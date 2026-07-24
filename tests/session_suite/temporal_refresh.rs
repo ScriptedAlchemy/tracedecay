@@ -1,7 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
+};
 use tracedecay::store::{GlobalDbSessionTemporalStore, SessionRefreshRestartStateV1};
 use tracedecay_domain::{
     SessionId, SessionRefreshKeyV1, SessionRefreshSourceTargetV1, SessionSourceFrontierV1,
@@ -13,10 +15,9 @@ use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshDispositionV1, SessionRefreshFailureRequestV1,
     SessionRefreshFrontierV1, SessionRefreshProgressRequestV1, SessionRefreshProgressV1,
     SessionRefreshReceiptRequestV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
-    SessionStoreError, SessionTemporalProjectionBatchV1,
+    SessionRetrievalStore, SessionStoreError, SessionTemporalProjectionBatchV1,
+    SessionTemporalSnapshotRequestV1,
 };
-
-use crate::common::{isolated_lcm_db_path, open_lcm_db};
 
 fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -47,6 +48,18 @@ fn now() -> UtcMicros {
     )
 }
 
+async fn registered_temporal_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("registered session-temporal test runtime")
+}
+
+fn temporal_store(runtime: &HostAdmissionTestRuntimeV1) -> GlobalDbSessionTemporalStore<'_> {
+    runtime
+        .session_temporal_store_for_test(HostAdmissionScope::Profile)
+        .expect("registered profile session-temporal store")
+}
+
 async fn begin(
     store: &GlobalDbSessionTemporalStore<'_>,
     session_id: &SessionId,
@@ -61,11 +74,28 @@ async fn begin(
         .unwrap()
 }
 
-async fn scalar(path: &std::path::Path, sql: &str) -> i64 {
-    let raw_db = libsql::Builder::new_local(path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn.query(sql, ()).await.unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+async fn fixture_count(
+    runtime: &HostAdmissionTestRuntimeV1,
+    kind: SessionTemporalFixtureCountV1,
+) -> i64 {
+    runtime
+        .session_temporal_fixture_count_for_test(HostAdmissionScope::Profile, kind)
+        .await
+        .unwrap()
+}
+
+async fn refresh_state_rows(runtime: &HostAdmissionTestRuntimeV1) -> i64 {
+    let mut total = 0;
+    for kind in [
+        SessionTemporalFixtureCountV1::RefreshOperations,
+        SessionTemporalFixtureCountV1::RefreshBindings,
+        SessionTemporalFixtureCountV1::RefreshProgress,
+        SessionTemporalFixtureCountV1::RefreshBatchBindings,
+        SessionTemporalFixtureCountV1::RefreshReceipts,
+    ] {
+        total += fixture_count(runtime, kind).await;
+    }
+    total
 }
 
 fn batch_for(
@@ -109,9 +139,8 @@ fn progress_for(
 #[tokio::test]
 async fn begin_joins_exact_requests_and_rejects_conflicting_running_targets() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.join");
 
     let started = begin(&store, &session_id, frontier(4, 0)).await;
@@ -149,22 +178,16 @@ async fn begin_joins_exact_requests_and_rejects_conflicting_running_targets() {
         SessionRefreshRestartStateV1::BeginProjection
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_temporal_generations
-             WHERE session_id = 'session.refresh.join' AND state = 'building'"
-        )
-        .await,
-        1
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::TemporalGenerations,).await,
+        2
     );
 }
 
 #[tokio::test]
 async fn projection_batch_and_progress_commit_atomically_and_replay_exactly() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.progress");
     begin(&store, &session_id, frontier(0, 0)).await;
     let recovery = store
@@ -205,19 +228,13 @@ async fn projection_batch_and_progress_commit_atomically_and_replay_exactly() {
     );
 
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_refresh_progress
-             WHERE session_id = 'session.refresh.progress'"
-        )
-        .await,
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::RefreshProgress).await,
         1
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_refresh_batch_bindings
-             WHERE session_id = 'session.refresh.progress'"
+        fixture_count(
+            &runtime,
+            SessionTemporalFixtureCountV1::RefreshBatchBindings,
         )
         .await,
         1
@@ -227,9 +244,8 @@ async fn projection_batch_and_progress_commit_atomically_and_replay_exactly() {
 #[tokio::test]
 async fn invalid_progress_rolls_back_the_projection_receipt_without_a_crash_gap() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.rollback");
     begin(&store, &session_id, frontier(0, 0)).await;
     let recovery = store
@@ -254,21 +270,11 @@ async fn invalid_progress_rolls_back_the_projection_receipt_without_a_crash_gap(
             .is_err()
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_temporal_projection_receipts
-             WHERE session_id = 'session.refresh.rollback'"
-        )
-        .await,
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::ProjectionReceipts,).await,
         0
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_refresh_progress
-             WHERE session_id = 'session.refresh.rollback'"
-        )
-        .await,
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::RefreshProgress).await,
         0
     );
 }
@@ -276,9 +282,8 @@ async fn invalid_progress_rolls_back_the_projection_receipt_without_a_crash_gap(
 #[tokio::test]
 async fn complete_activates_the_bound_generation_and_terminal_retry_is_exact() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.complete");
     begin(&store, &session_id, frontier(0, 0)).await;
     let recovery = store
@@ -309,13 +314,15 @@ async fn complete_activates_the_bound_generation_and_terminal_retry_is_exact() {
         receipt
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT generation FROM session_temporal_generations
-             WHERE session_id = 'session.refresh.complete' AND state = 'active'"
-        )
-        .await,
-        i64::try_from(recovery.candidate_generation().value()).unwrap()
+        store
+            .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
+                session_id.clone(),
+            ))
+            .await
+            .unwrap()
+            .watermarks()
+            .active_generation(),
+        recovery.candidate_generation()
     );
     assert!(
         store
@@ -332,8 +339,8 @@ async fn complete_activates_the_bound_generation_and_terminal_retry_is_exact() {
 #[tokio::test]
 async fn failure_and_cancellation_preserve_last_durable_progress() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
 
     let failed_session = session("session.refresh.failed");
     begin(&store, &failed_session, frontier(0, 0)).await;
@@ -432,8 +439,8 @@ async fn failure_and_cancellation_preserve_last_durable_progress() {
 #[tokio::test]
 async fn fail_or_cancel_with_no_progress_terminates_and_releases_session() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
 
     let failed_session = session("session.refresh.empty.fail");
     begin(&store, &failed_session, frontier(0, 0)).await;
@@ -514,8 +521,8 @@ async fn fail_or_cancel_with_no_progress_terminates_and_releases_session() {
 #[tokio::test]
 async fn begin_after_failure_or_cancellation_starts_new_operation_for_same_frontier() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
 
     let failed_session = session("session.refresh.retry.failed");
     let first = begin(&store, &failed_session, frontier(0, 0)).await;
@@ -570,8 +577,8 @@ async fn begin_after_failure_or_cancellation_starts_new_operation_for_same_front
 #[tokio::test]
 async fn cross_terminal_retry_is_idempotency_conflict() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.cross.terminal");
     begin(&store, &session_id, frontier(0, 0)).await;
     let recovery = store
@@ -624,8 +631,8 @@ async fn cross_terminal_retry_is_idempotency_conflict() {
 #[tokio::test]
 async fn progress_replay_ignores_updated_at_clock_skew() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.progress.clock");
     begin(&store, &session_id, frontier(0, 0)).await;
     let recovery = store
@@ -657,8 +664,8 @@ async fn progress_replay_ignores_updated_at_clock_skew() {
 #[tokio::test]
 async fn progress_rejects_observed_frontier_mismatch() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.progress.binding");
     begin(&store, &session_id, frontier(4, 0)).await;
     let recovery = store
@@ -686,10 +693,9 @@ async fn progress_rejects_observed_frontier_mismatch() {
 #[tokio::test]
 async fn concurrent_same_digest_begins_both_join_or_start_one_operation() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let first = GlobalDbSessionTemporalStore::new(&db);
-    let second = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let first = temporal_store(&runtime);
+    let second = temporal_store(&runtime);
     let session_id = session("session.refresh.same.digest");
     let request = SessionRefreshBeginOrJoinRequestV1::new(session_id.clone(), frontier(1, 0));
 
@@ -706,28 +712,20 @@ async fn concurrent_same_digest_begins_both_join_or_start_one_operation() {
         1
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_refresh_operations WHERE state = 'running'"
-        )
-        .await,
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::RefreshOperations,).await,
         1
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'building'"
-        )
-        .await,
-        1
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::TemporalGenerations,).await,
+        2
     );
 }
 
 #[tokio::test]
 async fn running_session_refreshes_are_bounded_and_ordered() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     for name in [
         "session.refresh.bound.a",
         "session.refresh.bound.b",
@@ -754,12 +752,12 @@ async fn running_session_refreshes_are_bounded_and_ordered() {
 #[tokio::test]
 async fn recovery_is_read_only_and_deterministic_across_reopen() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
     let session_id = session("session.refresh.restart");
     let operation_id;
+    let before;
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbSessionTemporalStore::new(&db);
+        let runtime = registered_temporal_runtime(&tmp).await;
+        let store = temporal_store(&runtime);
         operation_id = begin(&store, &session_id, frontier(0, 0))
             .await
             .operation_id()
@@ -776,23 +774,11 @@ async fn recovery_is_read_only_and_deterministic_across_reopen() {
             )
             .await
             .unwrap();
+        before = refresh_state_rows(&runtime).await;
     }
 
-    let before = scalar(
-        &path,
-        "SELECT
-            (SELECT COUNT(*) FROM session_refresh_operations)
-          + (SELECT COUNT(*) FROM session_refresh_bindings)
-          + (SELECT COUNT(*) FROM session_refresh_progress)
-          + (SELECT COUNT(*) FROM session_refresh_batch_bindings)
-          + (SELECT COUNT(*) FROM session_refresh_receipts)",
-    )
-    .await;
-    let reopened = GlobalDb::try_open_at(&path)
-        .await
-        .unwrap()
-        .expect("database should reopen");
-    let store = GlobalDbSessionTemporalStore::new(&reopened);
+    let reopened = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&reopened);
     let running = store.running_session_refreshes().await.unwrap();
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].operation_id(), &operation_id);
@@ -800,16 +786,7 @@ async fn recovery_is_read_only_and_deterministic_across_reopen() {
         running[0].restart_state(),
         SessionRefreshRestartStateV1::ReadyToComplete
     );
-    let after = scalar(
-        &path,
-        "SELECT
-            (SELECT COUNT(*) FROM session_refresh_operations)
-          + (SELECT COUNT(*) FROM session_refresh_bindings)
-          + (SELECT COUNT(*) FROM session_refresh_progress)
-          + (SELECT COUNT(*) FROM session_refresh_batch_bindings)
-          + (SELECT COUNT(*) FROM session_refresh_receipts)",
-    )
-    .await;
+    let after = refresh_state_rows(&reopened).await;
     assert_eq!(before, after);
 }
 
@@ -827,12 +804,11 @@ async fn restart_preserves_source_identity_and_each_temporal_coverage_mode() {
         ("forensic", TemporalModeV1::Forensic),
     ] {
         let tmp = TempDir::new().unwrap();
-        let path = isolated_lcm_db_path(&tmp);
         let session_id = session(&format!("session.refresh.mode.{suffix}"));
         let source_id = SessionSourceIdV1::new(format!("source.{suffix}")).unwrap();
         {
-            let db = open_lcm_db(&tmp).await;
-            let store = GlobalDbSessionTemporalStore::new(&db);
+            let runtime = registered_temporal_runtime(&tmp).await;
+            let store = temporal_store(&runtime);
             let refresh_key = SessionRefreshKeyV1::new(
                 "root.refresh.mode",
                 session_id.clone(),
@@ -858,11 +834,9 @@ async fn restart_preserves_source_identity_and_each_temporal_coverage_mode() {
                 .unwrap();
         }
 
-        let reopened = GlobalDb::try_open_at(&path)
-            .await
-            .unwrap()
-            .expect("database should reopen");
-        let recovery = GlobalDbSessionTemporalStore::new(&reopened)
+        let reopened = registered_temporal_runtime(&tmp).await;
+        let store = temporal_store(&reopened);
+        let recovery = store
             .session_refresh_recovery(&session_id)
             .await
             .unwrap()
@@ -877,8 +851,8 @@ async fn restart_preserves_source_identity_and_each_temporal_coverage_mode() {
 #[tokio::test]
 async fn stale_batch_replay_against_newer_progress_is_idempotency_conflict() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.stale.batch");
     // Non-zero observed target gives distinct projection_through values so empty
     // batches do not collide on content digest (ordinal is not part of the digest).
@@ -917,8 +891,8 @@ async fn stale_batch_replay_against_newer_progress_is_idempotency_conflict() {
 #[tokio::test]
 async fn future_progress_timestamp_is_rejected() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
     let session_id = session("session.refresh.future.ts");
     begin(&store, &session_id, frontier(0, 0)).await;
     let recovery = store
@@ -946,10 +920,9 @@ async fn future_progress_timestamp_is_rejected() {
 #[tokio::test]
 async fn concurrent_begins_leave_one_running_owner_and_one_candidate() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let first = GlobalDbSessionTemporalStore::new(&db);
-    let second = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let first = temporal_store(&runtime);
+    let second = temporal_store(&runtime);
     let session_id = session("session.refresh.concurrent");
     let first_request = SessionRefreshBeginOrJoinRequestV1::new(session_id.clone(), frontier(1, 0));
     let second_request =
@@ -966,19 +939,11 @@ async fn concurrent_begins_leave_one_running_owner_and_one_candidate() {
         SessionStoreError::IdempotencyConflict { .. }
     ));
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_refresh_operations WHERE state = 'running'"
-        )
-        .await,
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::RefreshOperations,).await,
         1
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'building'"
-        )
-        .await,
-        1
+        fixture_count(&runtime, SessionTemporalFixtureCountV1::TemporalGenerations,).await,
+        2
     );
 }

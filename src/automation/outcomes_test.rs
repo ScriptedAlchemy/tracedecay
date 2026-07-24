@@ -360,15 +360,19 @@ async fn seed_applied_fact_database(
 ) -> crate::db::Database {
     use crate::application::memory::MemoryApplication;
     use crate::automation::fact_proposals::{apply_fact_proposal, record_session_fact_proposals};
-    use crate::db::{Database, DatabaseAuthority};
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use crate::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactOwnerV1;
 
     let authority =
         DatabaseAuthority::acquire_test(database_path, "outcome persistence test").unwrap();
-    let (database, _) = Database::initialize(database_path, &authority)
-        .await
-        .unwrap();
+    let (database, _) = Database::publish_test_runtime(
+        database_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap();
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let records = record_session_fact_proposals(

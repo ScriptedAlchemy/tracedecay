@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, QueryExecutor, params};
 
 use crate::global_db::global_db_operation_error;
 
@@ -1691,7 +1691,7 @@ pub(in crate::global_db::schema_contract) const INVARIANTS: &[Invariant] = &[
 ];
 
 pub(super) async fn replace_trigger(
-    conn: &Connection,
+    conn: &impl Executor,
     trigger: &Trigger,
 ) -> crate::errors::Result<()> {
     conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
@@ -1703,7 +1703,9 @@ pub(super) async fn replace_trigger(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-pub(super) async fn trigger_contracts_intact(conn: &Connection) -> crate::errors::Result<bool> {
+pub(super) async fn trigger_contracts_intact(
+    conn: &impl QueryExecutor,
+) -> crate::errors::Result<bool> {
     for invariant in INVARIANTS {
         for trigger in invariant.triggers {
             if !trigger_matches(conn, trigger).await? {
@@ -1714,7 +1716,10 @@ pub(super) async fn trigger_contracts_intact(conn: &Connection) -> crate::errors
     Ok(true)
 }
 
-async fn trigger_matches(conn: &Connection, trigger: &Trigger) -> crate::errors::Result<bool> {
+async fn trigger_matches(
+    conn: &impl QueryExecutor,
+    trigger: &Trigger,
+) -> crate::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT tbl_name, sql FROM sqlite_master
@@ -1741,7 +1746,7 @@ async fn trigger_matches(conn: &Connection, trigger: &Trigger) -> crate::errors:
 }
 
 pub(in crate::global_db) async fn suspend_immutability_for_canonical_repair(
-    conn: &Connection,
+    conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
         if !trigger_matches(conn, trigger).await? {
@@ -1760,7 +1765,7 @@ pub(in crate::global_db) async fn suspend_immutability_for_canonical_repair(
 }
 
 pub(in crate::global_db) async fn restore_immutability_after_canonical_repair(
-    conn: &Connection,
+    conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
         replace_trigger(conn, trigger).await?;
@@ -1775,7 +1780,7 @@ pub(in crate::global_db) async fn restore_immutability_after_canonical_repair(
 }
 
 pub(in crate::global_db) async fn suspend_session_invariants_for_schema_upgrade(
-    conn: &Connection,
+    conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     for invariant in INVARIANTS {
         for trigger in invariant

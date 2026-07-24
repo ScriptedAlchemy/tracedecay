@@ -15,9 +15,9 @@
 //! contract. `ON DELETE CASCADE` on the schema reclaims rows when either node
 //! is deleted, so orphaned rows never need an explicit sweep.
 
-use libsql::params;
+use crate::db::engine::{Error as EngineError, Row, params};
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
 
 /// A duplicate pair to persist. Borrows from the caller's `RedundantPair`
@@ -149,7 +149,7 @@ impl Database {
         node_id: &str,
     ) -> Result<Vec<RedundancyPairRow>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT rp.node_a_id, rp.node_b_id, rp.ranking_score, rp.similarity,
                         rp.vector_cosine, rp.overlap_kind, rp.severity,
@@ -181,11 +181,11 @@ impl Database {
 }
 
 async fn upsert_pair_in_transaction(
-    transaction: &libsql::Transaction,
+    transaction: &DatabaseWriteTransaction<'_>,
     pair: &RedundancyPairWrite<'_>,
 ) -> Result<()> {
     transaction
-        .execute(
+        .execute_engine(
             "INSERT OR REPLACE INTO redundancy_pairs
                  (node_a_id, node_b_id, source_hash_a, source_hash_b,
                   ranking_score, similarity, vector_cosine, overlap_kind,
@@ -213,8 +213,8 @@ async fn upsert_pair_in_transaction(
     Ok(())
 }
 
-fn row_to_pair(row: &libsql::Row) -> Result<RedundancyPairRow> {
-    let get_err = |field: &str, e: libsql::Error| TraceDecayError::Database {
+fn row_to_pair(row: &Row) -> Result<RedundancyPairRow> {
+    let get_err = |field: &str, e: EngineError| TraceDecayError::Database {
         message: format!("failed to read redundancy pair {field}: {e}"),
         operation: "row_to_pair".to_string(),
     };
@@ -237,7 +237,7 @@ fn row_to_pair(row: &libsql::Row) -> Result<RedundancyPairRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::DatabaseAuthority;
+    use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
     use crate::redundancy::Fingerprint;
 
     fn fingerprint(source_hash: &str) -> Fingerprint {
@@ -284,7 +284,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "redundancy publication").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
         {
             db.writer_connection("seed redundancy publication")
                 .await

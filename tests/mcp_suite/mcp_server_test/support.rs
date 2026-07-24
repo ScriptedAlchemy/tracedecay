@@ -190,10 +190,16 @@ pub(crate) async fn settled_ledger_total(
     expected_calls: u64,
 ) -> tracedecay::global_db::SavingsTotal {
     server.ledger_writes_settled().await;
-    let db = tracedecay::global_db::GlobalDb::open_at(global_db_path)
-        .await
-        .expect("global db opens at isolated path");
-    let total = db.sum_savings(Some(&project.to_string_lossy()), 0).await;
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        global_db_path
+            .parent()
+            .expect("global db has a profile root"),
+    )
+    .await
+    .expect("registered profile runtime opens at isolated path");
+    let total = runtime
+        .sum_savings_for_test(Some(&project.to_string_lossy()), 0)
+        .await;
     assert_eq!(
         total.calls, expected_calls,
         "every settled ledger write for this project must be visible (got {} calls)",
@@ -249,19 +255,24 @@ pub(crate) async fn mcp_runtime_events(
     global_db_path: &std::path::Path,
     session_id: &str,
 ) -> Vec<tracedecay::global_db::AnalyticsEventRecord> {
-    let db = tracedecay::global_db::GlobalDb::open_at(global_db_path)
-        .await
-        .expect("global db opens at isolated path");
-    db.query_analytics_events(&tracedecay::global_db::AnalyticsEventQuery {
-        provider: Some("mcp".to_string()),
-        project_id: None,
-        session_id: Some(session_id.to_string()),
-        event_kind: Some("mcp_tool_call".to_string()),
-        since: None,
-        limit: 100,
-    })
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        global_db_path
+            .parent()
+            .expect("global db has a profile root"),
+    )
     .await
-    .expect("query runtime analytics events")
+    .expect("registered profile runtime opens at isolated path");
+    runtime
+        .query_profile_analytics_events_for_test(&tracedecay::global_db::AnalyticsEventQuery {
+            provider: Some("mcp".to_string()),
+            project_id: None,
+            session_id: Some(session_id.to_string()),
+            event_kind: Some("mcp_tool_call".to_string()),
+            since: None,
+            limit: 100,
+        })
+        .await
+        .expect("query runtime analytics events")
 }
 
 pub(crate) async fn mcp_runtime_event(

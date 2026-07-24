@@ -17,10 +17,14 @@
 //! that discovers run directories and parses transcripts, and the
 //! `tracedecay_workflows` query surface, build on the APIs defined here.
 
-use libsql::{Connection, Value, params};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
+use tracedecay_store::StoreShardScopeV1;
 
+use crate::db::engine::{
+    Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
+};
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
 
 /// Schema version recorded in `session_schema_migrations` under
@@ -56,8 +60,8 @@ impl std::fmt::Display for WorkflowIndexError {
 
 impl std::error::Error for WorkflowIndexError {}
 
-impl From<libsql::Error> for WorkflowIndexError {
-    fn from(err: libsql::Error) -> Self {
+impl From<crate::db::engine::Error> for WorkflowIndexError {
+    fn from(err: crate::db::engine::Error) -> Self {
         Self::Db(err.to_string())
     }
 }
@@ -202,7 +206,7 @@ fn matches_token(value: &str, tokens: &[&str]) -> bool {
 /// [`crate::sessions::git_correlation::ensure_git_correlation_schema`], so both
 /// stores register under their own migration name in one table.
 pub(crate) async fn ensure_workflow_index_schema(
-    conn: &Connection,
+    conn: &impl Executor,
 ) -> Result<(), WorkflowIndexError> {
     if schema_version(conn)
         .await
@@ -271,7 +275,7 @@ pub(crate) async fn ensure_workflow_index_schema(
     Ok(())
 }
 
-async fn schema_version(conn: &Connection) -> Option<i64> {
+async fn schema_version(conn: &impl QueryExecutor) -> Option<i64> {
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
@@ -286,7 +290,7 @@ async fn schema_version(conn: &Connection) -> Option<i64> {
 /// predates this schema can short-circuit to empty instead of hitting a
 /// `no such table` error. Mirrors
 /// [`crate::sessions::git_correlation::tables_present`].
-pub async fn tables_present(conn: &Connection) -> Result<bool, WorkflowIndexError> {
+pub(crate) async fn tables_present(conn: &impl QueryExecutor) -> Result<bool, WorkflowIndexError> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM sqlite_master
@@ -310,7 +314,7 @@ pub const INGEST_WATERMARK_KEY: &str = "ingest_watermark_mtime";
 /// Reads the ingest watermark (max processed run-file mtime, unix seconds), or
 /// `0` when unset / the schema predates this table. Never errors: a store
 /// without the meta table simply reports no watermark, forcing a full sweep.
-pub async fn read_ingest_watermark(conn: &Connection, key: &str) -> i64 {
+pub(crate) async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 {
     let Ok(mut rows) = conn
         .query(
             "SELECT value FROM workflow_index_meta WHERE key = ?1",
@@ -329,8 +333,8 @@ pub async fn read_ingest_watermark(conn: &Connection, key: &str) -> i64 {
 /// Advances the ingest watermark to `mtime` when it is newer than the stored
 /// value (monotonic; a stale re-scan never rewinds it). Requires the schema to
 /// exist; callers ensure it before writing.
-pub async fn bump_ingest_watermark(
-    conn: &Connection,
+pub(crate) async fn bump_ingest_watermark(
+    conn: &impl Executor,
     key: &str,
     mtime: i64,
 ) -> Result<(), WorkflowIndexError> {
@@ -358,7 +362,10 @@ fn opt_int(value: Option<i64>) -> Value {
 /// whose transcripts grew (e.g. a `running` run that later `completed`)
 /// overwrites the mutable columns and refreshes `updated_at`. `created_at` is
 /// preserved.
-pub async fn upsert_run(conn: &Connection, run: &WorkflowRun) -> Result<(), WorkflowIndexError> {
+pub(crate) async fn upsert_run(
+    conn: &impl Executor,
+    run: &WorkflowRun,
+) -> Result<(), WorkflowIndexError> {
     if run.run_id.trim().is_empty() {
         return Err(WorkflowIndexError::InvalidArgument(
             "workflow run_id must not be empty".to_string(),
@@ -399,8 +406,8 @@ pub async fn upsert_run(conn: &Connection, run: &WorkflowRun) -> Result<(), Work
 
 /// Inserts or updates one agent row (idempotent on `(run_id, agent_label,
 /// agent_id)`).
-pub async fn upsert_agent(
-    conn: &Connection,
+pub(crate) async fn upsert_agent(
+    conn: &impl Executor,
     agent: &WorkflowAgent,
 ) -> Result<(), WorkflowIndexError> {
     if agent.run_id.trim().is_empty() {
@@ -444,7 +451,7 @@ pub async fn upsert_agent(
 const RUN_COLUMNS: &str = "run_id, parent_session_id, name, description, phase_json,
      status, started_ts, ended_ts, result_summary, agent_count";
 
-fn row_to_run(row: &libsql::Row) -> Result<WorkflowRun, WorkflowIndexError> {
+fn row_to_run(row: &Row) -> Result<WorkflowRun, WorkflowIndexError> {
     let status: String = row.get(5)?;
     Ok(WorkflowRun {
         run_id: row.get(0)?,
@@ -463,7 +470,7 @@ fn row_to_run(row: &libsql::Row) -> Result<WorkflowRun, WorkflowIndexError> {
 const AGENT_COLUMNS: &str = "run_id, agent_label, agent_id, phase, transcript_path,
      agent_session_id, status, model, tokens, started_ts, ended_ts";
 
-fn row_to_agent(row: &libsql::Row) -> Result<WorkflowAgent, WorkflowIndexError> {
+fn row_to_agent(row: &Row) -> Result<WorkflowAgent, WorkflowIndexError> {
     let status: String = row.get(6)?;
     Ok(WorkflowAgent {
         run_id: row.get(0)?,
@@ -484,10 +491,185 @@ fn clamp_limit(limit: usize) -> i64 {
     limit.clamp(1, MAX_WORKFLOW_LIMIT) as i64
 }
 
+/// Workflow-index reader pinned to one registry-owned database snapshot.
+///
+/// A run detail and its agents are therefore observed at one database
+/// generation; callers cannot rediscover or reopen the physical store.
+pub(crate) struct RegisteredWorkflowIndexSnapshot {
+    snapshot: RegisteredReadSnapshot,
+}
+
+impl RegisteredWorkflowIndexSnapshot {
+    pub(crate) async fn new(database: &RegisteredGlobalDb) -> Result<Self, WorkflowIndexError> {
+        if !matches!(
+            &database.binding().shard_id.scope,
+            StoreShardScopeV1::ProjectSessions { .. }
+        ) {
+            return Err(WorkflowIndexError::InvalidArgument(
+                "workflow index requires ProjectSessions authority".to_string(),
+            ));
+        }
+        Ok(Self {
+            snapshot: database.read_snapshot().await?,
+        })
+    }
+
+    async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
+        if names.is_empty() {
+            return Ok(true);
+        }
+        let placeholders = (1..=names.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN ({placeholders})"
+        );
+        let params = names
+            .iter()
+            .map(|name| Value::Text((*name).to_string()))
+            .collect::<Vec<_>>();
+        let mut rows = self.snapshot.query(&sql, params).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        Ok(row.get::<i64>(0)? == i64::try_from(names.len()).unwrap_or(i64::MAX))
+    }
+
+    pub(crate) async fn runs_for_session(
+        &self,
+        parent_session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {RUN_COLUMNS}
+             FROM workflow_runs
+             WHERE parent_session_id = ?1
+             ORDER BY COALESCE(started_ts, 0) DESC, run_id DESC
+             LIMIT ?2"
+        );
+        let mut rows = self
+            .snapshot
+            .query(&sql, params![parent_session_id, clamp_limit(limit)])
+            .await?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next().await? {
+            runs.push(row_to_run(&row)?);
+        }
+        Ok(runs)
+    }
+
+    pub(crate) async fn run_for_id(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<WorkflowRun>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(None);
+        }
+        let sql = format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE run_id = ?1");
+        let mut rows = self.snapshot.query(&sql, params![run_id]).await?;
+        rows.next().await?.map(|row| row_to_run(&row)).transpose()
+    }
+
+    pub(crate) async fn agents_for_run(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowAgent>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {AGENT_COLUMNS}
+             FROM workflow_agents
+             WHERE run_id = ?1
+             ORDER BY COALESCE(started_ts, 0) ASC, agent_label ASC
+             LIMIT ?2"
+        );
+        let mut rows = self
+            .snapshot
+            .query(&sql, params![run_id, clamp_limit(limit)])
+            .await?;
+        let mut agents = Vec::new();
+        while let Some(row) = rows.next().await? {
+            agents.push(row_to_agent(&row)?);
+        }
+        Ok(agents)
+    }
+
+    pub(crate) async fn runs_for_git_scope(
+        &self,
+        filter: &GitScopeFilter,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
+        if filter.is_empty() {
+            return Err(WorkflowIndexError::InvalidArgument(
+                "runs_for_git_scope requires at least one of branch/worktree/commit".to_string(),
+            ));
+        }
+        if !self
+            .has_tables(&[
+                "workflow_runs",
+                "workflow_agents",
+                "session_git_spans",
+                "commit_sessions",
+            ])
+            .await?
+        {
+            return Ok(Vec::new());
+        }
+
+        let clauses = crate::sessions::git_correlation::git_scope_exists_clauses(
+            filter,
+            "r.parent_session_id",
+        );
+        let mut sql = format!(
+            "SELECT {RUN_COLUMNS}
+             FROM workflow_runs AS r
+             WHERE r.parent_session_id <> ''
+               AND ("
+        );
+        let mut params = Vec::new();
+        for (index, (clause, values)) in clauses.into_iter().enumerate() {
+            if index > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str(&clause);
+            params.extend(values);
+        }
+        params.push(Value::Integer(clamp_limit(limit)));
+        let _ = write!(
+            sql,
+            ") ORDER BY COALESCE(r.started_ts, 0) DESC, r.run_id DESC LIMIT ?{}",
+            params.len()
+        );
+
+        let mut rows = self.snapshot.query(&sql, params).await?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next().await? {
+            runs.push(row_to_run(&row)?);
+        }
+        Ok(runs)
+    }
+}
+
 /// Lists workflow runs spawned by one parent session, newest-first. Returns an
 /// empty vec (never an error) when the schema is absent.
-pub async fn runs_for_session(
-    conn: &Connection,
+pub(crate) async fn runs_for_session(
+    conn: &impl QueryExecutor,
     parent_session_id: &str,
     limit: usize,
 ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
@@ -512,8 +694,8 @@ pub async fn runs_for_session(
 }
 
 /// Fetches one run by its `wf_*` id, or `None` when absent.
-pub async fn run_for_id(
-    conn: &Connection,
+pub(crate) async fn run_for_id(
+    conn: &impl QueryExecutor,
     run_id: &str,
 ) -> Result<Option<WorkflowRun>, WorkflowIndexError> {
     if !tables_present(conn).await.unwrap_or(false) {
@@ -529,8 +711,8 @@ pub async fn run_for_id(
 
 /// Lists the agents of one run, ordered by start time then label so a phase
 /// reads top-to-bottom.
-pub async fn agents_for_run(
-    conn: &Connection,
+pub(crate) async fn agents_for_run(
+    conn: &impl QueryExecutor,
     run_id: &str,
     limit: usize,
 ) -> Result<Vec<WorkflowAgent>, WorkflowIndexError> {
@@ -562,8 +744,8 @@ pub async fn agents_for_run(
 /// ([`session_git_spans`] / [`commit_sessions`]) — the same tables
 /// `tracedecay_sessions_for` reads. When either the workflow schema or the
 /// git-correlation schema is absent, returns empty (nothing could correlate).
-pub async fn runs_for_git_scope(
-    conn: &Connection,
+pub(crate) async fn runs_for_git_scope(
+    conn: &impl QueryExecutor,
     filter: &GitScopeFilter,
     limit: usize,
 ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {

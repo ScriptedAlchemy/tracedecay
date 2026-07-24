@@ -17,13 +17,14 @@
 
 use axum::Json;
 use axum::extract::State;
-use libsql::Connection;
 use serde::Serialize;
 use tracedecay_application::storage::identity::StoreKeyV1;
 use tracedecay_application::storage::telemetry::{
     StorageTelemetryReadV1, StoreSizeSampleV1, TableGrowthSampleV1,
 };
 use tracedecay_domain::UtcMicros;
+
+use crate::db::engine::QueryExecutor;
 
 use super::DashboardState;
 use super::read_model::{
@@ -97,14 +98,18 @@ pub(crate) async fn telemetry(
     // Graph store: the dashboard owns the connection directly.
     entries.push(sample_entry("graph", &state.graph_db_path, &state.graph_conn).await);
     // Project-memory store.
-    entries.push(sample_entry("memory", &state.mem_db_path, state.mem_db.conn()).await);
+    entries.push(sample_entry("memory", &state.mem_db_path, &state.mem_db.engine_conn()).await);
     // LCM session store, when a read connection is held.
-    if let Some(conn) = &state.lcm_conn {
-        entries.push(sample_entry("lcm", &state.lcm_db_path, conn).await);
+    if let Some(db) = &state.lcm_db {
+        if let Ok(snapshot) = db.read_snapshot().await {
+            entries.push(sample_entry("lcm", &state.lcm_db_path, &snapshot).await);
+        }
     }
     // Global accounting store, when available.
     if let Some(db) = &state.savings_db {
-        entries.push(sample_entry("savings", &state.savings_db_path, db.read_connection()).await);
+        if let Ok(snapshot) = db.read_snapshot().await {
+            entries.push(sample_entry("savings", &state.savings_db_path, &snapshot).await);
+        }
     }
 
     let total = entries.len() as u64;
@@ -143,7 +148,11 @@ pub(crate) async fn telemetry(
 /// Sample one store's size from a live connection. A pragma failure produces a
 /// typed [`StorageTelemetryReadV1::Unknown`], never a fabricated size.
 #[allow(clippy::expect_used)] // the "store" fallback key is statically valid
-async fn sample_entry(role: &str, path: &str, conn: &Connection) -> StoreTelemetryEntryV1 {
+async fn sample_entry(
+    role: &str,
+    path: &str,
+    conn: &(impl QueryExecutor + ?Sized),
+) -> StoreTelemetryEntryV1 {
     let store_name = store_file_name(path);
     let store_key = StoreKeyV1::new(store_name.clone());
 
@@ -191,7 +200,10 @@ async fn sample_entry(role: &str, path: &str, conn: &Connection) -> StoreTelemet
 /// Read `PRAGMA page_size` / `page_count` / `freelist_count` into a validated
 /// [`StoreSizeSampleV1`]. Returns `None` on any pragma failure or an invalid
 /// sample so the caller reports a typed `unknown` read.
-async fn read_size_sample(conn: &Connection, store: &StoreKeyV1) -> Option<StoreSizeSampleV1> {
+async fn read_size_sample(
+    conn: &(impl QueryExecutor + ?Sized),
+    store: &StoreKeyV1,
+) -> Option<StoreSizeSampleV1> {
     let page_size = pragma_u64(conn, "page_size").await?;
     let page_count = pragma_u64(conn, "page_count").await?;
     let freelist_pages = pragma_u64(conn, "freelist_count").await?;
@@ -210,7 +222,7 @@ async fn read_size_sample(conn: &Connection, store: &StoreKeyV1) -> Option<Store
 /// Run one `PRAGMA` and read its first column as a `u64`. `None` distinguishes a
 /// failed read from a real zero, so the caller never treats a query error as a
 /// zero-sized store.
-async fn pragma_u64(conn: &Connection, pragma: &str) -> Option<u64> {
+async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> Option<u64> {
     let sql = format!("PRAGMA {pragma}");
     let mut rows = conn.query(&sql, ()).await.ok()?;
     let row = rows.next().await.ok()??;
@@ -309,11 +321,8 @@ mod tests {
     async fn malformed_pragma_read_is_typed_unknown_not_zero() {
         // A closed/empty connection cannot answer pragmas: the read is `unknown`,
         // and the size fields stay `None` rather than collapsing to zero.
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .expect("memory db");
-        let conn = db.connect().expect("conn");
+        let directory = tempfile::tempdir().expect("tempdir");
+        let conn = crate::db::engine::TestConnection::open(&directory.path().join("telemetry.db"));
         // Drop the table backing so a bogus pragma path fails deterministically:
         // query a non-existent pragma name.
         let store = StoreKeyV1::new("probe.db").expect("key");

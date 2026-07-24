@@ -1,8 +1,8 @@
-use libsql::{Connection, params};
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::normalize_trigger_sql;
+use crate::db::engine::{Executor, QueryExecutor, params};
 
 mod audit;
 mod repair;
@@ -39,12 +39,12 @@ const SESSION_TEMPORAL_REPAIR_AUDITS: &[&str] = &[
 ];
 
 pub(in crate::global_db) async fn authority_invariant_triggers_intact(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<bool> {
     trigger_contracts_intact(conn).await
 }
 
-async fn projection_checkpoint(conn: &Connection) -> crate::errors::Result<i64> {
+async fn projection_checkpoint(conn: &impl QueryExecutor) -> crate::errors::Result<i64> {
     let mut rows = conn
         .query(
             "SELECT COALESCE((
@@ -64,7 +64,7 @@ async fn projection_checkpoint(conn: &Connection) -> crate::errors::Result<i64> 
 }
 
 pub(crate) async fn ensure_authority_invariant_schema(
-    conn: &Connection,
+    conn: &impl Executor,
 ) -> crate::errors::Result<bool> {
     ensure_audit_checkpoint_schema(conn).await?;
     let trigger_contracts_were_intact = trigger_contracts_intact(conn).await?;
@@ -77,7 +77,7 @@ pub(crate) async fn ensure_authority_invariant_schema(
 }
 
 pub(crate) async fn ensure_authority_invariants(
-    conn: &Connection,
+    conn: &impl Executor,
     force_exhaustive: bool,
     is_fresh: bool,
 ) -> crate::errors::Result<()> {
@@ -159,7 +159,9 @@ pub(crate) async fn ensure_authority_invariants(
     .await
 }
 
-pub(super) async fn validate_invariant_rows(conn: &Connection) -> crate::errors::Result<()> {
+pub(super) async fn validate_invariant_rows(
+    conn: &impl QueryExecutor,
+) -> crate::errors::Result<()> {
     for invariant in INVARIANTS {
         if let Some(query) = invariant.audit_query
             && query_has_rows(conn, query).await?
@@ -171,7 +173,7 @@ pub(super) async fn validate_invariant_rows(conn: &Connection) -> crate::errors:
 }
 
 pub(in crate::global_db) async fn validate_authority_rows_exhaustive(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     validate_receipt_authority_rows(conn, 0).await?;
     validate_observation_authority_rows(conn, 0).await?;
@@ -182,7 +184,7 @@ pub(in crate::global_db) async fn validate_authority_rows_exhaustive(
 }
 
 pub(in crate::global_db) async fn validate_session_temporal_repair_authority(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     for invariant in INVARIANTS
         .iter()

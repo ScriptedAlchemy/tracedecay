@@ -2,14 +2,21 @@ use crate::dashboard_api_support::*;
 use std::path::PathBuf;
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 
-async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, TraceDecay) {
+async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, Arc<TraceDecay>) {
     let target_root = fixture
         ._tmp
         .path()
         .canonicalize()
         .expect("fixture root should canonicalize")
         .join("target-project");
-    let target_cg = setup_project(&target_root).await;
+    let target_cg = Arc::new(setup_project(&target_root).await);
+    let target_project_id = project_id(&target_cg);
+    fixture
+        .host_runtime
+        .upsert_code_project(&target_project_id, &target_root, None, None, None)
+        .await
+        .expect("register retained target project");
+    fixture.project_graphs.register(Arc::clone(&target_cg));
     (target_root, target_cg)
 }
 
@@ -40,21 +47,17 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
         // redaction assertion below is actually exercised instead of
         // passing vacuously on an absent field.
         let credential_remote_url = "https://user:sekret-token@github.com/example/target.git";
-        {
-            let global_db = GlobalDb::open()
-                .await
-                .expect("global db should open for credential-remote seeding");
-            global_db
-                .upsert_code_project(
-                    &target_project_id,
-                    &target_root,
-                    None,
-                    Some(credential_remote_url),
-                    None,
-                )
-                .await
-                .expect("target project should accept credential-bearing remote upsert");
-        }
+        fixture
+            .host_runtime
+            .upsert_code_project(
+                &target_project_id,
+                &target_root,
+                None,
+                Some(credential_remote_url),
+                None,
+            )
+            .await
+            .expect("target project should accept credential-bearing remote upsert");
 
         let (status, projects) = get_json(&agent, &format!("{}/api/projects", fixture.base_url));
         assert_eq!(status, 200);
@@ -158,7 +161,7 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
             .checkpoint()
             .await
             .expect("target project DB should checkpoint before dashboard reopen");
-        target_cg.close();
+        drop(target_cg);
 
         let (active_status, active_payload) = get_json(
             &agent,
@@ -207,7 +210,7 @@ fn project_scoped_mutations_are_rejected_for_non_active_projects() {
 
         let (_target_root, target_cg) = setup_target_project(&fixture).await;
         let target_project_id = project_id(&target_cg);
-        target_cg.close();
+        drop(target_cg);
 
         let (status, body) = post_json_body(
             &agent,

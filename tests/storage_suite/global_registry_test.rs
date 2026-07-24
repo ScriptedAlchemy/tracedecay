@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tokio::sync::Mutex;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::global_db::{
-    GlobalDb, GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert,
-    StoreInstanceUpsert,
+    GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay::storage::{
     BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -14,7 +14,7 @@ use tracedecay::storage::{
 
 static GLOBAL_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-async fn upsert_test_store(db: &GlobalDb, project_id: &str, store_id: &str) {
+async fn upsert_test_store(db: &HostAdmissionTestRuntimeV1, project_id: &str, store_id: &str) {
     db.upsert_store_instance(StoreInstanceUpsert {
         store_id: store_id.to_string(),
         project_id: project_id.to_string(),
@@ -91,12 +91,12 @@ async fn create_observation_store_artifacts(
     paths
 }
 
-async fn close_global_db(db: GlobalDb) {
-    db.checkpoint().await;
-    db.close();
+async fn close_profile_runtime(db: HostAdmissionTestRuntimeV1) {
+    db.checkpoint_profile_database_for_test().await;
+    drop(db);
 }
 
-async fn upsert_registry_fixture(db: &GlobalDb, project_root: &Path) {
+async fn upsert_registry_fixture(db: &HostAdmissionTestRuntimeV1, project_root: &Path) {
     let project = db
         .upsert_code_project(
             "proj_registry",
@@ -147,43 +147,19 @@ async fn upsert_registry_fixture(db: &GlobalDb, project_root: &Path) {
     .unwrap();
 }
 
-async fn table_exists(db_path: &Path, table: &str) -> bool {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            libsql::params![table],
-        )
-        .await
-        .unwrap();
-    let exists = rows.next().await.unwrap().is_some();
-    drop(rows);
-    drop(conn);
-    drop(db);
-    exists
-}
-
-async fn project_column_exists(db_path: &Path, column: &str) -> bool {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn.query("PRAGMA table_info(projects)", ()).await.unwrap();
-    let mut exists = false;
-    while let Some(row) = rows.next().await.unwrap() {
-        let name: String = row.get(1).unwrap();
-        if name == column {
-            exists = true;
-            break;
-        }
-    }
-    drop(rows);
-    drop(conn);
-    drop(db);
-    exists
+fn project_column_exists(db_path: &Path, column: &str) -> bool {
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut statement = conn.prepare("PRAGMA table_info(projects)").unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .any(|name| name.is_ok_and(|name| name == column))
 }
 
 #[tokio::test]
-async fn open_at_migrates_existing_project_rows_to_canonical_keys() {
+async fn registered_profile_runtime_migrates_existing_project_rows_to_canonical_keys() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
@@ -191,8 +167,7 @@ async fn open_at_migrates_existing_project_rows_to_canonical_keys() {
     std::fs::create_dir_all(&project_root).unwrap();
     let legacy_key = project_root.join(".").to_string_lossy().to_string();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TABLE projects (
@@ -200,38 +175,38 @@ async fn open_at_migrates_existing_project_rows_to_canonical_keys() {
                 tokens_saved INTEGER NOT NULL DEFAULT 0
             );",
         )
-        .await
         .unwrap();
     raw_conn
         .execute(
             "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)",
-            libsql::params![legacy_key.as_str(), 77_i64],
+            rusqlite::params![legacy_key.as_str(), 77_i64],
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
 
     assert_eq!(db.get_project_tokens(&project_root).await, 77);
     assert_eq!(
         db.list_project_paths_compat().await,
         vec![project_root.canonicalize().unwrap().to_string_lossy()]
     );
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
 async fn delete_project_paths_use_same_canonical_key_as_upsert() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
     let project_one = dir.path().join("repo-one");
     let project_two = dir.path().join("repo-two");
     std::fs::create_dir_all(&project_one).unwrap();
     std::fs::create_dir_all(&project_two).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
 
     db.upsert(&project_one, 10).await;
     db.upsert(&project_two, 20).await;
@@ -244,17 +219,18 @@ async fn delete_project_paths_use_same_canonical_key_as_upsert() {
     assert_eq!(deleted, 1);
     assert_eq!(db.get_project_tokens(&project_two).await, 0);
     assert_eq!(db.global_tokens_saved().await, Some(0));
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
 async fn upsert_preserves_highest_known_tokens_saved() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
     let project = dir.path().join("repo");
     std::fs::create_dir_all(&project).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
 
     db.upsert(&project, 12_007_312).await;
     db.upsert(&project.join("."), 0).await;
@@ -262,28 +238,29 @@ async fn upsert_preserves_highest_known_tokens_saved() {
 
     db.upsert(&project, 12_100_000).await;
     assert_eq!(db.get_project_tokens(&project).await, 12_100_000);
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
-async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
+async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
     let project_root = dir.path().join("repo");
     std::fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
+    db.validate_profile_registry_schema_contract_for_test()
+        .await
+        .unwrap();
+    close_profile_runtime(db).await;
 
-    for table in [
-        "code_projects",
-        "project_aliases",
-        "store_instances",
-        "graph_scopes",
-        "store_artifacts",
-    ] {
-        assert!(table_exists(&db_path, table).await, "{table} missing");
-    }
-
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
+    db.validate_profile_registry_schema_contract_for_test()
+        .await
+        .unwrap();
     upsert_registry_fixture(&db, &project_root).await;
 
     let projects = db.list_code_projects(10).await;
@@ -298,6 +275,7 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
     let context = db
         .project_registry_context_by_alias(&project_root)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(context.project.project_id, "proj_registry");
     let alias_paths: Vec<_> = context
@@ -325,17 +303,18 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
         context.stores[0].artifacts[0].artifact_kind,
         "store_manifest"
     );
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
 async fn delete_code_projects_cascades_registry_rows_without_touching_legacy_projects() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
     let project_root = dir.path().join("repo");
     std::fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
 
     db.upsert(&project_root, 42).await;
     upsert_registry_fixture(&db, &project_root).await;
@@ -354,14 +333,14 @@ async fn delete_code_projects_cascades_registry_rows_without_touching_legacy_pro
     assert!(db.list_code_projects(10).await.is_empty());
     assert_eq!(db.get_project_tokens(&project_root).await, 42);
     assert_eq!(db.global_tokens_saved().await, Some(42));
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
 async fn registry_resolves_store_by_repo_identity_aliases() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     let original = dir.path().join("original");
@@ -396,14 +375,14 @@ async fn registry_resolves_store_by_repo_identity_aliases() {
         .await
         .unwrap();
     assert_eq!(by_remote.store.store_id, "store_repo_identity");
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
 async fn registry_context_resolves_linked_worktree_by_git_common_dir_identity() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     let main_checkout = dir.path().join("main");
@@ -427,16 +406,18 @@ async fn registry_context_resolves_linked_worktree_by_git_common_dir_identity() 
     assert!(
         db.project_registry_context_by_alias(&linked_worktree)
             .await
+            .unwrap()
             .is_none()
     );
     let context = db
         .project_registry_context_by_identity(&linked_worktree, Some(&common_dir))
         .await
+        .unwrap()
         .unwrap();
 
     assert_eq!(context.project.project_id, "proj_worktree");
     assert_eq!(context.stores[0].store.store_id, "store_worktree");
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -446,7 +427,7 @@ async fn observation_store_resolver_returns_canonical_registered_paths() {
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let project_id = "proj_observation";
@@ -475,7 +456,7 @@ async fn observation_store_resolver_returns_canonical_registered_paths() {
         resolution.database_path(),
         database_path.canonicalize().unwrap()
     );
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -485,7 +466,7 @@ async fn observation_store_resolver_fails_closed_without_project_or_store() {
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
 
@@ -512,7 +493,7 @@ async fn observation_store_resolver_fails_closed_without_project_or_store() {
             if project_id == "proj_no_store"
     ));
     assert!(!profile_root.join("projects/proj_no_store").exists());
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -522,7 +503,7 @@ async fn observation_store_resolver_rejects_multiple_stores_without_newest_fallb
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let project_id = "proj_ambiguous_stores";
@@ -545,11 +526,21 @@ async fn observation_store_resolver_rejects_multiple_stores_without_newest_fallb
     .unwrap();
     create_observation_store_artifacts(&profile_root, &project_root, project_id).await;
 
-    let legacy = db
-        .resolve_project_store_by_alias(&project_root)
+    let identity_error = db
+        .resolve_project_store_by_identity(&project_root, None)
         .await
-        .expect("legacy resolver should retain its newest-store behavior");
-    assert_eq!(legacy.store.store_id, "store_newer");
+        .unwrap_err();
+    assert!(
+        identity_error
+            .to_string()
+            .contains("resolves to multiple stores")
+    );
+    assert!(
+        db.resolve_project_store_by_alias(&project_root)
+            .await
+            .is_none(),
+        "legacy resolver must not select a newest store from ambiguous authority"
+    );
 
     let error = db
         .resolve_project_observation_store(&project_root)
@@ -568,7 +559,7 @@ async fn observation_store_resolver_rejects_multiple_stores_without_newest_fallb
         store_ids,
         vec!["store_newer".to_string(), "store_older".to_string()]
     );
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -578,7 +569,7 @@ async fn observation_store_resolver_rejects_unverified_store_as_stale() {
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let project_id = "proj_stale_store";
@@ -602,7 +593,7 @@ async fn observation_store_resolver_rejects_unverified_store_as_stale() {
             store_id: actual_store_id,
         } if actual_project_id == project_id && actual_store_id == store_id
     ));
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -612,7 +603,7 @@ async fn observation_store_resolver_requires_exact_canonical_store_metadata() {
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let project_id = "proj_store_shape";
@@ -686,7 +677,7 @@ async fn observation_store_resolver_requires_exact_canonical_store_metadata() {
             other => panic!("{case} should reject as noncanonical, got {other:?}"),
         }
     }
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -696,7 +687,7 @@ async fn observation_store_resolver_requires_existing_artifacts_and_creates_noth
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let profile_root = profile_root.canonicalize().unwrap();
@@ -777,7 +768,7 @@ async fn observation_store_resolver_requires_existing_artifacts_and_creates_noth
             .await
             .is_ok()
     );
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -787,7 +778,7 @@ async fn observation_store_resolver_rejects_a_registered_but_missing_checkout() 
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let project_id = "proj_missing_checkout";
@@ -811,7 +802,7 @@ async fn observation_store_resolver_rejects_a_registered_but_missing_checkout() 
         ProjectObservationStoreError::UnavailableProject { project_root: missing }
             if missing == project_root
     ));
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[cfg(unix)]
@@ -824,7 +815,7 @@ async fn observation_store_resolver_rejects_symlinked_store_artifacts() {
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let project_id = "proj_symlinked_store";
@@ -882,14 +873,14 @@ async fn observation_store_resolver_rejects_symlinked_store_artifacts() {
         error,
         ProjectObservationStoreError::NonCanonicalStore { .. }
     ));
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
 async fn registry_remote_resolution_is_conservative_when_ambiguous() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     let one = dir.path().join("one");
@@ -925,7 +916,7 @@ async fn registry_remote_resolution_is_conservative_when_ambiguous() {
         .await
         .is_none()
     );
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }
 
 #[tokio::test]
@@ -937,11 +928,17 @@ async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
     let project_two = dir.path().join("repo-two");
     std::fs::create_dir_all(&project_one).unwrap();
     std::fs::create_dir_all(&project_two).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
+    close_profile_runtime(db).await;
 
-    assert!(project_column_exists(&db_path, "path").await);
-    assert!(project_column_exists(&db_path, "tokens_saved").await);
+    assert!(project_column_exists(&db_path, "path"));
+    assert!(project_column_exists(&db_path, "tokens_saved"));
 
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
     db.upsert(&project_one, 11).await;
     db.upsert(&project_two, 22).await;
     db.upsert(&project_one.join("."), 33).await;
@@ -950,5 +947,5 @@ async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, Some(55));
     assert_eq!(db.list_project_paths_compat().await.len(), 2);
-    close_global_db(db).await;
+    close_profile_runtime(db).await;
 }

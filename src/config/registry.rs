@@ -10,11 +10,12 @@ use thiserror::Error;
 use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AnalyzerSettingsV1,
-    CONFIGURATION_SETTING_KEYS_V1, ConfigurationValueKindV1, ConfigurationValueV1,
-    DEFAULT_COLLECTION_SETTING_KEY, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationValueKindV1,
+    ConfigurationValueV1, ContextScoutSettingsV1, DEFAULT_COLLECTION_SETTING_KEY,
+    DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY, RestartRequirementV1,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
@@ -122,6 +123,18 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::DaemonRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(CONTEXT_SCOUT_SETTINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::ContextScoutSettings,
+            default_value: ConfigurationValueV1::ContextScoutSettings(
+                ContextScoutSettingsV1::disabled(),
+            ),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
         register_legacy_project_settings(&mut registry)?;
@@ -394,4 +407,30 @@ fn register_legacy_project_settings(
 
 fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
     Ok(SettingKey::new(value)?)
+}
+
+#[cfg(test)]
+mod context_scout_tests {
+    use super::*;
+    use tracedecay_domain::configuration::{
+        ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
+    };
+
+    #[test]
+    fn stock_context_scout_configuration_is_explicitly_disabled() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let definition = registry
+            .definition(&SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).unwrap())
+            .unwrap();
+        let ConfigurationValueV1::ContextScoutSettings(settings) = &definition.default_value else {
+            panic!("Context Scout registry entry must retain its typed value");
+        };
+        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Disabled);
+        assert_eq!(
+            settings.mode,
+            ContextScoutConfigurationModeV1::Deterministic
+        );
+        assert_eq!(settings.model_path, None);
+        settings.validate().unwrap();
+    }
 }

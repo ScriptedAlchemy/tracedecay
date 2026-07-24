@@ -5,6 +5,7 @@
 use serde_json::json;
 use tracedecay_domain::FactOwnerV1;
 
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::application::memory::MemoryApplication;
 use tracedecay::automation::config::{AutomationConfigPatch, save_project_config};
 use tracedecay::automation::fact_proposals::{
@@ -20,7 +21,6 @@ use tracedecay::automation::memory_digest::{
     update_project_digest_section,
 };
 use tracedecay::automation::skill_targets::SkillInstallTarget;
-use tracedecay::global_db::GlobalDb;
 use tracedecay::memory::types::{FactRecord, MemoryCategory};
 use tracedecay::storage::default_profile_sharded_layout;
 use tracedecay::store::memory::DatabaseFactStore;
@@ -419,7 +419,7 @@ async fn project_config_gate_disables_refresh_and_removes_existing_section() {
     update_project_digest_section(
         &profile_root,
         ProjectDigestSection {
-            project_key: GlobalDb::canonical_project_key(&project_root),
+            project_key: HostAdmissionTestRuntimeV1::canonical_project_key(&project_root),
             project_label: "repo".to_string(),
             lines: vec!["- (decision, trust 0.90) Existing project fact".to_string()],
             omitted_count: 0,

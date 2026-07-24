@@ -1,4 +1,4 @@
-use libsql::Connection;
+use crate::db::engine::Executor;
 
 use crate::errors::Result;
 
@@ -16,7 +16,7 @@ use super::db_error;
 /// The connection must already have `source` attached and
 /// `PRAGMA defer_foreign_keys = ON` set (as `merge_one_graph` does), because the
 /// union crosses foreign keys between the durable tables.
-pub(super) async fn merge_memory_v2_authority(conn: &Connection) -> Result<()> {
+pub(super) async fn merge_memory_v2_authority(conn: &impl Executor) -> Result<()> {
     if !source_has_memory_v2(conn).await? {
         return Ok(());
     }
@@ -36,6 +36,95 @@ pub(super) async fn merge_memory_v2_authority(conn: &Connection) -> Result<()> {
          )
          SELECT owner_json, alias_kind, locator_digest, anchor_id
          FROM source.retrieval_anchor_aliases;
+
+         INSERT OR IGNORE INTO retrieval_anchor_dispositions(
+             disposition_id, anchor_id, owner_json, state, superseded_by,
+             reason_class, effective_at, record_json
+         )
+         SELECT disposition_id, anchor_id, owner_json, state, superseded_by,
+                reason_class, effective_at, record_json
+         FROM source.retrieval_anchor_dispositions
+         ORDER BY sequence;
+
+         INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage(
+             source_anchor_id, owner_json, derivative_kind, derivative_id,
+             direct_evidence
+         )
+         SELECT source_anchor_id, owner_json, derivative_kind, derivative_id,
+                direct_evidence
+         FROM source.retrieval_anchor_reverse_lineage;
+
+         INSERT OR IGNORE INTO retrieval_anchor_derivative_tombstones(
+             source_anchor_id, owner_json, derivative_kind, derivative_id,
+             disposition_id, effective_at
+         )
+         SELECT source_anchor_id, owner_json, derivative_kind, derivative_id,
+                disposition_id, effective_at
+         FROM source.retrieval_anchor_derivative_tombstones;
+
+         INSERT OR IGNORE INTO evidence_source_occurrences(
+             occurrence_id, owner_digest, timeline_digest, source_anchor_id,
+             source_order, record_digest, record_json
+         )
+         SELECT occurrence_id, owner_digest, timeline_digest, source_anchor_id,
+                source_order, record_digest, record_json
+         FROM source.evidence_source_occurrences;
+
+         INSERT OR IGNORE INTO evidence_occurrence_sets(
+             occurrence_set_id, owner_digest, record_digest, record_json
+         )
+         SELECT occurrence_set_id, owner_digest, record_digest, record_json
+         FROM source.evidence_occurrence_sets;
+
+         INSERT OR IGNORE INTO evidence_occurrence_set_members(
+             occurrence_set_id, canonical_ordinal, occurrence_id
+         )
+         SELECT occurrence_set_id, canonical_ordinal, occurrence_id
+         FROM source.evidence_occurrence_set_members;
+
+         INSERT OR IGNORE INTO evidence_spans(
+             span_id, owner_digest, occurrence_set_id, anchor_id, producer_kind,
+             record_digest, record_json
+         )
+         SELECT span_id, owner_digest, occurrence_set_id, anchor_id, producer_kind,
+                record_digest, record_json
+         FROM source.evidence_spans;
+
+         INSERT OR IGNORE INTO evidence_span_members(
+             span_id, assembly_ordinal, run_ordinal, run_member_ordinal, occurrence_id
+         )
+         SELECT span_id, assembly_ordinal, run_ordinal, run_member_ordinal, occurrence_id
+         FROM source.evidence_span_members;
+
+         INSERT OR IGNORE INTO evidence_span_projection_receipts(
+             projection_receipt_id, span_id, record_digest, record_json
+         )
+         SELECT projection_receipt_id, span_id, record_digest, record_json
+         FROM source.evidence_span_projection_receipts;
+
+         INSERT OR IGNORE INTO evidence_retriever_contributions(
+             contribution_id, owner_digest, span_id, anchor_id, record_digest,
+             record_json
+         )
+         SELECT contribution_id, owner_digest, span_id, anchor_id, record_digest,
+                record_json
+         FROM source.evidence_retriever_contributions;
+
+         INSERT OR IGNORE INTO evidence_derived_anchors(
+             anchor_id, owner_digest, target_kind, target_id, anchor_json
+         )
+         SELECT anchor_id, owner_digest, target_kind, target_id, anchor_json
+         FROM source.evidence_derived_anchors;
+
+         INSERT OR IGNORE INTO evidence_assembly_receipts(
+             publication_receipt_id, owner_digest, privacy_domain_id, key_epoch,
+             idempotency_key, assembly_digest, occurrence_set_id, span_id,
+             contribution_id, projection_receipt_id, receipt_json
+         )
+         SELECT publication_receipt_id, owner_digest, privacy_domain_id, key_epoch,
+                idempotency_key, assembly_digest, occurrence_set_id, span_id,
+                contribution_id, projection_receipt_id, receipt_json
+         FROM source.evidence_assembly_receipts;
 
          INSERT OR IGNORE INTO memory_v2_facts(
              fact_id, owner_kind, project_id, owner_json, identity_json, created_at
@@ -75,6 +164,14 @@ pub(super) async fn merge_memory_v2_authority(conn: &Connection) -> Result<()> {
          )
          SELECT assertion_id, fact_id, owner_kind, project_id, payload_json, content
          FROM source.memory_v2_assertion_payloads;
+
+         INSERT OR IGNORE INTO memory_v2_assertion_vectors(
+             assertion_id, fact_id, owner_kind, project_id, vector, algebra,
+             dimensions, precision
+         )
+         SELECT assertion_id, fact_id, owner_kind, project_id, vector, algebra,
+                dimensions, precision
+         FROM source.memory_v2_assertion_vectors;
 
          INSERT OR IGNORE INTO memory_v2_evidence(
              evidence_id, fact_id, owner_kind, project_id, owner_json,
@@ -178,7 +275,8 @@ pub(super) async fn merge_memory_v2_authority(conn: &Connection) -> Result<()> {
     .await
     .map_err(|error| db_error("merge_memory_v2_authority", error))?;
 
-    merge_current_facts_with_deletion_terminality(conn).await
+    merge_current_facts_with_deletion_terminality(conn).await?;
+    reconcile_memory_v2_derived_state(conn).await
 }
 
 /// Reconciles the derived `memory_v2_current_facts` projection across the two
@@ -186,7 +284,7 @@ pub(super) async fn merge_memory_v2_authority(conn: &Connection) -> Result<()> {
 /// shard must win over a live copy from the other, and no payload, FTS, or
 /// vector row is re-materialized for it. Among rows that agree on liveness the
 /// most recently updated projection wins, matching single-store recovery.
-async fn merge_current_facts_with_deletion_terminality(conn: &Connection) -> Result<()> {
+async fn merge_current_facts_with_deletion_terminality(conn: &impl Executor) -> Result<()> {
     conn.execute_batch(
         "INSERT INTO memory_v2_current_facts(
              fact_id, owner_kind, project_id, payload_access, trust_score,
@@ -233,7 +331,95 @@ async fn merge_current_facts_with_deletion_terminality(conn: &Connection) -> Res
     Ok(())
 }
 
-async fn source_has_memory_v2(conn: &Connection) -> Result<bool> {
+/// Re-establishes the runtime's canonical payload-purge and projection-dirty
+/// invariants after the durable authorities from both shards have been
+/// unioned. Source compatibility-bank projections are intentionally not
+/// copied: their fact set is no longer authoritative after consolidation.
+async fn reconcile_memory_v2_derived_state(conn: &impl Executor) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA secure_delete = ON;
+
+         DELETE FROM memory_v2_assertion_vectors
+         WHERE EXISTS(
+             SELECT 1 FROM memory_v2_current_facts AS current
+             WHERE current.fact_id = memory_v2_assertion_vectors.fact_id
+               AND current.owner_kind = memory_v2_assertion_vectors.owner_kind
+               AND current.project_id = memory_v2_assertion_vectors.project_id
+               AND current.payload_access = 'deleted'
+         );
+
+         DELETE FROM memory_v2_assertion_payloads
+         WHERE EXISTS(
+             SELECT 1 FROM memory_v2_current_facts AS current
+             WHERE current.fact_id = memory_v2_assertion_payloads.fact_id
+               AND current.owner_kind = memory_v2_assertion_payloads.owner_kind
+               AND current.project_id = memory_v2_assertion_payloads.project_id
+               AND current.payload_access = 'deleted'
+         );
+
+         UPDATE memory_v2_feedback_history
+         SET source = NULL, note = NULL,
+             details_availability = CASE
+                 WHEN details_availability = 'available' THEN 'legacy_redacted'
+                 ELSE details_availability
+             END
+         WHERE EXISTS(
+             SELECT 1 FROM memory_v2_current_facts AS current
+             WHERE current.fact_id = memory_v2_feedback_history.fact_id
+               AND current.owner_kind = memory_v2_feedback_history.owner_kind
+               AND current.project_id = memory_v2_feedback_history.project_id
+               AND current.payload_access = 'deleted'
+         );
+
+         UPDATE memory_v2_current_facts
+         SET active_assertion_id = NULL,
+             projection_state = 'unavailable',
+             vector_watermark_json = NULL
+         WHERE payload_access = 'deleted';
+
+         UPDATE memory_v2_current_facts
+         SET projection_state = 'rebuilding',
+             vector_watermark_json = NULL
+         WHERE payload_access <> 'deleted'
+           AND EXISTS(
+               SELECT 1 FROM source.memory_v2_facts AS source_fact
+               WHERE source_fact.owner_kind = memory_v2_current_facts.owner_kind
+                 AND source_fact.project_id = memory_v2_current_facts.project_id
+           );
+
+         INSERT INTO memory_v2_compatibility_bank_dirty(
+             owner_kind, project_id, source_store_id, owner_json, bank_name,
+             updated_at
+         )
+         SELECT source_fact.owner_kind, source_fact.project_id,
+                'legacy-memory-v1', source_fact.owner_json, bank.bank_name,
+                MAX(source_fact.created_at)
+         FROM source.memory_v2_facts AS source_fact
+         CROSS JOIN (
+             SELECT 'all' AS bank_name
+             UNION ALL SELECT 'general'
+             UNION ALL SELECT 'user_pref'
+             UNION ALL SELECT 'project'
+             UNION ALL SELECT 'tool'
+             UNION ALL SELECT 'decision'
+             UNION ALL SELECT 'code_area'
+         ) AS bank
+         GROUP BY source_fact.owner_kind, source_fact.project_id,
+                  source_fact.owner_json, bank.bank_name
+         ON CONFLICT(owner_kind, project_id, source_store_id, bank_name)
+         DO UPDATE SET
+             owner_json = excluded.owner_json,
+             updated_at = MAX(
+                 excluded.updated_at,
+                 memory_v2_compatibility_bank_dirty.updated_at + 1
+             );",
+    )
+    .await
+    .map_err(|error| db_error("reconcile_memory_v2_derived_state", error))?;
+    Ok(())
+}
+
+async fn source_has_memory_v2(conn: &impl Executor) -> Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM source.sqlite_master

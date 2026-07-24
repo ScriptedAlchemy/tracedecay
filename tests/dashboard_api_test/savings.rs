@@ -11,15 +11,17 @@ use std::path::Path;
 
 use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
-    pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
+    pick_free_port, wait_for_dashboard,
 };
 use crate::dashboard_api_support::{MessageDetails, MessageRecordBuilder, message};
 use serde_json::Value;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
-use tracedecay::global_db::{GlobalDb, ParseOffset};
+use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::SessionRecord;
-use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::CostTurn;
 
@@ -81,8 +83,73 @@ const TEXT_ASSISTANT: &str =
 const TEXT_UNKNOWN: &str = "This message was stored without any model id attached.";
 const TEXT_MIXED: &str = "Second message of the mixed session, no usage record here.";
 
-async fn seed_ledger_db(db_path: &Path, project: &Path, day_start: i64) {
-    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
+struct SavingsSeed<'a>(&'a HostAdmissionTestRuntimeV1);
+
+impl SavingsSeed<'_> {
+    async fn upsert(&self, project: &Path, tokens_saved: u64) {
+        self.0.upsert(project, tokens_saved).await;
+    }
+
+    async fn record_savings(
+        &self,
+        project: &str,
+        tool: &str,
+        before: u64,
+        after: u64,
+        timestamp: i64,
+    ) {
+        self.0
+            .record_savings_for_test(project, tool, before, after, timestamp)
+            .await;
+    }
+
+    async fn insert_turn(&self, turn: &CostTurn) -> bool {
+        self.0.insert_turn_for_test(turn).await
+    }
+
+    async fn insert_turns(&self, turns: &[CostTurn]) -> usize {
+        self.0.insert_turns_for_test(turns).await
+    }
+
+    async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.0
+            .upsert_session_for_test(HostAdmissionScope::Project, session)
+            .await
+            .expect("seed savings session")
+    }
+
+    async fn upsert_session_message(
+        &self,
+        message: &tracedecay::sessions::SessionMessageRecord,
+    ) -> bool {
+        self.0
+            .upsert_session_message_for_test(HostAdmissionScope::Project, message)
+            .await
+            .expect("seed savings session message")
+    }
+
+    async fn upsert_transcript_batch(
+        &self,
+        session: &SessionRecord,
+        messages: &[tracedecay::sessions::SessionMessageRecord],
+        source: &str,
+        offset: ParseOffset,
+    ) -> bool {
+        self.0
+            .upsert_transcript_batch_for_test(
+                HostAdmissionScope::Project,
+                session,
+                messages,
+                source,
+                offset,
+            )
+            .await
+            .is_ok()
+    }
+}
+
+async fn seed_ledger_db(runtime: &HostAdmissionTestRuntimeV1, project: &Path, day_start: i64) {
+    let gdb = SavingsSeed(runtime);
 
     // Lifetime counter (legacy `projects.tokens_saved`, what `tracedecay
     // gain` reports as the lifetime number).
@@ -104,9 +171,9 @@ async fn seed_ledger_db(db_path: &Path, project: &Path, day_start: i64) {
     .await;
 }
 
-async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
-    seed_ledger_db(db_path, project, day_start).await;
-    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
+async fn seed_global_db(runtime: &HostAdmissionTestRuntimeV1, project: &Path, day_start: i64) {
+    seed_ledger_db(runtime, project, day_start).await;
+    let gdb = SavingsSeed(runtime);
 
     // Claude Code accounting turn (cost computed from real usage at ingest).
     assert!(
@@ -312,14 +379,11 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
 }
 
 async fn seed_daily_limit_regression(
-    session_db_path: &Path,
-    global_db_path: &Path,
+    runtime: &HostAdmissionTestRuntimeV1,
     project: &Path,
     latest_day: i64,
 ) {
-    let gdb = GlobalDb::open_at(session_db_path)
-        .await
-        .expect("open session db");
+    let gdb = SavingsSeed(runtime);
 
     let daily_session = session(
         "sess-daily-limit",
@@ -367,9 +431,6 @@ async fn seed_daily_limit_regression(
         .await
     );
 
-    let accounting = GlobalDb::open_at(global_db_path)
-        .await
-        .expect("open accounting db");
     let mut turns = Vec::new();
     for offset in 0..=366 {
         turns.push(CostTurn {
@@ -387,7 +448,7 @@ async fn seed_daily_limit_regression(
             tool_names: String::new(),
         });
     }
-    assert_eq!(accounting.insert_turns(&turns).await, turns.len());
+    assert_eq!(gdb.insert_turns(&turns).await, turns.len());
 }
 
 async fn start_fixture(seed: FixtureSeed) -> Fixture {
@@ -401,8 +462,10 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     .expect("seed source file");
 
     let global_db_path = tmp.path().join("global").join("global.db");
+    let profile_root = tmp.path().join("profile").join(".tracedecay");
     let env_guards = vec![
         EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path),
+        EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
         // `.cargo/config.toml` disables global accounting for cargo-launched
         // processes; opt back in so the recording state reads "enabled".
         EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1"),
@@ -415,45 +478,45 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         ),
     ];
 
-    // Pre-create both GlobalDb-schema stores from the cached empty template
-    // so seeding and dashboard startup open existing DBs instead of paying a
-    // full schema creation each (slow on Windows).
-    write_empty_global_db_schema(&global_db_path).await;
-
     let now = now_unix();
     let day_start = now - (now % 86_400);
-    match seed {
-        FixtureSeed::Base => seed_global_db(&global_db_path, &project_root, day_start).await,
-        FixtureSeed::LedgerOnly => seed_ledger_db(&global_db_path, &project_root, day_start).await,
-        FixtureSeed::DailyLimitRegression => {}
-    }
 
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
-    let session_db_path = project_session_db_path(&project_root);
-    if !session_db_path.exists() {
-        write_empty_global_db_schema(&session_db_path).await;
-    }
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|project_id| tracedecay_domain::ProjectId::new(project_id.to_owned()).ok())
+        .expect("savings fixture project identity");
+    let host_runtime = Arc::new(
+        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
+            .await
+            .expect("savings host-admission runtime"),
+    );
     match seed {
-        FixtureSeed::Base => seed_global_db(&session_db_path, &project_root, day_start).await,
-        FixtureSeed::LedgerOnly => {}
+        FixtureSeed::Base => seed_global_db(&host_runtime, &project_root, day_start).await,
+        FixtureSeed::LedgerOnly => seed_ledger_db(&host_runtime, &project_root, day_start).await,
         FixtureSeed::DailyLimitRegression => {
-            seed_daily_limit_regression(
-                &session_db_path,
-                &global_db_path,
-                &project_root,
-                day_start,
-            )
-            .await;
+            seed_daily_limit_regression(&host_runtime, &project_root, day_start).await;
         }
     }
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
+    let server_runtime = Arc::clone(&host_runtime);
+    let server_graph = Arc::new(cg);
     let server = tokio::spawn(async move {
-        let _ =
-            dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, std::future::pending())
-                .await;
+        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+            server_graph,
+            server_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            "127.0.0.1",
+            port,
+            std::future::pending(),
+        )
+        .await;
     });
 
     wait_for_dashboard(&http_agent(), &base_url).await;

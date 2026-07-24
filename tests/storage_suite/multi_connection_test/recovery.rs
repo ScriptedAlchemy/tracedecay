@@ -12,13 +12,13 @@ async fn killed_writer_fixture() {
         PathBuf::from(std::env::var_os("TRACEDECAY_FIXTURE_READY").expect("fixture ready path"));
     let authority = DatabaseAuthority::acquire_test(&db_path, "killed writer fixture")
         .expect("acquire fixture database authority");
-    let (db, _) = Database::open(&db_path, &authority)
-        .await
-        .expect("open fixture graph DB");
-    db.conn()
-        .execute_batch("PRAGMA wal_autocheckpoint = 0")
-        .await
-        .expect("disable WAL autocheckpoint");
+    let (db, _) = Database::publish_test_runtime(
+        &db_path,
+        &authority,
+        tracedecay::db::TestDatabaseRuntimeMode::Existing,
+    )
+    .await
+    .expect("open fixture graph DB");
     db.insert_nodes(&[common::sample_node(
         "broker-recovery-node",
         "broker_recovery_node",

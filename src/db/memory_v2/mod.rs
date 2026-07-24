@@ -263,24 +263,83 @@ async fn load_legacy_entities(
     conn: &impl MemoryV2Executor,
     legacy_fact_id: i64,
 ) -> Result<Vec<String>> {
-    let mut rows = conn
-        .query(
-            "SELECT e.name FROM memory_entities e
-             JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
-             WHERE fe.fact_id = ?1 ORDER BY e.name",
-            params![legacy_fact_id],
-        )
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
+    const PAGE_SIZE: i64 = 512;
+
     let mut entities = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error(OPERATION, error))?
-    {
-        entities.push(row.get(0).map_err(|error| db_error(OPERATION, error))?);
+    let mut name_cursor: Option<String> = None;
+    let mut id_cursor: Option<i64> = None;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT e.name, e.entity_id FROM memory_entities e
+                 JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
+                 WHERE fe.fact_id = ?1
+                   AND (
+                       ?2 IS NULL
+                       OR e.name > ?2
+                       OR (e.name = ?2 AND e.entity_id > ?3)
+                   )
+                 ORDER BY e.name, e.entity_id
+                 LIMIT ?4",
+                params![legacy_fact_id, name_cursor.as_ref(), id_cursor, PAGE_SIZE],
+            )
+            .await
+            .map_err(|error| db_error(OPERATION, error))?;
+        let mut page_count = 0;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| db_error(OPERATION, error))?
+        {
+            let name: String = row.get(0).map_err(|error| db_error(OPERATION, error))?;
+            id_cursor = Some(row.get(1).map_err(|error| db_error(OPERATION, error))?);
+            name_cursor = Some(name.clone());
+            entities.push(name);
+            page_count += 1;
+        }
+        if page_count < PAGE_SIZE {
+            break;
+        }
     }
     Ok(entities)
+}
+
+async fn load_legacy_entity_ids(
+    conn: &impl MemoryV2Executor,
+    legacy_fact_id: i64,
+    operation: &str,
+) -> Result<Vec<i64>> {
+    const PAGE_SIZE: i64 = 512;
+
+    let mut entity_ids = Vec::new();
+    let mut cursor: Option<i64> = None;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT entity_id FROM memory_fact_entities
+                 WHERE fact_id = ?1 AND (?2 IS NULL OR entity_id > ?2)
+                 ORDER BY entity_id
+                 LIMIT ?3",
+                params![legacy_fact_id, cursor, PAGE_SIZE],
+            )
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        let mut page_count = 0;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| db_error(operation, error))?
+        {
+            let entity_id = row.get(0).map_err(|error| db_error(operation, error))?;
+            cursor = Some(entity_id);
+            entity_ids.push(entity_id);
+            page_count += 1;
+        }
+        if page_count < PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(entity_ids)
 }
 
 fn owner_key(owner: &FactOwnerV1) -> Result<OwnerKey> {

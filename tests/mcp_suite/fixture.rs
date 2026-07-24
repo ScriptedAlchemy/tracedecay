@@ -23,6 +23,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay::errors::Result as TdResult;
@@ -305,11 +306,7 @@ async fn build_template(dest: &Path) -> io::Result<()> {
 /// DB so seeded copies start with a schema-complete but empty registry;
 /// each test's `TraceDecay::open` re-registers its own project cleanly.
 async fn purge_global_registry(global_db_path: &Path) -> io::Result<()> {
-    let db = libsql::Builder::new_local(global_db_path)
-        .build()
-        .await
-        .map_err(io_other)?;
-    let conn = db.connect().map_err(io_other)?;
+    let conn = Connection::open(global_db_path).map_err(io_other)?;
     conn.execute_batch(
         "DELETE FROM store_artifacts;
          DELETE FROM graph_scopes;
@@ -319,7 +316,6 @@ async fn purge_global_registry(global_db_path: &Path) -> io::Result<()> {
          DELETE FROM projects;
          PRAGMA wal_checkpoint(TRUNCATE);",
     )
-    .await
     .map_err(io_other)?;
     Ok(())
 }

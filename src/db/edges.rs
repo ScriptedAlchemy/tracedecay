@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_edge;
@@ -24,7 +24,7 @@ impl Database {
         // edge into an UPDATE rather than writing a row to the edges table.
         if edge.kind == EdgeKind::Contains {
             transaction
-                .execute(
+                .execute_engine(
                     "UPDATE nodes SET parent_id = ?1 WHERE id = ?2",
                     params![edge.source.as_str(), edge.target.as_str()],
                 )
@@ -36,7 +36,7 @@ impl Database {
             return Ok(());
         }
         transaction
-            .execute(
+            .execute_engine(
                 "INSERT OR IGNORE INTO edges (source, target, kind, line) \
                  SELECT ?1, ?2, ?3, ?4 \
                  WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
@@ -85,7 +85,7 @@ impl Database {
         // `nodes`. This avoids FK violations during incremental sync
         // when an edge references a node from a not-yet-indexed file.
         let stmt = transaction
-            .prepare(
+            .prepare_engine(
                 "INSERT OR IGNORE INTO edges (source, target, kind, line) \
                      SELECT ?1, ?2, ?3, ?4 \
                      WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
@@ -98,7 +98,7 @@ impl Database {
             })?;
 
         let parent_stmt = transaction
-            .prepare("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
+            .prepare_engine("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to prepare parent update: {e}"),
@@ -153,7 +153,7 @@ impl Database {
     ) -> Result<Vec<Edge>> {
         if kinds.is_empty() {
             let mut rows = self
-                .conn()
+                .engine_conn()
                 .query(
                     "SELECT source, target, kind, line FROM edges WHERE source = ?1",
                     params![source_id],
@@ -176,15 +176,15 @@ impl Database {
                 placeholders.join(", ")
             );
 
-            let mut param_values: Vec<libsql::Value> = Vec::new();
-            param_values.push(libsql::Value::Text(source_id.to_string()));
+            let mut param_values: Vec<Value> = Vec::new();
+            param_values.push(Value::Text(source_id.to_string()));
             for k in kinds {
-                param_values.push(libsql::Value::Text(k.as_str().to_string()));
+                param_values.push(Value::Text(k.as_str().to_string()));
             }
 
             let mut rows = self
-                .conn()
-                .query(&sql, libsql::params_from_iter(param_values))
+                .engine_conn()
+                .query(&sql, params_from_iter(param_values))
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query outgoing edges: {e}"),
@@ -205,7 +205,7 @@ impl Database {
     ) -> Result<Vec<Edge>> {
         if kinds.is_empty() {
             let mut rows = self
-                .conn()
+                .engine_conn()
                 .query(
                     "SELECT source, target, kind, line FROM edges WHERE target = ?1",
                     params![target_id],
@@ -228,15 +228,15 @@ impl Database {
                 placeholders.join(", ")
             );
 
-            let mut param_values: Vec<libsql::Value> = Vec::new();
-            param_values.push(libsql::Value::Text(target_id.to_string()));
+            let mut param_values: Vec<Value> = Vec::new();
+            param_values.push(Value::Text(target_id.to_string()));
             for k in kinds {
-                param_values.push(libsql::Value::Text(k.as_str().to_string()));
+                param_values.push(Value::Text(k.as_str().to_string()));
             }
 
             let mut rows = self
-                .conn()
-                .query(&sql, libsql::params_from_iter(param_values))
+                .engine_conn()
+                .query(&sql, params_from_iter(param_values))
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query incoming edges: {e}"),
@@ -266,9 +266,9 @@ impl Database {
 
         let target_placeholders: Vec<String> =
             (1..=target_ids.len()).map(|i| format!("?{i}")).collect();
-        let mut param_values: Vec<libsql::Value> = target_ids
+        let mut param_values: Vec<Value> = target_ids
             .iter()
-            .map(|id| libsql::Value::Text(id.clone()))
+            .map(|id| Value::Text(id.clone()))
             .collect();
 
         let sql = if kinds.is_empty() {
@@ -281,7 +281,7 @@ impl Database {
                 .map(|i| format!("?{}", target_ids.len() + i))
                 .collect();
             for k in kinds {
-                param_values.push(libsql::Value::Text(k.as_str().to_string()));
+                param_values.push(Value::Text(k.as_str().to_string()));
             }
             format!(
                 "SELECT source, target, kind, line FROM edges \
@@ -292,8 +292,8 @@ impl Database {
         };
 
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query bulk incoming edges: {e}"),
@@ -306,7 +306,7 @@ impl Database {
     /// Returns every edge in the database.
     pub async fn get_all_edges(&self) -> Result<Vec<Edge>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query("SELECT source, target, kind, line FROM edges", ())
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -333,7 +333,7 @@ impl Database {
         source_id: &str,
     ) -> Result<()> {
         transaction
-            .execute("DELETE FROM edges WHERE source = ?1", params![source_id])
+            .execute_engine("DELETE FROM edges WHERE source = ?1", params![source_id])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete edges by source: {e}"),
@@ -371,14 +371,11 @@ impl Database {
                 placeholders.join(", ")
             );
 
-            let param_values: Vec<libsql::Value> = batch
-                .iter()
-                .map(|id| libsql::Value::Text(id.clone()))
-                .collect();
+            let param_values: Vec<Value> = batch.iter().map(|id| Value::Text(id.clone())).collect();
 
             let mut rows = self
-                .conn()
-                .query(&sql, libsql::params_from_iter(param_values))
+                .engine_conn()
+                .query(&sql, params_from_iter(param_values))
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query internal edges: {e}"),

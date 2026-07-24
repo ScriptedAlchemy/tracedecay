@@ -1,9 +1,10 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::source::try_ingest_source;
+
+use crate::restart_atomicity::{open_project_session_db, try_ingest_source};
 
 pub(crate) fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
     std::fs::write(
@@ -27,18 +28,31 @@ async fn user_scope_ingests_only_codex_sessions_outside_registered_projects() {
     std::fs::create_dir_all(&general).unwrap();
     write_codex_rollout(&home, &registered, "project-session");
     write_codex_rollout(&home, &general, "user-session");
-    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
         .await
         .unwrap();
     let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
 
-    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+    let stats = runtime
+        .ingest_profile_transcript_source_for_test(&source, tmp.path(), None)
         .await
         .unwrap();
 
     assert_eq!(stats.sessions_upserted, 1);
-    assert!(db.get_session("codex", "user-session").await.is_some());
-    assert!(db.get_session("codex", "project-session").await.is_none());
+    assert!(
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "codex", "user-session")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "codex", "project-session")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -71,19 +85,28 @@ async fn user_scope_excludes_codex_turns_after_switching_to_registered_project()
         })
     )
     .unwrap();
-    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
         .await
         .unwrap();
     let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
 
-    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+    let stats = runtime
+        .ingest_profile_transcript_source_for_test(&source, tmp.path(), None)
         .await
         .unwrap();
 
     assert!(stats.messages_upserted > 0);
     assert!(
-        db.search_session_messages("codex", None, "registered project secret", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "codex",
+                None,
+                "registered project secret",
+                10,
+            )
             .await
+            .unwrap()
             .is_empty()
     );
 }
@@ -119,17 +142,9 @@ async fn project_scopes_split_codex_turns_when_cwd_changes() {
     )
     .unwrap();
 
-    let db_a = GlobalDb::open_at(&tmp.path().join("project-a.db"))
-        .await
-        .unwrap();
-    let db_b = GlobalDb::open_at(&tmp.path().join("project-b.db"))
-        .await
-        .unwrap();
+    let db_a = open_project_session_db(&project_a).await.unwrap();
     let source = CodexSource::with_home(&home);
     try_ingest_source(&db_a, &source, &project_a, None)
-        .await
-        .unwrap();
-    try_ingest_source(&db_b, &source, &project_b, None)
         .await
         .unwrap();
 
@@ -144,6 +159,12 @@ async fn project_scopes_split_codex_turns_when_cwd_changes() {
             .await
             .is_empty()
     );
+    drop(db_a);
+
+    let db_b = open_project_session_db(&project_b).await.unwrap();
+    try_ingest_source(&db_b, &source, &project_b, None)
+        .await
+        .unwrap();
     assert!(
         db_b.search_session_messages("codex", None, "billing pipeline", 10)
             .await
@@ -187,23 +208,40 @@ async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
         })
     )
     .unwrap();
-    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
         .await
         .unwrap();
     let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
 
-    try_ingest_source(&db, &source, tmp.path(), None)
+    runtime
+        .ingest_profile_transcript_source_for_test(&source, tmp.path(), None)
         .await
         .unwrap();
 
     assert!(
-        db.search_session_messages("codex", None, "billing pipeline", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "codex",
+                None,
+                "billing pipeline",
+                10,
+            )
             .await
+            .unwrap()
             .is_empty()
     );
     assert!(
-        !db.search_session_messages("codex", None, "general chat private marker", 10)
+        !runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "codex",
+                None,
+                "general chat private marker",
+                10,
+            )
             .await
+            .unwrap()
             .is_empty()
     );
 }

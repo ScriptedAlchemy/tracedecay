@@ -4,7 +4,7 @@ use tracedecay_domain::ObservationScopeV1;
 
 use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{
     self, TranscriptDiscoveryBounds, TranscriptSource, try_ingest_source,
@@ -21,7 +21,7 @@ use super::user::{
 };
 
 pub(super) async fn run_user_provider(
-    db: &GlobalDb,
+    registered: &RegisteredGlobalDb,
     profile_root: &Path,
     roots: &[PathBuf],
     facade: &HostAdmissionFacade<'_>,
@@ -30,7 +30,7 @@ pub(super) async fn run_user_provider(
     cancellation: &ObservationCancellation,
 ) -> ProviderRunOutcome {
     UserProviderUnit {
-        db,
+        registered,
         profile_root,
         roots,
         facade,
@@ -43,7 +43,7 @@ pub(super) async fn run_user_provider(
 }
 
 struct UserProviderUnit<'a> {
-    db: &'a GlobalDb,
+    registered: &'a RegisteredGlobalDb,
     profile_root: &'a Path,
     roots: &'a [PathBuf],
     facade: &'a HostAdmissionFacade<'a>,
@@ -69,10 +69,10 @@ impl UserProviderUnit<'_> {
 
     async fn run_codex(self) -> ProviderRunOutcome {
         match try_ingest_user_codex_sessions_with_db_bounded(
-            self.db,
             self.profile_root,
             None,
             self.roots.to_vec(),
+            self.facade,
             Some(self.max_new_bytes),
             self.cancellation,
         )
@@ -97,8 +97,8 @@ impl UserProviderUnit<'_> {
 
     async fn run_cursor(self) -> ProviderRunOutcome {
         match try_ingest_user_cursor_sessions_with_db_bounded(
-            self.db,
             self.roots.to_vec(),
+            self.facade,
             Some(self.max_new_bytes),
         )
         .await
@@ -121,9 +121,12 @@ impl UserProviderUnit<'_> {
     }
 
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let outcome =
-            hermes::ingest_user_sessions_capped(self.db, self.roots, Some(self.max_new_bytes))
-                .await;
+        let outcome = hermes::ingest_user_sessions_capped_with_admission(
+            self.facade,
+            self.roots,
+            Some(self.max_new_bytes),
+        )
+        .await;
         ProviderRunOutcome::bounded(
             outcome.stats,
             outcome.bytes_consumed,
@@ -132,11 +135,11 @@ impl UserProviderUnit<'_> {
     }
 
     async fn run_claude(self) -> ProviderRunOutcome {
-        match claude_observation::ingest_user_sessions(
-            self.db,
+        match claude_observation::ingest_user_sessions_with_admission(
             self.profile_root,
             None,
             self.roots.to_vec(),
+            self.facade,
             Some(self.max_new_bytes),
             self.cancellation.clone(),
         )
@@ -238,7 +241,7 @@ impl UserProviderUnit<'_> {
         };
         let source = source.for_user_scope(self.roots.to_vec());
         match try_ingest_file_source_bounded(
-            self.db,
+            self.registered,
             &source,
             self.profile_root,
             self.max_new_bytes,
@@ -262,7 +265,7 @@ impl UserProviderUnit<'_> {
 }
 
 pub(super) async fn try_ingest_file_source_bounded(
-    db: &GlobalDb,
+    registered: &RegisteredGlobalDb,
     transcript_source: &dyn TranscriptSource,
     project_root: &Path,
     max_new_bytes: u64,
@@ -279,7 +282,8 @@ pub(super) async fn try_ingest_file_source_bounded(
             break;
         }
         let single = SinglePathSource::new(transcript_source, path.clone());
-        stats = stats.merge(try_ingest_source(db, &single, project_root, Some(grant)).await?);
+        stats =
+            stats.merge(try_ingest_source(registered, &single, project_root, Some(grant)).await?);
         remaining = remaining.saturating_sub(grant);
     }
     Ok(stats)

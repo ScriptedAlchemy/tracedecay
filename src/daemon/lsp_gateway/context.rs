@@ -89,6 +89,43 @@ pub enum ContextCoverage {
     Failed,
 }
 
+/// Exact immutable code-index identity carried by every projection.
+///
+/// `document_content_digest` is present only for a document-scoped request;
+/// root-scoped projections remain bound to the complete snapshot digest and
+/// content identity without inventing a document identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextProjectionIdentity {
+    pub head_commit_id: String,
+    pub code_generation_id: String,
+    pub snapshot_digest: String,
+    pub invalidation_digest: String,
+    pub snapshot_content_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_content_digest: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextFreshness {
+    Current,
+    Stale,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextProducerState {
+    Complete,
+    Partial,
+    Indexing,
+    Unavailable,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextProjectionRequest {
@@ -126,10 +163,14 @@ pub struct ContextProjectionEnvelope {
     pub document_uri: Option<String>,
     pub kind: ContextProjectionKind,
     pub generation: u64,
+    pub identity: ContextProjectionIdentity,
+    pub freshness: ContextFreshness,
+    pub producer_state: ContextProducerState,
     pub coverage: ContextCoverage,
     pub revision: u32,
     pub items: Vec<ContextProjectionItem>,
     pub omitted_count: usize,
+    pub omission_reasons: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrieval_handle: Option<String>,
 }
@@ -142,6 +183,9 @@ pub struct ContextProjectionChange {
     pub document_uri: Option<String>,
     pub kind: ContextProjectionKind,
     pub generation: u64,
+    pub identity: ContextProjectionIdentity,
+    pub freshness: ContextFreshness,
+    pub producer_state: ContextProducerState,
     pub coverage: ContextCoverage,
     pub revision: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,8 +196,7 @@ pub struct ContextProjectionChange {
 #[serde(rename_all = "camelCase")]
 pub struct ContextExpansionScope {
     pub scope_digest: String,
-    pub head_commit_id: String,
-    pub code_generation_id: String,
+    pub identity: ContextProjectionIdentity,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

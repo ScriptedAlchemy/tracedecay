@@ -15,7 +15,10 @@ use tracedecay_domain::configuration::{
     SettingScopeV1, SettingSensitivityV1,
 };
 
-use crate::application::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
+use crate::application::semantic_runtime::{
+    ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
+    SemanticRuntimeIntegrationPortV1,
+};
 use crate::config::{
     ConfigurationDaemonClient, OpenedRuntimeConfiguration, PinnedRuntimeConfiguration,
     RuntimeConfigurationFuture, RuntimeConfigurationTarget, SEMANTIC_RUNTIME_SETTING_KEY,
@@ -49,6 +52,7 @@ pub struct ProjectConfigurationRuntime {
     #[allow(dead_code)] // Plan 20 config control-plane — staged
     control_plane: SharedConfigurationControlPlane,
     client: Arc<ProductionConfigurationDaemonClient>,
+    semantic_runtime: OnceLock<Arc<ProductionSemanticActivationCoordinatorV1>>,
 }
 
 impl ProjectConfigurationRuntime {
@@ -88,6 +92,7 @@ impl ProjectConfigurationRuntime {
             authorities,
             control_plane,
             client,
+            semantic_runtime: OnceLock::new(),
         })
     }
 
@@ -118,6 +123,195 @@ impl ProjectConfigurationRuntime {
 
     pub(crate) fn dyn_client(&self) -> Arc<dyn crate::config::ConfigurationDaemonClient> {
         Arc::clone(&self.client) as Arc<dyn crate::config::ConfigurationDaemonClient>
+    }
+
+    pub(crate) fn configuration_store(&self) -> OwnedGlobalDbConfigurationControlStore {
+        self.client.store.clone()
+    }
+
+    pub(crate) fn install_semantic_runtime(
+        &self,
+        runtime: Arc<ProductionSemanticActivationCoordinatorV1>,
+    ) -> Result<()> {
+        self.semantic_runtime
+            .set(runtime)
+            .map_err(|_| TraceDecayError::Config {
+                message: "semantic configuration runtime is already installed".to_owned(),
+            })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn semantic_runtime(
+        &self,
+    ) -> Option<Arc<dyn SemanticRuntimeIntegrationPortV1 + Send + Sync>> {
+        self.semantic_runtime
+            .get()
+            .cloned()
+            .map(|runtime| runtime as Arc<dyn SemanticRuntimeIntegrationPortV1 + Send + Sync>)
+    }
+
+    pub(crate) fn semantic_activation_coordinator(
+        &self,
+    ) -> Option<Arc<ProductionSemanticActivationCoordinatorV1>> {
+        self.semantic_runtime.get().cloned()
+    }
+
+    pub(crate) async fn authorize_semantic_configuration_mutation(
+        &self,
+        authority: ConfigurationMutationAuthority,
+        expected_revision: &ConfigurationRevisionId,
+        now: UtcMicros,
+    ) -> std::result::Result<
+        (),
+        crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1,
+    > {
+        self.retrieval_profile_mutation_capability(authority, expected_revision, now)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn bootstrap_pr9_retrieval_profile(
+        &self,
+        configuration: super::ports::ConfigurationCurrentStateV1,
+        accepted_pr9: crate::config::retrieval::AcceptedRetrievalProfileV1,
+        runtime: &crate::config::retrieval::RetrievalRuntimeCompatibilityV1,
+    ) -> std::result::Result<
+        (),
+        crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1,
+    > {
+        self.semantic_runtime
+            .get()
+            .ok_or(
+                crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable,
+            )?
+            .bootstrap_pr9_profile(configuration, accepted_pr9, runtime)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn stage_and_activate_semantic(
+        &self,
+        base_configuration: crate::application::semantic_runtime::SemanticConfigurationPinV1,
+        result_configuration: super::ports::ConfigurationCurrentStateV1,
+        authority: ConfigurationMutationAuthority,
+        expected: crate::config::retrieval::RetrievalProfileCasV1,
+        candidate: crate::config::retrieval::AcceptedRetrievalProfileV1,
+        current_runtime: &crate::config::retrieval::RetrievalRuntimeCompatibilityV1,
+        candidate_runtime: &crate::config::retrieval::RetrievalRuntimeCompatibilityV1,
+        central_mutation: DirectConfigurationMutation,
+        freshness_vector_digest: tracedecay_domain::ManifestDigest,
+        now: UtcMicros,
+    ) -> std::result::Result<
+        crate::application::semantic_runtime::SemanticActivationReceiptV1,
+        crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1,
+    > {
+        let capability = self
+            .retrieval_profile_mutation_capability(
+                authority,
+                &expected.expected_configuration_revision,
+                now,
+            )
+            .await?;
+        self.semantic_runtime
+            .get()
+            .ok_or(
+                crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable,
+            )?
+            .stage_and_activate(
+                base_configuration,
+                result_configuration,
+                &capability,
+                expected,
+                candidate,
+                current_runtime,
+                candidate_runtime,
+                central_mutation,
+                freshness_vector_digest,
+                now,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn stage_and_rollback_semantic(
+        &self,
+        base_configuration: crate::application::semantic_runtime::SemanticConfigurationPinV1,
+        result_configuration: super::ports::ConfigurationCurrentStateV1,
+        authority: ConfigurationMutationAuthority,
+        expected: crate::config::retrieval::RetrievalProfileCasV1,
+        restored_runtime: &crate::config::retrieval::RetrievalRuntimeCompatibilityV1,
+        central_mutation: DirectConfigurationMutation,
+        trigger: String,
+        freshness_vector_digest: tracedecay_domain::ManifestDigest,
+        now: UtcMicros,
+    ) -> std::result::Result<
+        crate::application::semantic_runtime::SemanticRollbackReceiptV1,
+        crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1,
+    > {
+        let capability = self
+            .retrieval_profile_mutation_capability(
+                authority,
+                &expected.expected_configuration_revision,
+                now,
+            )
+            .await?;
+        self.semantic_runtime
+            .get()
+            .ok_or(
+                crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable,
+            )?
+            .stage_and_rollback(
+                base_configuration,
+                result_configuration,
+                &capability,
+                expected,
+                restored_runtime,
+                central_mutation,
+                trigger,
+                freshness_vector_digest,
+                now,
+            )
+            .await
+    }
+
+    async fn retrieval_profile_mutation_capability(
+        &self,
+        authority: ConfigurationMutationAuthority,
+        expected_revision: &ConfigurationRevisionId,
+        now: UtcMicros,
+    ) -> std::result::Result<
+        crate::config::retrieval::RetrievalProfileMutationCapabilityV1,
+        crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1,
+    > {
+        let current = self
+            .authorities
+            .mutation_authorization()
+            .map_err(|_| {
+                crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable
+            })?
+            .recheck(
+                &authority.receipt,
+                tracedecay_domain::configuration::ConfigurationMutationOperationV1::DirectMutation,
+                expected_revision,
+                tracedecay_domain::configuration::ConfigurationMutationSinkV1::ConfigurationStore,
+                tracedecay_domain::configuration::ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                now,
+            )
+            .await
+            .map_err(|error| match error {
+                ConfigurationError::Unavailable => {
+                    crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable
+                }
+                _ => {
+                    crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Rejected
+                }
+            })?;
+        crate::config::retrieval::RetrievalProfileMutationCapabilityV1::from_current_authorization(
+            authority, current,
+        )
+        .map_err(|_| {
+            crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Rejected
+        })
     }
 }
 

@@ -19,7 +19,6 @@ mod automation_skills;
 mod code_diagnostics;
 mod graph;
 mod lcm;
-mod lcm_fixes;
 mod memory_curation;
 mod projects;
 mod savings;

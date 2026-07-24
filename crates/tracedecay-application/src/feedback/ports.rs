@@ -390,6 +390,17 @@ pub trait FeedbackCycleDedupePort {
     ) -> FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>;
 }
 
+/// Authorized read of the newest already-committed publication in the exact
+/// request scope. Implementations must not return pending, uncommitted, stale,
+/// differently scoped, or no-longer-authorized evidence.
+pub trait FeedbackCompletedPublicationReadPort {
+    fn latest_committed<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        observed_at: UtcMicros,
+    ) -> FeedbackPortFuture<'a, Option<FeedbackCompletedPublicationV1>>;
+}
+
 /// Best-effort, privacy-safe observation emission. Observation delivery can
 /// never alter cycle truth or trigger another feedback cycle. Implementations
 /// must submit to a bounded non-blocking sink rather than synchronously write

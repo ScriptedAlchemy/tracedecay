@@ -2,7 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 pub use tracedecay_domain::{
-    AuthorityEpoch, BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, WorktreeId,
+    AuthorityEpoch, BrainId, LocatorDigest, ProjectId, RefId, RepositoryId, UserProfileId,
+    WorktreeId,
 };
 
 use super::StorageRuntimeContractErrorV1;
@@ -117,6 +118,10 @@ pub enum CodeShardScopeV1 {
     Worktree {
         worktree_id: WorktreeId,
     },
+    Branch {
+        worktree_id: WorktreeId,
+        ref_id: RefId,
+    },
     /// Immutable retained state. It is never a mutable code-index target.
     Snapshot {
         worktree_id: Option<WorktreeId>,
@@ -129,6 +134,8 @@ pub enum CodeShardScopeV1 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreShardScopeV1 {
     Profile,
+    ProfileMemory,
+    ProfileSessions,
     Project {
         project_id: ProjectId,
     },
@@ -145,7 +152,7 @@ pub enum StoreShardScopeV1 {
 impl StoreShardScopeV1 {
     pub fn project_id(&self) -> Option<&ProjectId> {
         match self {
-            Self::Profile => None,
+            Self::Profile | Self::ProfileMemory | Self::ProfileSessions => None,
             Self::Project { project_id }
             | Self::ProjectSessions { project_id }
             | Self::Code { project_id, .. } => Some(project_id),
@@ -154,9 +161,13 @@ impl StoreShardScopeV1 {
 
     pub fn is_mutable(&self) -> bool {
         match self {
-            Self::Profile | Self::Project { .. } | Self::ProjectSessions { .. } => true,
+            Self::Profile
+            | Self::ProfileMemory
+            | Self::ProfileSessions
+            | Self::Project { .. }
+            | Self::ProjectSessions { .. } => true,
             Self::Code {
-                scope: CodeShardScopeV1::Worktree { .. },
+                scope: CodeShardScopeV1::Worktree { .. } | CodeShardScopeV1::Branch { .. },
                 ..
             } => true,
             Self::Code {
@@ -190,6 +201,14 @@ impl StoreShardIdV1 {
 
     pub fn profile(brain_id: BrainId, profile_id: UserProfileId) -> Self {
         Self::new(brain_id, profile_id, StoreShardScopeV1::Profile)
+    }
+
+    pub fn profile_memory(brain_id: BrainId, profile_id: UserProfileId) -> Self {
+        Self::new(brain_id, profile_id, StoreShardScopeV1::ProfileMemory)
+    }
+
+    pub fn profile_sessions(brain_id: BrainId, profile_id: UserProfileId) -> Self {
+        Self::new(brain_id, profile_id, StoreShardScopeV1::ProfileSessions)
     }
 
     pub fn project(brain_id: BrainId, profile_id: UserProfileId, project_id: ProjectId) -> Self {
@@ -367,5 +386,78 @@ impl VerifiedStoreLocatorV1 {
             incarnation,
             locator_digest,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("canonical fixture identity")
+    }
+
+    #[test]
+    fn profile_memory_has_a_distinct_mutable_wire_identity() {
+        let shard = StoreShardIdV1::profile_memory(
+            id::<BrainId>("brain.identity"),
+            id::<UserProfileId>("profile.identity"),
+        );
+
+        assert!(shard.is_mutable());
+        assert_eq!(shard.scope.project_id(), None);
+        assert_ne!(
+            shard,
+            StoreShardIdV1::profile(
+                id::<BrainId>("brain.identity"),
+                id::<UserProfileId>("profile.identity"),
+            )
+        );
+
+        let encoded = serde_json::to_value(&shard).expect("serialize profile-memory shard");
+        assert_eq!(encoded["scope"]["kind"], "profile_memory");
+        assert_eq!(
+            serde_json::from_value::<StoreShardIdV1>(encoded).expect("deserialize shard"),
+            shard
+        );
+    }
+
+    #[test]
+    fn branch_scope_is_mutable_and_does_not_alias_its_worktree() {
+        let project_id = id::<ProjectId>("project.identity");
+        let worktree_id = id::<WorktreeId>("worktree.identity");
+        let branch = StoreShardIdV1::code(
+            id::<BrainId>("brain.identity"),
+            id::<UserProfileId>("profile.identity"),
+            project_id.clone(),
+            id::<RepositoryId>("repository.identity"),
+            CodeShardScopeV1::Branch {
+                worktree_id: worktree_id.clone(),
+                ref_id: id::<RefId>("refs/heads/main"),
+            },
+        );
+        let worktree = StoreShardIdV1::code(
+            id::<BrainId>("brain.identity"),
+            id::<UserProfileId>("profile.identity"),
+            project_id.clone(),
+            id::<RepositoryId>("repository.identity"),
+            CodeShardScopeV1::Worktree { worktree_id },
+        );
+
+        assert!(branch.is_mutable());
+        assert_eq!(branch.scope.project_id(), Some(&project_id));
+        assert_ne!(branch, worktree);
+
+        let encoded = serde_json::to_value(&branch).expect("serialize branch shard");
+        assert_eq!(encoded["scope"]["scope"]["kind"], "branch");
+        assert_eq!(encoded["scope"]["scope"]["ref_id"], "refs/heads/main");
+        assert_eq!(
+            serde_json::from_value::<StoreShardIdV1>(encoded).expect("deserialize shard"),
+            branch
+        );
     }
 }

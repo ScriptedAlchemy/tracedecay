@@ -1,7 +1,6 @@
 //! MCP tool dispatch policy shared by schema generation and handlers.
 
 pub(super) const REGISTERED_PROJECT_READER_TOOL_NAMES: &[&str] = &[
-    "tracedecay_search",
     "tracedecay_grep",
     "tracedecay_context",
     "tracedecay_retrieve",
@@ -40,4 +39,24 @@ pub(super) fn tool_accepts_registered_project_selector(tool_name: &str) -> bool 
 
 pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
     REGISTERED_PROJECT_READER_TOOL_NAMES.contains(&tool_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authority_bound_reads_are_active_project_only() {
+        for tool_name in [
+            "tracedecay_search",
+            "tracedecay_git_status",
+            "tracedecay_git_diff",
+            "tracedecay_git_history",
+            "tracedecay_git_blame",
+            "tracedecay_git_hunks",
+        ] {
+            assert!(!tool_accepts_registered_project_selector(tool_name));
+            assert!(!tool_dispatches_registered_project_reader(tool_name));
+        }
+    }
 }

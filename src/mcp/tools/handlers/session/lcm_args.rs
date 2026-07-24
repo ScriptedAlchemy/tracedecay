@@ -194,16 +194,16 @@ pub(super) fn optional_search_provider_arg(args: &Value) -> Result<Option<&str>>
 }
 
 pub(super) fn lcm_cursor_arg(args: &Value) -> Result<Option<String>> {
+    if args.get("after_store_id").is_some() {
+        return Err(argument_error(
+            "after_store_id is no longer supported; use the opaque cursor returned as next_cursor",
+        ));
+    }
     let cursor = match args.get("cursor") {
         None => None,
         Some(Value::String(cursor)) if !cursor.trim().is_empty() => Some(cursor.clone()),
         Some(_) => return Err(argument_error("cursor must be a non-empty opaque string")),
     };
-    if cursor.is_some() && args.get("after_store_id").is_some() {
-        return Err(argument_error(
-            "cursor cannot be combined with deprecated after_store_id",
-        ));
-    }
     Ok(cursor)
 }
 

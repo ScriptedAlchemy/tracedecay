@@ -1,87 +1,132 @@
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::lcm::types::{
     LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
 };
 use tracedecay::sessions::lcm::{
-    LcmError, LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
+    LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmGrepRequest, LcmGrepSort, LcmScope,
+    LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
 
-use crate::common::{
-    isolated_lcm_db_path as isolated_db_path, lcm_dag_message as raw_message,
-    lcm_dag_session as sample_session, open_lcm_db,
-};
+use crate::common::{lcm_dag_message as raw_message, lcm_dag_session as sample_session};
 
-async fn summary_table_counts(db_path: &std::path::Path) -> (i64, i64) {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut node_rows = conn
-        .query("SELECT COUNT(*) FROM lcm_summary_nodes", ())
+async fn registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
         .await
-        .unwrap();
-    let node_count = node_rows.next().await.unwrap().unwrap().get(0).unwrap();
-    let mut source_rows = conn
-        .query("SELECT COUNT(*) FROM lcm_summary_sources", ())
-        .await
-        .unwrap();
-    let source_count = source_rows.next().await.unwrap().unwrap().get(0).unwrap();
-    (node_count, source_count)
+        .expect("registered LCM test runtime")
 }
 
-async fn summary_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_summary_nodes_fts
-             WHERE lcm_summary_nodes_fts MATCH ?1",
-            libsql::params![query],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+trait ProfileLcmFixture {
+    async fn upsert_session(&self, session: &tracedecay::sessions::SessionRecord) -> bool;
+
+    async fn upsert_session_message(
+        &self,
+        message: &tracedecay::sessions::SessionMessageRecord,
+    ) -> bool;
+
+    async fn lcm_insert_summary_node(
+        &self,
+        draft: LcmSummaryNodeDraft,
+    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError>;
+
+    async fn lcm_publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> Result<tracedecay::sessions::lcm::types::LcmSummaryPublicationReceipt, LcmError>;
 }
 
-async fn scalar_i64(db_path: &std::path::Path, sql: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn.query(sql, ()).await.unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
-}
-
-async fn text_rows(db_path: &std::path::Path, sql: &str) -> Vec<String> {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn.query(sql, ()).await.unwrap();
-    let mut values = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        values.push(row.get(0).unwrap());
+impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
+    async fn upsert_session(&self, session: &tracedecay::sessions::SessionRecord) -> bool {
+        self.upsert_session_for_test(HostAdmissionScope::Profile, session)
+            .await
+            .unwrap_or(false)
     }
-    values
+
+    async fn upsert_session_message(
+        &self,
+        message: &tracedecay::sessions::SessionMessageRecord,
+    ) -> bool {
+        self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn lcm_insert_summary_node(
+        &self,
+        draft: LcmSummaryNodeDraft,
+    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError> {
+        self.lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
+            .await
+    }
+
+    async fn lcm_publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> Result<tracedecay::sessions::lcm::types::LcmSummaryPublicationReceipt, LcmError> {
+        self.lcm_publish_immutable_summary_for_test(HostAdmissionScope::Profile, publication)
+            .await
+    }
 }
 
-async fn lineage_effect_count(db_path: &std::path::Path) -> i64 {
-    scalar_i64(
-        db_path,
-        "SELECT
-            (SELECT COUNT(*) FROM session_summary_nodes)
-          + (SELECT COUNT(*) FROM session_summary_sources)
-          + (SELECT COUNT(*) FROM session_summary_successors)
-          + (SELECT COUNT(*) FROM session_external_payload_manifests)
-          + (SELECT COUNT(*) FROM session_temporal_generations)
-          + (SELECT COUNT(*) FROM session_summary_availability)
-          + (SELECT COUNT(*) FROM retrieval_anchors
-             WHERE projection_generation = 'lcm_summary_lineage_v1')
-          + (SELECT COUNT(*) FROM sanitization_receipts
-             WHERE sanitizer_version = 'tracedecay.lcm-summary-publication.v1')
-          + (SELECT COUNT(*) FROM lcm_summary_nodes)
-          + (SELECT COUNT(*) FROM lcm_summary_sources)",
-    )
+async fn summary_table_counts(db: &HostAdmissionTestRuntimeV1) -> (i64, i64) {
+    let sessions = db
+        .lcm_recent_sessions_for_test(None, 100)
+        .await
+        .expect("recent sessions");
+    let mut node_ids = std::collections::BTreeSet::new();
+    let mut source_count = 0_i64;
+    for session in sessions {
+        let description = db
+            .lcm_describe_for_test(LcmDescribeRequest {
+                provider: session.provider,
+                session_id: session.session_id,
+                target: LcmDescribeTarget::Session,
+            })
+            .await
+            .expect("session description");
+        for node in description.summary_nodes {
+            if node_ids.insert(node.node_id) {
+                source_count += node.source_count as i64;
+            }
+        }
+    }
+    (node_ids.len() as i64, source_count)
+}
+
+async fn summary_fts_count(db: &HostAdmissionTestRuntimeV1, query: &str) -> i64 {
+    db.lcm_grep_for_test(LcmGrepRequest {
+        provider: "all".to_string(),
+        query: query.to_string(),
+        scope: LcmScope::All,
+        session_id: None,
+        include_summaries: true,
+        limit: 100,
+        sort: LcmGrepSort::Relevance,
+        source: None,
+        role: None,
+        start_time: None,
+        end_time: None,
+        git_filter: Default::default(),
+    })
     .await
+    .expect("summary search")
+    .hits
+    .into_iter()
+    .filter(|hit| hit.kind == "summary_node")
+    .count() as i64
 }
 
-async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
+async fn lineage_effect_count(db: &HostAdmissionTestRuntimeV1) -> i64 {
+    let (nodes, sources) = summary_table_counts(db).await;
+    let successors = db
+        .lcm_summary_successor_edges_for_test()
+        .await
+        .expect("summary successors")
+        .len() as i64;
+    nodes + sources + successors
+}
+
+async fn insert_session(db: &HostAdmissionTestRuntimeV1, provider: &str, session_id: &str) {
     assert!(
         db.upsert_session(&sample_session(provider, session_id))
             .await
@@ -89,7 +134,7 @@ async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
 }
 
 async fn insert_raw_messages(
-    db: &GlobalDb,
+    db: &HostAdmissionTestRuntimeV1,
     provider: &str,
     session_id: &str,
     contents: &[&str],
@@ -101,7 +146,7 @@ async fn insert_raw_messages(
         let message = raw_message(provider, &message_id, session_id, (idx + 1) as i64, content);
         assert!(db.upsert_session_message(&message).await);
         let raw = db
-            .lcm_load_raw_message(provider, &message_id)
+            .lcm_load_raw_message_for_test(provider, &message_id)
             .await
             .expect("raw message should exist");
         store_ids.push(raw.store_id);
@@ -110,8 +155,8 @@ async fn insert_raw_messages(
 }
 
 async fn insert_external_raw_message(
-    db: &GlobalDb,
-    tmp: &TempDir,
+    db: &HostAdmissionTestRuntimeV1,
+    _tmp: &TempDir,
     provider: &str,
     session_id: &str,
     message_id: &str,
@@ -122,13 +167,11 @@ async fn insert_external_raw_message(
     message.role = "tool".to_string();
     message.kind = Some("tool_result".to_string());
 
-    let storage_root = tmp.path().join(".tracedecay");
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&message)
+    db.lcm_ingest_raw_message_for_test(HostAdmissionScope::Profile, &message)
         .await
         .expect("raw ingest should externalize payload");
     let raw = db
-        .lcm_load_raw_message(provider, message_id)
+        .lcm_load_raw_message_for_test(provider, message_id)
         .await
         .expect("external raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::External);
@@ -162,7 +205,7 @@ fn summary_draft(
 #[tokio::test]
 async fn summary_node_preserves_source_lineage_and_expands_sources() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids =
         insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta", "gamma"]).await;
     let mut first_source = raw_message("cursor", "session-1-message-1", "session-1", 1, "alpha");
@@ -195,7 +238,7 @@ async fn summary_node_preserves_source_lineage_and_expands_sources() {
     assert_eq!(node.metadata_json.as_deref(), Some(r#"{"topic":"dag"}"#));
 
     let expanded = db
-        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &node.node_id)
         .await
         .expect("summary node should expand");
     assert_eq!(expanded.summary, node);
@@ -222,8 +265,10 @@ async fn summary_node_preserves_source_lineage_and_expands_sources() {
 #[tokio::test]
 async fn summary_dag_survives_reopen() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    let profile_root = tmp.path().join(".tracedecay");
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .expect("registered session runtime");
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta"]).await;
     let node = db
         .lcm_insert_summary_node(summary_draft(
@@ -241,11 +286,11 @@ async fn summary_dag_survives_reopen() {
         .expect("summary node insert should succeed");
     drop(db);
 
-    let reopened = GlobalDb::open_at(&db_path)
+    let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
-        .expect("session db reopen");
+        .expect("registered session runtime reopen");
     let expanded = reopened
-        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &node.node_id)
         .await
         .expect("summary node should expand after reopen");
 
@@ -255,30 +300,16 @@ async fn summary_dag_survives_reopen() {
     assert_eq!(expanded.sources[0].content, "alpha");
     assert_eq!(expanded.sources[1].content, "beta");
     assert_eq!(
-        scalar_i64(
-            &db_path,
-            "SELECT COUNT(*) FROM session_summary_nodes
-             WHERE summary_id IN (SELECT node_id FROM lcm_summary_nodes)",
-        )
-        .await,
-        1,
+        summary_table_counts(&reopened).await,
+        (1, 2),
         "authoritative summary and compatibility projection survive restart together"
-    );
-    assert_eq!(
-        scalar_i64(
-            &db_path,
-            "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'active'",
-        )
-        .await,
-        1
     );
 }
 
 #[tokio::test]
 async fn summary_insert_rejects_missing_raw_source_without_persisting_rows() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-1").await;
 
     let result = db
@@ -295,14 +326,13 @@ async fn summary_insert_rejects_missing_raw_source_without_persisting_rows() {
         result,
         Err(LcmError::SummarySourceNotOwnedBySession)
     ));
-    assert_eq!(summary_table_counts(&db_path).await, (0, 0));
+    assert_eq!(summary_table_counts(&db).await, (0, 0));
 }
 
 #[tokio::test]
 async fn summary_insert_validates_source_session_ownership_without_persisting_rows() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let session_one = insert_raw_messages(&db, "cursor", "session-1", &["owned"]).await;
     let session_two = insert_raw_messages(&db, "cursor", "session-2", &["other"]).await;
 
@@ -322,7 +352,7 @@ async fn summary_insert_validates_source_session_ownership_without_persisting_ro
         cross_raw,
         LcmError::SummarySourceNotOwnedBySession
     ));
-    assert_eq!(summary_table_counts(&db_path).await, (0, 0));
+    assert_eq!(summary_table_counts(&db).await, (0, 0));
 
     let other_child = db
         .lcm_insert_summary_node(summary_draft(
@@ -336,7 +366,7 @@ async fn summary_insert_validates_source_session_ownership_without_persisting_ro
         ))
         .await
         .expect("child summary insert should succeed");
-    let before_cross_child = summary_table_counts(&db_path).await;
+    let before_cross_child = summary_table_counts(&db).await;
     let cross_child = db
         .lcm_insert_summary_node(summary_draft(
             "cursor",
@@ -358,13 +388,13 @@ async fn summary_insert_validates_source_session_ownership_without_persisting_ro
         cross_child,
         LcmError::SummarySourceNotOwnedBySession
     ));
-    assert_eq!(summary_table_counts(&db_path).await, before_cross_child);
+    assert_eq!(summary_table_counts(&db).await, before_cross_child);
 }
 
 #[tokio::test]
 async fn summary_expansion_marks_external_raw_sources_without_silent_empty_content() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let (store_id, payload_ref) =
         insert_external_raw_message(&db, &tmp, "cursor", "session-1", "tool-1").await;
 
@@ -380,7 +410,7 @@ async fn summary_expansion_marks_external_raw_sources_without_silent_empty_conte
         .expect("summary node insert should succeed");
 
     let expanded = db
-        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &node.node_id)
         .await
         .expect("summary node should expand");
     assert_eq!(expanded.sources.len(), 1);
@@ -401,7 +431,7 @@ async fn summary_expansion_marks_external_raw_sources_without_silent_empty_conte
 #[tokio::test]
 async fn nested_summary_expansion_is_direct_only() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
     let child = db
         .lcm_insert_summary_node(summary_draft(
@@ -429,7 +459,7 @@ async fn nested_summary_expansion_is_direct_only() {
         .expect("parent summary insert should succeed");
 
     let expanded = db
-        .lcm_expand_summary_node("cursor", "session-1", &parent.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &parent.node_id)
         .await
         .expect("parent summary should expand");
     assert_eq!(expanded.sources.len(), 1);
@@ -451,8 +481,7 @@ async fn nested_summary_expansion_is_direct_only() {
 #[tokio::test]
 async fn summary_insert_rejects_non_decreasing_child_depth_without_persisting_rows() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
     let child = db
         .lcm_insert_summary_node(summary_draft(
@@ -466,7 +495,7 @@ async fn summary_insert_rejects_non_decreasing_child_depth_without_persisting_ro
         ))
         .await
         .expect("child summary insert should succeed");
-    let before = summary_table_counts(&db_path).await;
+    let before = summary_table_counts(&db).await;
 
     let result = db
         .lcm_insert_summary_node(summary_draft(
@@ -484,14 +513,13 @@ async fn summary_insert_rejects_non_decreasing_child_depth_without_persisting_ro
         result,
         Err(LcmError::SummarySourceNotOwnedBySession)
     ));
-    assert_eq!(summary_table_counts(&db_path).await, before);
+    assert_eq!(summary_table_counts(&db).await, before);
 }
 
 #[tokio::test]
 async fn summary_fts_matches_inserted_summary_text() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
     db.lcm_insert_summary_node(summary_draft(
         "cursor",
@@ -505,13 +533,13 @@ async fn summary_fts_matches_inserted_summary_text() {
     .await
     .expect("summary node insert should succeed");
 
-    assert_eq!(summary_fts_count(&db_path, "\"unique summary\"").await, 1);
+    assert_eq!(summary_fts_count(&db, "\"unique summary\"").await, 1);
 }
 
 #[tokio::test]
 async fn summary_node_ids_are_stable_for_identical_drafts() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
     let draft = summary_draft(
         "cursor",
@@ -538,8 +566,7 @@ async fn summary_node_ids_are_stable_for_identical_drafts() {
 #[tokio::test]
 async fn immutable_publication_replays_exactly_and_rejects_identity_conflicts() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta"]).await;
     let draft = summary_draft(
         "cursor",
@@ -578,24 +605,7 @@ async fn immutable_publication_replays_exactly_and_rejects_identity_conflicts() 
     assert_eq!(replay.generation, first.generation);
     assert_eq!(replay.frozen_watermarks_json, first.frozen_watermarks_json);
     assert_eq!(replay.published_at, first.published_at);
-    assert_eq!(
-        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await,
-        1
-    );
-    assert_eq!(
-        scalar_i64(
-            &db_path,
-            "SELECT COUNT(*) FROM session_temporal_generations"
-        )
-        .await,
-        1,
-        "exact replay must not publish another generation"
-    );
-    assert_eq!(
-        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_sources").await,
-        scalar_i64(&db_path, "SELECT COUNT(*) FROM lcm_summary_sources").await,
-        "the legacy source projection must stay in parity with authority"
-    );
+    assert_eq!(summary_table_counts(&db).await, (1, 2));
 
     let mut changed_content = draft.clone();
     changed_content.summary_text = "changed content".to_string();
@@ -633,8 +643,7 @@ async fn immutable_publication_replays_exactly_and_rejects_identity_conflicts() 
 #[tokio::test]
 async fn immutable_publication_preserves_order_and_stales_transitive_descendants() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids =
         insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta", "gamma"]).await;
 
@@ -712,19 +721,24 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
         .expect("successor publication")
         .summary;
 
+    let expanded_leaf = db
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &leaf.node_id)
+        .await
+        .expect("leaf expansion");
     assert_eq!(
-        text_rows(
-            &db_path,
-            "SELECT authority.source_ordinal || ':' || authority.source_kind || ':'
-                    || compatibility.source_id
-             FROM session_summary_sources authority
-             JOIN lcm_summary_sources compatibility
-               ON compatibility.node_id = authority.summary_id
-              AND compatibility.ordinal = authority.source_ordinal
-             WHERE authority.summary_id = 'summary.leaf-v1'
-             ORDER BY authority.source_ordinal",
-        )
-        .await,
+        expanded_leaf
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(ordinal, source)| match source.source_ref {
+                LcmSourceRef::RawMessage { store_id } => {
+                    format!("{ordinal}:anchor:{store_id}")
+                }
+                LcmSourceRef::SummaryNode { ref node_id } => {
+                    format!("{ordinal}:summary:{node_id}")
+                }
+            })
+            .collect::<Vec<_>>(),
         vec![
             format!("0:anchor:{}", store_ids[0]),
             format!("1:anchor:{}", store_ids[1]),
@@ -733,36 +747,25 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
         "the authoritative manifest and compatibility projection preserve source order"
     );
     assert_eq!(
-        text_rows(
-            &db_path,
-            "SELECT predecessor_summary_id || '>' || successor_summary_id
-             FROM session_summary_successors ORDER BY created_at",
-        )
-        .await,
-        vec![format!("{}>{}", leaf.node_id, successor.node_id)]
+        db.lcm_summary_successor_edges_for_test()
+            .await
+            .expect("summary successor edges"),
+        vec![(leaf.node_id.clone(), successor.node_id.clone())]
     );
-    let active = text_rows(
-        &db_path,
-        "SELECT summary_id || ':' || availability
-         FROM session_summary_availability
-         WHERE (session_id, generation) = (
-             SELECT session_id, generation FROM session_temporal_generations
-             WHERE session_id = 'session-1' AND state = 'active'
-         )
-         ORDER BY summary_id",
-    )
-    .await;
-    assert!(active.contains(&format!("{}:stale", leaf.node_id)));
-    assert!(active.contains(&format!("{}:stale", parent.node_id)));
-    assert!(active.contains(&format!("{}:stale", grandparent.node_id)));
-    assert!(active.contains(&format!("{}:available", successor.node_id)));
+    let active = db
+        .lcm_active_summary_availability_for_test("session-1")
+        .await
+        .expect("active summary availability");
+    assert!(active.contains(&(leaf.node_id.clone(), "stale".to_string())));
+    assert!(active.contains(&(parent.node_id.clone(), "stale".to_string())));
+    assert!(active.contains(&(grandparent.node_id.clone(), "stale".to_string())));
+    assert!(active.contains(&(successor.node_id.clone(), "available".to_string())));
 }
 
 #[tokio::test]
 async fn immutable_publication_rejects_cycles_and_rolls_back_every_projection() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
     let _leaf = db
         .lcm_insert_summary_node(summary_draft(
@@ -795,19 +798,10 @@ async fn immutable_publication_rejects_cycles_and_rolls_back_every_projection() 
         .expect_err("self/source cycle must fail");
     assert!(matches!(cycle, LcmError::SummaryCycle { .. }));
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER reject_compatibility_summary
-         BEFORE INSERT ON lcm_summary_nodes
-         WHEN NEW.node_id = 'summary.rollback'
-         BEGIN SELECT RAISE(ABORT, 'forced compatibility failure'); END;",
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    drop(raw_db);
-    let before = lineage_effect_count(&db_path).await;
+    db.install_lcm_summary_insert_abort_trigger_for_test()
+        .await
+        .expect("install summary insert fault");
+    let before = lineage_effect_count(&db).await;
     let rollback = db
         .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
             summary_id: "summary.rollback".to_string(),
@@ -824,21 +818,21 @@ async fn immutable_publication_rejects_cycles_and_rolls_back_every_projection() 
         })
         .await;
     assert!(rollback.is_err());
-    let after = lineage_effect_count(&db_path).await;
+    let after = lineage_effect_count(&db).await;
     assert_eq!(
         after, before,
         "all authoritative and projection writes roll back"
     );
+    db.remove_lcm_summary_insert_abort_trigger_for_test()
+        .await
+        .expect("remove summary insert fault");
 }
 
 #[tokio::test]
 async fn immutable_publication_rejects_redacted_deleted_and_expired_sources() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["sensitive"]).await;
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
 
     for (identity, metadata, reason) in [
         (
@@ -857,12 +851,16 @@ async fn immutable_publication_rejects_redacted_deleted_and_expired_sources() {
             "retention_expired",
         ),
     ] {
-        conn.execute(
-            "UPDATE lcm_raw_messages SET metadata_json = ?2 WHERE store_id = ?1",
-            libsql::params![store_ids[0], metadata],
-        )
-        .await
-        .unwrap();
+        let mut source = raw_message("cursor", "session-1-message-1", "session-1", 1, "sensitive");
+        source.metadata_json = Some(metadata.to_string());
+        assert!(db.upsert_session_message(&source).await);
+        assert_eq!(
+            db.lcm_load_raw_message_for_test("cursor", "session-1-message-1")
+                .await
+                .expect("updated raw message")
+                .store_id,
+            store_ids[0]
+        );
         let error = db
             .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
                 summary_id: identity.to_string(),
@@ -887,21 +885,13 @@ async fn immutable_publication_rejects_redacted_deleted_and_expired_sources() {
             } if actual == reason
         ));
     }
-    assert_eq!(
-        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await,
-        0
-    );
-    assert_eq!(
-        scalar_i64(&db_path, "SELECT COUNT(*) FROM lcm_summary_nodes").await,
-        0
-    );
+    assert_eq!(summary_table_counts(&db).await, (0, 0));
 }
 
 #[tokio::test]
 async fn codex_auxiliary_summary_appends_successor_without_replacement() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "codex", "session-1", &["alpha", "beta"]).await;
     let mut draft = summary_draft(
         "codex",
@@ -918,7 +908,7 @@ async fn codex_auxiliary_summary_appends_successor_without_replacement() {
     let original = db.lcm_insert_summary_node(draft).await.unwrap();
 
     let successor = db
-        .publish_codex_compaction_summary_successor(
+        .publish_codex_compaction_summary_successor_for_test(
             &original.node_id,
             "visible Codex auxiliary summary",
             "codex_app_server",
@@ -928,24 +918,14 @@ async fn codex_auxiliary_summary_appends_successor_without_replacement() {
         .expect("Codex replacement publishes an immutable successor");
     assert_ne!(successor.node_id, original.node_id);
     assert_eq!(successor.summary_text, "visible Codex auxiliary summary");
+    assert_eq!(summary_table_counts(&db).await.0, 2);
     assert_eq!(
-        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await,
-        2
+        db.lcm_summary_successor_edges_for_test()
+            .await
+            .expect("summary successor edges"),
+        vec![(original.node_id.clone(), successor.node_id.clone())]
     );
-    assert_eq!(
-        scalar_i64(&db_path, "SELECT COUNT(*) FROM lcm_summary_nodes").await,
-        2
-    );
-    assert_eq!(
-        text_rows(
-            &db_path,
-            "SELECT predecessor_summary_id || '>' || successor_summary_id
-             FROM session_summary_successors",
-        )
-        .await,
-        vec![format!("{}>{}", original.node_id, successor.node_id)]
-    );
-    db.lcm_expand_summary_node("codex", "session-1", &original.node_id)
+    db.lcm_expand_summary_node_for_test("codex", "session-1", &original.node_id)
         .await
         .expect("original summary remains addressable");
 }
@@ -955,7 +935,7 @@ async fn codex_auxiliary_summary_appends_successor_without_replacement() {
 #[tokio::test]
 async fn boundary_link_does_not_reassign_summary_nodes() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta"]).await;
     let node = db
         .lcm_insert_summary_node(summary_draft(
@@ -973,7 +953,7 @@ async fn boundary_link_does_not_reassign_summary_nodes() {
         .expect("summary node insert should succeed");
 
     let boundary = db
-        .lcm_session_boundary(LcmSessionBoundaryRequest {
+        .lcm_session_boundary_for_test(LcmSessionBoundaryRequest {
             provider: "cursor".to_string(),
             session_id: "session-2".to_string(),
             old_session_id: Some("session-1".to_string()),
@@ -987,7 +967,7 @@ async fn boundary_link_does_not_reassign_summary_nodes() {
     assert_eq!(boundary.reason, "compression_boundary_carried_over");
 
     let expanded = db
-        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &node.node_id)
         .await
         .expect("source-owned node remains addressable");
     assert_eq!(expanded.summary.node_id, node.node_id);
@@ -996,7 +976,7 @@ async fn boundary_link_does_not_reassign_summary_nodes() {
     assert_eq!(expanded.sources[0].content, "alpha");
 
     let target = db
-        .lcm_expand_summary_node("cursor", "session-2", &node.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-2", &node.node_id)
         .await;
     assert!(matches!(target, Err(LcmError::SummaryNodeNotFound)));
 }

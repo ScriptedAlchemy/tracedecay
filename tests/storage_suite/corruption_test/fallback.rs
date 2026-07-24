@@ -2,22 +2,11 @@ use super::*;
 use std::path::Path;
 
 async fn raw_quick_check_detects_corruption(db_path: &Path) -> bool {
-    let raw = libsql::Builder::new_local(db_path)
-        .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
-        .await
-        .expect("build raw read-only database");
-    let conn = raw.connect().expect("connect raw read-only database");
-    let detected = match conn.query("PRAGMA quick_check", ()).await {
-        Ok(mut rows) => match rows.next().await {
-            Ok(Some(row)) => row.get::<String>(0).map_or(true, |result| result != "ok"),
-            Ok(None) | Err(_) => true,
-        },
-        Err(_) => true,
-    };
-    drop(conn);
-    drop(raw);
-    detected
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open raw read-only database");
+    conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+        .map_or(true, |result| result != "ok")
 }
 
 #[tokio::test]
@@ -37,22 +26,13 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
 
     // Capture an FTS segment, then corrupt only its payload on disk. The nodes
     // table and primary database B-trees remain healthy.
-    let mut rows = db
-        .conn()
-        .query(
+    let segment = db
+        .query_scalar_blob(
+            "capture FTS corruption segment",
             "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
-            (),
         )
         .await
         .unwrap();
-    let segment = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<Vec<u8>>(0)
-        .unwrap();
-    drop(rows);
     db.checkpoint().await.unwrap();
     db.close();
 
@@ -72,44 +52,30 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
     );
     let corrupted_bytes = std::fs::read(&db_path).unwrap();
 
-    let raw = libsql::Builder::new_local(&db_path)
-        .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
-        .await
-        .expect("build raw read-only database");
-    let conn = raw.connect().expect("connect raw read-only database");
-    let mut rows = conn
-        .query(
-            "SELECT id FROM nodes WHERE name LIKE '%important_handler%'",
-            (),
-        )
-        .await
-        .unwrap();
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open raw read-only database");
     assert_eq!(
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
+        conn.query_row(
+            "SELECT id FROM nodes WHERE name LIKE '%important_handler%'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
         "e1",
         "the intact nodes table must remain readable"
     );
-    drop(rows);
-    let mut rows = conn
-        .query(
-            "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH '\"important_handler\"*'",
-            (),
-        )
-        .await
+    let mut statement = conn
+        .prepare("SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH '\"important_handler\"*'")
         .unwrap();
+    let mut rows = statement.query([]).unwrap();
     assert!(
-        rows.next().await.is_err(),
+        rows.next().is_err(),
         "the corrupt FTS index must remain untouched for offline repair"
     );
     drop(rows);
+    drop(statement);
     drop(conn);
-    drop(raw);
 
     let error = match crate::common::open_test_database(&db_path).await {
         Err(error) => error,
@@ -136,35 +102,24 @@ async fn whole_database_corruption_propagates_without_write() {
         .await
         .unwrap();
 
-    let mut rows = db
-        .conn()
-        .query(
+    let segment = db
+        .query_scalar_blob(
+            "capture whole-database corruption FTS segment",
             "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
-            (),
         )
         .await
         .unwrap();
-    let segment = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<Vec<u8>>(0)
-        .unwrap();
-    drop(rows);
-    let mut rows = db
-        .conn()
-        .query(
+    let root_page = db
+        .query_scalar_i64(
+            "read corruption fixture root page",
             "SELECT rootpage FROM sqlite_schema WHERE name = 'edges'",
-            (),
         )
         .await
-        .unwrap();
-    let root_page = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap() as u64;
-    drop(rows);
-    let mut rows = db.conn().query("PRAGMA page_size", ()).await.unwrap();
-    let page_size = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap() as u64;
-    drop(rows);
+        .unwrap() as u64;
+    let page_size = db
+        .query_scalar_i64("read corruption fixture page size", "PRAGMA page_size")
+        .await
+        .unwrap() as u64;
     db.checkpoint().await.unwrap();
     db.close();
 

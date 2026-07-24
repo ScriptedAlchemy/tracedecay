@@ -1,4 +1,4 @@
-//! Labeled ranking eval for `GlobalDb::search_session_messages`.
+//! Labeled ranking eval for registered session-message search.
 //!
 //! This is the retrieval-surface twin of the redundancy scoring eval
 //! (`src/redundancy.rs::redundancy_eval_fixture_scores_real_cases` +
@@ -20,20 +20,23 @@
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::SessionMessageSearchResult;
+use tracedecay_domain::ProjectId;
 
-use crate::common::{
-    MessageRecordBuilder, global_session as sample_session,
-    isolated_global_db_path as isolated_db_path, write_empty_global_db_schema,
-};
+use crate::common::{MessageRecordBuilder, global_session as sample_session};
 
-async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = isolated_db_path(tmp);
-    write_empty_global_db_schema(&db_path).await;
-    GlobalDb::open_at_assuming_schema(&db_path)
-        .await
-        .expect("global db open")
+async fn open_isolated_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    let profile_root = tmp.path().join("profile");
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project_root,
+        ProjectId::new("project.message-search-eval").expect("project id"),
+    )
+    .await
+    .expect("registered project session runtime")
 }
 
 fn fixture() -> Value {
@@ -44,14 +47,18 @@ fn fixture() -> Value {
 /// Seed every corpus session and message into the store, routing through the
 /// production upsert path so the FTS index is populated exactly as ingest would
 /// populate it.
-async fn seed_corpus(db: &GlobalDb, fixture: &Value) {
+async fn seed_corpus(db: &HostAdmissionTestRuntimeV1, fixture: &Value) {
     for session in fixture["corpus"].as_array().expect("corpus") {
         let provider = session["provider"].as_str().expect("session provider");
         let session_id = session["session_id"].as_str().expect("session_id");
         let project_key = session["project_key"].as_str().expect("project_key");
         assert!(
-            db.upsert_session(&sample_session(provider, session_id, project_key))
-                .await,
+            db.upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &sample_session(provider, session_id, project_key),
+            )
+            .await
+            .expect("seed registered session"),
             "seed session {session_id}"
         );
         for (ordinal, message) in session["messages"]
@@ -74,7 +81,9 @@ async fn seed_corpus(db: &GlobalDb, fixture: &Value) {
             .with_source(Some("/tmp/project/transcript.jsonl"), Some(ordinal as i64))
             .build();
             assert!(
-                db.upsert_session_message(&record).await,
+                db.upsert_session_message_for_test(HostAdmissionScope::Project, &record)
+                    .await
+                    .expect("seed registered session message"),
                 "seed message {}",
                 message["id"].as_str().unwrap_or("?")
             );
@@ -84,14 +93,15 @@ async fn seed_corpus(db: &GlobalDb, fixture: &Value) {
 
 /// Run one query case against the live search path, returning the ordered
 /// message ids (our per-message labels are the message ids).
-async fn run_query(db: &GlobalDb, case: &Value) -> Vec<String> {
+async fn run_query(db: &HostAdmissionTestRuntimeV1, case: &Value) -> Vec<String> {
     let provider = case["provider"].as_str().expect("case provider");
     let project_key = case["project_key"].as_str();
     let query = case["query"].as_str().expect("case query");
     let limit = case["limit"].as_u64().unwrap_or(10) as usize;
     let results: Vec<SessionMessageSearchResult> = db
-        .search_session_messages(provider, project_key, query, limit)
-        .await;
+        .search_project_session_messages_for_test(provider, project_key, query, limit)
+        .await
+        .expect("search registered project session messages");
     results
         .into_iter()
         .map(|hit| hit.message.message_id)

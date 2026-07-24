@@ -6,7 +6,7 @@ use tracedecay_domain::ProjectId;
 
 use crate::application::host_admission::DEFAULT_MAX_RECORDS;
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::SessionProvider;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::snapshot_observation::MAX_SNAPSHOT_CAPTURE_UNIT_BYTES;
@@ -429,7 +429,7 @@ pub(super) fn admit_fair_ingest_units(
     (admitted, coverage)
 }
 
-pub(super) async fn read_ingest_frontier(db: &GlobalDb, key: &str) -> Option<u64> {
+pub(super) async fn read_ingest_frontier(db: &RegisteredGlobalDb, key: &str) -> Option<u64> {
     match db.get_parse_offset_result(key).await {
         Ok(Some(offset)) => Some(offset.byte_offset),
         Ok(None) => Some(0),
@@ -438,7 +438,7 @@ pub(super) async fn read_ingest_frontier(db: &GlobalDb, key: &str) -> Option<u64
 }
 
 pub(super) async fn write_ingest_frontier(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     key: &str,
     previous: u64,
     advance: usize,
@@ -463,7 +463,7 @@ pub(super) async fn write_ingest_frontier(
 /// multi-source admission. Separated from [`ingest_global_sources`] so tests can
 /// supply sources rooted at a temporary home directory instead of the real `~`.
 pub(crate) async fn ingest_sources(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     project_root: &Path,
     project_id: &ProjectId,
     sources: &[Box<dyn TranscriptSource>],
@@ -482,7 +482,7 @@ pub(crate) async fn ingest_sources(
 
 /// Bounded fair multi-source ingest with typed coverage / scheduling outcomes.
 pub(crate) async fn ingest_sources_bounded(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     project_root: &Path,
     project_id: &ProjectId,
     sources: &[Box<dyn TranscriptSource>],
@@ -647,7 +647,7 @@ struct UnitIngestOutcome {
 /// and reporting whether the durable cursor or stats advanced.
 async fn ingest_admitted_unit(
     store: &GlobalDbTranscriptStore<'_>,
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     source: &dyn TranscriptSource,
     path: &Path,
     project_root: &Path,

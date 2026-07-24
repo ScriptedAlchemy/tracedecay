@@ -5,7 +5,10 @@
 //! store, supervise an analyzer, resolve workspace folders, or implement any
 //! host-specific transport.
 
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
+
+use url::Url;
 
 use super::capabilities::{CapabilityAvailability, EffectiveCapabilities, SemanticCapability};
 use super::diagnostics::{
@@ -30,13 +33,119 @@ impl AdmittedRoot {
     }
 
     /// Presentation-level containment guard. Root admission itself remains a
-    /// daemon authorization decision; this prevents a request from escaping
-    /// that already-admitted URI by simple prefix confusion.
+    /// daemon authorization decision; this rejects non-file and ambiguous URI
+    /// forms, then compares decoded filesystem path components rather than raw
+    /// URI prefixes.
     pub fn contains_document(&self, document_uri: &str) -> bool {
-        let root = self.uri.trim_end_matches('/');
-        document_uri
-            .strip_prefix(root)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+        let Some((root_url, root_path)) = strict_file_uri_path(&self.uri) else {
+            return false;
+        };
+        let Some((document_url, document_path)) = strict_file_uri_path(document_uri) else {
+            return false;
+        };
+        if root_url.host_str() != document_url.host_str() {
+            return false;
+        }
+        document_path
+            .strip_prefix(&root_path)
+            .is_ok_and(|relative| {
+                !relative.as_os_str().is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
+            })
+    }
+}
+
+fn strict_file_uri_path(uri: &str) -> Option<(Url, PathBuf)> {
+    let (_, after_scheme) = uri.split_once(':')?;
+    if after_scheme.contains('\\') {
+        return None;
+    }
+    let raw_path = if let Some(authority_and_path) = after_scheme.strip_prefix("//") {
+        authority_and_path
+            .find('/')
+            .map_or("", |path_start| &authority_and_path[path_start..])
+    } else {
+        after_scheme
+    };
+    if !valid_raw_uri_path(raw_path) {
+        return None;
+    }
+
+    let url = Url::parse(uri).ok()?;
+    if url.scheme() != "file"
+        || url.cannot_be_a_base()
+        || url.path().is_empty()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = url.to_file_path().ok()?;
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return None;
+    }
+    Some((url, path))
+}
+
+fn valid_raw_uri_path(raw_path: &str) -> bool {
+    if raw_path.is_empty() || raw_path.as_bytes().contains(&0) {
+        return false;
+    }
+    let segments = raw_path.split('/').collect::<Vec<_>>();
+    for (index, segment) in segments.iter().enumerate() {
+        if segment.is_empty() {
+            let is_leading = index == 0;
+            let is_trailing = index + 1 == segments.len();
+            if !is_leading && !is_trailing {
+                return false;
+            }
+            continue;
+        }
+        let Some(decoded) = decode_uri_segment(segment) else {
+            return false;
+        };
+        if decoded == b"."
+            || decoded == b".."
+            || decoded.iter().any(|byte| matches!(*byte, b'/' | b'\\' | 0))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn decode_uri_segment(segment: &str) -> Option<Vec<u8>> {
+    let source = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(source.len());
+    let mut index = 0;
+    while index < source.len() {
+        if source[index] != b'%' {
+            decoded.push(source[index]);
+            index += 1;
+            continue;
+        }
+        let high = source.get(index + 1).copied().and_then(hex_value)?;
+        let low = source.get(index + 2).copied().and_then(hex_value)?;
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    Some(decoded)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1397,5 +1506,64 @@ mod tests {
             gateway.github_ci_proximity_transport(),
             GatewayResponse::Unavailable(_)
         ));
+    }
+
+    #[test]
+    fn admitted_root_rejects_ambiguous_or_escaping_document_uris() {
+        let root = AdmittedRoot::new("file:///root");
+        assert!(root.contains_document("file:///root/src/lib.rs"));
+        assert!(root.contains_document("file:///root/with%20space.rs"));
+
+        for document_uri in [
+            "file:///root-sibling/a.rs",
+            "file:///root/%2e%2e/escape.rs",
+            "file:///root/.%2E/escape.rs",
+            "file:///root/%2Fescape.rs",
+            "file:///root/%5cescape.rs",
+            "file:///root/%00escape.rs",
+            "file:///root/a.rs?outside=true",
+            "file:///root/a.rs#outside",
+            "https:///root/a.rs",
+        ] {
+            assert!(
+                !root.contains_document(document_uri),
+                "unexpectedly admitted {document_uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_document_uri_is_rejected_before_semantic_provider_dispatch() {
+        let gateway = DaemonLspGateway::new(
+            AdmittedRoot::new("file:///root"),
+            capabilities(),
+            Feedback::default(),
+            Semantics,
+        );
+
+        for document_uri in [
+            "file:///root-sibling/a.rs",
+            "file:///root/%2e%2e/root/a.rs",
+            "file:///root/%2fa.rs",
+            "file:///root/%5ca.rs",
+            "file:///root/%00a.rs",
+            "file:///root/a.rs?query",
+            "file:///root/a.rs#fragment",
+            "untitled:///root/a.rs",
+        ] {
+            assert!(matches!(
+                gateway.definition(
+                    document_uri,
+                    LspPosition {
+                        line: 0,
+                        character: 0,
+                    }
+                ),
+                GatewayResponse::Unavailable(MethodUnavailable {
+                    reason: MethodUnavailableReason::OutsideAdmittedRoot,
+                    ..
+                })
+            ));
+        }
     }
 }

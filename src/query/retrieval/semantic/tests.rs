@@ -862,6 +862,38 @@ fn complete_generation(request: &SemanticRetrievalRequestV1<'_>) -> CompleteSema
     .expect("complete semantic generation")
 }
 
+#[test]
+fn semantic_calibration_profile_is_canonical_and_threshold_bound() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let calibration = calibration(&request, 2_000_000, 17);
+    let encoded = serde_json::to_vec(&calibration).expect("serialize calibration");
+    let decoded: SemanticCalibrationProfileV1 =
+        serde_json::from_slice(&encoded).expect("deserialize calibration");
+
+    assert_eq!(decoded, calibration);
+    let accepted_digest = calibration
+        .canonical_digest()
+        .expect("canonical calibration digest");
+    let mut changed_threshold = calibration.clone();
+    changed_threshold.minimum_margin_micros += 1;
+    assert_ne!(
+        changed_threshold
+            .canonical_digest()
+            .expect("changed threshold digest"),
+        accepted_digest
+    );
+    let mut changed_cohort = calibration;
+    changed_cohort.cohort_digest = digest('8');
+    assert_ne!(
+        changed_cohort
+            .canonical_digest()
+            .expect("changed cohort digest"),
+        accepted_digest
+    );
+}
+
 fn shared_fusion_profile() -> FusionProfile {
     let lanes = [
         RetrieverKind::ExactLiteral,

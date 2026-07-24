@@ -2,8 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use libsql::params;
-
+use crate::db::engine::{Value, params};
 use crate::errors::Result;
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::trust::DEFAULT_MIN_TRUST;
@@ -110,8 +109,7 @@ impl MemoryStore<'_> {
                  FROM memory_facts
                  WHERE fact_id IN ({placeholders})"
             );
-            let values: Vec<libsql::Value> =
-                chunk.iter().map(|id| libsql::Value::Integer(*id)).collect();
+            let values: Vec<Value> = chunk.iter().map(|id| Value::Integer(*id)).collect();
             let mut rows = self
                 .conn
                 .query(&sql, values)
@@ -151,8 +149,7 @@ impl MemoryStore<'_> {
             let sql = format!(
                 "SELECT fact_id, hrr_vector FROM memory_facts WHERE fact_id IN ({placeholders})"
             );
-            let values: Vec<libsql::Value> =
-                chunk.iter().map(|id| libsql::Value::Integer(*id)).collect();
+            let values: Vec<Value> = chunk.iter().map(|id| Value::Integer(*id)).collect();
             let mut rows = self
                 .conn
                 .query(&sql, values)
@@ -161,9 +158,9 @@ impl MemoryStore<'_> {
             while let Some(row) = rows.next().await.map_err(|e| db_error("fact_vectors", e))? {
                 let fact_id = row.get::<i64>(0).map_err(|e| db_error("fact_vectors", e))?;
                 let value = row
-                    .get::<libsql::Value>(1)
+                    .get::<Value>(1)
                     .map_err(|e| db_error("fact_vectors", e))?;
-                if let libsql::Value::Blob(bytes) = value
+                if let Value::Blob(bytes) = value
                     && let Ok(vector) = HolographicEncoder::deserialize(&bytes)
                 {
                     vectors.insert(fact_id, vector);

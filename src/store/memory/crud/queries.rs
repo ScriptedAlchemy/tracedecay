@@ -10,7 +10,8 @@ use super::{
     PROMOTE_OPERATION, Projection, PromotionAttempt, anchor_matches, commit_fact_tx,
     current_last_event,
 };
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -27,7 +28,7 @@ use tracedecay_store::{
     RetrievalAnchorQuery, StoredFactV1,
 };
 pub(in crate::store::memory) async fn query_current_facts_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &CurrentFactsQuery,
 ) -> FactStoreResult<Vec<StoredFactV1>> {
     let owner = OwnerKey::new(query.owner())?;
@@ -84,7 +85,7 @@ pub(in crate::store::memory) async fn query_current_facts_tx(
 }
 
 pub(in crate::store::memory) async fn query_fact_current_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactStoreResult<Option<StoredFactV1>> {
@@ -93,7 +94,7 @@ pub(in crate::store::memory) async fn query_fact_current_tx(
 }
 
 pub(in crate::store::memory) async fn query_fact_current_response_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &FactCurrentQuery,
 ) -> FactStoreResult<FactCurrentResponseV1> {
     let fact = query_fact_current_tx(snapshot, query.owner(), query.fact_id()).await?;
@@ -113,7 +114,7 @@ pub(in crate::store::memory) async fn query_fact_current_response_tx(
 }
 
 pub(in crate::store::memory) async fn load_current_fact_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     typed_owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -197,7 +198,7 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
 }
 
 pub(in crate::store::memory) async fn query_fact_as_of_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &FactAsOfQuery,
 ) -> FactStoreResult<Option<StoredFactV1>> {
     let owner = OwnerKey::new(query.owner())?;
@@ -280,7 +281,7 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
 }
 
 pub(in crate::store::memory) async fn query_fact_as_of_response_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &FactAsOfQuery,
 ) -> FactStoreResult<FactAsOfResponseV1> {
     let fact = query_fact_as_of_tx(snapshot, query).await?;
@@ -300,7 +301,7 @@ pub(in crate::store::memory) async fn query_fact_as_of_response_tx(
 }
 
 async fn load_assertion_payload_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     assertion_id: &FactAssertionId,
@@ -330,7 +331,7 @@ async fn load_assertion_payload_tx(
 }
 
 pub(in crate::store::memory) async fn query_fact_lineage_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &FactLineageQuery,
 ) -> FactStoreResult<Vec<FactLineageEventV1>> {
     let owner = OwnerKey::new(query.owner())?;
@@ -392,7 +393,7 @@ pub(in crate::store::memory) async fn query_fact_lineage_tx(
 }
 
 pub(in crate::store::memory) async fn query_fact_lineage_response_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &FactLineageQuery,
 ) -> FactStoreResult<FactLineageResponseV1> {
     let events = query_fact_lineage_tx(snapshot, query).await?;
@@ -418,7 +419,7 @@ struct FactResponseMetadata {
 }
 
 async fn query_fact_response_metadata_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     typed_owner: &FactOwnerV1,
     fact_id: &FactId,
     as_of: Option<UtcMicros>,
@@ -463,7 +464,7 @@ async fn query_fact_response_metadata_tx(
 }
 
 async fn fact_lineage_event_exists_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     as_of: Option<UtcMicros>,
@@ -507,7 +508,7 @@ async fn fact_lineage_event_exists_tx(
 }
 
 async fn latest_fact_assertion_id_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     as_of: Option<UtcMicros>,
@@ -565,7 +566,7 @@ async fn latest_fact_assertion_id_tx(
 }
 
 async fn latest_fact_payload_access_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     as_of: Option<UtcMicros>,
@@ -623,7 +624,7 @@ async fn latest_fact_payload_access_tx(
 }
 
 async fn fact_contradiction_ids_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     typed_owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -688,7 +689,7 @@ async fn fact_contradiction_ids_tx(
 
 #[allow(clippy::too_many_arguments)]
 async fn query_fact_coverage_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     typed_owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -829,7 +830,7 @@ fn classify_fact_coverage(
 }
 
 pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &RetrievalAnchorQuery,
 ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
     let owner = OwnerKey::new(query.owner())?;
@@ -873,7 +874,7 @@ pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
 }
 
 async fn load_current_legacy_mapping_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     typed_owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -906,7 +907,7 @@ async fn load_current_legacy_mapping_tx(
 }
 
 pub(in crate::store::memory) async fn promote_fact_proposal_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     promotion: &PromoteFactProposal,
 ) -> Result<PromotionAttempt, FactProposalStoreError> {
     let owner = OwnerKey::new(promotion.owner())?;
@@ -1050,7 +1051,7 @@ pub(in crate::store::memory) async fn promote_fact_proposal_tx(
 }
 
 async fn proposal_current_state(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     proposal_id: &ProvenanceId,
 ) -> Result<Option<FactProposalPromotionStateV1>, FactProposalStoreError> {
@@ -1092,7 +1093,7 @@ async fn proposal_current_state(
 }
 
 async fn matching_applied_promotion_transition(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     promotion: &PromoteFactProposal,
 ) -> Result<Option<String>, FactProposalStoreError> {
@@ -1214,7 +1215,7 @@ impl DatabaseFactStore<'_> {
     ) -> FactStoreResult<FactCommitOutcome> {
         let transaction = self
             .db
-            .begin_write_transaction(COMMIT_OPERATION)
+            .begin_memory_write_transaction(COMMIT_OPERATION)
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
         let attempt = match commit_fact_tx(&transaction, batch).await {

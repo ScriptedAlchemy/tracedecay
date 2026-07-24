@@ -391,17 +391,11 @@ async fn handle_migrate_apply(
             ),
         });
     }
-    let global_db =
-        tracedecay::global_db::GlobalDb::try_open_at(&apply_report.profile_root.join("global.db"))
-            .await?
-            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                message: "could not open global DB for migrate apply".to_string(),
-            })?;
-    let registry_report =
-        tracedecay::migrate::registry::apply_single_registry_reconstruction_report(
-            &global_db,
-            &verify_report.registry_reconstruction,
-        )
+    let migration_runtime =
+        tracedecay::migrate::registry::MigrationRegistryRuntime::open(&apply_report.profile_root)
+            .await?;
+    let registry_report = migration_runtime
+        .apply_single_reconstruction(&verify_report.registry_reconstruction)
         .await
         .map_err(|issues| tracedecay::errors::TraceDecayError::Config {
             message: format!(
@@ -526,22 +520,17 @@ async fn handle_migrate_reconstruct(
                 ),
             });
         }
-        let global_db =
-            tracedecay::global_db::GlobalDb::try_open_at(&profile_root.join("global.db"))
-                .await?
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: "could not open global DB for registry reconstruction".to_string(),
-                })?;
-        let applied = tracedecay::migrate::registry::apply_registry_reconstruction_report(
-            &global_db, &report,
-        )
-        .await
-        .map_err(|issues| tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "failed to apply registry reconstruction: {}",
-                issues.join("; ")
-            ),
-        })?;
+        let migration_runtime =
+            tracedecay::migrate::registry::MigrationRegistryRuntime::open(&profile_root).await?;
+        let applied = migration_runtime
+            .apply_reconstruction(&report)
+            .await
+            .map_err(|issues| tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "failed to apply registry reconstruction: {}",
+                    issues.join("; ")
+                ),
+            })?;
         if json {
             println!(
                 "{}",
@@ -615,11 +604,12 @@ async fn handle_migrate_repair_sessions(
                 .map(|artifact| {
                     (
                         plan.project.project_id.clone(),
+                        plan.project.project_root.clone(),
                         profile_root.join(&artifact.relpath),
                     )
                 })
         })
-        .filter(|(_, path)| path.is_file())
+        .filter(|(_, _, path)| path.is_file())
         .collect::<Vec<_>>();
     if !apply {
         if json {
@@ -628,7 +618,7 @@ async fn handle_migrate_repair_sessions(
                 serde_json::to_string_pretty(&serde_json::json!({
                     "apply": false,
                     "candidate_count": stores.len(),
-                    "project_ids": stores.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                    "project_ids": stores.iter().map(|(id, _, _)| id).collect::<Vec<_>>(),
                 }))?
             );
         } else {
@@ -648,10 +638,19 @@ async fn handle_migrate_repair_sessions(
         &profile_root,
         "session temporal repair",
     )?;
+    let migration_runtime =
+        tracedecay::migrate::registry::MigrationRegistryRuntime::try_open_existing(&profile_root)
+            .await?
+            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                message: "profile registry is required for session temporal repair".to_string(),
+            })?;
     let mut repaired = Vec::new();
     let mut failed = Vec::new();
-    for (project_id, path) in stores {
-        match tracedecay::global_db::repair_session_temporal_store(&path).await {
+    for (project_id, project_root, path) in stores {
+        match migration_runtime
+            .repair_project_sessions(&project_id, &project_root, &path)
+            .await
+        {
             Ok(()) => repaired.push(project_id),
             Err(error) => failed.push(serde_json::json!({
                 "project_id": project_id,
@@ -787,16 +786,15 @@ async fn offline_registry_gc(
         &profile_root,
         "registry cleanup",
     )?;
-    let global_db = tracedecay::global_db::GlobalDb::try_open_at(&profile_root.join("global.db"))
-        .await?
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "could not open global DB for registry cleanup".to_string(),
-        })?;
-    let report = if apply {
-        tracedecay::migrate::registry::apply_registry_gc(&global_db, &profile_root, prefix).await?
-    } else {
-        tracedecay::migrate::registry::registry_gc_report(&global_db, &profile_root, prefix).await?
-    };
+    let migration_runtime =
+        tracedecay::migrate::registry::MigrationRegistryRuntime::try_open_existing(&profile_root)
+            .await?
+            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                message: "could not open global DB for registry cleanup".to_string(),
+            })?;
+    let report = migration_runtime
+        .registry_gc(&profile_root, prefix, apply)
+        .await?;
     serde_json::to_value(report).map_err(Into::into)
 }
 

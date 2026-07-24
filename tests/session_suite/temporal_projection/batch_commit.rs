@@ -3,12 +3,20 @@ use super::*;
 #[tokio::test]
 async fn batch_receipts_require_contiguous_ordinals_and_replay_exactly() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.receipts");
-    let persisted = persist_observation(&db, &session_id, 0, "receipt").await;
+    let persisted = persist_observation(&observation_store, &session_id, 0, "receipt").await;
     let projected = occurrence(&session_id, &persisted);
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 1).await;
 
     let skipped = batch(&session_id, 2, 1, vec![projected.clone()], vec![], vec![])
@@ -87,13 +95,21 @@ async fn batch_receipts_require_contiguous_ordinals_and_replay_exactly() {
 #[tokio::test]
 async fn caller_forged_occurrence_fields_never_cross_the_canonical_boundary() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.untrusted");
-    let first = persist_observation(&db, &session_id, 0, "first").await;
-    let second = persist_observation(&db, &session_id, 1, "second").await;
+    let first = persist_observation(&observation_store, &session_id, 0, "first").await;
+    let second = persist_observation(&observation_store, &session_id, 1, "second").await;
     let canonical = occurrence(&session_id, &first);
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
 
     let mut forged = Vec::new();
@@ -142,13 +158,21 @@ async fn caller_forged_occurrence_fields_never_cross_the_canonical_boundary() {
 #[tokio::test]
 async fn incremental_batch_commit_is_atomic_and_rolls_back_on_late_failure() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.atomic");
-    let persisted = persist_observation(&db, &session_id, 0, "atomic").await;
+    let persisted = persist_observation(&observation_store, &session_id, 0, "atomic").await;
     let persisted_occurrence = occurrence(&session_id, &persisted);
     let missing = occurrence(&session_id, &observation(&session_id, 99, "not persisted"));
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 1).await;
 
     let result = store
@@ -204,10 +228,15 @@ async fn incremental_batch_commit_is_atomic_and_rolls_back_on_late_failure() {
 #[tokio::test]
 async fn batches_reject_cross_session_and_cross_generation_ownership() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.owner");
-    let observation = persist_observation(&db, &session_id, 0, "owner").await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let observation = persist_observation(&observation_store, &session_id, 0, "owner").await;
     begin_candidate(&store, &session_id, 2, 1).await;
 
     let other_session = session("session.temporal.other");
@@ -241,12 +270,20 @@ async fn batches_reject_cross_session_and_cross_generation_ownership() {
 #[tokio::test]
 async fn exact_replay_is_idempotent_and_conflicting_replay_rolls_back() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.replay");
-    let observation = persist_observation(&db, &session_id, 0, "replay").await;
+    let observation = persist_observation(&observation_store, &session_id, 0, "replay").await;
     let occurrence = occurrence(&session_id, &observation);
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 1).await;
     let projection = batch(&session_id, 2, 1, vec![occurrence.clone()], vec![], vec![]);
 
@@ -320,20 +357,25 @@ async fn projection_batch_rejects_item_count_above_max() {
 #[tokio::test]
 async fn duplicate_message_ids_within_one_batch_are_rejected_deterministically() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.duplicate-within");
     let duplicate = "message.temporal.duplicate";
     let first = persist_custom_observation(
-        &db,
+        &observation_store,
         observation_with_message_ids(&session_id, 0, "first", duplicate, None),
     )
     .await;
     let second = persist_custom_observation(
-        &db,
+        &observation_store,
         observation_with_message_ids(&session_id, 1, "second", duplicate, None),
     )
     .await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
     store
         .persist_session_temporal_projection_batch(batch(
@@ -370,20 +412,25 @@ async fn duplicate_message_ids_within_one_batch_are_rejected_deterministically()
 #[tokio::test]
 async fn duplicate_message_ids_across_batches_are_rejected_deterministically() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.duplicate-across");
     let duplicate = "message.temporal.duplicate";
     let first = persist_custom_observation(
-        &db,
+        &observation_store,
         observation_with_message_ids(&session_id, 0, "first", duplicate, None),
     )
     .await;
     let second = persist_custom_observation(
-        &db,
+        &observation_store,
         observation_with_message_ids(&session_id, 1, "second", duplicate, None),
     )
     .await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
     store
         .persist_session_temporal_projection_batch(
@@ -436,18 +483,23 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
     let session_id = session("session.temporal.duplicate-restart");
     let duplicate = "message.temporal.duplicate";
     let second = {
-        let db = open_lcm_db(&tmp).await;
+        let runtime = profile_runtime(&tmp).await;
+        let observation_store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let store = runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
+            .unwrap();
         let first = persist_custom_observation(
-            &db,
+            &observation_store,
             observation_with_message_ids(&session_id, 0, "first", duplicate, None),
         )
         .await;
         let second = persist_custom_observation(
-            &db,
+            &observation_store,
             observation_with_message_ids(&session_id, 1, "second", duplicate, None),
         )
         .await;
-        let store = GlobalDbSessionTemporalStore::new(&db);
         begin_candidate(&store, &session_id, 2, 2).await;
         store
             .persist_session_temporal_projection_batch(
@@ -466,8 +518,10 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
             .unwrap();
         second
     };
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     assert_eq!(
         begin_candidate(&store, &session_id, 2, 2).await,
         SessionGenerationRebuildDispositionV1::Resumed
@@ -505,14 +559,22 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
 #[tokio::test]
 async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.mid-batch-abort");
-    let first = persist_observation(&db, &session_id, 0, "stable").await;
-    let second = persist_observation(&db, &session_id, 1, "pending").await;
+    let first = persist_observation(&observation_store, &session_id, 0, "stable").await;
+    let second = persist_observation(&observation_store, &session_id, 1, "pending").await;
     let first = occurrence(&session_id, &first);
     let second = occurrence(&session_id, &second);
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
     store
         .persist_session_temporal_projection_batch(batch(
@@ -535,8 +597,7 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
         1
     );
 
-    let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "CREATE TRIGGER abort_copy_insert
          BEFORE INSERT ON session_logical_copy_edges
@@ -544,7 +605,6 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
              SELECT RAISE(ABORT, 'forced mid-batch projector failure');
          END;",
     )
-    .await
     .unwrap();
     assert!(
         store
@@ -588,14 +648,16 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
         vec!["1:active", "2:building"]
     );
 
-    conn.execute("DROP TRIGGER abort_copy_insert", ())
-        .await
-        .unwrap();
+    conn.execute("DROP TRIGGER abort_copy_insert", []).unwrap();
     drop(conn);
-    drop(raw_db);
+    drop(store);
+    drop(observation_store);
+    drop(runtime);
 
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     assert_eq!(
         begin_candidate(&store, &session_id, 2, 2).await,
         SessionGenerationRebuildDispositionV1::Resumed

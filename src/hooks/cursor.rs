@@ -1152,7 +1152,10 @@ mod tests {
     async fn cursor_root_uses_identity_resolver_for_global_only_store() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+        let gdb =
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .unwrap();
 
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();

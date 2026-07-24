@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use libsql::{Connection, params};
 use serde_json::{Map, Value as JsonValue, json};
 
 use crate::{
+    db::engine::{Executor, QueryExecutor, Row, params},
     privacy::detector_kernel::{
         JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
     },
@@ -19,8 +19,12 @@ pub(crate) const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
                     snippet_text, legacy_source, legacy_truncated, metadata_json";
+pub(crate) const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
+    "provider, message_id, session_id, store_id, role, ordinal,
+                    timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
+                    '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
 
-pub(crate) fn raw_message_from_row(row: &libsql::Row) -> Result<LcmRawMessage, LcmError> {
+pub(crate) fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let storage_kind_text: String = row.get(9)?;
     let content: Option<String> = row.get(7)?;
     let snippet_text: String = row.get(11)?;
@@ -49,11 +53,28 @@ pub(crate) fn raw_message_from_row(row: &libsql::Row) -> Result<LcmRawMessage, L
 }
 
 pub(crate) async fn load_raw_message_by_store_id(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     store_id: i64,
 ) -> Result<LcmRawMessage, LcmError> {
     let sql = format!(
         "SELECT {RAW_MESSAGE_SELECT_COLUMNS}
+         FROM lcm_raw_messages
+         WHERE store_id = ?1"
+    );
+    let mut rows = conn.query(&sql, params![store_id]).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+    raw_message_from_row(&row)
+}
+
+pub(crate) async fn load_raw_message_metadata_by_store_id(
+    conn: &(impl QueryExecutor + ?Sized),
+    store_id: i64,
+) -> Result<LcmRawMessage, LcmError> {
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
          FROM lcm_raw_messages
          WHERE store_id = ?1"
     );
@@ -170,7 +191,7 @@ fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
 }
 
 async fn upsert_inline_raw_message(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
     text: &str,
     metadata_json: Option<&str>,
@@ -205,13 +226,13 @@ async fn upsert_inline_raw_message(
             message.session_id.as_str(),
             message.role.as_str(),
             message.ordinal,
-            util::opt_i64(message.timestamp),
+            message.timestamp,
             text,
             content_hash.as_str(),
             LcmStorageKind::Inline.as_str(),
             snippet.as_str(),
             index.as_str(),
-            util::opt_text(metadata_json),
+            metadata_json,
         ],
     )
     .await
@@ -224,7 +245,7 @@ async fn upsert_inline_raw_message(
 /// path preserves the canonical projected text instead of reprocessing the
 /// provider payload or performing filesystem-backed externalization.
 pub(crate) async fn upsert_projected_raw_message(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
 ) -> bool {
     upsert_inline_raw_message(
@@ -253,7 +274,7 @@ fn externalized_payload_metadata(
 }
 
 pub(crate) async fn upsert_raw_message_with_payload_tracked(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     message: &SessionMessageRecord,
     rollback: &mut payload::PayloadFileRollback,
@@ -330,7 +351,7 @@ pub(crate) async fn upsert_raw_message_with_payload_tracked(
             message.session_id.as_str(),
             message.role.as_str(),
             message.ordinal,
-            util::opt_i64(message.timestamp),
+            message.timestamp,
             payload_ref.content_hash.as_str(),
             LcmStorageKind::External.as_str(),
             payload_ref.payload_ref.as_str(),
@@ -350,7 +371,7 @@ pub(crate) async fn upsert_raw_message_with_payload_tracked(
 /// active-replay `tool_calls`) using the same redaction and substring media
 /// externalization primitives as raw-message ingest.
 pub(crate) async fn protect_replay_field_value_tracked(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     message: &SessionMessageRecord,
     field_path: &str,
@@ -395,7 +416,7 @@ pub(crate) async fn protect_replay_field_value_tracked(
 }
 
 async fn prepare_message(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
     externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<PreparedMessage, LcmError> {

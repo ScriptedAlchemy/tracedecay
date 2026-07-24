@@ -17,7 +17,7 @@ use crate::application::session::{
     SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::{
     SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
     SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
@@ -64,7 +64,7 @@ impl SessionRefreshSchedulerPort for DaemonSessionRefreshWake {
 }
 
 pub(crate) struct DaemonSessionRefreshService {
-    database: Arc<GlobalDb>,
+    database: Arc<RegisteredGlobalDb>,
     wake: DaemonSessionRefreshWake,
     expected_project_id: Option<String>,
     handles: std::sync::Mutex<HashMap<String, SessionRefreshHandle>>,
@@ -78,7 +78,7 @@ enum SessionRefreshHandleLookup {
 
 impl DaemonSessionRefreshService {
     pub(crate) fn new(
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
         wake: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
         expected_project_id: Option<String>,
     ) -> Self {

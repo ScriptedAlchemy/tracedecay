@@ -28,13 +28,14 @@ use tracedecay_domain::{ProjectId, UtcMicros};
 
 use crate::application::configuration::ConfigurationControlStore;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::{
     GlobalDbConfigurationControlStore, migrate_legacy_configuration_inputs,
 };
 
 pub mod registry;
 pub mod resolver;
+pub mod retrieval;
 pub mod scope_control;
 pub mod topology;
 
@@ -92,12 +93,16 @@ const MAX_SEMANTIC_LOAD_DEADLINE_MS: u64 = 10 * 60 * 1000;
 #[serde(deny_unknown_fields)]
 pub struct SemanticProfileSelection {
     pub profile_id: String,
+    pub accepted_profile_digest: tracedecay_domain::ManifestDigest,
     pub artifact_digest: String,
     pub artifact_path: PathBuf,
 }
 
 impl SemanticProfileSelection {
     fn validate(&self) -> Result<()> {
+        self.accepted_profile_digest
+            .validate()
+            .map_err(|error| config_error(format!("semantic accepted profile digest: {error}")))?;
         if self.profile_id.trim().is_empty() || self.profile_id.len() > 128 {
             return Err(config_error(
                 "semantic profile_id must be non-empty and at most 128 bytes",
@@ -495,7 +500,7 @@ impl Default for CompactionThresholdConfig {
 /// inert by default: the session (LCM) and observation-evidence sub-configs
 /// default to their own disabled state, and the orphan-store and compaction
 /// windows default to `None`. Only an owner who sets a window opts a store in.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetentionConfig {
     /// Session-store (LCM raw/projected) retention windows.
     #[serde(default)]
@@ -510,6 +515,10 @@ pub struct RetentionConfig {
     /// Incremental-vacuum compaction trigger. `None` disables compaction.
     #[serde(default)]
     pub compaction: Option<CompactionThresholdConfig>,
+    /// Owner-configured soft byte budgets keyed by exact logical store key.
+    /// Missing entries mean no budget was configured for that store.
+    #[serde(default)]
+    pub store_soft_budgets_bytes: BTreeMap<String, u64>,
     /// Cadence between daemon retention passes (hours).
     #[serde(default = "default_retention_interval_hours")]
     pub interval_hours: u64,
@@ -523,12 +532,31 @@ impl Default for RetentionConfig {
                 crate::global_db::observation::retention::ObservationRetentionConfig::default(),
             orphan_store_gc_days: None,
             compaction: None,
+            store_soft_budgets_bytes: BTreeMap::new(),
             interval_hours: default_retention_interval_hours(),
         }
     }
 }
 
 impl RetentionConfig {
+    pub(crate) fn store_soft_budget(
+        &self,
+        store: &str,
+    ) -> Result<Option<tracedecay_application::storage::StoreSizeBudgetV1>> {
+        let Some(bytes) = self.store_soft_budgets_bytes.get(store).copied() else {
+            return Ok(None);
+        };
+        let budget = tracedecay_application::storage::StoreSizeBudgetV1 {
+            store: tracedecay_application::storage::StoreKeyV1::new(store.to_owned())
+                .map_err(|error| config_error(error.to_string()))?,
+            soft_limit_bytes: tracedecay_application::storage::StorageByteSizeV1(bytes),
+        };
+        budget
+            .validate()
+            .map_err(|error| config_error(error.to_string()))?;
+        Ok(Some(budget))
+    }
+
     /// Validate the compaction trigger, when configured. A non-positive or
     /// non-finite ratio would schedule compaction unconditionally, so it is
     /// rejected in favor of leaving compaction disabled (`None`).
@@ -540,6 +568,18 @@ impl RetentionConfig {
             return Err(config_error(
                 "retention compaction free_page_ratio_threshold must be a positive, finite ratio",
             ));
+        }
+        for (store, bytes) in &self.store_soft_budgets_bytes {
+            tracedecay_application::storage::StoreKeyV1::new(store.clone()).map_err(|_| {
+                config_error(format!(
+                    "retention store soft budget key '{store}' is not a valid StoreKeyV1"
+                ))
+            })?;
+            if *bytes == 0 {
+                return Err(config_error(format!(
+                    "retention store soft budget for '{store}' must be greater than zero"
+                )));
+            }
         }
         Ok(())
     }
@@ -1024,8 +1064,8 @@ pub fn runtime_configuration_target_for_project_id(
 ///
 /// This is fail-closed: callers that must not invent authority (hooks,
 /// destructive branch administration) use it after the daemon has published a
-/// snapshot. Project open paths that need to cold-start a process use
-/// [`ensure_runtime_configuration_for_layout`] instead.
+/// snapshot. Daemon project-open paths that need to cold-start a process use
+/// [`ensure_runtime_configuration_for_registered_database`] instead.
 pub fn runtime_configuration_for_layout(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -1050,11 +1090,13 @@ pub fn runtime_configuration_for_layout(
 /// consults legacy `config.json` input and never migrates or writes the store; a
 /// genuinely uninitialized or unopenable configuration store still yields a
 /// typed error rather than a fabricated default authority.
-pub async fn resolve_runtime_configuration_for_layout(
+pub(crate) async fn resolve_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
+    database: Arc<RegisteredGlobalDb>,
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
+    validate_registered_configuration_database(&target, database.as_ref())?;
     if let Ok(configuration) = runtime_configuration_cache().for_project(&target.project_id) {
         // The cache already holds a daemon-published pin (possibly a migrated
         // durable revision). Retarget it to this operation's non-authoritative
@@ -1067,7 +1109,8 @@ pub async fn resolve_runtime_configuration_for_layout(
     // input, no store mutation) and publish it. A store that was never made
     // writable resolves to registry defaults in memory; an initialized-but-
     // unreadable store surfaces a typed authority error.
-    load_runtime_configuration_for_layout_read_only(project_root, layout).await
+    load_runtime_configuration_for_registered_database_read_only(project_root, layout, database)
+        .await
 }
 
 /// Retained store handle paired with the exact revision resolved at project
@@ -1075,9 +1118,10 @@ pub async fn resolve_runtime_configuration_for_layout(
 /// configuration database or resolving a second snapshot.
 pub(crate) struct OpenedRuntimeConfiguration {
     pub(crate) configuration: PinnedRuntimeConfiguration,
-    /// The opened configuration control store, or `None` when the store has no
-    /// durable sessions.db yet (a read-only open of a never-writable store).
-    pub(crate) database: Option<Arc<GlobalDb>>,
+    /// Exact daemon-owned registered session runtime used to resolve this
+    /// snapshot. Configuration composition retains this authority directly;
+    /// it never reacquires the physical database by path.
+    pub(crate) registered_database: Arc<RegisteredGlobalDb>,
 }
 
 /// Loads and publishes the durable current configuration for a resolved store
@@ -1086,22 +1130,26 @@ pub(crate) struct OpenedRuntimeConfiguration {
 /// A fresh project receives one migration-backed registry-default revision.
 /// Once any revision exists, open always reads that durable current revision;
 /// a corrupt or ambiguous history is never replaced with local defaults.
-pub(crate) async fn open_runtime_configuration_for_layout(
+pub(crate) async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
+    database: Arc<RegisteredGlobalDb>,
 ) -> Result<OpenedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
-    let database = Arc::new(
-        GlobalDb::try_open_at(&layout.sessions_db_path)
-            .await?
-            .ok_or_else(|| {
-                config_error(format!(
-                    "configuration authority unavailable: could not open '{}'",
-                    layout.sessions_db_path.display()
-                ))
-            })?,
-    );
-    let store = GlobalDbConfigurationControlStore::new(database.as_ref());
+    validate_registered_configuration_database(&target, database.as_ref())?;
+    let store = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
+    let configuration = open_runtime_configuration_from_store(target, layout, &store).await?;
+    Ok(OpenedRuntimeConfiguration {
+        configuration,
+        registered_database: database,
+    })
+}
+
+async fn open_runtime_configuration_from_store(
+    target: RuntimeConfigurationTarget,
+    layout: &crate::storage::StoreLayout,
+    store: &GlobalDbConfigurationControlStore<'_>,
+) -> Result<PinnedRuntimeConfiguration> {
     let current = match store.current().await {
         Ok(current) => current,
         Err(error) => {
@@ -1134,7 +1182,7 @@ pub(crate) async fn open_runtime_configuration_for_layout(
                 &environment,
                 &legacy_target,
             )?;
-            migrate_legacy_configuration_inputs(&registry, &legacy, &store, current_utc_micros())
+            migrate_legacy_configuration_inputs(&registry, &legacy, store, current_utc_micros())
                 .await
                 .map_err(|error| {
                     config_error(format!(
@@ -1147,43 +1195,42 @@ pub(crate) async fn open_runtime_configuration_for_layout(
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone())?;
-    Ok(OpenedRuntimeConfiguration {
-        configuration,
-        database: Some(database),
-    })
+    Ok(configuration)
 }
 
-pub async fn ensure_runtime_configuration_for_layout(
+pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
+    database: Arc<RegisteredGlobalDb>,
 ) -> Result<PinnedRuntimeConfiguration> {
-    Ok(open_runtime_configuration_for_layout(project_root, layout)
-        .await?
-        .configuration)
+    Ok(
+        open_runtime_configuration_for_registered_database(project_root, layout, database)
+            .await?
+            .configuration,
+    )
 }
 
 /// Loads an already-persisted current configuration without creating a store,
 /// applying a migration, or publishing a fallback revision.
-pub(crate) async fn open_runtime_configuration_for_layout_read_only(
+pub(crate) async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
+    database: Arc<RegisteredGlobalDb>,
 ) -> Result<OpenedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
-    let Some(database) = GlobalDb::open_read_only_at(&layout.sessions_db_path).await else {
-        // A store that was never opened writable has no durable sessions.db.
-        // Read-only inspection must not require the writable-open side effect:
-        // resolve the registry default snapshot as a typed absent-store state
-        // and report the configuration control store as unavailable, so writes
-        // still guard rather than silently succeeding.
-        let configuration = read_only_default_runtime_configuration(target)?;
-        install_pinned_runtime_configuration(configuration.clone())?;
-        return Ok(OpenedRuntimeConfiguration {
-            configuration,
-            database: None,
-        });
-    };
-    let database = Arc::new(database);
-    let store = GlobalDbConfigurationControlStore::new(database.as_ref());
+    validate_registered_configuration_database(&target, database.as_ref())?;
+    let store = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
+    let configuration = open_runtime_configuration_read_only_from_store(target, &store).await?;
+    Ok(OpenedRuntimeConfiguration {
+        configuration,
+        registered_database: database,
+    })
+}
+
+async fn open_runtime_configuration_read_only_from_store(
+    target: RuntimeConfigurationTarget,
+    store: &GlobalDbConfigurationControlStore<'_>,
+) -> Result<PinnedRuntimeConfiguration> {
     if store
         .is_uninitialized()
         .await
@@ -1200,19 +1247,29 @@ pub(crate) async fn open_runtime_configuration_for_layout_read_only(
         // durable authority is never silently replaced.
         let configuration = read_only_default_runtime_configuration(target)?;
         install_pinned_runtime_configuration(configuration.clone())?;
-        return Ok(OpenedRuntimeConfiguration {
-            configuration,
-            database: None,
-        });
+        return Ok(configuration);
     }
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone())?;
-    Ok(OpenedRuntimeConfiguration {
-        configuration,
-        database: Some(database),
-    })
+    Ok(configuration)
+}
+
+fn validate_registered_configuration_database(
+    target: &RuntimeConfigurationTarget,
+    database: &RegisteredGlobalDb,
+) -> Result<()> {
+    match &database.binding().shard_id.scope {
+        tracedecay_store::StoreShardScopeV1::ProjectSessions { project_id }
+            if project_id == &target.project_id =>
+        {
+            Ok(())
+        }
+        _ => Err(config_error(
+            "configuration authority unavailable: registered database is not the exact project session shard",
+        )),
+    }
 }
 
 /// Builds the registry-default runtime configuration for a read-only open of a
@@ -1236,14 +1293,50 @@ fn read_only_default_runtime_configuration(
     PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)
 }
 
-pub async fn load_runtime_configuration_for_layout_read_only(
+pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
+    database: Arc<RegisteredGlobalDb>,
 ) -> Result<PinnedRuntimeConfiguration> {
     Ok(
-        open_runtime_configuration_for_layout_read_only(project_root, layout)
-            .await?
-            .configuration,
+        open_runtime_configuration_for_registered_database_read_only(
+            project_root,
+            layout,
+            database,
+        )
+        .await?
+        .configuration,
+    )
+}
+
+#[cfg(not(test))]
+pub async fn ensure_runtime_configuration_for_layout(
+    _project_root: &Path,
+    _layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    Err(registered_configuration_database_required())
+}
+
+#[cfg(not(test))]
+pub async fn resolve_runtime_configuration_for_layout(
+    _project_root: &Path,
+    _layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    Err(registered_configuration_database_required())
+}
+
+#[cfg(not(test))]
+pub async fn load_runtime_configuration_for_layout_read_only(
+    _project_root: &Path,
+    _layout: &crate::storage::StoreLayout,
+) -> Result<PinnedRuntimeConfiguration> {
+    Err(registered_configuration_database_required())
+}
+
+#[cfg(not(test))]
+fn registered_configuration_database_required() -> TraceDecayError {
+    config_error(
+        "configuration authority unavailable: a registered project session runtime is required",
     )
 }
 

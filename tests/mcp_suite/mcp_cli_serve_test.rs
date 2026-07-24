@@ -22,7 +22,7 @@ use crate::serve_harness::{canonical_path_string, run_serve_runtime};
 use crate::serve_harness::{init_project_under, register_global_project};
 use crate::serve_harness::{init_project_with_file, profile_root};
 #[cfg(unix)]
-use libsql::Builder;
+use rusqlite::Connection;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -131,11 +131,8 @@ fn run_serve_runtime_with_initialize_root(
 
 #[cfg(unix)]
 async fn set_user_version(db_path: &Path, version: u32) {
-    let db = Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute(&format!("PRAGMA user_version = {version}"), ())
-        .await
-        .unwrap();
+    let conn = Connection::open(db_path).unwrap();
+    conn.pragma_update(None, "user_version", version).unwrap();
 }
 
 #[cfg(unix)]

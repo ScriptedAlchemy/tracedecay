@@ -20,18 +20,20 @@ use tracedecay_store::{
     SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 pub use crate::global_db::session_temporal::{
     SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
+#[cfg(test)]
+use tracedecay_store::SessionStoreError;
 
 /// Session-temporal projection adapter over an already-open authoritative database.
 pub struct GlobalDbSessionTemporalStore<'a> {
-    db: &'a GlobalDb,
+    db: &'a RegisteredGlobalDb,
 }
 
 impl<'a> GlobalDbSessionTemporalStore<'a> {
-    pub const fn new(db: &'a GlobalDb) -> Self {
+    pub const fn new(db: &'a RegisteredGlobalDb) -> Self {
         Self { db }
     }
 
@@ -59,6 +61,81 @@ impl<'a> GlobalDbSessionTemporalStore<'a> {
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {
         self.db.running_session_refreshes_result().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn materialize_session_temporal_refresh_batch_for_test(
+        &self,
+        recovery: &SessionRefreshRecoveryV1,
+    ) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>>
+    {
+        self.db
+            .materialize_session_temporal_refresh_batch_result(recovery)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn materialize_pending_session_refresh_for_test(
+        &self,
+        session_id: &tracedecay_domain::SessionId,
+    ) -> SessionStoreResult<()> {
+        let request = self
+            .db
+            .pending_session_temporal_refresh_requests_result(128)
+            .await?
+            .into_iter()
+            .find(|request| request.session_id() == session_id)
+            .ok_or(SessionStoreError::InvalidStateTransition {
+                context: "test temporal fixture pending refresh",
+            })?;
+        self.begin_or_join_session_refresh(request).await?;
+
+        loop {
+            let recovery = self.session_refresh_recovery(session_id).await?.ok_or(
+                SessionStoreError::InvalidStateTransition {
+                    context: "test temporal fixture refresh recovery",
+                },
+            )?;
+            match recovery.restart_state() {
+                SessionRefreshRestartStateV1::ReadyToComplete => {
+                    let progress =
+                        recovery
+                            .progress()
+                            .ok_or(SessionStoreError::InvalidStateTransition {
+                                context: "test temporal fixture refresh progress",
+                            })?;
+                    let mut request = SessionRefreshCompletionRequestV1::new(
+                        recovery.operation_id().clone(),
+                        recovery.session_id().clone(),
+                        progress.frontier(),
+                        *progress.coverage(),
+                    )?;
+                    if let Some(source_coverage) =
+                        progress.source_coverage().cloned().or_else(|| {
+                            recovery
+                                .source_coverage(progress.frontier().committed_through())
+                                .ok()
+                        })
+                    {
+                        request = request.with_source_coverage(source_coverage);
+                    }
+                    self.complete_session_refresh(request).await?;
+                    return Ok(());
+                }
+                SessionRefreshRestartStateV1::BeginProjection
+                | SessionRefreshRestartStateV1::ResumeProjection { .. } => {
+                    let (progress, batch) = self
+                        .db
+                        .materialize_session_temporal_refresh_batch_result(&recovery)
+                        .await?
+                        .ok_or(SessionStoreError::InvalidStateTransition {
+                            context: "test temporal fixture projection batch",
+                        })?;
+                    self.persist_session_refresh_projection_batch(progress, batch)
+                        .await?;
+                }
+            }
+        }
     }
 }
 
@@ -204,7 +281,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adapter_contains_only_the_borrowed_global_db_handle() {
+    fn adapter_contains_only_the_borrowed_registered_db_handle() {
         fn assert_exact_fields(store: &GlobalDbSessionTemporalStore<'_>) {
             let GlobalDbSessionTemporalStore { db: _ } = store;
         }
@@ -212,7 +289,7 @@ mod tests {
         let _ = assert_exact_fields;
         assert_eq!(
             std::mem::size_of::<GlobalDbSessionTemporalStore<'static>>(),
-            std::mem::size_of::<&'static GlobalDb>()
+            std::mem::size_of::<&'static RegisteredGlobalDb>()
         );
     }
 }

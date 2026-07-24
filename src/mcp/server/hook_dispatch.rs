@@ -8,25 +8,34 @@ impl McpServer {
         &self,
         event: &hook_events::HookEvent,
         route_cache: &mut HookProjectRouteCache,
-    ) {
+    ) -> crate::errors::Result<()> {
         let route_cwd = HookProjectRouteCache::route_cwd(event);
         let project_path = match route_cwd {
-            Some(cwd) => self.registered_project_containing_path(cwd).await,
+            Some(cwd) => self.registered_project_containing_path(cwd).await?,
             None => None,
         };
         route_cache.observe_hook_event(event, project_path);
         self.hook_project_routes.store(route_cache);
+        Ok(())
     }
 
-    pub(crate) async fn registered_project_containing_path(&self, cwd: &Path) -> Option<String> {
-        let registry = self.registry_db.as_deref()?;
+    pub(crate) async fn registered_project_containing_path(
+        &self,
+        cwd: &Path,
+    ) -> crate::errors::Result<Option<String>> {
+        let Some(registry) = self.registry_db.as_deref() else {
+            return Ok(None);
+        };
         let mut candidate = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         loop {
-            if let Some(context) = registry.project_registry_context_by_alias(&candidate).await {
-                return Some(context.project.canonical_root);
+            if let Some(context) = registry
+                .project_registry_context_by_alias(&candidate)
+                .await?
+            {
+                return Ok(Some(context.project.canonical_root));
             }
             if !candidate.pop() {
-                return None;
+                return Ok(None);
             }
         }
     }
@@ -37,16 +46,21 @@ impl McpServer {
     /// by git-common-dir identity. A linked worktree lives at a sibling path,
     /// so the alias walk never reaches its main checkout; identity resolution
     /// maps it back to the registered project through the shared common dir.
-    pub(crate) async fn registered_project_for_route_cwd(&self, cwd: &Path) -> Option<String> {
-        if let Some(root) = self.registered_project_containing_path(cwd).await {
-            return Some(root);
+    pub(crate) async fn registered_project_for_route_cwd(
+        &self,
+        cwd: &Path,
+    ) -> crate::errors::Result<Option<String>> {
+        if let Some(root) = self.registered_project_containing_path(cwd).await? {
+            return Ok(Some(root));
         }
-        let registry = self.registry_db.as_deref()?;
+        let Some(registry) = self.registry_db.as_deref() else {
+            return Ok(None);
+        };
         let git_common_dir = crate::worktree::git_common_dir(cwd);
         let context = registry
             .project_registry_context_by_identity(cwd, git_common_dir.as_deref())
             .await?;
-        Some(context.project.canonical_root)
+        Ok(context.map(|context| context.project.canonical_root))
     }
 
     pub(crate) async fn run_hook_event_plan(
@@ -85,9 +99,9 @@ impl McpServer {
                     }
                 };
                 let request = HookBranchWriteRequest {
+                    graph: Arc::clone(&cg),
                     root,
                     branch,
-                    open_options: cg.open_options(),
                     incremental_sync_agent: None,
                 };
                 match (self.hook_branch_writer)(request).await {
@@ -136,9 +150,9 @@ impl McpServer {
                         }
                     };
                 let request = HookBranchWriteRequest {
+                    graph: Arc::clone(&cg),
                     root,
                     branch,
-                    open_options: cg.open_options(),
                     incremental_sync_agent: Some(agent),
                 };
                 match (self.hook_branch_writer)(request).await {
@@ -183,9 +197,9 @@ impl McpServer {
                     }
                 };
                 let request = HookBranchWriteRequest {
+                    graph: Arc::clone(&cg),
                     root,
                     branch,
-                    open_options: cg.open_options(),
                     incremental_sync_agent: Some(agent),
                 };
                 match (self.hook_branch_writer)(request).await {

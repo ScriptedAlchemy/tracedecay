@@ -7,14 +7,13 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::global_db::GlobalDb;
+use crate::application::host_admission::HostAdmissionFacade;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::{
     ProjectRootMatcher, SqliteReadConn, StoredCursor, TranscriptIngestStats,
 };
 
-use super::coverage::{admit_rows, admit_rows_with_admission, sqlite_incarnation};
+use super::coverage::{admit_rows_with_admission, sqlite_incarnation};
 use super::ingest::{HermesProfileSource, ProjectIngestDestination};
 use super::observation::{HermesProjectionMetadata, project_projection_metadata};
 use super::routing::{
@@ -289,16 +288,6 @@ pub(crate) fn select_new_messages_sql(
 /// Incrementally scans one Hermes `state.db`; each bounded page is admitted
 /// against its session-scoped authoritative SQLite-row cursor. The caller
 /// decides whether a source error is runtime noise or migration-blocking.
-pub(crate) async fn try_ingest_state_db(
-    db: &GlobalDb,
-    source: &HermesProfileSource,
-    project_root: &Path,
-    project_id: ProjectId,
-) -> Result<TranscriptIngestStats, String> {
-    let mut budget = IngestByteBudget::unbounded();
-    try_ingest_state_db_bounded(db, source, project_root, project_id, &mut budget).await
-}
-
 /// Opens a Hermes `state.db` read-only and derives everything a page sweep
 /// needs before its first read: the physical incarnation and the column-probed
 /// bounded SELECT.
@@ -399,21 +388,6 @@ where
     }
 }
 
-async fn try_ingest_state_db_bounded(
-    db: &GlobalDb,
-    source: &HermesProfileSource,
-    project_root: &Path,
-    project_id: ProjectId,
-    budget: &mut IngestByteBudget,
-) -> Result<TranscriptIngestStats, String> {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
-        project_id.clone(),
-    ));
-    try_ingest_state_db_bounded_with_admission(source, project_root, project_id, &admission, budget)
-        .await
-}
-
 pub(crate) async fn try_ingest_state_db_bounded_with_admission(
     source: &HermesProfileSource,
     project_root: &Path,
@@ -481,8 +455,8 @@ pub(crate) async fn try_ingest_state_db_for_projects(
             &mut destination_routes,
         );
         for (index, destination) in destinations.iter().enumerate() {
-            let admitted = admit_rows(
-                destination.db,
+            let admitted = admit_rows_with_admission(
+                destination.admission,
                 &new.items,
                 scopes[index].clone(),
                 generation,
@@ -521,17 +495,16 @@ pub(crate) async fn try_ingest_state_db_for_projects(
     }
 }
 
-pub(crate) async fn try_ingest_user_state_db_bounded(
-    db: &GlobalDb,
+pub(crate) async fn try_ingest_user_state_db_bounded_with_admission(
+    admission: &HostAdmissionFacade<'_>,
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],
     budget: &mut IngestByteBudget,
 ) -> Result<TranscriptIngestStats, String> {
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
     ingest_bounded_pages(
-        &admission,
+        admission,
         &conn,
         &select_sql,
         ObservationScopeV1::Profile,

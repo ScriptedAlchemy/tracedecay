@@ -1,4 +1,4 @@
-use libsql::Connection;
+use crate::db::engine::Executor;
 
 use super::{db_error, db_message, query_i64, quote_identifier};
 use crate::errors::Result;
@@ -17,7 +17,7 @@ const PLAN_TABLES: &[&str] = &[
     "consolidation_projection_disposition_plan",
 ];
 
-pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -> Result<()> {
+pub(super) async fn materialize(conn: &impl Executor, target: &str, source: &str) -> Result<()> {
     for table in PLAN_TABLES {
         conn.execute(&format!("DROP TABLE IF EXISTS temp.{table}"), ())
             .await
@@ -206,7 +206,7 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
     Ok(())
 }
 
-async fn validate_claims(conn: &Connection, operation: &'static str) -> Result<()> {
+async fn validate_claims(conn: &impl Executor, operation: &'static str) -> Result<()> {
     for (query, message) in [
         (
             "SELECT COUNT(*) FROM (
@@ -250,11 +250,11 @@ async fn validate_claims(conn: &Connection, operation: &'static str) -> Result<(
     Ok(())
 }
 
-pub(super) async fn preflight(conn: &Connection) -> Result<()> {
+pub(super) async fn preflight(conn: &impl Executor) -> Result<()> {
     validate_claims(conn, "merge_observation_authority").await
 }
 
-pub(super) async fn merge(conn: &Connection) -> Result<()> {
+pub(super) async fn merge(conn: &impl Executor) -> Result<()> {
     conn.execute_batch(
         "DELETE FROM session_messages AS message
          WHERE EXISTS (
@@ -320,7 +320,7 @@ pub(super) fn expected_session_messages(session_metadata: &str) -> String {
     )
 }
 
-pub(super) async fn verify(conn: &Connection) -> Result<()> {
+pub(super) async fn verify(conn: &impl Executor) -> Result<()> {
     validate_claims(conn, "verify_consolidation").await?;
     for (label, table, plan, columns) in [
         (

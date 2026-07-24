@@ -355,11 +355,7 @@ async fn compression_boundary_link_preserves_payload_owner_and_projects_debt() {
         &payload_body,
     );
     external_message.kind = Some("tool_result".to_string());
-    let storage_root = tmp.path().join(".tracedecay");
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&external_message)
-        .await
-        .unwrap();
+    assert!(db.upsert_session_message(&external_message).await);
     let payload_ref = db
         .lcm_load_raw_message("cursor", "session-old-tool-1")
         .await
@@ -463,11 +459,7 @@ async fn boundary_link_to_existing_target_leaves_source_session_state_intact() {
         &payload_body,
     );
     external_message.kind = Some("tool_result".to_string());
-    let storage_root = tmp.path().join(".tracedecay");
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&external_message)
-        .await
-        .unwrap();
+    assert!(db.upsert_session_message(&external_message).await);
     let payload_ref = db
         .lcm_load_raw_message("cursor", "session-old-tool-1")
         .await

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::privacy::sanitize_provider_metadata_text;
 
-use libsql::Transaction;
+use crate::db::DatabaseMemoryTransaction as Transaction;
 use serde::{Serialize, de::DeserializeOwned};
 
 use tracedecay_domain::{
@@ -153,7 +153,7 @@ pub(super) fn from_json<T: DeserializeOwned>(
 }
 
 pub(super) fn row_string(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<String> {
@@ -162,7 +162,7 @@ pub(super) fn row_string(
 }
 
 pub(super) fn row_optional_string(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<Option<String>> {
@@ -171,7 +171,7 @@ pub(super) fn row_optional_string(
 }
 
 pub(super) fn row_i64(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<i64> {
@@ -180,7 +180,7 @@ pub(super) fn row_i64(
 }
 
 pub(super) fn row_optional_i64(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<Option<i64>> {
@@ -189,7 +189,7 @@ pub(super) fn row_optional_i64(
 }
 
 pub(super) fn row_optional_f64(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<Option<f64>> {
@@ -198,7 +198,7 @@ pub(super) fn row_optional_f64(
 }
 
 pub(super) fn row_f64(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     index: i32,
     operation: &'static str,
 ) -> FactStoreResult<f64> {
@@ -207,9 +207,9 @@ pub(super) fn row_f64(
 }
 
 pub(super) async fn row_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     sql: &str,
-    values: impl libsql::params::IntoParams,
+    values: impl crate::db::engine::IntoParams,
 ) -> FactStoreResult<bool> {
     let mut rows = transaction
         .query(sql, values)
@@ -223,9 +223,9 @@ pub(super) async fn row_exists(
 }
 
 pub(super) async fn row_exists_params(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     sql: &str,
-    values: impl libsql::params::IntoParams,
+    values: impl crate::db::engine::IntoParams,
 ) -> FactStoreResult<bool> {
     row_exists(transaction, sql, values).await
 }

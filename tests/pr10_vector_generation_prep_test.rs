@@ -5,32 +5,15 @@ use std::fmt::Write as _;
 use std::sync::mpsc;
 use std::time::Duration;
 
-#[path = "../src/code_index/projection.rs"]
-pub mod projection_impl;
-#[path = "../src/code_index/receipts.rs"]
-pub mod receipts;
-
-pub mod code_index {
-    pub mod projection {
-        pub use super::super::projection_impl::*;
-    }
-}
-
-pub mod db {
-    pub use tracedecay::db::*;
-}
-
-#[path = "../src/semantic_code/projector.rs"]
-pub mod semantic_projector;
-
-pub mod semantic_code {
-    pub use crate::semantic_projector as projector;
-}
-
-#[path = "../src/store/vector_generations.rs"]
-mod vector_generations;
-
 use sha2::{Digest, Sha256};
+use tracedecay::code_index::projection::{expected_request_digest, verify_batch_receipt};
+use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay::store::vector_generation_test_support::{
+    CanonicalChunkVectorEncoderV1, DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1,
+    SemanticProjectionErrorV1, VectorGenerationIdV1, VectorGenerationPlanV1,
+    VectorGenerationStoreErrorV1, fail_before_publication_swap_once, prepare_vector_generation,
+    prepare_vector_generation_async,
+};
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
@@ -41,18 +24,6 @@ use tracedecay_domain::{
     ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
     SourceSpan,
 };
-
-use semantic_projector::{
-    CanonicalChunkVectorEncoderV1, SemanticProjectionErrorV1, prepare_vector_generation,
-    prepare_vector_generation_async,
-};
-use vector_generations::{
-    DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, VectorGenerationIdV1,
-    VectorGenerationPlanV1, VectorGenerationStoreErrorV1,
-};
-
-use crate::code_index::projection::{expected_request_digest, verify_batch_receipt};
-use crate::db::{Database, DatabaseAuthority};
 
 fn id<T>(value: &str) -> T
 where
@@ -562,7 +533,7 @@ fn checkpoint_and_active_pointer_publish_atomically() {
     store.commit_batch(&build_id, None, prepared).unwrap();
 
     let prior_checkpoint = store.active_checkpoint().cloned();
-    store.fail_before_publication_swap_once();
+    fail_before_publication_swap_once(&mut store);
     assert_eq!(
         store.publish_generation(&build_id, Some(&base_generation)),
         Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure)
@@ -897,10 +868,14 @@ async fn database_store_survives_restart_and_preserves_superseded_generations() 
     let authority =
         DatabaseAuthority::acquire_test(&database_path, "vector generation restart test")
             .expect("project database authority");
-    let database = Database::initialize(&database_path, &authority)
-        .await
-        .expect("project database")
-        .0;
+    let database = Database::publish_test_runtime(
+        &database_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("project database")
+    .0;
     let key = embedding_key();
     let admitted = admitted_key(&key);
     let projection_key = key.projection_key().expect("projection key");

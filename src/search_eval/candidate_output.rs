@@ -21,7 +21,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::application::code_index::open_production_code_index_owner_v1;
+use crate::application::git_reads::{
+    GitReadAuthorityV1, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
+    execute_historical_git_read,
+};
 use crate::code_index::chunks::content_digest;
+use crate::code_index::historical_query::{
+    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
+};
 use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use crate::code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -47,11 +54,13 @@ use crate::query::retrieval::lexical::{
     LexicalLaneRequest, LexicalLaneRetriever,
 };
 use crate::query::retrieval::ports::CodeCandidateBindingV1;
+use tracedecay_application::ResolvedScope;
+use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision,
     DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
     ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId, LanguageId, ManifestDigest,
-    PolicyRevisionId, Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId,
+    PolicyRevisionId, Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId, ProjectId,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
     ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryNormalizationRevision,
     RelationEdgeKindV1, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrievalFailure,
@@ -185,6 +194,15 @@ pub struct QueryCandidateRowV1 {
     pub query_id: String,
     pub ranked: Vec<RankedCandidateRowV1>,
     pub abstained: bool,
+    pub historical: HistoricalQueryExecutionV1,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", content = "reason", rename_all = "snake_case")]
+pub enum HistoricalQueryExecutionV1 {
+    NotRequested,
+    Complete,
+    Unavailable(HistoricalGitReadUnavailableReasonV1),
 }
 
 /// Truthful execution state for an optional evaluated retrieval stage.
@@ -368,6 +386,9 @@ struct PublishedCorpus {
     generation: CodeIndexPublishedGenerationV1,
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
     file_scopes: BTreeMap<String, String>,
+    repo_root: PathBuf,
+    source_commit: GitOidV1,
+    corpus: Vec<CorpusDocumentV1>,
     corpus_digest: String,
     eligible_chunks: u64,
 }
@@ -799,12 +820,15 @@ fn retrieve_one_query(
     query: &WorkloadQueryV1,
 ) -> Result<QueryCandidateRowV1, CandidateOutputError> {
     let composed = compose_production_query(published, profile, query)?;
-    let ranked = map_ranked_candidates(published, &composed)?;
+    let mut ranked = map_ranked_candidates(published, &composed)?;
+    let (historical, historical_ranked) = historical_candidates(published, query)?;
+    ranked.extend(historical_ranked);
     let abstained = ranked.is_empty();
     Ok(QueryCandidateRowV1 {
         query_id: query.query_id.clone(),
         ranked,
         abstained,
+        historical,
     })
 }
 
@@ -1027,13 +1051,16 @@ fn map_ranked_candidates(
 ) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
     let mut rows = Vec::new();
     for ranked in &output.ranked_candidates {
-        let occurrence = ranked.candidate.occurrences.first().map_or_else(
-            || ranked.candidate.anchor_id.as_str().to_owned(),
-            |occurrence| occurrence.source_occurrence_id.as_str().to_owned(),
-        );
         let entry = published
             .occurrence_map
-            .get(&occurrence)
+            .get(ranked.candidate.anchor_id.as_str())
+            .or_else(|| {
+                ranked.candidate.occurrences.iter().find_map(|occurrence| {
+                    published
+                        .occurrence_map
+                        .get(occurrence.source_occurrence_id.as_str())
+                })
+            })
             .cloned()
             .ok_or_else(|| {
                 CandidateOutputError::Contract(format!(
@@ -1055,6 +1082,135 @@ fn map_ranked_candidates(
         });
     }
     Ok(rows)
+}
+
+fn historical_candidates(
+    published: &PublishedCorpus,
+    query: &WorkloadQueryV1,
+) -> Result<(HistoricalQueryExecutionV1, Vec<RankedCandidateRowV1>), CandidateOutputError> {
+    if !query.strata.iter().any(|stratum| {
+        matches!(
+            stratum.as_str(),
+            "incremental_edit"
+                | "incremental_delete"
+                | "incremental_rename"
+                | "renamed_moved_symbol"
+        )
+    }) {
+        return Ok((HistoricalQueryExecutionV1::NotRequested, Vec::new()));
+    }
+
+    let marker = crate::storage::read_repository_identity_marker(&published.repo_root)
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(
+                "historical evaluator requires the authoritative repository identity marker"
+                    .to_owned(),
+            )
+        })?;
+    let project_id = ProjectId::new(marker.project_id.clone())
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let identity = crate::repository_provenance::RepositoryProvenanceAdmissionContext::
+        from_authoritative_project_marker(&published.repo_root, &project_id, &marker)
+        .and_then(|context| context.admitted_identity())
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(
+                "historical evaluator could not resolve authoritative repository identity"
+                    .to_owned(),
+            )
+        })?;
+    let scope = ResolvedScope::new(identity.0, identity.1, identity.2, None)
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let authority = GitReadAuthorityV1::new(&published.repo_root, scope.clone());
+
+    let paths: Vec<String> = published
+        .corpus
+        .iter()
+        .filter(|document| query.allowed_scopes.contains(&document.scope))
+        .map(|document| document.path.clone())
+        .collect();
+    let authorization = if paths.is_empty() {
+        None
+    } else {
+        Some(
+            HistoricalSourceAuthorizationV1::new(
+                scope.clone(),
+                [published.source_commit.clone()],
+                paths.clone(),
+            )
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        )
+    };
+    let (terms, _) = lexical_terms(&query.query);
+    let request = HistoricalQueryRequestV1 {
+        commits: vec![published.source_commit.clone()],
+        paths,
+        terms,
+        rename_mode: HistoricalRenameModeV1::FollowExactObjectRenames,
+        max_results: 32,
+        max_blob_bytes: 8 * 1024 * 1024,
+        max_total_bytes: 32 * 1024 * 1024,
+    };
+    match execute_historical_git_read(Some(&authority), &scope, authorization.as_ref(), &request) {
+        HistoricalGitReadOutcomeV1::Unavailable { reason } => {
+            Ok((HistoricalQueryExecutionV1::Unavailable(reason), Vec::new()))
+        }
+        HistoricalGitReadOutcomeV1::Complete {
+            scope: returned_scope,
+            result,
+        } => {
+            if returned_scope != scope || result.scope != scope {
+                return Err(CandidateOutputError::Contract(
+                    "historical evaluator received cross-scope evidence".to_owned(),
+                ));
+            }
+            let mut rows = Vec::new();
+            for evidence in result.evidence {
+                let document = published
+                    .corpus
+                    .iter()
+                    .find(|document| document.path == evidence.path)
+                    .ok_or_else(|| {
+                        CandidateOutputError::Contract(format!(
+                            "historical evidence path {} is outside the corpus",
+                            evidence.path
+                        ))
+                    })?;
+                if !query.allowed_scopes.contains(&document.scope) {
+                    return Err(CandidateOutputError::Contract(format!(
+                        "historical evidence path {} escaped allowed scopes",
+                        evidence.path
+                    )));
+                }
+                let anchors: Vec<_> = evidence
+                    .anchors
+                    .iter()
+                    .flat_map(|anchor| {
+                        [
+                            format!(
+                                "git:{}:{}::{}",
+                                evidence.commit.as_str(),
+                                evidence.path,
+                                anchor.term
+                            ),
+                            format!("{}::{}", evidence.path, anchor.term),
+                        ]
+                    })
+                    .collect();
+                let Some(anchor) = anchors.first().cloned() else {
+                    continue;
+                };
+                rows.push(RankedCandidateRowV1 {
+                    anchor,
+                    anchors,
+                    scope: document.scope.clone(),
+                    document_id: document.document_id.clone(),
+                    tier: "historical_exact".to_owned(),
+                });
+            }
+            Ok((HistoricalQueryExecutionV1::Complete, rows))
+        }
+    }
 }
 
 fn publish_corpus(
@@ -1210,6 +1366,10 @@ fn publish_corpus_with_scale(
         generation,
         occurrence_map,
         file_scopes,
+        repo_root: repo_root.to_path_buf(),
+        source_commit: GitOidV1::new(workload.source_repository_commit.clone())
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        corpus: workload.corpus.clone(),
         corpus_digest,
         eligible_chunks,
     })
@@ -1539,6 +1699,14 @@ fn lexical_terms(query: &str) -> (Vec<String>, Vec<String>) {
             continue;
         }
         whole.push(token.to_owned());
+        if token.contains('_')
+            || token
+                .chars()
+                .skip(1)
+                .any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        {
+            continue;
+        }
         for part in split_identifier(token) {
             if part != token {
                 subtokens.push(part);
@@ -1675,6 +1843,21 @@ mod tests {
         workload.queries[0].label = None;
         let error = validate_workload_for_tuning(&workload).expect_err("missing label");
         assert!(error.to_string().contains("missing its checked-in label"));
+    }
+
+    #[test]
+    fn technical_query_tokens_do_not_leak_common_subtokens() {
+        assert_eq!(
+            lexical_terms("qzxw_owner_validation_absent_551"),
+            (
+                vec!["qzxw_owner_validation_absent_551".to_owned()],
+                Vec::new()
+            )
+        );
+        assert_eq!(
+            lexical_terms("SessionEvidenceMetadataV1"),
+            (vec!["SessionEvidenceMetadataV1".to_owned()], Vec::new())
+        );
     }
 
     #[test]
@@ -1835,6 +2018,27 @@ mod tests {
                     published.occurrence_map.contains_key(&graph_occurrence),
                     "missing exact graph occurrence {graph_occurrence}"
                 );
+            }
+        }
+
+        for profile in &workload.profile_matrix {
+            for query in &workload.queries {
+                let output =
+                    compose_production_query(&published, profile, query).expect("production query");
+                for ranked in output.ranked_candidates {
+                    assert!(
+                        published
+                            .occurrence_map
+                            .contains_key(ranked.candidate.anchor_id.as_str())
+                            || ranked.candidate.occurrences.iter().any(|occurrence| {
+                                published
+                                    .occurrence_map
+                                    .contains_key(occurrence.source_occurrence_id.as_str())
+                            }),
+                        "ranked candidate {} has no corpus occurrence binding",
+                        ranked.candidate.anchor_id
+                    );
+                }
             }
         }
     }

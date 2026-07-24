@@ -644,6 +644,7 @@ async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
         store_administration,
         project_open_gates,
         super::super::DaemonInvocationState::default(),
+        super::super::http_application::DaemonHttpApplicationRegistry::default(),
         handshake,
         initialize_request,
         Some(Arc::clone(&attempts)),
@@ -752,19 +753,15 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(client_identity.global_db_path.clone()),
     };
-    drop(
-        crate::tracedecay::TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize project"),
-    );
-    let registry = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path)
+    let project_runtime = crate::tracedecay::TraceDecay::init_with_options(&project, options)
         .await
-        .expect("open global registry");
+        .expect("initialize project");
+    let registry = Arc::clone(project_runtime.profile_database());
     registry
         .upsert_code_project("mcp-bootstrap-route-project", &project, None, None, None)
         .await
         .expect("register initialize root");
-    drop(registry);
+    drop(project_runtime);
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)

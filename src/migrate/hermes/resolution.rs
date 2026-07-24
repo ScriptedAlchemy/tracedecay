@@ -3,10 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use libsql::Connection;
-
 use super::copy::table_columns;
-use crate::global_db::GlobalDb;
+use crate::db::engine::QueryExecutor;
+use crate::global_db::RegisteredGlobalDb;
 
 pub(crate) struct ResolvedTargetProject {
     pub(crate) root: PathBuf,
@@ -65,10 +64,12 @@ fn real_project_root(
 }
 
 fn target_key(target: &ResolvedTargetProject) -> String {
-    target
-        .registry_project_id
-        .clone()
-        .unwrap_or_else(|| format!("path:{}", GlobalDb::canonical_project_key(&target.root)))
+    target.registry_project_id.clone().unwrap_or_else(|| {
+        format!(
+            "path:{}",
+            RegisteredGlobalDb::canonical_project_key(&target.root)
+        )
+    })
 }
 
 fn project_identity_collision(
@@ -120,7 +121,7 @@ async fn resolve_project_candidate(
     candidate: &Path,
     user_home: &Path,
     hermes_homes: &[PathBuf],
-    registry: Option<&GlobalDb>,
+    registry: Option<&RegisteredGlobalDb>,
 ) -> Result<Option<ResolvedTargetProject>, String> {
     if !candidate.is_absolute() {
         return Ok(None);
@@ -128,12 +129,16 @@ async fn resolve_project_candidate(
 
     let canonical_candidate = canonicalize_with_missing_tail(candidate);
     let context = if let Some(registry) = registry {
-        let direct = registry.project_registry_context_by_alias(candidate).await;
+        let direct = registry
+            .project_registry_context_by_alias(candidate)
+            .await
+            .map_err(|error| error.to_string())?;
         match (direct, canonical_candidate.as_deref()) {
             (Some(context), _) => Some(context),
-            (None, Some(canonical)) if canonical != candidate => {
-                registry.project_registry_context_by_alias(canonical).await
-            }
+            (None, Some(canonical)) if canonical != candidate => registry
+                .project_registry_context_by_alias(canonical)
+                .await
+                .map_err(|error| error.to_string())?,
             _ => None,
         }
     } else {
@@ -175,38 +180,20 @@ async fn resolve_project_candidate(
     )
 }
 
-pub(crate) async fn resolve_target_project(
-    source: Option<&Connection>,
+pub(crate) async fn resolve_target_project<Q>(
+    source: Option<&Q>,
+    registry: Option<&RegisteredGlobalDb>,
     config_path: &Path,
     user_home: &Path,
     hermes_homes: &[PathBuf],
-    tracedecay_profile_root: &Path,
-) -> Result<ResolvedTargetProject, String> {
-    let registry_path = tracedecay_profile_root.join("global.db");
-    let registry = if registry_path.is_file() {
-        Some(
-            GlobalDb::open_read_only_at(&registry_path)
-                .await
-                .ok_or_else(|| {
-                    format!(
-                        "could not open project registry '{}' read-only",
-                        registry_path.display()
-                    )
-                })?,
-        )
-    } else {
-        None
-    };
-
+) -> Result<ResolvedTargetProject, String>
+where
+    Q: QueryExecutor + ?Sized,
+{
     if let Some(pin) = crate::agents::hermes::read_config_pinned_project_root(config_path) {
-        return resolve_project_candidate(
-            Path::new(&pin),
-            user_home,
-            hermes_homes,
-            registry.as_ref(),
-        )
-        .await?
-        .ok_or_else(|| format!("legacy project pin '{pin}' is not a resolvable code project"));
+        return resolve_project_candidate(Path::new(&pin), user_home, hermes_homes, registry)
+            .await?
+            .ok_or_else(|| format!("legacy project pin '{pin}' is not a resolvable code project"));
     }
 
     let source = source
@@ -270,8 +257,7 @@ pub(crate) async fn resolve_target_project(
                 continue;
             }
             let resolved =
-                resolve_project_candidate(&candidate, user_home, hermes_homes, registry.as_ref())
-                    .await?;
+                resolve_project_candidate(&candidate, user_home, hermes_homes, registry).await?;
             let Some(target) = resolved else {
                 row_has_unresolved_project_evidence = true;
                 continue;

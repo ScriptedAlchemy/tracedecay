@@ -1,5 +1,4 @@
-use libsql::Connection;
-
+use crate::db::engine::Executor;
 use crate::global_db::global_db_operation_error;
 
 /// Adds the durable, project-local authority for PR11 index transactions.
@@ -8,8 +7,8 @@ use crate::global_db::global_db_operation_error;
 /// one mutable phase/epoch state; terminal receipts are append-only.  A
 /// repository quarantine is retained after a proven resolution rather than
 /// deleted, so recovery evidence survives restart.
-pub(in crate::global_db) async fn ensure_git_index_transaction_schema(
-    connection: &Connection,
+pub(crate) async fn ensure_git_index_transaction_schema(
+    connection: &impl Executor,
 ) -> crate::errors::Result<()> {
     connection
         .execute_batch(

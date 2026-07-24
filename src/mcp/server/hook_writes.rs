@@ -9,18 +9,18 @@ use std::sync::Arc;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::hook_events::{self, HookAgent};
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::tracedecay::TraceDecay;
 
 /// Complete hook-driven branch write requested by the MCP server.
 ///
 /// `incremental_sync_agent` is set only for a routed worktree operation. In
-/// that case the writer must keep any opened [`TraceDecay`] handle inside the
+/// that case the writer must keep the retained [`TraceDecay`] handle inside the
 /// returned future until the conditional incremental sync has completed.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct HookBranchWriteRequest {
+    pub(crate) graph: Arc<TraceDecay>,
     pub(crate) root: PathBuf,
     pub(crate) branch: String,
-    pub(crate) open_options: TraceDecayOpenOptions,
     pub(crate) incremental_sync_agent: Option<HookAgent>,
 }
 
@@ -53,20 +53,31 @@ pub(crate) fn direct_hook_branch_writer() -> HookBranchWriter {
 pub(crate) async fn execute_hook_branch_write_direct(
     request: HookBranchWriteRequest,
 ) -> Result<HookBranchWriteResult> {
-    let branch_outcome = TraceDecay::add_branch_tracking_with_options(
-        &request.root,
-        &request.branch,
-        request.open_options.clone(),
-    )
-    .await?;
+    if request.graph.branch_drifted() {
+        return Err(TraceDecayError::Config {
+            message: "retained hook branch graph drifted before write".to_string(),
+        });
+    }
+    let branch_outcome = request
+        .graph
+        .track_worktree_branch(&request.root, &request.branch)
+        .await?;
     let mut refresh_file_token_map = false;
 
     if branch_outcome == crate::branch::BranchAddOutcome::AlreadyTracked
         && let Some(agent) = request.incremental_sync_agent
     {
-        let worktree_cg =
-            TraceDecay::open_with_options(&request.root, request.open_options).await?;
-        refresh_file_token_map = run_hook_incremental_sync_direct(&worktree_cg, agent).await?;
+        let canonical_root = request
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| request.root.clone());
+        let active_branch = crate::branch::current_branch(&canonical_root);
+        if request.graph.project_root() == canonical_root
+            && request.graph.active_branch() == active_branch.as_deref()
+        {
+            refresh_file_token_map =
+                run_hook_incremental_sync_direct(request.graph.as_ref(), agent).await?;
+        }
     }
 
     Ok(HookBranchWriteResult {
@@ -94,16 +105,16 @@ pub(crate) async fn run_hook_incremental_sync_direct(
 }
 
 /// Complete detached read-refresh write requested by the MCP server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct BackgroundRefreshRequest {
+    pub(crate) graph: Arc<TraceDecay>,
     pub(crate) project_root: PathBuf,
-    pub(crate) open_options: TraceDecayOpenOptions,
     pub(crate) full_sync_escalation_files: usize,
 }
 
 /// Injectable ownership boundary for a detached read refresh. The returned
-/// token map is the only state allowed to cross back into the server; any
-/// temporary [`TraceDecay`] handle must remain inside the callback future.
+/// token map is the only state allowed to cross back into the server; the
+/// retained [`TraceDecay`] handle remains owned by the callback future.
 pub(crate) type BackgroundRefreshWriter = Arc<
     dyn Fn(
             BackgroundRefreshRequest,
@@ -120,7 +131,19 @@ pub(crate) fn direct_background_refresh_writer() -> BackgroundRefreshWriter {
 pub(crate) async fn execute_background_refresh_direct(
     request: BackgroundRefreshRequest,
 ) -> Result<Option<HashMap<String, u64>>> {
-    let cg = TraceDecay::open_with_options(&request.project_root, request.open_options).await?;
+    let canonical_root = request
+        .project_root
+        .canonicalize()
+        .unwrap_or_else(|_| request.project_root.clone());
+    let active_branch = crate::branch::current_branch(&canonical_root);
+    if request.graph.project_root() != canonical_root
+        || request.graph.active_branch() != active_branch.as_deref()
+    {
+        return Err(TraceDecayError::Config {
+            message: "retained background refresh graph is stale".to_string(),
+        });
+    }
+    let cg = request.graph;
     let scoped = match (
         request.full_sync_escalation_files,
         cg.last_synced_commit().await,

@@ -94,14 +94,13 @@ pub(super) fn validate_snapshot_registry_completeness(
 }
 
 pub(super) async fn snapshot_from_executor(
-    executor: &impl ConfigurationQueryExecutor,
+    executor: &impl QueryExecutor,
     revision_id: &ConfigurationRevisionId,
     expected_snapshot_id: &str,
     expected_behavior_digest: &str,
     expected_provenance_digest: &str,
 ) -> ConfigurationStoreResult<ConfigurationSnapshotV1> {
     let mut rows = executor
-        .query_connection()
         .query(
             "SELECT key, schema_revision, typed_value
              FROM configuration_entries
@@ -186,11 +185,10 @@ fn revision_from_metadata(
 }
 
 pub(super) async fn read_revision_from_executor(
-    executor: &impl ConfigurationQueryExecutor,
+    executor: &impl QueryExecutor,
     revision_id: &ConfigurationRevisionId,
 ) -> ConfigurationStoreResult<Option<ConfigurationRevisionRecordV1>> {
     let mut rows = executor
-        .query_connection()
         .query(
             "SELECT revision_id, parent_revision_id, snapshot_id,
                     effective_behavior_digest, resolution_provenance_digest,
@@ -223,11 +221,10 @@ pub(super) async fn read_revision_from_executor(
 }
 
 pub(super) async fn read_change_plan_from_executor(
-    executor: &impl ConfigurationQueryExecutor,
+    executor: &impl QueryExecutor,
     plan_id: &ChangePlanId,
 ) -> ConfigurationStoreResult<Option<ConfigurationProtectedPlanRecordV1>> {
     let mut rows = executor
-        .query_connection()
         .query(
             "SELECT p.plan_id, p.actor_id, p.base_revision_id, p.operation_digest,
                     p.resolved_scope_digest, p.membership_digest,
@@ -255,10 +252,9 @@ pub(super) async fn read_change_plan_from_executor(
 }
 
 pub(super) async fn current_revision_id_from_executor(
-    executor: &impl ConfigurationQueryExecutor,
+    executor: &impl QueryExecutor,
 ) -> ConfigurationStoreResult<ConfigurationRevisionId> {
     let mut rows = executor
-        .query_connection()
         .query(
             "SELECT revision_id
              FROM configuration_revisions AS candidate

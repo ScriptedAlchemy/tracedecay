@@ -12,6 +12,16 @@ use std::time::Duration;
 async fn read_refresh_uses_injected_writer_without_direct_fallback() {
     let (cg, dir, _pin) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
+    // `init_indexed_repo` persists `session_start_sync = false`, but the handle
+    // it returns still carries the init-time config snapshot (default true).
+    // Re-open the project so the constructed server honors the persisted
+    // setting and does not spawn a startup catch-up that would also drive the
+    // injected writer, leaving this test's explicit read refresh as the only
+    // observed call.
+    drop(cg);
+    let cg = crate::tracedecay::TraceDecay::open(&root)
+        .await
+        .expect("reopen project with persisted startup-sync config");
     let source_path = root.join("src/a.rs");
     std::fs::write(&source_path, "pub fn a() { println!(\"changed\"); }\n").expect("modify source");
     std::fs::File::options()

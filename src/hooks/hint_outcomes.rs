@@ -43,7 +43,9 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, GlobalDb};
+use crate::global_db::{
+    AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, RegisteredGlobalDb,
+};
 
 use super::tool_hints::expected_tools_for_key;
 
@@ -102,9 +104,9 @@ enum Resolution {
 /// to) `analytics_db`; reads session activity from `sessions_db`. Best-effort:
 /// query errors are swallowed and simply leave hints unresolved for a later
 /// pass.
-pub async fn correlate_hint_outcomes(
-    analytics_db: &GlobalDb,
-    sessions_db: &GlobalDb,
+pub(crate) async fn correlate_hint_outcomes(
+    analytics_db: &RegisteredGlobalDb,
+    sessions_db: &RegisteredGlobalDb,
     project_id: &str,
     now_secs: i64,
 ) -> HintOutcomeStats {
@@ -181,7 +183,7 @@ pub async fn correlate_hint_outcomes(
 
 /// Loads the set of `hint_id`s that already carry a `hint_outcome` event for
 /// this project so resolved hints are never rewritten.
-async fn resolved_hint_ids(analytics_db: &GlobalDb, project_id: &str) -> HashSet<String> {
+async fn resolved_hint_ids(analytics_db: &RegisteredGlobalDb, project_id: &str) -> HashSet<String> {
     let outcomes = analytics_db
         .query_analytics_events(&AnalyticsEventQuery {
             project_id: Some(project_id.to_string()),

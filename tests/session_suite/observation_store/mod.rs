@@ -1,11 +1,12 @@
 mod retrieval_anchors;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::{
     AnchorDurabilityClass, AnchorSourceGenerationV2, ClaudeByteRangeV1, ClaudeFileGenerationV1,
     ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, CommitId,
@@ -31,9 +32,13 @@ use tracedecay_store::{
     build_observation_retrieval_anchor_v2,
 };
 
-use crate::common::{isolated_lcm_db_path, open_lcm_db};
-
 const GENERATION: u64 = 7;
+
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
 
 fn source() -> ClaudeSourceIdentityV1 {
     ClaudeSourceIdentityV1::new(SessionId::new("session.observation-store").unwrap()).unwrap()
@@ -535,36 +540,31 @@ fn observation_write_requires_exact_source_contiguity() {
     ));
 }
 
-async fn user_table_counts(tmp: &TempDir) -> BTreeMap<String, i64> {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
+fn user_table_counts(database_path: &Path) -> BTreeMap<String, i64> {
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT name
              FROM sqlite_master
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
              ORDER BY name",
-            (),
         )
-        .await
         .unwrap();
-    let mut tables = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        tables.push(row.get::<String>(0).unwrap());
-    }
-    drop(rows);
+    let tables = statement
+        .query_map((), |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    drop(statement);
 
     let mut counts = BTreeMap::new();
     for table in tables {
         let quoted = table.replace('"', "\"\"");
-        let mut rows = conn
-            .query(&format!("SELECT COUNT(*) FROM \"{quoted}\""), ())
-            .await
+        let count = conn
+            .query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), (), |row| {
+                row.get(0)
+            })
             .unwrap();
-        let count = rows.next().await.unwrap().unwrap().get(0).unwrap();
         counts.insert(table, count);
     }
     counts
@@ -586,11 +586,17 @@ fn table_deltas(
 #[tokio::test]
 async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row_atomically() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(0, 100, "receipt.atomic", "first sanitized payload");
     let expected_cursor = cursor(100);
-    let before = user_table_counts(&tmp).await;
+    let before = user_table_counts(&database_path);
 
     let outcome = store
         .persist_observation(write(candidate.clone(), None))
@@ -635,19 +641,13 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         ObservationProjectionStatus::Queued
     );
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let mut columns = raw_conn.prepare("PRAGMA table_info(observations)").unwrap();
+    let column_names = columns
+        .query_map((), |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    let mut columns = raw_conn
-        .query("PRAGMA table_info(observations)", ())
-        .await
-        .unwrap();
-    let mut column_names = Vec::new();
-    while let Some(row) = columns.next().await.unwrap() {
-        column_names.push(row.get::<String>(1).unwrap());
-    }
     assert!(
         !column_names.iter().any(|name| name == "idempotency_key"),
         "new schemas must use observation_id as the sole idempotency identity"
@@ -657,9 +657,8 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         raw_conn
             .execute(
                 "UPDATE observations SET observation_json = '{}' WHERE observation_id = ?1",
-                libsql::params![candidate.observation_id().as_str()],
+                rusqlite::params![candidate.observation_id().as_str()],
             )
-            .await
             .is_err(),
         "immutable observations must reject updates"
     );
@@ -667,9 +666,8 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         raw_conn
             .execute(
                 "DELETE FROM observations WHERE observation_id = ?1",
-                libsql::params![candidate.observation_id().as_str()],
+                rusqlite::params![candidate.observation_id().as_str()],
             )
-            .await
             .is_err(),
         "immutable observations must reject deletes"
     );
@@ -678,9 +676,8 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
             .execute(
                 "UPDATE retrieval_anchors SET projection_generation = 'projection.mutated' \
                  WHERE anchor_id = ?1",
-                libsql::params![receipt.retrieval_anchor_id().as_str()],
+                rusqlite::params![receipt.retrieval_anchor_id().as_str()],
             )
-            .await
             .is_err(),
         "stable retrieval anchors must reject updates"
     );
@@ -688,14 +685,13 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         raw_conn
             .execute(
                 "DELETE FROM observation_retrieval_anchors WHERE observation_id = ?1",
-                libsql::params![candidate.observation_id().as_str()],
+                rusqlite::params![candidate.observation_id().as_str()],
             )
-            .await
             .is_err(),
         "observation retrieval anchor bindings must reject deletes"
     );
 
-    let deltas = table_deltas(&before, &user_table_counts(&tmp).await);
+    let deltas = table_deltas(&before, &user_table_counts(&database_path));
     assert_eq!(
         deltas.len(),
         7,
@@ -718,8 +714,18 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
 #[tokio::test]
 async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let bootstrap = profile_runtime(&tmp).await;
+    let db_path = bootstrap
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    drop(bootstrap);
+    std::fs::remove_file(&db_path).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = db_path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(sidecar));
+    }
     let original = observation(0, 100, "receipt.legacy.original", "legacy payload");
     let original_cursor = cursor(100);
     let legacy_idempotency_key = {
@@ -733,8 +739,7 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
     let mut legacy_wire = serde_json::to_value(&original).unwrap();
     legacy_wire["idempotency_key"] = legacy_idempotency_key.clone().into();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TABLE sanitization_receipts (
@@ -754,21 +759,19 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
                 FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
             );",
         )
-        .await
         .unwrap();
     raw_conn
         .execute(
             "INSERT INTO sanitization_receipts
                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
              VALUES (?1, ?2, ?3, ?4)",
-            libsql::params![
+            rusqlite::params![
                 original.receipt().receipt().receipt_id().as_str(),
                 original.receipt().receipt().sanitizer_version().as_str(),
                 original.payload_reference().digest().as_str(),
                 serde_json::to_string(original.receipt()).unwrap()
             ],
         )
-        .await
         .unwrap();
     raw_conn
         .execute(
@@ -776,7 +779,7 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
                 (observation_id, idempotency_key, payload_digest, receipt_id,
                  observation_json, committed_cursor_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            libsql::params![
+            rusqlite::params![
                 original.observation_id().as_str(),
                 legacy_idempotency_key,
                 original.payload_reference().digest().as_str(),
@@ -785,15 +788,17 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
                 serde_json::to_string(&original_cursor).unwrap()
             ],
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
-    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
-        .await
+    let runtime = profile_runtime(&tmp).await;
+    assert_eq!(
+        runtime.database_path(HostAdmissionScope::Profile),
+        Some(db_path.as_path())
+    );
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let store = GlobalDbObservationStore::new(&db);
     let stored = store
         .get_observation(original.observation_id())
         .await
@@ -830,33 +835,35 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
         .persist_observation(write(next.clone(), Some(original_cursor)))
         .await
         .unwrap();
-    let verify_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let verify_conn = verify_db.connect().unwrap();
-    let mut rows = verify_conn
-        .query("SELECT name FROM pragma_table_xinfo('observations')", ())
-        .await
+    let verify_conn = rusqlite::Connection::open(&db_path).unwrap();
+    let mut statement = verify_conn
+        .prepare("SELECT name FROM pragma_table_xinfo('observations')")
         .unwrap();
-    let mut columns = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        columns.push(row.get::<String>(0).unwrap());
-    }
+    let columns = statement
+        .query_map((), |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert!(!columns.iter().any(|name| name == "idempotency_key"));
-    let mut rows = verify_conn
-        .query(
+    drop(statement);
+    let mut statement = verify_conn
+        .prepare(
             "SELECT migration FROM global_schema_migrations
              WHERE migration IN (?1, ?2)
              ORDER BY migration",
-            libsql::params![
+        )
+        .unwrap();
+    let migration_markers = statement
+        .query_map(
+            rusqlite::params![
                 "observation-repository-provenance-v1",
                 "observation-retrieval-anchors-v2"
             ],
+            |row| row.get::<_, String>(0),
         )
-        .await
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let mut migration_markers = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        migration_markers.push(row.get::<String>(0).unwrap());
-    }
     assert_eq!(
         migration_markers,
         vec![
@@ -865,8 +872,9 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
         ],
         "an existing global database must record both resumable anchor upgrades"
     );
-    let mut rows = verify_conn
-        .query(
+    drop(statement);
+    let mut statement = verify_conn
+        .prepare(
             "SELECT name FROM sqlite_master
              WHERE type IN ('table', 'trigger')
                AND name IN (
@@ -875,14 +883,13 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
                    'observation_repository_provenance_immutable_delete'
                )
              ORDER BY name",
-            (),
         )
-        .await
         .unwrap();
-    let mut provenance_schema = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        provenance_schema.push(row.get::<String>(0).unwrap());
-    }
+    let provenance_schema = statement
+        .query_map((), |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(
         provenance_schema,
         vec![
@@ -891,33 +898,39 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
             "observation_repository_provenance_immutable_update".to_owned(),
         ]
     );
+    drop(statement);
     assert!(
         verify_conn
             .execute(
                 "UPDATE observation_repository_provenance
                  SET availability_json = availability_json
                  WHERE observation_id = ?1",
-                libsql::params![original.observation_id().as_str()],
+                rusqlite::params![original.observation_id().as_str()],
             )
-            .await
             .is_err(),
         "an upgraded provenance attachment must be immutable"
     );
-    let mut rows = verify_conn
-        .query(
+    let exists = verify_conn
+        .query_row(
             "SELECT sequence FROM observations WHERE observation_id = ?1",
-            libsql::params![next.observation_id().as_str()],
+            rusqlite::params![next.observation_id().as_str()],
+            |_| Ok(()),
         )
-        .await
-        .unwrap();
-    assert!(rows.next().await.unwrap().is_some());
+        .is_ok();
+    assert!(exists);
 }
 
 #[tokio::test]
 async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_store() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(0, 100, "receipt.duplicate", "stable sanitized payload");
 
     let first = store
@@ -932,7 +945,7 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
         .get_source_cursor(candidate.source(), candidate.scope())
         .await
         .unwrap();
-    let counts_before = user_table_counts(&tmp).await;
+    let counts_before = user_table_counts(&database_path);
 
     let duplicate_write =
         ObservationWrite::new(candidate, None, original_receipt.committed_cursor().clone())
@@ -961,14 +974,20 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
             .unwrap(),
         cursor_before
     );
-    assert_eq!(user_table_counts(&tmp).await, counts_before);
+    assert_eq!(user_table_counts(&database_path), counts_before);
 }
 
 #[tokio::test]
 async fn relocated_native_duplicate_advances_coverage_without_reinserting_observation() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let original = native_observation(
         1,
         41,
@@ -986,7 +1005,7 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
         other => panic!("first native observation must commit, got {other:?}"),
     };
     let original_cursor = native_cursor(1, 42);
-    let counts_after_original = user_table_counts(&tmp).await;
+    let counts_after_original = user_table_counts(&database_path);
 
     let relocated = native_observation(
         2,
@@ -1020,7 +1039,7 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
             .unwrap(),
         Some(native_cursor(2, 72))
     );
-    let deltas = table_deltas(&counts_after_original, &user_table_counts(&tmp).await);
+    let deltas = table_deltas(&counts_after_original, &user_table_counts(&database_path));
     assert_eq!(
         deltas,
         BTreeMap::from([
@@ -1043,21 +1062,24 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].observation(), &original);
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT coverage_json, reason, receipt_id FROM source_cursor_advances")
         .unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT coverage_json, reason, receipt_id FROM source_cursor_advances",
-            (),
-        )
-        .await
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let row = rows.next().await.unwrap().expect("duplicate coverage row");
-    let coverage: ObservationCoverageV1 =
-        serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let coverage: ObservationCoverageV1 = serde_json::from_str(&row.0).unwrap();
     assert_eq!(coverage.generation().generation_id(), 2);
     assert_eq!(
         coverage.ordering_domain(),
@@ -1067,17 +1089,18 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
         coverage.range(),
         ObservationSourceRangeV1::new(71, 72).unwrap()
     );
-    assert_eq!(row.get::<String>(1).unwrap(), "duplicate_observation");
-    assert_eq!(row.get::<String>(2).unwrap(), "receipt.native.relocated");
-    assert!(rows.next().await.unwrap().is_none());
+    assert_eq!(row.1, "duplicate_observation");
+    assert_eq!(row.2, "receipt.native.relocated");
+    drop(statement);
+    drop(conn);
 
-    let counts_after_relocation = user_table_counts(&tmp).await;
+    let counts_after_relocation = user_table_counts(&database_path);
     let retry = store.persist_observation(relocated_write).await.unwrap();
     assert!(matches!(
         retry,
         ObservationPersistOutcome::CoveredDuplicate(_)
     ));
-    assert_eq!(user_table_counts(&tmp).await, counts_after_relocation);
+    assert_eq!(user_table_counts(&database_path), counts_after_relocation);
 
     let next = native_observation(
         2,
@@ -1114,9 +1137,15 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
 #[tokio::test]
 async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempotently() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
-    let before = user_table_counts(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let before = user_table_counts(&database_path);
     let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::BlankFrame);
 
     assert_eq!(advance.covered(), ClaudeByteRangeV1::new(0, 10).unwrap());
@@ -1141,39 +1170,40 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
             .is_empty()
     );
     assert_eq!(
-        table_deltas(&before, &user_table_counts(&tmp).await),
+        table_deltas(&before, &user_table_counts(&database_path)),
         BTreeMap::from([
             ("source_cursor_advances".to_owned(), 1),
             ("source_cursors".to_owned(), 1),
         ])
     );
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let receipt = conn
+        .query_row(
             "SELECT coverage_json, reason FROM source_cursor_advances",
             (),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
-        .await
         .unwrap();
-    let receipt = rows.next().await.unwrap().expect("cursor advance receipt");
-    let coverage: ObservationCoverageV1 =
-        serde_json::from_str(&receipt.get::<String>(0).unwrap()).unwrap();
+    let coverage: ObservationCoverageV1 = serde_json::from_str(&receipt.0).unwrap();
     assert_eq!(coverage.range().start(), 0);
     assert_eq!(coverage.range().end(), 10);
-    assert_eq!(receipt.get::<String>(1).unwrap(), "blank_frame");
-    assert!(rows.next().await.unwrap().is_none());
+    assert_eq!(receipt.1, "blank_frame");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM source_cursor_advances", (), |row| row
+            .get::<_, i64>(0),)
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
 
     store
         .advance_source_cursor(cursor_advance(
@@ -1205,8 +1235,10 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
 #[tokio::test]
 async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
 
     store
         .advance_source_cursor(cursor_advance(
@@ -1238,8 +1270,14 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
 #[tokio::test]
 async fn contiguous_observation_commit_is_atomic() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     store
         .advance_source_cursor(cursor_advance(
             None,
@@ -1252,11 +1290,7 @@ async fn contiguous_observation_commit_is_atomic() {
     let candidate = observation(10, 30, "receipt.contiguous", "retained payload");
     let write = write(candidate.clone(), Some(cursor(10)));
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TRIGGER fail_contiguous_enqueue
@@ -1264,7 +1298,6 @@ async fn contiguous_observation_commit_is_atomic() {
                 SELECT RAISE(ABORT, 'injected contiguous write failure');
              END;",
         )
-        .await
         .unwrap();
     assert!(matches!(
         store.persist_observation(write.clone()).await,
@@ -1284,7 +1317,6 @@ async fn contiguous_observation_commit_is_atomic() {
 
     raw_conn
         .execute_batch("DROP TRIGGER fail_contiguous_enqueue")
-        .await
         .unwrap();
     store.persist_observation(write).await.unwrap();
     assert_eq!(
@@ -1303,8 +1335,10 @@ async fn contiguous_observation_commit_is_atomic() {
 #[tokio::test]
 async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     store
         .advance_source_cursor(cursor_advance(
             None,
@@ -1346,10 +1380,16 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
 #[tokio::test]
 async fn sanitizer_cursor_progress_persists_typed_nonpayload_receipt_atomically() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
+    let database_path;
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
         let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::SanitizerRejected);
         assert_eq!(
             store.advance_source_cursor(advance.clone()).await.unwrap(),
@@ -1361,26 +1401,30 @@ async fn sanitizer_cursor_progress_persists_typed_nonpayload_receipt_atomically(
         );
     }
 
-    let raw_db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let row = conn
+        .query_row(
             "SELECT advance.reason, advance.receipt_id,
                     receipt.payload_digest, receipt.receipt_json
              FROM source_cursor_advances AS advance
              JOIN sanitization_receipts AS receipt
                ON receipt.receipt_id = advance.receipt_id",
             (),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
-        .await
         .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "sanitizer_rejected");
-    let receipt_id = row.get::<String>(1).unwrap();
+    assert_eq!(row.0, "sanitizer_rejected");
+    let receipt_id = row.1;
     assert!(receipt_id.starts_with("receipt.cursor.0.10."));
-    assert_eq!(row.get::<String>(2).unwrap(), "");
-    let receipt: SanitizationReceiptV1 =
-        serde_json::from_str(&row.get::<String>(3).unwrap()).unwrap();
+    assert_eq!(row.2, "");
+    let receipt: SanitizationReceiptV1 = serde_json::from_str(&row.3).unwrap();
     assert_eq!(receipt.disposition(), SanitizerDispositionV1::Rejected);
     assert!(receipt.payload().is_none());
 }
@@ -1388,8 +1432,10 @@ async fn sanitizer_cursor_progress_persists_typed_nonpayload_receipt_atomically(
 #[tokio::test]
 async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     store
         .advance_source_cursor(cursor_advance(
             None,
@@ -1445,10 +1491,11 @@ fn cursor_only_progress_rejects_file_replacement_after_zero() {
 #[tokio::test]
 async fn cursor_only_progress_survives_restart() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         store
             .advance_source_cursor(cursor_advance(
                 None,
@@ -1460,10 +1507,10 @@ async fn cursor_only_progress_survives_restart() {
             .unwrap();
     }
 
-    let reopened = tracedecay::global_db::GlobalDb::open_at_assuming_schema(&db_path)
-        .await
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let store = GlobalDbObservationStore::new(&reopened);
     assert_eq!(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
@@ -1486,8 +1533,14 @@ async fn cursor_only_progress_survives_restart() {
 #[tokio::test]
 async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchanged() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let original = observation(0, 100, "receipt.collision.original", "original payload");
     let colliding = observation(0, 100, "receipt.collision.candidate", "different payload");
 
@@ -1507,7 +1560,7 @@ async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchange
         .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
         .await
         .unwrap();
-    let counts_before = user_table_counts(&tmp).await;
+    let counts_before = user_table_counts(&database_path);
 
     let error = store
         .persist_observation(write(colliding.clone(), None))
@@ -1555,14 +1608,20 @@ async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchange
             .unwrap(),
         replay_before
     );
-    assert_eq!(user_table_counts(&tmp).await, counts_before);
+    assert_eq!(user_table_counts(&database_path), counts_before);
 }
 
 #[tokio::test]
 async fn duplicate_identity_with_a_different_receipt_is_rejected_without_mutation() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let original = observation(0, 100, "receipt.retry.original", "stable payload");
     let mismatched_receipt = observation(0, 100, "receipt.retry.changed", "stable payload");
 
@@ -1578,7 +1637,7 @@ async fn duplicate_identity_with_a_different_receipt_is_rejected_without_mutatio
         .get_source_cursor(original.source(), original.scope())
         .await
         .unwrap();
-    let counts_before = user_table_counts(&tmp).await;
+    let counts_before = user_table_counts(&database_path);
 
     let error = store
         .persist_observation(write(mismatched_receipt, None))
@@ -1602,7 +1661,7 @@ async fn duplicate_identity_with_a_different_receipt_is_rejected_without_mutatio
             .unwrap(),
         cursor_before
     );
-    assert_eq!(user_table_counts(&tmp).await, counts_before);
+    assert_eq!(user_table_counts(&database_path), counts_before);
 }
 
 #[tokio::test]
@@ -1617,21 +1676,23 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
         ("enqueue", "projection_queue"),
     ] {
         let tmp = TempDir::new().unwrap();
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
         let candidate = observation(
             0,
             100,
             &format!("receipt.fault.{stage}"),
             "rollback payload",
         );
-        let counts_before = user_table_counts(&tmp).await;
+        let counts_before = user_table_counts(&database_path);
 
-        let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-            .build()
-            .await
-            .unwrap();
-        let raw_conn = raw_db.connect().unwrap();
+        let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
         raw_conn
             .execute_batch(&format!(
                 "CREATE TRIGGER fail_observation_{stage}
@@ -1639,7 +1700,6 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
                     SELECT RAISE(ABORT, 'injected {stage} statement failure');
                  END;"
             ))
-            .await
             .unwrap();
 
         let error = store
@@ -1675,7 +1735,7 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
             "{stage} fault leaked replay state"
         );
         assert_eq!(
-            user_table_counts(&tmp).await,
+            user_table_counts(&database_path),
             counts_before,
             "{stage} fault did not roll back every table"
         );
@@ -1685,15 +1745,19 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
 #[tokio::test]
 async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate() {
     let tmp = TempDir::new().unwrap();
-    let db_left = open_lcm_db(&tmp).await;
-    let db_right =
-        tracedecay::global_db::GlobalDb::open_at_assuming_schema(&isolated_lcm_db_path(&tmp))
-            .await
-            .unwrap();
-    let store_left = GlobalDbObservationStore::new(&db_left);
-    let store_right = GlobalDbObservationStore::new(&db_right);
+    let runtime = profile_runtime(&tmp).await;
+    let store_left = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store_right = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(0, 100, "receipt.concurrent", "concurrent payload");
-    let counts_before = user_table_counts(&tmp).await;
+    let counts_before = user_table_counts(&database_path);
 
     let left = store_left.persist_observation(write(candidate.clone(), None));
     let right = store_right.persist_observation(write(candidate.clone(), None));
@@ -1724,7 +1788,7 @@ async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate()
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].sequence(), committed.sequence());
     assert_eq!(replay[0].observation(), &candidate);
-    let deltas = table_deltas(&counts_before, &user_table_counts(&tmp).await);
+    let deltas = table_deltas(&counts_before, &user_table_counts(&database_path));
     assert_eq!(deltas.len(), 7);
     assert!(deltas.values().all(|delta| *delta == 1));
 }
@@ -1732,8 +1796,14 @@ async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate()
 #[tokio::test]
 async fn stale_exact_cas_cursor_conflict_rolls_back_every_candidate_write() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let first = observation(0, 100, "receipt.cas.first", "first payload");
     let stale_candidate = observation(0, 200, "receipt.cas.stale", "stale payload");
 
@@ -1746,7 +1816,7 @@ async fn stale_exact_cas_cursor_conflict_rolls_back_every_candidate_write() {
         .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
         .await
         .unwrap();
-    let counts_before = user_table_counts(&tmp).await;
+    let counts_before = user_table_counts(&database_path);
 
     let error = store
         .persist_observation(write(stale_candidate.clone(), None))
@@ -1781,14 +1851,16 @@ async fn stale_exact_cas_cursor_conflict_rolls_back_every_candidate_write() {
             .unwrap(),
         replay_before
     );
-    assert_eq!(user_table_counts(&tmp).await, counts_before);
+    assert_eq!(user_table_counts(&database_path), counts_before);
 }
 
 #[tokio::test]
 async fn point_read_and_replay_follow_authoritative_sequence_order() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let observations = [
         observation(0, 10, "receipt.replay.1", "payload one"),
         observation(10, 20, "receipt.replay.2", "payload two"),
@@ -1857,10 +1929,16 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
         let session_id = format!("session.cross-store.{provider}");
         let record_id = format!("{provider}.message.cross-store");
         let tmp = TempDir::new().unwrap();
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
         let source = provider_source(provider, &session_id);
-        let counts_before_commit = user_table_counts(&tmp).await;
+        let counts_before_commit = user_table_counts(&database_path);
         let original = provider_observation(ProviderObservationFixture {
             provider,
             session_id: &session_id,
@@ -1881,7 +1959,7 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             other => panic!("{provider}: first persist must commit, got {other:?}"),
         };
         let cursor_after_commit = store.get_source_cursor(&source, &scope()).await.unwrap();
-        let counts_after_commit = user_table_counts(&tmp).await;
+        let counts_after_commit = user_table_counts(&database_path);
         assert_eq!(original_receipt.observation(), &original, "{provider}");
         assert_eq!(
             cursor_after_commit.as_ref(),
@@ -1919,7 +1997,7 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             "{provider}"
         );
         assert_eq!(
-            user_table_counts(&tmp).await,
+            user_table_counts(&database_path),
             counts_after_commit,
             "{provider}"
         );
@@ -1959,7 +2037,7 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             "{provider}"
         );
         assert_eq!(
-            user_table_counts(&tmp).await,
+            user_table_counts(&database_path),
             counts_after_commit,
             "{provider}"
         );
@@ -1991,7 +2069,7 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             "{provider}: reordered candidate must not persist"
         );
         assert_eq!(
-            user_table_counts(&tmp).await,
+            user_table_counts(&database_path),
             counts_after_commit,
             "{provider}"
         );
@@ -2071,17 +2149,24 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
         );
         let observation_id = original.observation_id().clone();
         let after_malformed_frame_id = after_malformed_frame.observation_id().clone();
-        let counts_before_restart = user_table_counts(&tmp).await;
+        let counts_before_restart = user_table_counts(&database_path);
         let replay_before_restart = store
             .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
             .await
             .unwrap();
         assert_eq!(replay_before_restart.len(), 2, "{provider}");
-        drop(db);
+        drop(store);
+        drop(runtime);
 
         // Crash/restart + commit-before-ack: reopen and retry the original write.
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        assert_eq!(
+            runtime.database_path(HostAdmissionScope::Profile),
+            Some(database_path.as_path())
+        );
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         let restarted_duplicate = store
             .persist_observation(provider_write(original.clone(), None))
             .await
@@ -2127,7 +2212,7 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             "{provider}"
         );
         assert_eq!(
-            user_table_counts(&tmp).await,
+            user_table_counts(&database_path),
             counts_before_restart,
             "{provider}"
         );

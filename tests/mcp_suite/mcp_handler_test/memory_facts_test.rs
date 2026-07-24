@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tracedecay::memory::store::MemoryStore;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
@@ -994,21 +993,23 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
     let first_id = first["fact"]["fact_id"].as_i64().unwrap();
 
     let db = cg.open_project_store_db().await.unwrap();
+    let mut fixture_conn = rusqlite::Connection::open(db.database_path()).unwrap();
+    let fixture_tx = fixture_conn.transaction().unwrap();
     for i in 0..205i64 {
-        db.execute_write(
-            "seed later memory facts fixture",
-            "INSERT INTO memory_facts (
+        fixture_tx
+            .execute(
+                "INSERT INTO memory_facts (
                     content, category, tags, trust_score, created_at, updated_at, source, metadata
                  )
                  VALUES (?1, 'general', '[]', 0.5, ?2, ?2, 'test', '{}')",
-            libsql::params![
-                format!("Later fact {i} should not hide the first fact"),
-                9_000_000_000i64 + i,
-            ],
-        )
-        .await
-        .unwrap();
+                rusqlite::params![
+                    format!("Later fact {i} should not hide the first fact"),
+                    9_000_000_000i64 + i,
+                ],
+            )
+            .unwrap();
     }
+    fixture_tx.commit().unwrap();
 
     let updated = handle_tool_call(
         &cg,
@@ -1208,8 +1209,10 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
     let (branch_db, _) = crate::common::open_test_database(&cg.db_path())
         .await
         .unwrap();
+    let branch_writer = branch_db.memory_writer().await.unwrap();
     assert!(
-        MemoryStore::new(branch_db.conn())
+        branch_writer
+            .store()
             .get_fact(fact_id)
             .await
             .unwrap()
@@ -1220,8 +1223,10 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
     let (project_db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
         .await
         .unwrap();
+    let project_writer = project_db.memory_writer().await.unwrap();
     assert!(
-        MemoryStore::new(project_db.conn())
+        project_writer
+            .store()
             .get_fact(fact_id)
             .await
             .unwrap()
@@ -1296,15 +1301,15 @@ async fn memory_status_reports_repair_state_without_repairing() {
     let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
     let db_path = project_graph_db(&cg);
     let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
-    db.execute_write(
-        "clear memory vector fixture",
-        "UPDATE memory_facts
+    rusqlite::Connection::open(db.database_path())
+        .unwrap()
+        .execute(
+            "UPDATE memory_facts
              SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
              WHERE fact_id = ?1",
-        libsql::params![fact_id],
-    )
-    .await
-    .unwrap();
+            rusqlite::params![fact_id],
+        )
+        .unwrap();
     db.close();
 
     // A status read alone must not repair the missing vector or rebuild banks.

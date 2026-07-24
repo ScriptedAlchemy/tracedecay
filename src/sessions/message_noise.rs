@@ -1,8 +1,8 @@
 //! Shared transcript-noise classification for message retrieval re-ranking.
 //!
 //! Both the LCM grep path (`sessions::lcm::query`, BM25-free recency/relevance
-//! grep over the raw store) and the global session-message search path
-//! (`GlobalDb::search_session_messages*`, BM25 over `session_messages_fts`)
+//! grep over the raw store) and the registered session-message search path
+//! (`RegisteredGlobalDb::search_session_messages*`, BM25 over `session_messages_fts`)
 //! surface the same failure mode: an *inventory/listing* message — a glob/find
 //! tool call over transcript directories, a path-list dump, or a prose branch/
 //! worktree roster that merely name-drops many identifiers — matches a query

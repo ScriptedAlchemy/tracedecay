@@ -50,7 +50,7 @@ const ASSET_STAMP: &str = env!("TRACEDECAY_DASHBOARD_ASSET_STAMP");
 mod app_manifest {
     include!(concat!(env!("OUT_DIR"), "/dashboard_app_assets.rs"));
 }
-use app_manifest::{APP_ASSETS, APP_ASSET_STAMP};
+use app_manifest::{APP_ASSET_STAMP, APP_ASSETS};
 
 pub(crate) struct DashboardPlugin {
     pub(crate) name: &'static str,

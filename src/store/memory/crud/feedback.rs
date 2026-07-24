@@ -28,9 +28,10 @@ use super::{
     compatibility_mirror_insert_tx, compatibility_payload_metadata, compatibility_sanitize_payload,
     compatibility_update_feedback_projection_tx, load_current_fact_tx, query_fact_lineage_tx,
 };
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use crate::db::{Database, publish_fact_feedback_finding_tx};
 use crate::privacy::sanitize_provider_metadata_text;
-use libsql::{Transaction, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
@@ -192,7 +193,7 @@ fn compatibility_feedback_action(
 
 #[allow(clippy::too_many_arguments)]
 async fn compatibility_record_feedback_history_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
     event_id: &FactEventId,
@@ -255,7 +256,7 @@ async fn compatibility_record_feedback_history_tx(
 }
 
 async fn compatibility_replay_feedback_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
@@ -303,7 +304,7 @@ async fn compatibility_replay_feedback_tx(
 }
 
 pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactFeedbackCommandV1,
 ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
     let request_digest = compatibility_digest(json!({
@@ -458,7 +459,7 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
 }
 
 pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactFeedbackHistoryQueryV1,
     repair_progress: CompatibilityFeedbackRepairProgressV1,
 ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1> {
@@ -550,7 +551,7 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
 }
 
 pub(in crate::store::memory) async fn inspect_compatibility_fact_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     target: &CompatibilityFactTargetV1,
 ) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>> {
     let Some(fact_id) = resolve_compatibility_target_tx(transaction, target).await? else {
@@ -646,7 +647,7 @@ pub(in crate::store::memory) struct PromotionAttempt {
 
 pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactProposalPromotionV1,
 ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
     let result =
@@ -656,7 +657,7 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_tx(
 
 pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_disposition_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactProposalPromotionV1,
 ) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1> {
     let material = json!({

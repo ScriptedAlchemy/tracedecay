@@ -2,7 +2,7 @@ use tracedecay_domain::{
     Confidence, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, SourceStoreId,
 };
 
-use crate::db::engine::{Executor, params};
+use crate::db::engine::params;
 use crate::errors::Result;
 
 use super::super::schema::v22_feedback_history_schema_installed;

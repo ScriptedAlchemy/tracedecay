@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, QueryExecutor, params};
 
 use super::{
     CommitEvidence, CommitRelation, CommitSessionRecord, GitCorrelationError, SpanOverlapKind,
@@ -8,7 +8,7 @@ use super::{
 const COMMIT_SWEEP_WATERMARK_KEY: &str = "commit_attribution_watermark";
 
 pub(crate) async fn read_meta_value(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     key: &str,
 ) -> Result<Option<i64>, GitCorrelationError> {
     let mut rows = conn
@@ -24,7 +24,7 @@ pub(crate) async fn read_meta_value(
 }
 
 pub(crate) async fn write_meta_value(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     key: &str,
     value: i64,
 ) -> Result<(), GitCorrelationError> {
@@ -137,7 +137,7 @@ pub fn match_commit_to_spans(
 /// time) is deliberate: historical sessions ingested after the watermark carry
 /// old event times but a fresh `updated_at`, so they still get attributed.
 async fn scan_targets_since(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     since_ts: i64,
 ) -> Result<Vec<SpanScanTarget>, GitCorrelationError> {
     let mut rows = conn
@@ -165,7 +165,7 @@ async fn scan_targets_since(
 /// Loads span windows for one `(branch, worktree)` pair, used to attribute
 /// each scanned commit.
 async fn span_windows_for(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     branch: Option<&str>,
     worktree: &str,
 ) -> Result<Vec<SpanWindow>, GitCorrelationError> {
@@ -226,7 +226,7 @@ pub struct ScannedCommit {
 
 /// Runs commit attribution for span targets touched since the last sweep.
 pub(crate) async fn run_commit_attribution_sweep<F>(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     gap_secs: i64,
     mut scan: F,
 ) -> Result<usize, GitCorrelationError>

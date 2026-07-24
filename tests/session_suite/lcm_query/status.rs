@@ -3,11 +3,9 @@ use super::*;
 #[tokio::test]
 async fn status_reports_schema_frontier_payload_and_debt_counts() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tracedecay");
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["alpha".to_string(), "beta".to_string()],
@@ -18,8 +16,7 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
     let mut external = raw_message("cursor", "tool-payload", "session-1", 3, &payload);
     external.role = "tool".to_string();
     external.kind = Some("tool_result".to_string());
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&external)
+    db.lcm_ingest_raw_message(&external)
         .await
         .expect("external payload should ingest");
 
@@ -49,7 +46,7 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
     .expect("lifecycle state should update");
 
     let status = db
-        .lcm_status("cursor", Some("session-1"))
+        .lcm_status_for_test("cursor", Some("session-1"))
         .await
         .expect("status should load");
     assert_eq!(status.schema_version, LCM_SCHEMA_VERSION);
@@ -93,56 +90,35 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
 #[tokio::test]
 async fn status_reports_payload_gc_run_metadata_after_apply() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tracedecay");
-    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-gc").await;
 
     let payload = format!("gc metadata payload\n{}", "G".repeat(300_000));
     let mut external = raw_message("cursor", "tool-gc", "session-gc", 1, &payload);
     external.role = "tool".to_string();
     external.kind = Some("tool_result".to_string());
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&external)
+    db.lcm_ingest_raw_message(&external)
         .await
         .expect("external payload should ingest");
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
     let cfg = LcmGcConfig {
         backup_before_reap: false,
         ..LcmGcConfig::default()
     };
-    let report = tracedecay::sessions::lcm::gc::run_payload_gc_with_apply(
-        &conn,
-        &storage_root,
-        "cursor",
-        Some("session-gc"),
-        &cfg,
-        true,
-        1_715_123_456,
-    )
-    .await
-    .expect("payload gc should run");
-    assert_eq!(report.status, "applied");
-
-    let mut rows = conn
-        .query(
-            "SELECT value FROM lcm_gc_meta WHERE key = 'last_gc_status'",
-            (),
+    let report = db
+        .lcm_run_payload_gc_apply_for_test(
+            HostAdmissionScope::Profile,
+            "cursor",
+            Some("session-gc"),
+            &cfg,
+            1_715_123_456,
         )
         .await
-        .expect("last GC status query should run");
-    let row = rows
-        .next()
-        .await
-        .expect("last GC status row should load")
-        .expect("last GC status should be stored");
-    let stored_status: String = row.get(0).expect("last GC status should be text");
-    assert_eq!(stored_status, "ok");
+        .expect("payload gc should run");
+    assert_eq!(report.status, "applied");
 
     let status = db
-        .lcm_status("cursor", Some("session-gc"))
+        .lcm_status_for_test("cursor", Some("session-gc"))
         .await
         .expect("status should load");
     assert_eq!(status.payload_gc.last_gc_at, Some(1_715_123_456));
@@ -159,10 +135,9 @@ async fn status_reports_payload_gc_run_metadata_after_apply() {
 #[tokio::test]
 async fn status_reports_dag_depth_distribution_store_estimate_and_config_defaults() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["alpha beta gamma".to_string(), "delta epsilon".to_string()],
@@ -195,7 +170,7 @@ async fn status_reports_dag_depth_distribution_store_estimate_and_config_default
         .expect("parent summary should insert");
 
     let status = db
-        .lcm_status("cursor", Some("session-1"))
+        .lcm_status_for_test("cursor", Some("session-1"))
         .await
         .expect("status should load");
 
@@ -222,7 +197,7 @@ async fn status_reports_dag_depth_distribution_store_estimate_and_config_default
     // An empty scope reports an inert DAG rather than dividing by zero.
     insert_session(&db, "cursor", "session-empty").await;
     let empty = db
-        .lcm_status("cursor", Some("session-empty"))
+        .lcm_status_for_test("cursor", Some("session-empty"))
         .await
         .expect("empty status should load");
     assert_eq!(empty.dag.total_nodes, 0);
@@ -235,10 +210,9 @@ async fn status_reports_dag_depth_distribution_store_estimate_and_config_default
 #[tokio::test]
 async fn status_uses_python_half_even_rounding_for_ratio_ties() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-tie",
         &["alpha".to_string(), "beta".to_string()],
@@ -256,7 +230,7 @@ async fn status_uses_python_half_even_rounding_for_ratio_ties() {
     node.source_token_count = 5; // 1.25 -> Python round(..., 1) => 1.2
     db.lcm_insert_summary_node(node).await.unwrap();
     let status = db
-        .lcm_status("cursor", Some("session-tie"))
+        .lcm_status_for_test("cursor", Some("session-tie"))
         .await
         .expect("status should load");
     assert_eq!(status.dag.compression_ratio, "1.2:1");
@@ -269,12 +243,9 @@ async fn status_uses_python_half_even_rounding_for_ratio_ties() {
 #[tokio::test]
 async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-lossy").await;
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
     let variants: &[(&str, Option<&str>)] = &[
         (
             "lossy-true",
@@ -298,26 +269,19 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
         ("null-metadata", None),
     ];
     for (idx, (message_id, metadata)) in variants.iter().enumerate() {
-        let metadata_value = match metadata {
-            Some(text) => libsql::Value::Text((*text).to_string()),
-            None => libsql::Value::Null,
-        };
-        conn.execute(
-            "INSERT INTO lcm_raw_messages (
-                provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
-             )
-             VALUES ('cursor', ?1, 'session-lossy', 'assistant', ?2, ?2,
-                     'body', 'hash', 'inline', NULL, 'body', 'body', 0, 0, ?3)",
-            libsql::params![*message_id, (idx + 1) as i64, metadata_value],
-        )
-        .await
-        .unwrap();
+        let mut message = raw_message(
+            "cursor",
+            message_id,
+            "session-lossy",
+            (idx + 1) as i64,
+            "body",
+        );
+        message.metadata_json = metadata.map(str::to_string);
+        assert!(db.upsert_session_message(&message).await);
     }
 
     let status = db
-        .lcm_status("cursor", Some("session-lossy"))
+        .lcm_status_for_test("cursor", Some("session-lossy"))
         .await
         .expect("status should load");
     assert_eq!(

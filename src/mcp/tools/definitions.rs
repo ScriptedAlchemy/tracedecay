@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 121;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 139;
 
 mod admin;
 mod analysis;
@@ -365,6 +365,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_project_search(),
         def_project_context(),
         def_files(),
+        def_git_status(),
+        def_git_diff(),
+        def_git_history(),
+        def_git_blame(),
+        def_git_hunks(),
         def_git_preview(),
         def_git_apply(),
         def_feedback_diagnostics(),
@@ -473,6 +478,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_move_symbol(),
         def_find_exact_symbol(),
     ];
+    definitions.extend(configuration_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
@@ -598,6 +604,19 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_health_read",
     "tracedecay_storage_status",
     "tracedecay_diagnostics_read",
+    "tracedecay_configuration_list",
+    "tracedecay_configuration_explain",
+    "tracedecay_configuration_get",
+    "tracedecay_configuration_set",
+    "tracedecay_configuration_unset",
+    "tracedecay_configuration_batch",
+    "tracedecay_configuration_write_credential",
+    "tracedecay_configuration_observed_state",
+    "tracedecay_configuration_protected_preview",
+    "tracedecay_configuration_protected_apply",
+    "tracedecay_configuration_rollback_preview",
+    "tracedecay_configuration_rollback_apply",
+    "tracedecay_configuration_audit",
     // analysis
     "tracedecay_dead_code",
     "tracedecay_circular",
@@ -790,15 +809,11 @@ mod tests {
             assert_eq!(properties["as_of_micros"]["minimum"], 0);
         }
 
-        assert_eq!(
-            load.input_schema["properties"]["after_store_id"]["deprecated"],
-            true
-        );
         assert!(
-            load.input_schema["properties"]["after_store_id"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("never returned or reused as next_cursor")
+            load.input_schema["properties"]
+                .get("after_store_id")
+                .is_none(),
+            "legacy offset pagination must not remain public"
         );
         assert_eq!(
             grep.input_schema["properties"]["include_summaries"]["default"],

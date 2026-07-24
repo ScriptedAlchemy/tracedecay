@@ -3,109 +3,54 @@
 use tempfile::TempDir;
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
-use tracedecay::sessions::source::try_ingest_source;
+use tracedecay::sessions::transcript_backfill::StructuredBackfillTestRuntimeV1;
+use tracedecay_domain::ProjectId;
 
 fn init_project(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     (home, project)
 }
 
-async fn raw_conn(project: &std::path::Path) -> libsql::Connection {
-    let raw = libsql::Builder::new_local(project_session_db_path(project))
-        .build()
-        .await
-        .unwrap();
-    raw.connect().unwrap()
-}
-
-async fn count_kind(project: &std::path::Path, provider: &str, kind: &str) -> i64 {
-    let conn = raw_conn(project).await;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM session_messages WHERE provider = ?1 AND kind = ?2",
-            libsql::params![provider, kind],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
-}
-
-async fn simulate_old_parser_store(project: &std::path::Path, provider: &str, kind: &str) {
-    let conn = raw_conn(project).await;
-    conn.execute(
-        "DELETE FROM lcm_raw_messages
-         WHERE provider = ?1
-           AND message_id IN (
-               SELECT message_id FROM session_messages
-               WHERE provider = ?1 AND kind = ?2)",
-        libsql::params![provider, kind],
+async fn registered_runtime(
+    tmp: &TempDir,
+    project: &std::path::Path,
+) -> StructuredBackfillTestRuntimeV1 {
+    StructuredBackfillTestRuntimeV1::project(
+        tmp.path().join("home/.tracedecay"),
+        project,
+        ProjectId::new("project.structured-backfill").unwrap(),
     )
     .await
-    .unwrap();
-    conn.execute(
-        "DELETE FROM session_messages WHERE provider = ?1 AND kind = ?2",
-        libsql::params![provider, kind],
-    )
-    .await
-    .unwrap();
-    // Reset both the retired global marker (older stores) and the per-provider
-    // markers so the version-bumped sweep re-enters from the start.
-    conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
-        (),
-    )
-    .await
-    .unwrap();
-    let _ = conn
-        .execute(
-            "DELETE FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
-            (),
-        )
-        .await;
+    .unwrap()
 }
 
-async fn load_only_goal_row(project: &std::path::Path) -> (String, Option<String>, Option<String>) {
-    let conn = raw_conn(project).await;
-    let mut rows = conn
-        .query(
-            "SELECT text, kind, metadata_json FROM session_messages
-             WHERE provider = 'codex' AND kind = 'goal'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().expect("one goal row");
-    (
-        row.get::<String>(0).unwrap(),
-        row.get::<Option<String>>(1).unwrap(),
-        row.get::<Option<String>>(2).unwrap(),
-    )
+async fn count_kind(runtime: &StructuredBackfillTestRuntimeV1, provider: &str, kind: &str) -> i64 {
+    runtime.count_kind(provider, kind).await.unwrap()
+}
+
+async fn simulate_old_parser_store(
+    runtime: &StructuredBackfillTestRuntimeV1,
+    provider: &str,
+    kind: &str,
+) {
+    runtime.remove_kind_and_reset(provider, kind).await.unwrap();
+}
+
+async fn load_only_goal_row(
+    runtime: &StructuredBackfillTestRuntimeV1,
+) -> (String, Option<String>, Option<String>) {
+    runtime.goal_row().await.unwrap()
 }
 
 /// Reads a provider's per-provider structured-backfill marker version, or the
 /// retired global marker when `provider` is `None`.
 async fn structured_marker_version(
-    project: &std::path::Path,
+    runtime: &StructuredBackfillTestRuntimeV1,
     provider: Option<&str>,
 ) -> Option<i64> {
-    let name = match provider {
-        Some(provider) => format!("structured_rows_backfill:{provider}"),
-        None => "structured_rows_backfill".to_string(),
-    };
-    let conn = raw_conn(project).await;
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            libsql::params![name],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().and_then(|row| row.get(0).ok())
+    runtime.marker_version(provider).await.unwrap()
 }
 
 fn write_codex_rollout_with_goal(
@@ -197,116 +142,102 @@ fn write_claude_transcript_with_thinking(
 
 #[tokio::test]
 async fn structured_backfill_never_replays_claude_transcripts() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
     let tmp = TempDir::new().unwrap();
     let (home, project) = init_project(&tmp);
     write_claude_transcript_with_thinking(&home, &project, "claude-thinking");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&tmp, &project).await;
     let source = ClaudeSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    runtime.seed_source(&source, &project).await.unwrap();
     // Live ingest emits the reasoning row. The structured backfill only sets
     // up its Codex state and must not claim a Claude marker.
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
+    runtime.run().await;
+    assert_eq!(count_kind(&runtime, "claude", "reasoning").await, 1);
     // The user + assistant conversational rows (both kind "message") coexist
     // with the reasoning row.
-    assert_eq!(count_kind(&project, "claude", "message").await, 2);
-    drop(db);
+    assert_eq!(count_kind(&runtime, "claude", "message").await, 2);
 
     // Remove the row and reset legacy backfill state. A second Claude parser
     // would recreate it; the observation pipeline must remain the sole
     // production Claude cursor authority, so the backfill leaves it absent.
-    simulate_old_parser_store(&project, "claude", "reasoning").await;
-    assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
+    simulate_old_parser_store(&runtime, "claude", "reasoning").await;
+    assert_eq!(count_kind(&runtime, "claude", "reasoning").await, 0);
     // Dropping reasoning rows leaves the conversational message rows untouched.
-    assert_eq!(count_kind(&project, "claude", "message").await, 2);
+    assert_eq!(count_kind(&runtime, "claude", "message").await, 2);
 
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
-    assert_eq!(count_kind(&project, "claude", "message").await, 2);
-    drop(db);
+    runtime.run().await;
+    assert_eq!(count_kind(&runtime, "claude", "reasoning").await, 0);
+    assert_eq!(count_kind(&runtime, "claude", "message").await, 2);
     assert_eq!(
-        structured_marker_version(&project, Some("claude")).await,
+        structured_marker_version(&runtime, Some("claude")).await,
         None
     );
 }
 
 #[tokio::test]
 async fn structured_backfill_inserts_codex_goal_rows_once() {
-    // `open_at` schedules the sweep on a detached background task; drive it
-    // synchronously here so the assertions observe a deterministic store.
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
     let tmp = TempDir::new().unwrap();
     let (home, project) = init_project(&tmp);
     write_codex_rollout_with_goal(&home, &project, "codex-backfill");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&tmp, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    // Drive one sweep so the backfill meta table exists (production creates it
-    // via the detached sweep `open_at` schedules); the goal row from live
-    // ingest is already present, so this inserts nothing.
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
-    drop(db);
+    runtime.seed_source(&source, &project).await.unwrap();
+    // Drive one sweep so the backfill meta table exists; the goal row from
+    // fixture ingest is already present, so this inserts nothing.
+    runtime.run().await;
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 1);
 
-    simulate_old_parser_store(&project, "codex", "goal").await;
-    assert_eq!(count_kind(&project, "codex", "goal").await, 0);
+    simulate_old_parser_store(&runtime, "codex", "goal").await;
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 0);
 
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
-    let goal = load_only_goal_row(&project).await;
+    runtime.run().await;
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 1);
+    let goal = load_only_goal_row(&runtime).await;
     assert_eq!(goal.0, "ship the ingestion backfill", "goal text");
     assert_eq!(goal.1.as_deref(), Some("goal"), "goal kind");
     assert!(
         goal.2.is_some_and(|meta| meta.contains("objective")),
         "goal metadata should round-trip through the parser"
     );
-    drop(db);
 
     // A second sweep finds no candidates past the watermark and marks the
     // whole history complete.
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
-    drop(db);
+    runtime.run().await;
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 1);
     assert_eq!(
-        structured_marker_version(&project, Some("codex")).await,
+        structured_marker_version(&runtime, Some("codex")).await,
         Some(4)
     );
 }
 
 #[tokio::test]
 async fn structured_backfill_preserves_existing_rows() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
     let tmp = TempDir::new().unwrap();
     let (home, project) = init_project(&tmp);
     write_codex_rollout_with_goal(&home, &project, "codex-preserve");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&tmp, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    runtime.seed_source(&source, &project).await.unwrap();
     // Create the backfill meta table up front (see the note in the goal test).
-    db.run_structured_backfill().await;
+    runtime.run().await;
 
-    let before = db.get_session("codex", "codex-preserve").await.unwrap();
-    drop(db);
+    let before = runtime
+        .session("codex", "codex-preserve")
+        .await
+        .unwrap()
+        .unwrap();
 
-    simulate_old_parser_store(&project, "codex", "goal").await;
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
+    simulate_old_parser_store(&runtime, "codex", "goal").await;
+    runtime.run().await;
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 1);
 
-    let after = db.get_session("codex", "codex-preserve").await.unwrap();
+    let after = runtime
+        .session("codex", "codex-preserve")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(before.started_at, after.started_at);
     assert_eq!(before.ended_at, after.ended_at);
     assert_eq!(before.title, after.title);
@@ -320,89 +251,36 @@ async fn structured_backfill_preserves_existing_rows() {
 /// zeroing out the candidate set.
 #[tokio::test]
 async fn structured_backfill_version_bump_reparses_from_start() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
     let tmp = TempDir::new().unwrap();
     let (home, project) = init_project(&tmp);
     write_codex_rollout_with_goal(&home, &project, "codex-versionbump");
 
     // Live ingest, then run the sweep to completion for the current version.
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&tmp, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    db.run_structured_backfill().await; // parses the file, advances the cursor
-    db.run_structured_backfill().await; // no candidates: marks complete, clears cursors
+    runtime.seed_source(&source, &project).await.unwrap();
+    runtime.run().await; // parses the file, advances the cursor
+    runtime.run().await; // no candidates: marks complete, clears cursors
     assert_eq!(
-        structured_marker_version(&project, Some("codex")).await,
+        structured_marker_version(&runtime, Some("codex")).await,
         Some(4)
     );
-    drop(db);
 
     // Drop the structured rows and reset the marker so the sweep re-enters
     // (exactly what bumping codex's entry in `STRUCTURED_BACKFILL_VERSIONS`
     // does). Then plant a stale, *un-versioned* watermark parked at the last
     // transcript path.
-    // Scope the raw connection so it is dropped before the final GlobalDb open.
-    // Holding it across `run_structured_backfill` contends on Windows (busy_timeout
-    // 5s) and can abort the insert with `BEGIN IMMEDIATE` failure.
-    {
-        let conn = raw_conn(&project).await;
-        conn.execute(
-            "DELETE FROM lcm_raw_messages
-             WHERE provider = 'codex'
-               AND message_id IN (
-                   SELECT message_id FROM session_messages
-                   WHERE provider = 'codex' AND kind = 'goal')",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "DELETE FROM session_messages WHERE provider = 'codex' AND kind = 'goal'",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
-            (),
-        )
-        .await
-        .unwrap();
-        let mut rows = conn
-            .query(
-                "SELECT MAX(source_path) FROM session_messages WHERE provider = 'codex'",
-                (),
-            )
-            .await
-            .unwrap();
-        let last_path = rows
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap();
-        conn.execute(
-            "INSERT INTO session_backfill_meta(key, value) VALUES ('structured_backfill_cursor', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            libsql::params![last_path],
-        )
-        .await
-        .unwrap();
-    }
-    assert_eq!(count_kind(&project, "codex", "goal").await, 0);
+    runtime.seed_stale_unversioned_cursor().await.unwrap();
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 0);
 
     // The version-namespaced cursor key has never been written, so the sweep
     // starts from the beginning and re-parses the whole history — the stale
     // un-versioned cursor parked at the last path is ignored. (A regression to
     // an un-versioned key would resume past `last_path`, see zero candidates,
     // and leave the goal row missing.)
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
+    runtime.run().await;
     assert_eq!(
-        count_kind(&project, "codex", "goal").await,
+        count_kind(&runtime, "codex", "goal").await,
         1,
         "a stale un-versioned cursor must not block a fresh version-bumped sweep"
     );
@@ -413,132 +291,62 @@ async fn structured_backfill_version_bump_reparses_from_start() {
 /// marker and its legacy cursor rows, and triggers no spurious re-sweep.
 #[tokio::test]
 async fn structured_backfill_migrates_legacy_global_marker() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
     let tmp = TempDir::new().unwrap();
     let (home, project) = init_project(&tmp);
     write_codex_rollout_with_goal(&home, &project, "codex-migrate");
 
-    let db = open_project_session_db(&project).await.unwrap();
-    try_ingest_source(&db, &CodexSource::with_home(&home), &project, None)
+    let runtime = registered_runtime(&tmp, &project).await;
+    runtime
+        .seed_source(&CodexSource::with_home(&home), &project)
         .await
         .unwrap();
     // Ensure the meta table exists (production creates it via the sweep).
-    db.run_structured_backfill().await;
-    drop(db);
+    runtime.run().await;
 
     // Rewrite the store into the legacy shape: a single global marker at v3
     // (a store that already finished the global sweep), no per-provider markers,
     // plus stale legacy cursor rows (un-versioned and global-versioned).
-    // Drop the raw connection before reopening GlobalDb — a held writer blocks
-    // `BEGIN IMMEDIATE` on Windows/Linux under busy_timeout and can leave the
-    // codex marker stuck at the seeded legacy baseline.
-    {
-        let conn = raw_conn(&project).await;
-        conn.execute(
-            "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "INSERT INTO session_schema_migrations(name, version) VALUES ('structured_rows_backfill', 3)",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "DELETE FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
-            (),
-        )
-        .await
-        .unwrap();
-        for key in [
-            "structured_backfill_cursor",
-            "structured_backfill_cursor:v3",
-        ] {
-            conn.execute(
-                "INSERT INTO session_backfill_meta(key, value) VALUES (?1, 'legacy/path.jsonl')",
-                libsql::params![key],
-            )
-            .await
-            .unwrap();
-        }
-    }
+    runtime.seed_legacy_global_marker(3).await.unwrap();
     // Sanity: the legacy global marker is present, per-provider markers are not.
-    assert_eq!(structured_marker_version(&project, None).await, Some(3));
+    assert_eq!(structured_marker_version(&runtime, None).await, Some(3));
     assert_eq!(
-        structured_marker_version(&project, Some("claude")).await,
+        structured_marker_version(&runtime, Some("claude")).await,
         None
     );
     assert_eq!(
-        structured_marker_version(&project, Some("codex")).await,
+        structured_marker_version(&runtime, Some("codex")).await,
         None
     );
 
     // The bounded sweep seeds the tracked Codex provider to N=3 and retires
     // the global marker/cursors. Codex then parses at its v4 custom-exec target;
     // Claude remains outside this legacy cursor authority entirely.
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    db.run_structured_backfill().await;
-    drop(db);
+    runtime.run().await;
+    runtime.run().await;
 
     assert_eq!(
-        structured_marker_version(&project, Some("claude")).await,
+        structured_marker_version(&runtime, Some("claude")).await,
         None,
         "legacy migration must not create a Claude backfill authority"
     );
     assert_eq!(
-        structured_marker_version(&project, Some("codex")).await,
+        structured_marker_version(&runtime, Some("codex")).await,
         Some(4),
         "codex marker advances from the legacy baseline to its current target"
     );
     assert_eq!(
-        structured_marker_version(&project, None).await,
+        structured_marker_version(&runtime, None).await,
         None,
         "the retired global marker row is gone"
     );
 
     // The legacy cursor rows were cleaned; no spurious full re-sweep occurred.
-    let conn = raw_conn(&project).await;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
-            (),
-        )
-        .await
-        .unwrap();
-    let leftover_cursors: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    let leftover_cursors = runtime.cursor_count().await.unwrap();
     assert_eq!(
         leftover_cursors, 0,
         "legacy cursor rows are retired on migration"
     );
-    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
-}
-
-// --- Process-safety coverage (adversarial-review findings on #357) ---
-
-/// A one-shot process (CLI/hook) must never schedule the detached sweep, even
-/// with the background switch on: it would drop the sweep mid-parse on exit.
-#[tokio::test]
-async fn structured_backfill_one_shot_process_never_spawns() {
-    let current_exe = std::env::current_exe().expect("resolve the session-suite test binary");
-    let output = std::process::Command::new(current_exe)
-        .args([
-            "--exact",
-            "structured_backfill_fresh_child_probe",
-            "--ignored",
-            "--nocapture",
-        ])
-        .output()
-        .expect("launch the fresh-process child probe");
-
-    assert!(
-        output.status.success(),
-        "fresh-process child probe failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 1);
 }
 
 /// Two concurrent openers of the same store contend on the sibling lock file:
@@ -551,20 +359,19 @@ async fn structured_backfill_lock_excludes_concurrent_openers() {
 
     let tmp = TempDir::new().unwrap();
     let (_home, project) = init_project(&tmp);
-    // Ensure the session store (and its parent dir) exists.
-    let _db = open_project_session_db(&project).await.unwrap();
-    let db_path = project_session_db_path(&project);
+    let runtime = registered_runtime(&tmp, &project).await;
+    let db_path = runtime.database_path();
 
-    let winner = try_acquire_structured_backfill_lock(&db_path);
+    let winner = try_acquire_structured_backfill_lock(db_path);
     assert!(winner.is_some(), "first opener acquires the sweep lock");
-    let loser = try_acquire_structured_backfill_lock(&db_path);
+    let loser = try_acquire_structured_backfill_lock(db_path);
     assert!(
         loser.is_none(),
         "a concurrent opener must be excluded while the lock is held"
     );
 
     drop(winner);
-    let reacquired = try_acquire_structured_backfill_lock(&db_path);
+    let reacquired = try_acquire_structured_backfill_lock(db_path);
     assert!(
         reacquired.is_some(),
         "the lock must be reusable once the holder releases it"
@@ -576,31 +383,22 @@ async fn structured_backfill_lock_excludes_concurrent_openers() {
 /// result — no duplicate whole-file re-parse, no double insert.
 #[tokio::test]
 async fn structured_backfill_concurrent_sweeps_run_once() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
     let tmp = TempDir::new().unwrap();
     let (home, project) = init_project(&tmp);
     write_codex_rollout_with_goal(&home, &project, "codex-concurrent");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&tmp, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    db.run_structured_backfill().await;
-    drop(db);
+    runtime.seed_source(&source, &project).await.unwrap();
+    runtime.run().await;
 
     // Drop the one goal row so a sweep has exactly one row to re-insert.
-    simulate_old_parser_store(&project, "codex", "goal").await;
-    assert_eq!(count_kind(&project, "codex", "goal").await, 0);
+    simulate_old_parser_store(&runtime, "codex", "goal").await;
+    assert_eq!(count_kind(&runtime, "codex", "goal").await, 0);
 
-    // Two independent openers (separate connections) sweep the same store at
-    // once. The cross-process lock admits one; the other returns empty stats.
-    let db_a = open_project_session_db(&project).await.unwrap();
-    let db_b = open_project_session_db(&project).await.unwrap();
-    let (a, b) = tokio::join!(
-        db_a.run_structured_backfill(),
-        db_b.run_structured_backfill()
-    );
+    // Two concurrent tasks borrow the same retained runtime authority. The
+    // cross-process lock admits one; the other returns empty stats.
+    let (a, b) = tokio::join!(runtime.run(), runtime.run());
 
     let a = a.expect("sweep a returns stats");
     let b = b.expect("sweep b returns stats");
@@ -609,7 +407,7 @@ async fn structured_backfill_concurrent_sweeps_run_once() {
         "exactly one concurrent sweep inserts the missing row; the other is locked out (a={a}, b={b})"
     );
     assert_eq!(
-        count_kind(&project, "codex", "goal").await,
+        count_kind(&runtime, "codex", "goal").await,
         1,
         "the store converges to a single goal row"
     );
@@ -620,37 +418,21 @@ async fn structured_backfill_concurrent_sweeps_run_once() {
 /// and re-queue already-covered files.
 #[tokio::test]
 async fn structured_backfill_watermark_never_regresses() {
-    use tracedecay::sessions::transcript_backfill::{
-        read_structured_backfill_cursor_for_test, write_structured_backfill_cursor_for_test,
-    };
-
     let tmp = TempDir::new().unwrap();
     let (_home, project) = init_project(&tmp);
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&tmp, &project).await;
 
-    write_structured_backfill_cursor_for_test(&db, "codex/aaa.jsonl")
-        .await
-        .unwrap();
-    assert_eq!(
-        read_structured_backfill_cursor_for_test(&db).await,
-        "codex/aaa.jsonl"
-    );
+    runtime.write_cursor("codex/aaa.jsonl").await.unwrap();
+    assert_eq!(runtime.read_cursor().await, "codex/aaa.jsonl");
 
     // A forward move advances the cursor.
-    write_structured_backfill_cursor_for_test(&db, "codex/zzz.jsonl")
-        .await
-        .unwrap();
-    assert_eq!(
-        read_structured_backfill_cursor_for_test(&db).await,
-        "codex/zzz.jsonl"
-    );
+    runtime.write_cursor("codex/zzz.jsonl").await.unwrap();
+    assert_eq!(runtime.read_cursor().await, "codex/zzz.jsonl");
 
     // A backwards move (an earlier path from a slower/racing sweep) is a no-op.
-    write_structured_backfill_cursor_for_test(&db, "codex/mmm.jsonl")
-        .await
-        .unwrap();
+    runtime.write_cursor("codex/mmm.jsonl").await.unwrap();
     assert_eq!(
-        read_structured_backfill_cursor_for_test(&db).await,
+        runtime.read_cursor().await,
         "codex/zzz.jsonl",
         "the watermark must never move backwards"
     );

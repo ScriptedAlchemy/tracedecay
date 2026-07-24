@@ -21,8 +21,9 @@ use super::{
     compatibility_curation_mappings_from_ids_tx, compatibility_relation_label,
 };
 use crate::db::Database;
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use crate::memory::entities::normalize_entity;
-use libsql::{Transaction, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
@@ -32,7 +33,7 @@ use tracedecay_store::{
     CompatibilityMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 async fn compatibility_owner_entity_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_id: i64,
 ) -> FactStoreResult<(String, Vec<String>)> {
@@ -107,7 +108,7 @@ async fn compatibility_owner_entity_tx(
 }
 
 async fn compatibility_entity_linked_to_evidence_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_id: i64,
     evidence_ids: &[FactId],
@@ -128,15 +129,17 @@ async fn compatibility_entity_linked_to_evidence_tx(
          LIMIT 1"
     );
     let mut values = Vec::with_capacity(evidence_ids.len() + 5);
-    values.push(libsql::Value::Integer(entity_id));
-    values.push(libsql::Value::Text(key.kind.to_string()));
-    values.push(libsql::Value::Text(key.project_id.clone()));
-    values.push(libsql::Value::Text(key.json.clone()));
-    values.push(libsql::Value::Text(source_store_id.as_str().to_owned()));
+    values.push(crate::db::engine::Value::Integer(entity_id));
+    values.push(crate::db::engine::Value::Text(key.kind.to_string()));
+    values.push(crate::db::engine::Value::Text(key.project_id.clone()));
+    values.push(crate::db::engine::Value::Text(key.json.clone()));
+    values.push(crate::db::engine::Value::Text(
+        source_store_id.as_str().to_owned(),
+    ));
     values.extend(
         evidence_ids
             .iter()
-            .map(|fact_id| libsql::Value::Text(fact_id.as_str().to_owned())),
+            .map(|fact_id| crate::db::engine::Value::Text(fact_id.as_str().to_owned())),
     );
     let mut rows = transaction
         .query(&sql, values)
@@ -157,7 +160,7 @@ async fn compatibility_entity_linked_to_evidence_tx(
 }
 
 async fn compatibility_owner_entity_fact_ids_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_ids: &[i64],
 ) -> FactStoreResult<Vec<FactId>> {
@@ -176,11 +179,18 @@ async fn compatibility_owner_entity_fact_ids_tx(
          ORDER BY mappings.fact_id ASC LIMIT 257"
     );
     let mut values = Vec::with_capacity(entity_ids.len() + 4);
-    values.push(libsql::Value::Text(key.kind.to_string()));
-    values.push(libsql::Value::Text(key.project_id.clone()));
-    values.push(libsql::Value::Text(key.json.clone()));
-    values.push(libsql::Value::Text(source_store_id.as_str().to_owned()));
-    values.extend(entity_ids.iter().copied().map(libsql::Value::Integer));
+    values.push(crate::db::engine::Value::Text(key.kind.to_string()));
+    values.push(crate::db::engine::Value::Text(key.project_id.clone()));
+    values.push(crate::db::engine::Value::Text(key.json.clone()));
+    values.push(crate::db::engine::Value::Text(
+        source_store_id.as_str().to_owned(),
+    ));
+    values.extend(
+        entity_ids
+            .iter()
+            .copied()
+            .map(crate::db::engine::Value::Integer),
+    );
     let mut rows = transaction
         .query(&sql, values)
         .await
@@ -206,7 +216,7 @@ async fn compatibility_owner_entity_fact_ids_tx(
 }
 
 async fn compatibility_fact_entities_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     legacy_fact_id: i64,
 ) -> FactStoreResult<Vec<String>> {
     let mut rows = transaction
@@ -233,7 +243,7 @@ async fn compatibility_fact_entities_tx(
 
 pub(super) async fn compatibility_merge_entities_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
     operation: &CompatibilityFactMergeEntitiesV1,
@@ -357,7 +367,7 @@ pub(super) async fn compatibility_merge_entities_tx(
 
 pub(super) async fn compatibility_add_entity_alias_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation: &CompatibilityFactAddAliasV1,
     now: UtcMicros,
@@ -477,7 +487,7 @@ pub(super) fn compatibility_curation_operation_digest(
 }
 
 pub(super) async fn compatibility_record_oplog_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     operation: &str,
     mapping: Option<&CompatibilityFactMappingV1>,
     detail: &Value,
@@ -499,7 +509,7 @@ pub(super) async fn compatibility_record_oplog_tx(
 }
 
 pub(super) async fn compatibility_replay_curation_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1> {

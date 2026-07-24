@@ -641,7 +641,7 @@ mod tests {
             "dashboard/lcm/dist/index.js",
             "node_modules/lib/index.js",
             ".worktrees/feature/src/lib.rs",
-            "vendor/libsql/src/lib.rs",
+            "vendor/sqlite/src/lib.rs",
             "assets/app.min.js",
         ] {
             assert!(is_generated_path(path), "{path} should count as generated");

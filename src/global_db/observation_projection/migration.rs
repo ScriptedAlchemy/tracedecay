@@ -1,13 +1,13 @@
-use libsql::{Connection, params};
 use tracedecay_store::{
     ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
     SESSION_MESSAGE_PROJECTOR_VERSION_V4,
 };
 
-use super::super::GlobalDb;
+use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+
 use super::apply::{apply_effect, derive_projection_with_alias, seed_predecessor_message_lineage};
-use super::rebuild::read_observation_frontier;
+use super::rebuild::{read_observation_frontier, rebuild_projection_with_engine};
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
     ensure_projection_output_state_cache, inherit_predecessor_output_state, storage,
@@ -26,11 +26,33 @@ struct MigrationProgress {
     completed: bool,
 }
 
-pub(in crate::global_db) async fn prepare_projection_version_migration(
-    db: &GlobalDb,
+/// Runs projector migration through an already-attached runtime connection.
+///
+/// The caller must supply the connection from the exact registered owner
+/// binding. This function never resolves or opens a database path; transaction
+/// begin, every write, and commit remain subject to the runtime's actor-time
+/// write-authority checks.
+pub(crate) async fn prepare_projection_version_migration_with_engine(
+    conn: &Connection,
 ) -> ProjectionStoreResult<()> {
-    if SESSION_MESSAGE_PROJECTOR_VERSION == SESSION_MESSAGE_PROJECTOR_VERSION_V1 {
+    if !migration_target_is_registered()? {
         return Ok(());
+    }
+    if !projection_version_migration_pending(conn).await? {
+        return Ok(());
+    }
+
+    match migrate_projection_page_with_engine(conn).await? {
+        MigrationPageOutcome::Advanced => Ok(()),
+        MigrationPageOutcome::UnmigratableLineage => {
+            rebuild_instead_of_migrating_with_engine(conn).await
+        }
+    }
+}
+
+fn migration_target_is_registered() -> ProjectionStoreResult<bool> {
+    if SESSION_MESSAGE_PROJECTOR_VERSION == SESSION_MESSAGE_PROJECTOR_VERSION_V1 {
+        return Ok(false);
     }
     if SESSION_MESSAGE_PROJECTOR_VERSION != SESSION_MESSAGE_PROJECTOR_VERSION_V4 {
         return Err(storage_message(
@@ -38,14 +60,7 @@ pub(in crate::global_db) async fn prepare_projection_version_migration(
             "current projector version has no registered migration",
         ));
     }
-    if !projection_version_migration_pending(&db.conn).await? {
-        return Ok(());
-    }
-
-    match migrate_projection_page(db).await? {
-        MigrationPageOutcome::Advanced => Ok(()),
-        MigrationPageOutcome::UnmigratableLineage => rebuild_instead_of_migrating(db).await,
-    }
+    Ok(true)
 }
 
 /// Converges a store whose predecessor projection lineage cannot support the
@@ -54,70 +69,97 @@ pub(in crate::global_db) async fn prepare_projection_version_migration(
 /// leave behind). Projections are derived data: rebuild the current version
 /// from canonical observations instead of failing the open forever, then mark
 /// the incremental migration superseded so it stops re-arming.
-async fn rebuild_instead_of_migrating(db: &GlobalDb) -> ProjectionStoreResult<()> {
+async fn rebuild_instead_of_migrating_with_engine(conn: &Connection) -> ProjectionStoreResult<()> {
     tracing::warn!(
         target_version = SESSION_MESSAGE_PROJECTOR_VERSION,
         "projection version migration fell back to a full rebuild"
     );
-    let frontier = read_observation_frontier(&db.conn).await?;
-    let outcome = db.rebuild_projection_result(frontier).await?;
+    let frontier = read_observation_frontier(conn).await?;
+    let outcome = rebuild_projection_with_engine(conn, frontier).await?;
     if !outcome.is_complete() {
-        // Bounded pass; the next open resumes the staged rebuild.
         return Ok(());
     }
-    let transaction = db
-        .begin_write_transaction()
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| storage("begin projection migration supersession", error))?;
-    if let Some(predecessor) = read_predecessor_frontier(&transaction).await? {
-        let frontier_i64 = i64::try_from(predecessor.sequence).map_err(|_| {
-            storage_message(
-                "record projection migration supersession",
-                "sequence overflow",
-            )
-        })?;
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO observation_projection_migrations (
-                    source_projector_version, target_projector_version,
-                    source_frontier, migrated_through, completed
-                 ) VALUES (?1, ?2, ?3, ?3, 1)",
-                params![
-                    predecessor.version.as_str(),
-                    SESSION_MESSAGE_PROJECTOR_VERSION,
-                    frontier_i64
-                ],
-            )
-            .await
-            .map_err(|error| storage("record projection migration supersession", error))?;
-    }
+    record_projection_migration_supersession(&transaction).await?;
     transaction
         .commit()
         .await
         .map_err(|error| storage("commit projection migration supersession", error))
 }
 
+async fn record_projection_migration_supersession(
+    transaction: &impl Executor,
+) -> ProjectionStoreResult<()> {
+    let Some(predecessor) = read_predecessor_frontier(transaction).await? else {
+        return Ok(());
+    };
+    let frontier_i64 = i64::try_from(predecessor.sequence).map_err(|_| {
+        storage_message(
+            "record projection migration supersession",
+            "sequence overflow",
+        )
+    })?;
+    let changed = transaction
+        .execute(
+            "INSERT INTO observation_projection_migrations (
+                source_projector_version, target_projector_version,
+                source_frontier, migrated_through, completed
+             ) VALUES (?1, ?2, ?3, ?3, 1)
+             ON CONFLICT(source_projector_version, target_projector_version)
+             DO UPDATE SET migrated_through = excluded.migrated_through, completed = 1
+             WHERE observation_projection_migrations.source_frontier =
+                   excluded.source_frontier",
+            params![
+                predecessor.version.as_str(),
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                frontier_i64
+            ],
+        )
+        .await
+        .map_err(|error| storage("record projection migration supersession", error))?;
+    if changed != 1 {
+        return Err(storage_message(
+            "record projection migration supersession",
+            "migration source frontier changed before supersession",
+        ));
+    }
+    Ok(())
+}
+
 /// One incremental migration page: either it advanced (more pages may
 /// remain; the next open continues), or the predecessor lineage disqualified
 /// incremental migration entirely.
+#[derive(Clone, Copy)]
 pub(super) enum MigrationPageOutcome {
     Advanced,
     UnmigratableLineage,
 }
 
-pub(super) async fn migrate_projection_page(
-    db: &GlobalDb,
+async fn migrate_projection_page_with_engine(
+    conn: &Connection,
 ) -> ProjectionStoreResult<MigrationPageOutcome> {
-    let transaction = db
-        .begin_write_transaction()
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| storage("begin projection version migration page", error))?;
+    let outcome = migrate_projection_page_transaction(&transaction).await?;
+    if matches!(outcome, MigrationPageOutcome::UnmigratableLineage) {
+        return Ok(outcome);
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection version migration page", error))?;
+    Ok(outcome)
+}
 
-    let Some(predecessor) = read_predecessor_frontier(&transaction).await? else {
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage("commit projection version migration page", error))?;
+async fn migrate_projection_page_transaction(
+    transaction: &impl Executor,
+) -> ProjectionStoreResult<MigrationPageOutcome> {
+    let Some(predecessor) = read_predecessor_frontier(transaction).await? else {
         return Ok(MigrationPageOutcome::Advanced);
     };
 
@@ -138,7 +180,7 @@ pub(super) async fn migrate_projection_page(
         )
         .await
         .map_err(|error| storage("initialize projection version migration", error))?;
-    let progress = read_migration_progress(&transaction, &predecessor)
+    let progress = read_migration_progress(transaction, &predecessor)
         .await?
         .ok_or_else(|| {
             storage_message(
@@ -147,14 +189,10 @@ pub(super) async fn migrate_projection_page(
             )
         })?;
     if progress.completed {
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage("commit projection version migration page", error))?;
         return Ok(MigrationPageOutcome::Advanced);
     }
 
-    ensure_projection_output_state_cache(&transaction).await?;
+    ensure_projection_output_state_cache(transaction).await?;
     let mut migrated_frontier = progress.migrated_through;
     if migrated_frontier >= predecessor.sequence {
         return Err(storage_message(
@@ -350,14 +388,14 @@ pub(super) async fn migrate_projection_page(
     drop(seed_rows);
     for (sequence, observation) in lineage_seeds {
         seed_predecessor_message_lineage(
-            &transaction,
+            transaction,
             sequence,
             &observation,
             predecessor.version.as_str(),
         )
         .await?;
         inherit_predecessor_output_state(
-            &transaction,
+            transaction,
             observation.observation_id().as_str(),
             predecessor.version.as_str(),
         )
@@ -370,16 +408,16 @@ pub(super) async fn migrate_projection_page(
             // converges through a full rebuild instead.
             return Ok(MigrationPageOutcome::UnmigratableLineage);
         }
-        let effect = derive_projection_with_alias(&transaction, &observation).await?;
-        apply_effect(&transaction, sequence, &observation, &effect).await?;
+        let effect = derive_projection_with_alias(transaction, &observation).await?;
+        apply_effect(transaction, sequence, &observation, &effect).await?;
         inherit_predecessor_output_state(
-            &transaction,
+            transaction,
             observation.observation_id().as_str(),
             predecessor.version.as_str(),
         )
         .await?;
-        consume_projection_queue_item(&transaction, observation.observation_id()).await?;
-        write_checkpoint(&transaction, sequence).await?;
+        consume_projection_queue_item(transaction, observation.observation_id()).await?;
+        write_checkpoint(transaction, sequence).await?;
         migrated_frontier = sequence;
     }
     let completed = i64::from(migrated_frontier == predecessor.sequence);
@@ -389,7 +427,10 @@ pub(super) async fn migrate_projection_page(
              SET migrated_through = ?3,
                  completed = ?4
              WHERE source_projector_version = ?1
-               AND target_projector_version = ?2",
+               AND target_projector_version = ?2
+               AND source_frontier = ?5
+               AND migrated_through = ?6
+               AND completed = 0",
             params![
                 predecessor.version.as_str(),
                 SESSION_MESSAGE_PROJECTOR_VERSION,
@@ -397,7 +438,15 @@ pub(super) async fn migrate_projection_page(
                     "advance projection version migration",
                     "sequence overflow"
                 ))?,
-                completed
+                completed,
+                i64::try_from(predecessor.sequence).map_err(|_| storage_message(
+                    "advance projection version migration",
+                    "sequence overflow"
+                ))?,
+                i64::try_from(progress.migrated_through).map_err(|_| storage_message(
+                    "advance projection version migration",
+                    "sequence overflow"
+                ))?
             ],
         )
         .await
@@ -408,14 +457,12 @@ pub(super) async fn migrate_projection_page(
             "migration watermark compare-and-swap failed",
         ));
     }
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage("commit projection version migration page", error))?;
     Ok(MigrationPageOutcome::Advanced)
 }
 
-async fn projection_version_migration_pending(conn: &Connection) -> ProjectionStoreResult<bool> {
+async fn projection_version_migration_pending(
+    conn: &impl QueryExecutor,
+) -> ProjectionStoreResult<bool> {
     let Some(predecessor) = read_predecessor_frontier(conn).await? else {
         return Ok(false);
     };
@@ -425,7 +472,7 @@ async fn projection_version_migration_pending(conn: &Connection) -> ProjectionSt
 }
 
 async fn read_migration_progress(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     predecessor: &PredecessorFrontier,
 ) -> ProjectionStoreResult<Option<MigrationProgress>> {
     let mut rows = conn
@@ -469,6 +516,14 @@ async fn read_migration_progress(
         .map_err(|error| storage("read projection version migration", error))?
         != 0;
     drop(rows);
+    if migrated_through > predecessor.sequence
+        || completed != (migrated_through == predecessor.sequence)
+    {
+        return Err(storage_message(
+            "read projection version migration",
+            "migration progress is inconsistent with its source frontier",
+        ));
+    }
     Ok(Some(MigrationProgress {
         migrated_through,
         completed,
@@ -476,7 +531,7 @@ async fn read_migration_progress(
 }
 
 async fn read_predecessor_frontier(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> ProjectionStoreResult<Option<PredecessorFrontier>> {
     let mut rows = conn
         .query(

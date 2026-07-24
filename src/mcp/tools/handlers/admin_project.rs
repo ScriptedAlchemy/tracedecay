@@ -10,7 +10,7 @@ use tracedecay_store::{
 
 use crate::application::memory::{MemoryApplication, MemoryApplicationError};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
 
@@ -206,7 +206,7 @@ fn fact_proposal_json(proposal: &CompatibilityFactProposalRecordV1) -> Value {
 pub(super) async fn handle_admin_project(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
 ) -> Result<ToolResult> {
     let action: AdminProjectAction =
@@ -252,16 +252,14 @@ pub(super) async fn handle_admin_project(
         AdminProjectAction::MemoryStatus => {
             let status = cg.memory_status().await?;
             let db = cg.open_project_store_db().await?;
-            let mut rows = db
-                .conn()
-                .query("SELECT COALESCE(MAX(fact_count), 0) FROM memory_banks", ())
-                .await?;
-            let largest_bank_fact_count = rows
-                .next()
-                .await?
-                .and_then(|row| row.get::<i64>(0).ok())
-                .unwrap_or(0)
-                .max(0) as usize;
+            let overview = project_memory_application(cg, &db)?
+                .dashboard_overview_v1(1, 1)
+                .await
+                .map_err(memory_application_error)?;
+            let largest_bank_fact_count = overview
+                .memory_banks
+                .first()
+                .map_or(0, |bank| bank.fact_count);
             json!({
                 "status": status,
                 "largest_bank_fact_count": largest_bank_fact_count,
@@ -414,7 +412,7 @@ pub(super) async fn handle_admin_project(
 
 async fn run_automation(
     cg: &TraceDecay,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     task: AutomationRunTask,
     options: Value,
 ) -> Result<Value> {

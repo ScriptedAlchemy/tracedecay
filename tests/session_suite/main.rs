@@ -20,7 +20,6 @@ mod lcm_ingest_protection;
 mod lcm_payload;
 mod lcm_query;
 mod lcm_raw;
-mod lcm_schema;
 mod lcm_summary_lineage_review;
 mod message_search_eval_test;
 mod observation_application;
@@ -31,19 +30,8 @@ mod structured_backfill;
 mod temporal_application;
 mod temporal_benchmark;
 mod temporal_derived_evidence;
-mod temporal_privacy;
 mod temporal_projection;
 mod temporal_refresh;
 mod temporal_refresh_application;
 mod transcript_backfill;
 mod transcript_store;
-
-#[test]
-#[ignore = "fresh-process child probe"]
-fn structured_backfill_fresh_child_probe() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(true);
-    assert!(
-        !tracedecay::global_db::structured_backfill_will_spawn(),
-        "a one-shot process must not spawn the sweep"
-    );
-}

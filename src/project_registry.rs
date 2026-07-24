@@ -264,7 +264,7 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 /// `project_root`.
 ///
 /// A tracedecay project id is shared across every linked worktree of a
-/// repository: [`crate::global_db::GlobalDb::upsert_code_project`] indexes a
+/// repository: [`crate::global_db::RegisteredGlobalDb::upsert_code_project`] indexes a
 /// `git-common-dir:<common dir>` alias back to whichever project id first
 /// registered it, so a session opened from *any* linked worktree resolves
 /// to the same project id as the primary checkout. Because that same upsert

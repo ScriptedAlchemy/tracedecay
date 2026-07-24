@@ -5,6 +5,7 @@
 //! generic lane evidence into the typed application-operation records.
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 
 use tracedecay_application::retrieval::{
@@ -15,8 +16,8 @@ use tracedecay_application::{
     CodeImplementationsRequest, CodeOccurrenceRecord, CodeQueryPage, CodeRelationRequest,
     CodeSignatureRequest, CodeSymbolSearchRequest, CoverageCompleteness, CoverageDomainState,
     EvidenceCoverage, EvidenceDomain, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    LexicalOccurrenceRecord, ModuleApiRequest, OperationBudgetUsage, PageState,
-    PhraseSearchRequest, QualifiedNameRequest, RetrievalEvidence, RetrievalPortContext,
+    LexicalOccurrenceRecord, ModuleApiRequest, Omission, OmissionReason, OperationBudgetUsage,
+    PageState, PhraseSearchRequest, QualifiedNameRequest, RetrievalEvidence, RetrievalPortContext,
     RetrievalPortOutcome, SourceMetadataRecord, SourceMetadataRequest, TemporalState,
 };
 use tracedecay_domain::{
@@ -61,20 +62,142 @@ fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
     generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL
 }
 
+pub(super) fn semantic_mcp_reason(
+    current_source: Option<&CodeGenerationId>,
+    latest_code_generation: &CodeGenerationId,
+    runtime_state: Option<&crate::application::semantic_runtime::SemanticRuntimeStateV1>,
+) -> &'static str {
+    if let Some(source_generation) = current_source {
+        return if source_generation == latest_code_generation {
+            // Plan 15 has not published an accepted calibration authority. A
+            // current vector generation alone cannot authorize influence.
+            "calibration_unavailable"
+        } else {
+            "semantic_generation_stale"
+        };
+    }
+    match runtime_state {
+        None
+        | Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
+            ..
+        }) => "semantic_runtime_unavailable",
+        Some(
+            crate::application::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
+                ..
+            },
+        ) => "semantic_model_not_downloaded",
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Downloading {
+            ..
+        }) => "semantic_model_downloading",
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Verifying {
+            ..
+        }) => "semantic_model_verifying",
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Installed {
+            ..
+        }) => "semantic_model_installed",
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Loading { .. }) => {
+            "semantic_model_loading"
+        }
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Indexing { .. }) => {
+            "semantic_indexing"
+        }
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Current { .. }) => {
+            "semantic_generation_incompatible"
+        }
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Degraded { .. }) => {
+            "semantic_degraded"
+        }
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Rollback { .. }) => {
+            "semantic_rollback"
+        }
+        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Failed { .. }) => {
+            "semantic_failed"
+        }
+    }
+}
+
 impl CodeIndexSchedulerRegistryV1 {
+    /// Compose real exact/lexical/graph lane outcomes only through the
+    /// accepted profile and query/cursor key authority mounted for this exact
+    /// admitted scope.
+    pub(in crate::daemon) async fn compose_pr9_fallback(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        request: &tracedecay_domain::RetrievalRequest,
+        query_view: &tracedecay_domain::EphemeralSanitizedQueryViewV1,
+        lanes: Vec<crate::query::retrieval::fusion::CompositionLaneInput>,
+        page_size: usize,
+        cursor: Option<&tracedecay_domain::RetrievalCursor>,
+    ) -> Result<
+        crate::query::retrieval::AuthorizedPr9FallbackV1,
+        crate::query::retrieval::Pr9QueryAuthorityErrorV1,
+    > {
+        let authority = self
+            .pr9_query_authority_for_scope(scope)
+            .await
+            .ok_or(crate::query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable)?;
+        authority.compose(request, query_view, lanes, page_size, cursor)
+    }
+
+    /// Resolve strict-semantic availability against this project's freshest
+    /// complete code generation.
+    ///
+    /// No semantic query is constructed until an accepted calibration
+    /// authority exists. That keeps ordinary PR9 fallback byte-stable and
+    /// makes a strict request fail with a typed reason instead of inventing a
+    /// score, profile, or candidate.
+    pub(in crate::daemon) async fn semantic_mcp_abstention(
+        &self,
+        project_root: &Path,
+    ) -> crate::mcp::server::CodeIndexSemanticAbstentionV1 {
+        let Some(latest) = self.latest_complete_fresh(project_root).await else {
+            return crate::mcp::server::CodeIndexSemanticAbstentionV1 {
+                code_generation: None,
+                reason: "code_index_unavailable",
+            };
+        };
+        let code_generation = latest.generation.manifest().generation_id.clone();
+        let code_generation_display = Some(code_generation.as_str().to_owned());
+        let current_source =
+            crate::application::semantic_runtime::project_semantic_source_generation(project_root);
+        let status =
+            crate::application::semantic_runtime::project_semantic_application_status(project_root);
+        let reason = semantic_mcp_reason(
+            current_source.as_ref(),
+            &code_generation,
+            status.as_ref().map(|status| &status.state),
+        );
+        crate::mcp::server::CodeIndexSemanticAbstentionV1 {
+            code_generation: code_generation_display,
+            reason,
+        }
+    }
+
     pub(super) async fn generation_for(
         &self,
+        scope: &tracedecay_application::ResolvedScope,
         generation_id: &CodeGenerationId,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let mounted = self.mounted.lock().await;
-        for worktree in mounted.values() {
-            let scheduler = worktree.scheduler.lock().ok()?;
-            let latest = scheduler.latest_complete()?;
-            if latest.generation.manifest().generation_id == *generation_id {
-                return Some(latest);
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            let mut matched = None;
+            for worktree in mounted.values() {
+                if worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+                {
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(std::sync::Arc::clone(&worktree.scheduler));
+                }
             }
-        }
-        None
+            matched?
+        };
+        let scheduler = scheduler.lock().ok()?;
+        let latest = scheduler.latest_complete()?;
+        (latest.generation.manifest().generation_id == *generation_id
+            && Self::latest_matches_scope(&latest, scope))
+        .then_some(latest)
     }
 
     /// Resolve the generation a callable-code query serves.
@@ -89,12 +212,13 @@ impl CodeIndexSchedulerRegistryV1 {
     /// the ladder only ever returns the latest complete generation.
     pub(super) async fn resolve_serving_generation(
         &self,
+        scope: &tracedecay_application::ResolvedScope,
         requested: &CodeGenerationId,
     ) -> Option<LatestCompleteCodeIndexV1> {
         if is_unpinned_latest(requested) {
-            self.latest_complete_fresh_any().await
+            self.latest_complete_fresh_for_scope(scope).await
         } else {
-            self.generation_for(requested).await
+            self.generation_for(scope, requested).await
         }
     }
 }
@@ -184,6 +308,22 @@ fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOut
         budget: OperationBudgetUsage::default(),
         cancellation: None,
     })
+}
+
+fn unsupported<T>(
+    finished_at: tracedecay_domain::UtcMicros,
+    generation: CodeGenerationId,
+) -> RetrievalPortOutcome<T> {
+    let RetrievalPortOutcome::Unavailable(mut evidence) = unavailable(finished_at) else {
+        unreachable!("unavailable helper returns the unavailable variant")
+    };
+    evidence.temporal.source_generation = Some(generation);
+    evidence.omissions.push(Omission {
+        domain: EvidenceDomain::Symbol,
+        count: 0,
+        reason: OmissionReason::Unsupported,
+    });
+    RetrievalPortOutcome::Unavailable(evidence)
 }
 
 fn completed<T>(
@@ -451,10 +591,21 @@ macro_rules! unavailable_method {
     ($name:ident, $request:ty, $item:ty) => {
         fn $name<'a>(
             &'a self,
-            _context: RetrievalPortContext<'a>,
-            _request: &'a $request,
+            context: RetrievalPortContext<'a>,
+            request: &'a $request,
         ) -> PortFuture<'a, $item> {
-            Box::pin(async move { unavailable(tracedecay_domain::UtcMicros(0)) })
+            Box::pin(async move {
+                let Some(latest) = self
+                    .resolve_serving_generation(context.request.scope(), &request.scope.generation)
+                    .await
+                else {
+                    return unavailable(tracedecay_domain::UtcMicros(0));
+                };
+                unsupported(
+                    latest.generation.manifest().seal.sealed_at,
+                    latest.generation.manifest().generation_id.clone(),
+                )
+            })
         }
     };
 }
@@ -467,7 +618,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
             let Some(latest) = self
-                .resolve_serving_generation(&request.scope.generation)
+                .resolve_serving_generation(context.request.scope(), &request.scope.generation)
                 .await
             else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
@@ -521,7 +672,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
             let Some(latest) = self
-                .resolve_serving_generation(&request.scope.generation)
+                .resolve_serving_generation(context.request.scope(), &request.scope.generation)
                 .await
             else {
                 return unavailable(tracedecay_domain::UtcMicros(0));
@@ -579,7 +730,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
             let Some(latest) = self
-                .resolve_serving_generation(&request.scope.generation)
+                .resolve_serving_generation(context.request.scope(), &request.scope.generation)
                 .await
             else {
                 return unavailable(tracedecay_domain::UtcMicros(0));

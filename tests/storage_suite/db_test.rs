@@ -429,13 +429,9 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
     let dir = TempDir::new().expect("tempdir");
     let db_path = dir.path().join("v6.db");
 
-    // Open the DB directly so we can build a v6-shaped schema (no
-    // attrs_start_line column) before running the migration.
-    let lib_db = libsql::Builder::new_local(&db_path)
-        .build()
-        .await
-        .expect("build db");
-    let conn = lib_db.connect().expect("connect");
+    // Build the v6-shaped fixture offline (no attrs_start_line column) before
+    // publishing its one canonical runtime.
+    let conn = rusqlite::Connection::open(&db_path).expect("open v6 fixture");
 
     conn.execute_batch(
         "CREATE TABLE nodes (
@@ -463,7 +459,6 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
         );
          PRAGMA user_version = 6;",
     )
-    .await
     .expect("v6 schema setup");
 
     // Two rows: one with a normal start_line, one a file root with start_line=0.
@@ -471,60 +466,60 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
         "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
                             start_line, end_line, start_column, end_column, updated_at)
          VALUES ('a', 'function', 'foo', 'crate::foo', 'src/lib.rs', 42, 50, 0, 1, 1000)",
-        (),
+        [],
     )
-    .await
     .expect("insert row a");
     conn.execute(
         "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
                             start_line, end_line, start_column, end_column, updated_at)
          VALUES ('b', 'file', 'src/lib.rs', 'src/lib.rs', 'src/lib.rs', 0, 100, 0, 0, 1000)",
-        (),
+        [],
     )
-    .await
     .expect("insert row b");
+    drop(conn);
 
-    // Run pending migrations — should apply v7.
-    let migrated = tracedecay::db::migrations::migrate(&conn)
+    // Publishing the existing fixture runs pending migrations on that exact
+    // registered attachment.
+    let (db, migrated) = crate::common::open_test_database(&db_path)
         .await
-        .expect("migrate failed");
+        .expect("open and migrate fixture");
     assert!(migrated, "expected v7 migration to run");
 
     // user_version is now the latest schema version.
-    let mut rows = conn
-        .query("PRAGMA user_version", ())
+    let version = db
+        .query_scalar_i64("read migrated schema version", "PRAGMA user_version")
         .await
         .expect("read version");
-    let row = rows.next().await.expect("row").expect("some row");
-    let version: i64 = row.get(0).expect("version");
     assert_eq!(version, 24);
 
     // attrs_start_line is backfilled from start_line for both rows.
     // Row a: start_line=42 -> attrs_start_line=42.
     // Row b: start_line=0  -> attrs_start_line stays 0 (file root, consistent).
-    let mut rows = conn
-        .query(
-            "SELECT id, start_line, attrs_start_line FROM nodes ORDER BY id",
-            (),
+    assert_eq!(
+        db.query_scalar_i64(
+            "verify migrated row a",
+            "SELECT COUNT(*) FROM nodes
+             WHERE id = 'a' AND start_line = 42 AND attrs_start_line = 42",
         )
         .await
-        .expect("select");
-    let r1 = rows.next().await.expect("row").expect("row a missing");
-    assert_eq!(r1.get::<String>(0).expect("id"), "a");
-    assert_eq!(r1.get::<u32>(1).expect("start_line"), 42);
-    assert_eq!(
-        r1.get::<u32>(2).expect("attrs_start_line"),
-        42,
+        .expect("inspect row a"),
+        1,
         "attrs_start_line should backfill from start_line"
     );
-
-    let r2 = rows.next().await.expect("row").expect("row b missing");
-    assert_eq!(r2.get::<String>(0).expect("id"), "b");
-    assert_eq!(r2.get::<u32>(1).expect("start_line"), 0);
-    assert_eq!(r2.get::<u32>(2).expect("attrs_start_line"), 0);
+    assert_eq!(
+        db.query_scalar_i64(
+            "verify migrated row b",
+            "SELECT COUNT(*) FROM nodes
+             WHERE id = 'b' AND start_line = 0 AND attrs_start_line = 0",
+        )
+        .await
+        .expect("inspect row b"),
+        1
+    );
 
     // Inserting a fresh row with an explicit attrs_start_line works post-migration.
-    conn.execute(
+    db.execute_write(
+        "insert post-migration row",
         "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
                             start_line, end_line, start_column, end_column, updated_at,
                             attrs_start_line)
@@ -533,12 +528,14 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
     )
     .await
     .expect("insert row c");
-    let mut rows = conn
-        .query("SELECT attrs_start_line FROM nodes WHERE id = 'c'", ())
+    let attrs_start_line = db
+        .query_scalar_i64(
+            "read post-migration attrs_start_line",
+            "SELECT attrs_start_line FROM nodes WHERE id = 'c'",
+        )
         .await
         .expect("select c");
-    let r = rows.next().await.expect("row").expect("row c missing");
-    assert_eq!(r.get::<u32>(0).expect("attrs"), 55);
+    assert_eq!(attrs_start_line, 55);
 }
 
 #[tokio::test]
@@ -551,15 +548,7 @@ async fn test_migrate_is_idempotent_at_latest() {
     let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
         .expect("initialize");
-    drop(db);
-
-    let lib_db = libsql::Builder::new_local(&db_path)
-        .build()
-        .await
-        .expect("build db");
-    let conn = lib_db.connect().expect("connect");
-
-    let migrated = tracedecay::db::migrations::migrate(&conn)
+    let migrated = tracedecay::db::migrations::migrate(&db)
         .await
         .expect("migrate");
     assert!(!migrated, "second migrate should be a no-op");

@@ -6,7 +6,8 @@ use super::super::primitives::{
     row_optional_string, row_string, storage_error, storage_message, to_json,
 };
 use super::DEFAULT_TRUST;
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactCurationActionV1, FactEventId, FactEvidenceId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState, UtcMicros,
@@ -15,7 +16,7 @@ use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
 };
 pub(super) async fn payload_is_purged_projection(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> FactStoreResult<bool> {
@@ -54,7 +55,7 @@ pub(super) async fn payload_is_purged_projection(
 }
 
 pub(super) async fn insert_legacy_mapping(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
 ) -> FactStoreResult<()> {
@@ -89,7 +90,7 @@ pub(super) async fn insert_legacy_mapping(
 }
 
 pub(super) async fn legacy_mapping_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
 ) -> FactStoreResult<bool> {
@@ -109,7 +110,7 @@ pub(super) async fn legacy_mapping_exists(
 }
 
 pub(super) async fn legacy_mapping_matches(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
 ) -> FactStoreResult<bool> {
@@ -146,7 +147,7 @@ pub(super) async fn legacy_mapping_matches(
 }
 
 pub(super) async fn ensure_event_references(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     event: &FactLineageEventV1,
 ) -> FactStoreResult<()> {
@@ -192,7 +193,7 @@ pub(super) async fn ensure_event_references(
 }
 
 async fn ensure_event_evidence(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     evidence_ids: &[FactEvidenceId],
@@ -209,7 +210,7 @@ async fn ensure_event_evidence(
 }
 
 async fn owned_assertion_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     assertion_id: &FactAssertionId,
@@ -231,7 +232,7 @@ async fn owned_assertion_exists(
 }
 
 async fn owned_evidence_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     evidence_id: &FactEvidenceId,
@@ -253,7 +254,7 @@ async fn owned_evidence_exists(
 }
 
 async fn owned_fact_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> FactStoreResult<bool> {
@@ -273,7 +274,7 @@ async fn owned_fact_exists(
 }
 
 pub(super) async fn insert_event(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     event: &FactLineageEventV1,
 ) -> FactStoreResult<()> {
@@ -308,7 +309,7 @@ pub(super) async fn insert_event(
 }
 
 pub(super) async fn event_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     event_id: &FactEventId,
 ) -> FactStoreResult<bool> {
     row_exists(
@@ -320,7 +321,7 @@ pub(super) async fn event_exists(
 }
 
 pub(super) async fn event_matches(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     event: &FactLineageEventV1,
 ) -> FactStoreResult<bool> {
@@ -407,7 +408,7 @@ impl Projection {
 }
 
 pub(super) async fn publish_current_projection(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<()> {
@@ -510,7 +511,7 @@ pub(super) async fn publish_current_projection(
 }
 
 pub(in crate::store::memory) async fn load_current_projection(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> FactStoreResult<Option<Projection>> {
@@ -545,7 +546,7 @@ pub(in crate::store::memory) async fn load_current_projection(
 }
 
 pub(super) async fn receipt_outcome(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
     replay: bool,
@@ -577,7 +578,7 @@ pub(super) async fn receipt_outcome(
 }
 
 pub(super) async fn ensure_fact_identity(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<()> {

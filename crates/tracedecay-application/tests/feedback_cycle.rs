@@ -637,6 +637,35 @@ fn admitted_provider(
 }
 
 #[test]
+fn analyzer_admission_rebinds_only_request_evidence_for_current_document() {
+    let input = saved_input();
+    let template = provider_identity(&input);
+    let admission = admitted_provider(&template, AnalyzerAvailabilityV1::Available, true);
+    let mut current = template.clone();
+    current.source = ProviderSourceIdentity::CleanGeneration {
+        generation: common::id::<CodeGenerationId>("generation.feedback.next"),
+    };
+    current.document.file = common::id::<FileOccurrenceId>("file.feedback.next");
+    current.document.content_digest = common::id::<ContentDigest>(common::SHA256_B);
+    current.freshness.observed_at = UtcMicros(3);
+
+    assert!(admission.admits_identity(&current));
+
+    let mut overlay = current.clone();
+    overlay.source = ProviderSourceIdentity::SessionOverlay {
+        session_id: common::id::<SessionId>("session.feedback.rebind"),
+        client_id: common::id::<HostInstanceId>("client.feedback.rebind"),
+        document_version: 7,
+        overlay_digest: common::digest(common::SHA256_B),
+    };
+    overlay.document.document_version = Some(7);
+    assert!(!admission.admits_identity(&overlay));
+
+    current.configuration.digest = common::digest(common::SHA256_B);
+    assert!(!admission.admits_identity(&current));
+}
+
+#[test]
 fn generation_bound_diagnostics_reuses_exact_current_and_previous_generations() {
     let input = saved_input();
     let provider = provider_identity(&input);

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::lcm::compression_decision::{
     AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput, PreflightDecisionInput,
     bounded_leaf_chunk_len, compression_plan, effective_assembly_token_cap,
@@ -16,21 +16,12 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
-use crate::common::{self, isolated_lcm_db_path as isolated_db_path, open_lcm_db};
+use crate::common::{self, LcmTestRuntime, open_lcm_db};
 
-async fn open_lcm_conn(tmp: &TempDir) -> libsql::Connection {
-    let db = libsql::Builder::new_local(isolated_db_path(tmp))
-        .build()
+async fn open_registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
         .await
-        .expect("build direct lcm db");
-    db.connect().expect("connect direct lcm db")
-}
-
-async fn scalar_i64(db_path: &std::path::Path, sql: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn.query(sql, ()).await.unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+        .expect("registered LCM test runtime")
 }
 
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
@@ -69,7 +60,7 @@ fn raw_message_with_role(
     .build()
 }
 
-async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
+async fn insert_session(db: &LcmTestRuntime, provider: &str, session_id: &str) {
     assert!(
         db.upsert_session(&sample_session(provider, session_id))
             .await
@@ -85,7 +76,7 @@ fn externalized_ref_from_placeholder(text: &str) -> String {
 }
 
 async fn insert_raw_messages(
-    db: &GlobalDb,
+    db: &LcmTestRuntime,
     provider: &str,
     session_id: &str,
     contents: &[&str],
@@ -106,8 +97,36 @@ async fn insert_raw_messages(
     store_ids
 }
 
+async fn insert_registered_raw_messages(
+    runtime: &HostAdmissionTestRuntimeV1,
+    provider: &str,
+    session_id: &str,
+    contents: &[&str],
+) -> Vec<i64> {
+    let session = sample_session(provider, session_id);
+    let messages = contents
+        .iter()
+        .enumerate()
+        .map(|(idx, content)| {
+            let message_slug = content.replace(|ch: char| !ch.is_ascii_alphanumeric(), "-");
+            let message_id = format!("{session_id}-message-{}-{message_slug}", idx + 1);
+            raw_message(provider, &message_id, session_id, (idx + 1) as i64, content)
+        })
+        .collect::<Vec<_>>();
+    runtime
+        .upsert_transcript_batch_for_test(
+            HostAdmissionScope::Profile,
+            &session,
+            &messages,
+            "lcm-compression-test-fixture",
+            tracedecay::global_db::ParseOffset::default(),
+        )
+        .await
+        .expect("registered raw message fixture")
+}
+
 async fn insert_raw_messages_with_roles(
-    db: &GlobalDb,
+    db: &LcmTestRuntime,
     provider: &str,
     session_id: &str,
     messages: &[(&str, &str)],

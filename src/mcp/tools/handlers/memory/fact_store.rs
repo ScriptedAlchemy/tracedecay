@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::application::memory::{MemoryApplication, V1UpdateFactOutcome};
 use crate::errors::Result;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::{ToolResult, render, renderers};
 use crate::memory::types::{AddFactRequest, MemoryCategory, SearchFactsRequest, UpdateFactRequest};
 use crate::store::DatabaseFactStore;
@@ -42,7 +42,7 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
 pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;

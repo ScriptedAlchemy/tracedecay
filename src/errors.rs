@@ -47,8 +47,8 @@ pub enum TraceDecayError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("libsql error: {0}")]
-    Libsql(#[from] libsql::Error),
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] crate::db::SqliteDriverError),
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
@@ -57,11 +57,17 @@ pub enum TraceDecayError {
 /// Convenience alias for results using `TraceDecayError`.
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
+impl From<crate::db::engine::Error> for TraceDecayError {
+    fn from(error: crate::db::engine::Error) -> Self {
+        Self::Sqlite(error.into())
+    }
+}
+
 /// Flatten an error and its [`std::error::Error::source`] chain into one
 /// message string.
 ///
 /// Many error families embed their source's `Display` inside their own — e.g.
-/// `#[error("libsql error: {0}")]` paired with `#[from]` (the displayed field
+/// `#[error("SQLite error: {0}")]` paired with `#[from]` (the displayed field
 /// *is* the `#[source]`), or every `std::io::Error::other` wrapper (its
 /// `Display` delegates straight to the wrapped error). Naively appending each
 /// layer's `to_string()` would then double the tail into `"...: E: E"` or
@@ -169,6 +175,15 @@ mod tests {
     }
 
     #[test]
+    fn engine_error_converts_without_exposing_the_private_engine_type() {
+        let err: TraceDecayError =
+            crate::db::engine::Error::Runtime("writer unavailable".to_string()).into();
+
+        assert!(matches!(err, TraceDecayError::Sqlite(_)));
+        assert!(err.to_string().contains("writer unavailable"));
+    }
+
+    #[test]
     fn database_operation_preserves_public_database_classification() {
         let err = TraceDecayError::database_operation(
             "SELECT observations",
@@ -199,14 +214,14 @@ mod tests {
         impl Error for Inner {}
 
         // Mimics the reachable self-displaying families (e.g.
-        // `#[error("libsql error: {0}")]` + `#[from]`, or `io::Error::other`):
+        // `#[error("SQLite error: {0}")]` + `#[from]`, or `io::Error::other`):
         // `Display` embeds the source's own `Display`, and `source()` returns
         // that same error, so the outer text already ends with the inner text.
         #[derive(Debug)]
         struct Outer(Inner);
         impl fmt::Display for Outer {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "libsql error: {}", self.0)
+                write!(f, "SQLite error: {}", self.0)
             }
         }
         impl Error for Outer {
@@ -220,8 +235,8 @@ mod tests {
             panic!("expected Database variant");
         };
         assert_eq!(operation, "SELECT nodes");
-        // Without the ends-with guard this would be "libsql error: disk full: disk full".
-        assert_eq!(message, "libsql error: disk full");
+        // Without the ends-with guard this would be "SQLite error: disk full: disk full".
+        assert_eq!(message, "SQLite error: disk full");
         assert_eq!(
             message.matches("disk full").count(),
             1,

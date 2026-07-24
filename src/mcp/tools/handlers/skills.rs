@@ -19,6 +19,7 @@ use crate::automation::skill_usage::{
     summarize_skill_usage, summarize_skill_usage_for,
 };
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 
@@ -86,9 +87,13 @@ fn json_by_skill<T: Serialize>(
         .collect()
 }
 
-pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_skill_list(
+    cg: &TraceDecay,
+    args: Value,
+    analytics_db: Option<&RegisteredGlobalDb>,
+) -> Result<ToolResult> {
     let profile_root = crate::storage::default_profile_root()?;
-    sync_project_skill_analytics(cg, &profile_root).await?;
+    sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
     let state = parse_state(&args)?;
     let include_body = optional_bool(&args, "include_body", false);
     let mut skills = list_managed_skills(&profile_root).await?;
@@ -143,9 +148,13 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
     ))
 }
 
-pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_skill_view(
+    cg: &TraceDecay,
+    args: Value,
+    analytics_db: Option<&RegisteredGlobalDb>,
+) -> Result<ToolResult> {
     let profile_root = crate::storage::default_profile_root()?;
-    sync_project_skill_analytics(cg, &profile_root).await?;
+    sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
     let include_support_files = optional_bool(&args, "include_support_files", true);
     let mut skill = load_managed_skill(&profile_root, required_str(&args, "id")?).await?;
     let targets = skill
@@ -168,7 +177,9 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
                 .get("__mcp_request_id")
                 .and_then(Value::as_str)
                 .map(|request_id| analytics_import_key_for_request(
-                    &crate::global_db::GlobalDb::canonical_project_key(cg.project_root()),
+                    &crate::global_db::RegisteredGlobalDb::canonical_project_key(
+                        cg.project_root(),
+                    ),
                     "mcp",
                     request_id,
                     &skill.metadata.id,
@@ -243,12 +254,15 @@ pub(super) async fn handle_automation_run_artifact_view(
     ))
 }
 
-async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> Result<()> {
-    let global_db = crate::global_db::GlobalDb::open().await;
+async fn sync_project_skill_analytics(
+    cg: &TraceDecay,
+    profile_root: &Path,
+    analytics_db: Option<&RegisteredGlobalDb>,
+) -> Result<()> {
     ingest_project_analytics_events(
         profile_root,
         cg.project_root(),
-        global_db.as_ref(),
+        analytics_db,
         SKILL_ANALYTICS_IMPORT_LIMIT,
     )
     .await

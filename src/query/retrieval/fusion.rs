@@ -133,6 +133,10 @@ impl RetrievalCursorKeyringV1 {
         Ok(())
     }
 
+    pub fn privacy_domain(&self) -> &PrivacyDomainId {
+        &self.privacy_domain
+    }
+
     pub fn rotate(
         &mut self,
         key_id: RetrievalCursorKeyId,

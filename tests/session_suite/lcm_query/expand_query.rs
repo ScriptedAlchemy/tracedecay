@@ -3,10 +3,9 @@ use super::*;
 #[tokio::test]
 async fn expand_query_returns_no_match_without_synthesis() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["ordinary transcript without the target term".to_string()],
@@ -14,7 +13,7 @@ async fn expand_query_returns_no_match_without_synthesis() {
     .await;
 
     let response = db
-        .lcm_expand_query(LcmExpandQueryRequest {
+        .lcm_expand_query_for_test(LcmExpandQueryRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             prompt: "What did we decide about citron?".into(),
@@ -41,10 +40,9 @@ async fn expand_query_returns_no_match_without_synthesis() {
 #[tokio::test]
 async fn expand_query_selects_summary_and_raw_context_blocks() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -66,7 +64,7 @@ async fn expand_query_selects_summary_and_raw_context_blocks() {
         .expect("summary should insert");
 
     let response = db
-        .lcm_expand_query(LcmExpandQueryRequest {
+        .lcm_expand_query_for_test(LcmExpandQueryRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             prompt: "What happened with orchard migration?".into(),
@@ -113,16 +111,9 @@ async fn expand_query_selects_summary_and_raw_context_blocks() {
 #[tokio::test]
 async fn expand_query_reports_context_budget_truncation() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let long_source = format!("raw lemon details {}", "L".repeat(4000));
-    let store_ids = insert_raw_messages(
-        &db,
-        &isolated_db_path(&tmp),
-        "cursor",
-        "session-1",
-        &[long_source],
-    )
-    .await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &[long_source]).await;
     let summary = db
         .lcm_insert_summary_node(summary_draft(
             "cursor",
@@ -136,7 +127,7 @@ async fn expand_query_reports_context_budget_truncation() {
         .expect("summary should insert");
 
     let response = db
-        .lcm_expand_query(LcmExpandQueryRequest {
+        .lcm_expand_query_for_test(LcmExpandQueryRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             prompt: "Explain lemon budget".into(),
@@ -169,13 +160,12 @@ async fn expand_query_reports_context_budget_truncation() {
 #[tokio::test]
 async fn expand_query_filters_base64_noise_blocks_from_context() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     // A realistic high-entropy base64 thinking-signature blob (mixed case and
     // digits, no whitespace), well over the noise-token length threshold.
     let noise = "Ab3Cd9Ef2Gh7Jk1Lm5".repeat(20);
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["raw apricot migration detail".to_string(), noise.clone()],
@@ -199,7 +189,7 @@ async fn expand_query_filters_base64_noise_blocks_from_context() {
         .expect("summary should insert");
 
     let response = db
-        .lcm_expand_query(LcmExpandQueryRequest {
+        .lcm_expand_query_for_test(LcmExpandQueryRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             prompt: "What happened with apricot migration?".into(),

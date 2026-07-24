@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::{HashMap, HashSet};
 
-use crate::db::{Database, DatabaseWriterConnection};
+use crate::db::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
@@ -27,7 +27,9 @@ pub struct GraphQueryManager<'a> {
     db: &'a Database,
 }
 
-fn row_to_node_dead_code(row: &libsql::Row) -> std::result::Result<Node, libsql::Error> {
+fn row_to_node_dead_code(
+    row: &crate::db::engine::Row,
+) -> std::result::Result<Node, crate::db::engine::Error> {
     let kind_str = get_string_lossy(row, 1)?;
     let vis_str = get_string_lossy(row, 11)?;
     let is_async_int = row.get::<i64>(12)?;
@@ -70,28 +72,33 @@ fn row_to_node_dead_code(row: &libsql::Row) -> std::result::Result<Node, libsql:
     })
 }
 
-fn get_string_lossy(row: &libsql::Row, idx: i32) -> std::result::Result<String, libsql::Error> {
-    let val = row.get::<libsql::Value>(idx)?;
+fn get_string_lossy(
+    row: &crate::db::engine::Row,
+    idx: i32,
+) -> std::result::Result<String, crate::db::engine::Error> {
+    let val = row.get::<crate::db::engine::Value>(idx)?;
     match val {
-        libsql::Value::Text(s) => Ok(s),
-        libsql::Value::Blob(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-        libsql::Value::Null => Ok(String::new()),
-        libsql::Value::Integer(i) => Ok(i.to_string()),
-        libsql::Value::Real(f) => Ok(f.to_string()),
+        crate::db::engine::Value::Text(s) => Ok(s),
+        crate::db::engine::Value::Blob(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        crate::db::engine::Value::Null => Ok(String::new()),
+        crate::db::engine::Value::Integer(i) => Ok(i.to_string()),
+        crate::db::engine::Value::Real(f) => Ok(f.to_string()),
     }
 }
 
 fn get_opt_string_lossy(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     idx: i32,
-) -> std::result::Result<Option<String>, libsql::Error> {
-    let val = row.get::<libsql::Value>(idx)?;
+) -> std::result::Result<Option<String>, crate::db::engine::Error> {
+    let val = row.get::<crate::db::engine::Value>(idx)?;
     match val {
-        libsql::Value::Text(s) => Ok(Some(s)),
-        libsql::Value::Blob(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
-        libsql::Value::Null => Ok(None),
-        libsql::Value::Integer(i) => Ok(Some(i.to_string())),
-        libsql::Value::Real(f) => Ok(Some(f.to_string())),
+        crate::db::engine::Value::Text(s) => Ok(Some(s)),
+        crate::db::engine::Value::Blob(bytes) => {
+            Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+        }
+        crate::db::engine::Value::Null => Ok(None),
+        crate::db::engine::Value::Integer(i) => Ok(Some(i.to_string())),
+        crate::db::engine::Value::Real(f) => Ok(Some(f.to_string())),
     }
 }
 
@@ -123,7 +130,7 @@ impl<'a> GraphQueryManager<'a> {
         kinds: &[NodeKind],
         include_public: bool,
     ) -> Result<Vec<Node>> {
-        let connection = self.db.writer_connection("find dead code").await?;
+        let transaction = self.db.begin_write_transaction("find dead code").await?;
         let kind_filter = if kinds.is_empty() {
             String::new()
         } else {
@@ -182,7 +189,7 @@ impl<'a> GraphQueryManager<'a> {
         //   probe is now against a ~15K-row indexed lookup table, not a
         //   correlated subquery the optimiser can re-shape.
         let result = self
-            .find_dead_code_inner(&connection, visibility_filter, &kind_filter)
+            .find_dead_code_inner(&transaction, visibility_filter, &kind_filter)
             .await;
 
         // Always drop both temp tables, even on the error path, so a
@@ -191,12 +198,13 @@ impl<'a> GraphQueryManager<'a> {
         // original error.
         let _ = self
             .db
-            .drop_test_annotated_targets_temp_table_unlocked(&connection)
+            .drop_test_annotated_targets_temp_table_unlocked(&transaction)
             .await;
         let _ = self
             .db
-            .drop_test_marker_temp_table_unlocked(&connection)
+            .drop_test_marker_temp_table_unlocked(&transaction)
             .await;
+        let _ = transaction.rollback().await;
         result
     }
 
@@ -204,7 +212,7 @@ impl<'a> GraphQueryManager<'a> {
     /// guaranteed `drop_*_temp_table()` even on the error path.
     async fn find_dead_code_inner(
         &self,
-        connection: &DatabaseWriterConnection<'_>,
+        connection: &DatabaseWriteTransaction<'_>,
         visibility_filter: &str,
         kind_filter: &str,
     ) -> Result<Vec<Node>> {
@@ -239,20 +247,24 @@ impl<'a> GraphQueryManager<'a> {
              {test_annotated_targets_filter}"
         );
 
-        let mut rows = connection
-            .query(&sql, ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to find dead code: {e}"),
-                operation: "find_dead_code".to_string(),
-            })?;
+        let mut rows =
+            connection
+                .query_engine(&sql, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to find dead code: {e}"),
+                    operation: "find_dead_code".to_string(),
+                })?;
 
         let mut dead = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: "find_dead_code".to_string(),
         })? {
-            let node = row_to_node_dead_code(&row)?;
+            let node = row_to_node_dead_code(&row).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to decode dead-code node: {error}"),
+                operation: "find_dead_code".to_owned(),
+            })?;
             dead.push(node);
         }
         Ok(dead)
@@ -308,15 +320,15 @@ impl<'a> GraphQueryManager<'a> {
             placeholders.join(", ")
         );
 
-        let param_values: Vec<libsql::Value> = node_ids
+        let param_values: Vec<crate::db::engine::Value> = node_ids
             .iter()
-            .map(|id| libsql::Value::Text(id.clone()))
+            .map(|id| crate::db::engine::Value::Text(id.clone()))
             .collect();
 
         let mut rows = self
             .db
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, crate::db::engine::params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query file dependencies: {e}"),
@@ -370,15 +382,15 @@ impl<'a> GraphQueryManager<'a> {
             placeholders.join(", ")
         );
 
-        let param_values: Vec<libsql::Value> = node_ids
+        let param_values: Vec<crate::db::engine::Value> = node_ids
             .iter()
-            .map(|id| libsql::Value::Text(id.clone()))
+            .map(|id| crate::db::engine::Value::Text(id.clone()))
             .collect();
 
         let mut rows = self
             .db
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, crate::db::engine::params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query file dependents: {e}"),

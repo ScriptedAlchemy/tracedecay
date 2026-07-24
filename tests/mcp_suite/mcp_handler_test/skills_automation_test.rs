@@ -5,6 +5,7 @@ use crate::support::*;
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     approve_managed_skill, create_managed_skill_draft,
@@ -16,7 +17,7 @@ use tracedecay::automation::run_ledger::{
 use tracedecay::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
-use tracedecay::global_db::GlobalDb;
+use tracedecay::mcp::McpServer;
 
 #[tokio::test]
 async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
@@ -144,6 +145,8 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
     let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let runtime = open_active_project_session_db(&cg).await;
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
 
     create_managed_skill_draft(
         &profile_root,
@@ -171,11 +174,10 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     )
     .await
     .unwrap();
-    let global_db = GlobalDb::open().await.unwrap();
-    global_db
-        .append_analytics_event(&tracedecay::global_db::AnalyticsEventInsert {
+    runtime
+        .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
             provider: "mcp".to_string(),
-            project_id: GlobalDb::canonical_project_key(cg.project_root()),
+            project_id: project_id.clone(),
             session_id: Some("mcp-skill-session".to_string()),
             timestamp: tracedecay::tracedecay::current_timestamp(),
             event_kind: "mcp_tool_call".to_string(),
@@ -198,16 +200,14 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         })
         .await
         .unwrap();
+    let server =
+        McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
+            .await;
 
-    let markdown_list = handle_tool_call(
-        &cg,
-        "tracedecay_skill_list",
-        json!({"state": "active"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let markdown_list = server
+        .call_tool_for_test("tracedecay_skill_list", json!({"state": "active"}))
+        .await
+        .unwrap();
     let markdown_text = extract_text(&markdown_list.value);
     assert!(markdown_text.starts_with("## Managed Skills"));
     assert!(markdown_text.contains("**count:** 1"));
@@ -215,15 +215,13 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     assert!(markdown_text.contains("Active skill"));
     assert!(!markdown_text.contains("|"));
 
-    let list = handle_tool_call(
-        &cg,
-        "tracedecay_skill_list",
-        json!({"state": "active", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let list = server
+        .call_tool_for_test(
+            "tracedecay_skill_list",
+            json!({"state": "active", "format": "json"}),
+        )
+        .await
+        .unwrap();
     assert!(list.touched_files.is_empty());
     let payload = extract_json(&list.value);
     assert_eq!(payload["status"], "ok");
@@ -251,19 +249,17 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     );
     assert!(payload["skills"][0].get("body_markdown").is_none());
 
-    let markdown_view = handle_tool_call(
-        &cg,
-        "tracedecay_skill_view",
-        json!({
-            "id": "active-skill",
-            "include_support_files": false,
-            "__mcp_request_id": "req-active-view",
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let markdown_view = server
+        .call_tool_for_test(
+            "tracedecay_skill_view",
+            json!({
+                "id": "active-skill",
+                "include_support_files": false,
+                "__mcp_request_id": "req-active-view",
+            }),
+        )
+        .await
+        .unwrap();
     let markdown_text = extract_text(&markdown_view.value);
     assert!(markdown_text.starts_with("## Managed Skill: active-skill"));
     assert!(markdown_text.contains("**state:** active"));
@@ -271,20 +267,18 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     assert!(markdown_text.contains("Active skill"));
     assert!(!markdown_text.contains("|"));
 
-    let view = handle_tool_call(
-        &cg,
-        "tracedecay_skill_view",
-        json!({
-            "id": "active-skill",
-            "include_support_files": false,
-            "__mcp_request_id": "req-active-view",
-            "format": "json",
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let view = server
+        .call_tool_for_test(
+            "tracedecay_skill_view",
+            json!({
+                "id": "active-skill",
+                "include_support_files": false,
+                "__mcp_request_id": "req-active-view",
+                "format": "json",
+            }),
+        )
+        .await
+        .unwrap();
     assert!(view.touched_files.is_empty());
     let payload = extract_json(&view.value);
     assert_eq!(payload["status"], "ok");
@@ -323,10 +317,12 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     assert_eq!(usage_record.use_count, 1);
     assert!(usage_record.targets.iter().any(|target| target == "mcp"));
 
-    global_db
-        .append_analytics_event(&tracedecay::global_db::AnalyticsEventInsert {
+    server
+        .host_admission_test_runtime_for_test()
+        .expect("server should retain the host-admission test runtime")
+        .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
             provider: "mcp".to_string(),
-            project_id: GlobalDb::canonical_project_key(cg.project_root()),
+            project_id,
             session_id: Some("mcp-skill-session".to_string()),
             timestamp: tracedecay::tracedecay::current_timestamp(),
             event_kind: "mcp_tool_call".to_string(),
@@ -350,19 +346,17 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         })
         .await
         .unwrap();
-    let list_after_view = handle_tool_call(
-        &cg,
-        "tracedecay_skill_list",
-        json!({"state": "active", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let list_after_view = server
+        .call_tool_for_test(
+            "tracedecay_skill_list",
+            json!({"state": "active", "format": "json"}),
+        )
+        .await
+        .unwrap();
     let payload = extract_json(&list_after_view.value);
     assert_eq!(payload["skills"][0]["usage_summary"]["view_count"], 3);
 
-    close_test_graph(cg).await;
+    drop(server);
     drop(env_lock);
 }
 

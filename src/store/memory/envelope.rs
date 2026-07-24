@@ -3,7 +3,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -20,7 +21,7 @@ use super::primitives::{
 };
 
 pub(super) async fn finish_read_snapshot<T>(
-    snapshot: Transaction,
+    snapshot: Transaction<'_>,
     result: FactStoreResult<T>,
 ) -> FactStoreResult<T> {
     match result {
@@ -63,7 +64,7 @@ pub(super) fn compatibility_digest(material: Value) -> FactStoreResult<String> {
 }
 
 pub(super) async fn compatibility_lookup_operation_receipt_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation_id: &ProvenanceId,
     expected_kind: &'static str,
@@ -121,7 +122,7 @@ pub(super) async fn compatibility_lookup_operation_receipt_tx(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn compatibility_record_operation_receipt_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation_id: &ProvenanceId,
     operation_kind: &'static str,
@@ -191,14 +192,14 @@ impl DatabaseFactStore<'_> {
     pub(super) async fn compatibility_read<T>(
         &self,
         work: impl for<'tx> FnOnce(
-            &'tx Transaction,
+            &'tx Transaction<'_>,
         ) -> Pin<
             Box<dyn Future<Output = FactCompatibilityResult<T>> + Send + 'tx>,
         >,
     ) -> FactCompatibilityResult<T> {
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(COMPATIBILITY_READ_OPERATION)
+            .begin_memory_read_transaction(COMPATIBILITY_READ_OPERATION)
             .await
             .map_err(|error| {
                 FactCompatibilityStoreError::Store(storage_error(
@@ -232,14 +233,14 @@ impl DatabaseFactStore<'_> {
     pub(super) async fn compatibility_write<T>(
         &self,
         work: impl for<'tx> FnOnce(
-            &'tx Transaction,
+            &'tx Transaction<'_>,
         ) -> Pin<
             Box<dyn Future<Output = FactCompatibilityResult<T>> + Send + 'tx>,
         >,
     ) -> FactCompatibilityResult<T> {
         let transaction = self
             .db
-            .begin_write_transaction(COMPATIBILITY_WRITE_OPERATION)
+            .begin_memory_write_transaction(COMPATIBILITY_WRITE_OPERATION)
             .await
             .map_err(|error| {
                 FactCompatibilityStoreError::Store(storage_error(

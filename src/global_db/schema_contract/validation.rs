@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
@@ -60,7 +60,7 @@ fn normalize_default(value: Option<&str>) -> Option<String> {
     })
 }
 
-async fn validate_table(conn: &Connection, contract: &Table) -> crate::errors::Result<()> {
+async fn validate_table(conn: &impl QueryExecutor, contract: &Table) -> crate::errors::Result<()> {
     let actual = read_columns(conn, contract.name).await?;
     if actual.len() != contract.columns.len() {
         return Err(global_db_operation_message(
@@ -174,7 +174,7 @@ fn index_has_columns(actual: &ActualIndex, expected: &[&str]) -> bool {
 }
 
 pub(in crate::global_db) async fn validate_observation_migration_source(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     has_legacy_idempotency: bool,
 ) -> crate::errors::Result<()> {
     let Some(contract) = TABLES
@@ -248,7 +248,10 @@ pub(in crate::global_db) async fn validate_observation_migration_source(
     Ok(())
 }
 
-async fn validate_indexes_for_table(conn: &Connection, table: &str) -> crate::errors::Result<()> {
+async fn validate_indexes_for_table(
+    conn: &impl QueryExecutor,
+    table: &str,
+) -> crate::errors::Result<()> {
     let actual = read_indexes(conn, table).await?;
     let expected = INDEXES
         .iter()
@@ -293,7 +296,7 @@ async fn validate_indexes_for_table(conn: &Connection, table: &str) -> crate::er
 }
 
 async fn validate_trigger(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     trigger: &super::invariants::Trigger,
 ) -> crate::errors::Result<()> {
     let mut rows = conn
@@ -304,13 +307,19 @@ async fn validate_trigger(
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let actual = rows
+    let actual = match rows
         .next()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .map(|row| Ok::<_, libsql::Error>((row.get::<String>(0)?, row.get::<String>(1)?)))
-        .transpose()
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    {
+        Some(row) => Some((
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            row.get::<String>(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        )),
+        None => None,
+    };
     if actual.as_ref().is_some_and(|(table, sql)| {
         table.eq_ignore_ascii_case(trigger.table)
             && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
@@ -327,7 +336,9 @@ async fn validate_trigger(
     }
 }
 
-async fn validate_observation_autoincrement(conn: &Connection) -> crate::errors::Result<()> {
+async fn validate_observation_autoincrement(
+    conn: &impl QueryExecutor,
+) -> crate::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT EXISTS(
@@ -368,7 +379,7 @@ async fn validate_observation_autoincrement(conn: &Connection) -> crate::errors:
 }
 
 async fn validate_tables_and_indexes(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     tables: &[Table],
 ) -> crate::errors::Result<()> {
     for contract in tables {
@@ -379,7 +390,7 @@ async fn validate_tables_and_indexes(
 }
 
 async fn validate_named_tables_and_indexes(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     table_names: &[&str],
 ) -> crate::errors::Result<()> {
     for table_name in table_names {
@@ -398,8 +409,8 @@ async fn validate_named_tables_and_indexes(
     Ok(())
 }
 
-pub(in crate::global_db) async fn validate_registry_schema_contract(
-    conn: &Connection,
+pub(crate) async fn validate_registry_schema_contract(
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     validate_named_tables_and_indexes(conn, REGISTRY_TABLE_NAMES).await
 }
@@ -409,7 +420,7 @@ pub(in crate::global_db) async fn validate_registry_schema_contract(
 /// Transcript, LCM, git-correlation, and workflow-index tables are independently owned by their
 /// schema modules; this validator intentionally neither claims nor validates those domains.
 pub(in crate::global_db) async fn validate_authority_schema_contract(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     validate_tables_and_indexes(conn, TABLES).await?;
     for invariant in super::invariants::INVARIANTS {
@@ -434,5 +445,20 @@ mod tests {
         );
         assert_eq!(normalize_default(Some("((0)")).as_deref(), Some("((0)"));
         assert_eq!(normalize_default(Some("(')')")).as_deref(), Some("')'"));
+    }
+
+    #[tokio::test]
+    async fn registry_contract_validates_through_engine_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+            directory.path(),
+        )
+        .await
+        .unwrap();
+
+        runtime
+            .validate_profile_registry_schema_contract_for_test()
+            .await
+            .unwrap();
     }
 }

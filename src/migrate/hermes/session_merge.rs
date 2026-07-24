@@ -1,6 +1,9 @@
 //! Transactional session-store merge and durable migration ledger.
 
 use super::*;
+use crate::db::engine::Value;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+use crate::sqlite_read_snapshot::SnapshotConnection;
 
 pub(super) struct MergeOutcome {
     pub(super) already_migrated: bool,
@@ -22,7 +25,7 @@ struct MigrationMarker {
 }
 
 pub(super) struct MergeSnapshotRequest<'a> {
-    pub(super) source: Option<&'a Connection>,
+    pub(super) source: Option<&'a SnapshotConnection>,
     pub(super) source_path: &'a Path,
     pub(super) target_path: &'a Path,
     pub(super) target_project: &'a Path,
@@ -64,7 +67,7 @@ impl Drop for CreatedPayloads {
 }
 
 pub(super) async fn merge_snapshot(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     request: MergeSnapshotRequest<'_>,
 ) -> Result<MergeOutcome, String> {
     let source_path = request.source_path;
@@ -123,7 +126,7 @@ pub(super) async fn merge_snapshot(
 
 async fn merge_snapshot_in_transaction(
     request: &MergeSnapshotRequest<'_>,
-    target: &Connection,
+    target: &RegisteredGlobalDbWriteTransaction<'_>,
 ) -> Result<MergeOutcome, String> {
     let target_project = request.target_project;
     let fail_after_table = request.fail_after_table;
@@ -135,7 +138,7 @@ async fn merge_snapshot_in_transaction(
             rows_copied,
         });
     };
-    let project = GlobalDb::canonical_project_key(target_project);
+    let project = RegisteredGlobalDb::canonical_project_key(target_project);
     rows_copied += copy_table(source, target, "sessions", &[], |columns, values| {
         for (column, value) in columns.iter().zip(values.iter_mut()) {
             if column == "project_path" || column == "project_key" {

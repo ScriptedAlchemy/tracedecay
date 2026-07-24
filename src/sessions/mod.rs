@@ -39,13 +39,11 @@ pub(crate) use ingest::{
     classify_transcript_ingest_failure, home_dir, ingest_project_sources_for_provider,
     ingest_user_global_sources_for_provider_with_authorities,
     ingest_user_global_sources_for_startup_with_db, registered_project_roots_from,
-    try_ingest_user_codex_sessions_with_db,
+    try_ingest_user_codex_sessions_with_db_and_admission,
 };
 pub use ingest::{
     USER_SESSIONS_DB_FILENAME, ingest_global_sources, ingest_global_sources_for_provider,
-    ingest_user_codex_sessions, ingest_user_cursor_sessions, ingest_user_global_sources,
-    ingest_user_global_sources_for_provider, open_user_session_db, registered_project_roots,
-    try_registered_project_roots, user_sessions_db_path,
+    user_sessions_db_path,
 };
 pub use providers::{ProviderScope, SessionProvider};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;

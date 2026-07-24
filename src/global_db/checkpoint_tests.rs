@@ -1,14 +1,11 @@
-use super::*;
+use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
-use crate::db::libsql_local;
-
-async fn pinned_wal_reader() -> (tempfile::TempDir, GlobalDb, libsql::Database, Connection) {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at_without_structured_backfill(&db_path)
-        .await
-        .unwrap();
-    db.conn
+async fn pinned_wal_reader() -> (RegisteredGlobalDbHarness, crate::db::engine::ReadSnapshot) {
+    let harness = RegisteredGlobalDbHarness::open("pinned-wal-reader").await;
+    harness
+        .registered
+        .writer_connection()
+        .unwrap()
         .execute_batch(
             "PRAGMA wal_autocheckpoint=0;
              PRAGMA busy_timeout=1;
@@ -18,11 +15,7 @@ async fn pinned_wal_reader() -> (tempfile::TempDir, GlobalDb, libsql::Database, 
         .await
         .unwrap();
 
-    let reader_db = libsql_local::open_local_database(&db_path, true)
-        .await
-        .unwrap();
-    let reader = reader_db.connect().unwrap();
-    reader.execute("BEGIN", ()).await.unwrap();
+    let reader = harness.registered.read_snapshot().await.unwrap();
     let mut rows = reader
         .query("SELECT COUNT(*) FROM checkpoint_probe", ())
         .await
@@ -33,33 +26,41 @@ async fn pinned_wal_reader() -> (tempfile::TempDir, GlobalDb, libsql::Database, 
     );
     drop(rows);
 
-    db.conn
+    harness
+        .registered
+        .writer_connection()
+        .unwrap()
         .execute("INSERT INTO checkpoint_probe(value) VALUES (2)", ())
         .await
         .unwrap();
-    (dir, db, reader_db, reader)
+    (harness, reader)
 }
 
 #[tokio::test]
 async fn checkpoint_result_reports_busy_and_recovers_after_reader_finishes() {
-    let (_dir, db, _reader_db, reader) = pinned_wal_reader().await;
+    let (harness, reader) = pinned_wal_reader().await;
 
-    let error = db.checkpoint_result().await.unwrap_err().to_string();
+    let error = harness
+        .registered
+        .checkpoint_result()
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("WAL checkpoint incomplete"), "{error}");
     assert!(error.contains("busy=1"), "{error}");
     assert!(error.contains("log_frames="), "{error}");
     assert!(error.contains("checkpointed_frames="), "{error}");
 
-    reader.execute("COMMIT", ()).await.unwrap();
-    db.checkpoint_result().await.unwrap();
+    drop(reader);
+    harness.registered.checkpoint_result().await.unwrap();
 }
 
 #[tokio::test]
 async fn public_checkpoint_remains_best_effort_when_reader_is_busy() {
-    let (_dir, db, _reader_db, reader) = pinned_wal_reader().await;
+    let (harness, reader) = pinned_wal_reader().await;
 
-    db.checkpoint().await;
+    harness.registered.checkpoint().await;
 
-    reader.execute("COMMIT", ()).await.unwrap();
-    db.checkpoint_result().await.unwrap();
+    drop(reader);
+    harness.registered.checkpoint_result().await.unwrap();
 }

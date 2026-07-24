@@ -8,40 +8,60 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::global_db::{GlobalDb, ParseOffset};
-use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::hermes::{
     ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
     ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
 };
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 use tracedecay::sessions::source::TranscriptIngestStats;
-use tracedecay::sessions::{SessionProvider, SessionRecord, ingest_global_sources_for_provider};
+use tracedecay::sessions::{SessionProvider, SessionRecord};
 use tracedecay_domain::{MAX_OBSERVATION_RECORD_BYTES, ProjectId};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    assert_secret_absent_from_observation_sinks, durable_table_count, fixture_project_id,
-    mark_test_project, observation_source_cursor, set_projection_failure,
+    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
+    mark_test_project, observation_source_cursor, open_project_session_db, set_projection_failure,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo,
 };
 
 const SESSION_ID: &str = "20260101_000000_abc123";
-static HERMES_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
-    tokio::sync::OnceCell::const_new();
 
-async fn ingest_for_project(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
-    ingest_for_project_with_id(db, project_root, fixture_project_id()).await
+async fn ingest_for_project(
+    runtime: &ProjectSessionTestRuntime,
+    project_root: &Path,
+) -> TranscriptIngestStats {
+    let admission = runtime.runtime().facade();
+    ingest_for_project_with_id(&admission, project_root, runtime.project_id().clone()).await
 }
 
 async fn ingest_homes(
-    db: &GlobalDb,
+    runtime: &ProjectSessionTestRuntime,
     hermes_homes: &[PathBuf],
     project_root: &Path,
 ) -> TranscriptIngestStats {
-    ingest_homes_with_id(db, hermes_homes, project_root, fixture_project_id()).await
+    let admission = runtime.runtime().facade();
+    ingest_homes_with_id(
+        &admission,
+        hermes_homes,
+        project_root,
+        runtime.project_id().clone(),
+    )
+    .await
+}
+
+async fn ingest_registered_project_provider(
+    runtime: &ProjectSessionTestRuntime,
+    project_root: &Path,
+) -> TranscriptIngestStats {
+    runtime
+        .runtime()
+        .ingest_project_provider_for_test(project_root, Some(SessionProvider::Hermes))
+        .await
+        .unwrap()
 }
 
 fn named_project_id(name: &str) -> ProjectId {
@@ -51,28 +71,32 @@ fn named_project_id(name: &str) -> ProjectId {
 #[tokio::test]
 async fn hermes_row_cursor_cannot_regress_during_overlapping_sweeps() {
     let tmp = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&tmp.path().join("sessions.db"))
+    let project = tmp.path().join("project");
+    crate::support::init_project_at(&project);
+    let db = open_project_session_db(&project).await.unwrap();
+    let cursor = "state.db#turn-project-v2";
+    db.runtime()
+        .set_project_parse_offset_for_test(
+            cursor,
+            ParseOffset {
+                byte_offset: 200,
+                mtime: 20,
+                file_id: 0,
+            },
+        )
         .await
         .unwrap();
-    let cursor = "state.db#turn-project-v2";
-    db.advance_parse_offset(
-        cursor,
-        ParseOffset {
-            byte_offset: 200,
-            mtime: 20,
-            file_id: 0,
-        },
-    )
-    .await;
-    db.advance_parse_offset(
-        cursor,
-        ParseOffset {
-            byte_offset: 100,
-            mtime: 10,
-            file_id: 0,
-        },
-    )
-    .await;
+    db.runtime()
+        .set_project_parse_offset_for_test(
+            cursor,
+            ParseOffset {
+                byte_offset: 100,
+                mtime: 10,
+                file_id: 0,
+            },
+        )
+        .await
+        .unwrap();
 
     assert_eq!(db.get_parse_offset(cursor).await.unwrap().byte_offset, 200);
 }
@@ -122,19 +146,6 @@ async fn write_hermes_profile(
 ) -> PathBuf {
     let profile_dir = hermes_home.join("profiles").join(profile);
     std::fs::create_dir_all(&profile_dir).unwrap();
-    HERMES_FIXTURE_OWNED_STORE_READY
-        .get_or_init(|| async {
-            // This mixed-engine test binary still contains the owned-store
-            // libsql compatibility layer. Match production startup order so
-            // it configures serialized SQLite before any foreign rusqlite
-            // fixture is opened; all `state.db` writes below remain rusqlite.
-            let initialization_path = profile_dir.join(".owned-store-initialization.db");
-            let db = GlobalDb::open_at_without_structured_backfill(&initialization_path)
-                .await
-                .expect("initialize owned storage before foreign SQLite fixtures");
-            drop(db);
-        })
-        .await;
     let config = match pinned_project {
         Some(pinned_project) => {
             // The pin is JSON-encoded exactly as `tracedecay install --agent
@@ -446,52 +457,58 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
 
     let db = open_project_session_db(&project).await.unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "hermes".to_string(),
-            session_id: SESSION_ID.to_string(),
-            project_key: project.to_string_lossy().to_string(),
-            project_path: project.to_string_lossy().to_string(),
-            title: Some("Runtime-owned raw session".to_string()),
-            started_at: Some(1_780_629_300),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: Some(r#"{"source":"runtime_preflight"}"#.to_string()),
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        db.runtime()
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "hermes".to_string(),
+                    session_id: SESSION_ID.to_string(),
+                    project_key: project.to_string_lossy().to_string(),
+                    project_path: project.to_string_lossy().to_string(),
+                    title: Some("Runtime-owned raw session".to_string()),
+                    started_at: Some(1_780_629_300),
+                    ended_at: None,
+                    transcript_path: None,
+                    metadata_json: Some(r#"{"source":"runtime_preflight"}"#.to_string()),
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                },
+            )
+            .await
+            .unwrap()
     );
 
     let raw_message_id = format!("{SESSION_ID}:3");
     let runtime_owned_raw = "runtime-owned raw message from active replay";
-    db.lcm_preflight(LcmPreflightRequest {
-        provider: "hermes".into(),
-        session_id: SESSION_ID.into(),
-        messages: vec![json!({
-            "id": raw_message_id,
-            "role": "assistant",
-            "content": runtime_owned_raw,
-        })],
-        current_tokens: Some(12),
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
-        ignore_session_patterns: Vec::new(),
-        stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
-    })
-    .await
-    .unwrap();
+    db.runtime()
+        .lcm_preflight_for_test(LcmPreflightRequest {
+            provider: "hermes".into(),
+            session_id: SESSION_ID.into(),
+            messages: vec![json!({
+                "id": raw_message_id,
+                "role": "assistant",
+                "content": runtime_owned_raw,
+            })],
+            current_tokens: Some(12),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
 
     let raw_before = db
         .lcm_load_raw_message("hermes", &raw_message_id)
@@ -570,7 +587,7 @@ async fn hermes_ingest_is_incremental_and_idempotent() {
 }
 
 async fn hermes_projection_signature(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
 ) -> Vec<(
     String,
     String,
@@ -581,7 +598,11 @@ async fn hermes_projection_signature(
 )> {
     let mut rows = std::collections::BTreeMap::new();
     for query in ["billing", "regression"] {
-        for hit in db.search_session_messages("hermes", None, query, 20).await {
+        for hit in runtime
+            .search_project_session_messages_for_test("hermes", None, query, 20)
+            .await
+            .unwrap()
+        {
             let message = hit.message;
             rows.insert(
                 message.message_id.clone(),
@@ -605,12 +626,18 @@ async fn hermes_incremental_ingest_converges_with_full_rebuild() {
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let homes = [hermes_home];
+    let project_id = mark_test_project(&project);
 
-    let incremental = GlobalDb::open_at(&tmp.path().join("incremental.db"))
-        .await
-        .unwrap();
+    let incremental = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("incremental-profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let incremental_admission = incremental.facade();
     assert_eq!(
-        ingest_homes(&incremental, &homes, &project)
+        ingest_homes_with_id(&incremental_admission, &homes, &project, project_id.clone(),)
             .await
             .messages_upserted,
         4
@@ -625,17 +652,22 @@ async fn hermes_incremental_ingest_converges_with_full_rebuild() {
     .unwrap();
     drop(conn);
     assert_eq!(
-        ingest_homes(&incremental, &homes, &project)
+        ingest_homes_with_id(&incremental_admission, &homes, &project, project_id.clone(),)
             .await
             .messages_upserted,
         1
     );
 
-    let rebuilt = GlobalDb::open_at(&tmp.path().join("rebuilt.db"))
-        .await
-        .unwrap();
+    let rebuilt = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("rebuilt-profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let rebuilt_admission = rebuilt.facade();
     assert_eq!(
-        ingest_homes(&rebuilt, &homes, &project)
+        ingest_homes_with_id(&rebuilt_admission, &homes, &project, project_id)
             .await
             .messages_upserted,
         5
@@ -652,15 +684,13 @@ async fn hermes_replacement_replay_preserves_message_identity() {
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let homes = [hermes_home.clone()];
-    let db = GlobalDb::open_at(&tmp.path().join("projection.db"))
-        .await
-        .unwrap();
+    let db = open_project_session_db(&project).await.unwrap();
 
     assert_eq!(
         ingest_homes(&db, &homes, &project).await.messages_upserted,
         4
     );
-    let before = hermes_projection_signature(&db).await;
+    let before = hermes_projection_signature(db.runtime()).await;
 
     let replacement_root = tmp.path().join("replacement");
     let replacement = write_hermes_profile(&replacement_root, "test", Some(&project)).await;
@@ -680,7 +710,7 @@ async fn hermes_replacement_replay_preserves_message_identity() {
 
     let replay = ingest_homes(&db, &homes, &project).await;
     assert_eq!(replay.messages_upserted, 0);
-    let after = hermes_projection_signature(&db).await;
+    let after = hermes_projection_signature(db.runtime()).await;
     assert_eq!(
         before.iter().map(|row| &row.0).collect::<Vec<_>>(),
         after.iter().map(|row| &row.0).collect::<Vec<_>>()
@@ -718,16 +748,18 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
 
     let first_db = open_project_session_db(&first_project).await.unwrap();
     let second_db = open_project_session_db(&second_project).await.unwrap();
+    let first_admission = first_db.runtime().facade();
+    let second_admission = second_db.runtime().facade();
     let destinations = [
         ProjectIngestDestination {
-            db: &first_db,
+            admission: &first_admission,
             project_root: &first_project,
-            project_id: named_project_id("first-project"),
+            project_id: first_db.project_id().clone(),
         },
         ProjectIngestDestination {
-            db: &second_db,
+            admission: &second_admission,
             project_root: &second_project,
-            project_id: named_project_id("second-project"),
+            project_id: second_db.project_id().clone(),
         },
     ];
     let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations).await;
@@ -778,25 +810,36 @@ async fn hermes_shared_sweep_cold_history_completes_under_sixty_seconds() {
         crate::support::init_project_at(&root);
         project_roots.push(root);
     }
-    let mut dbs = Vec::with_capacity(project_roots.len());
-    for index in 0..project_roots.len() {
-        dbs.push(
-            GlobalDb::open_at_without_structured_backfill(
-                &temp.path().join(format!("sessions-{index}.db")),
+    let mut runtimes = Vec::with_capacity(project_roots.len());
+    let mut project_ids = Vec::with_capacity(project_roots.len());
+    for (index, project_root) in project_roots.iter().enumerate() {
+        let project_id = named_project_id(&format!("benchmark-{index}"));
+        runtimes.push(
+            HostAdmissionTestRuntimeV1::project(
+                temp.path().join(format!("profile-{index}")),
+                project_root,
+                project_id.clone(),
             )
             .await
             .unwrap(),
         );
+        project_ids.push(project_id);
     }
-    let destinations = dbs
+    let admissions = runtimes
+        .iter()
+        .map(HostAdmissionTestRuntimeV1::facade)
+        .collect::<Vec<_>>();
+    let destinations = admissions
         .iter()
         .zip(&project_roots)
-        .enumerate()
-        .map(|(index, (db, project_root))| ProjectIngestDestination {
-            db,
-            project_root,
-            project_id: named_project_id(&format!("benchmark-{index}")),
-        })
+        .zip(&project_ids)
+        .map(
+            |((admission, project_root), project_id)| ProjectIngestDestination {
+                admission,
+                project_root,
+                project_id: project_id.clone(),
+            },
+        )
         .collect::<Vec<_>>();
 
     let started = std::time::Instant::now();
@@ -948,16 +991,30 @@ async fn unpinned_profile_never_maps_to_its_own_home_store() {
     assert_eq!(stats.messages_upserted, 0);
 
     // A Hermes profile directory is not a code project identity.
-    let profile_db = open_project_session_db(&profile_dir).await.unwrap();
-    let stats = ingest_homes(
-        &profile_db,
+    let profile_db = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile-directory-destination"),
+        &profile_dir,
+        named_project_id("profile-directory"),
+    )
+    .await
+    .unwrap();
+    let profile_admission = profile_db.facade();
+    let stats = ingest_homes_with_id(
+        &profile_admission,
         std::slice::from_ref(&hermes_home),
         &profile_dir,
+        named_project_id("profile-directory"),
     )
     .await;
     assert_eq!(stats.messages_upserted, 0);
     assert_eq!(stats.sessions_upserted, 0);
-    assert!(profile_db.get_session("hermes", SESSION_ID).await.is_none());
+    assert!(
+        profile_db
+            .session_for_test(HostAdmissionScope::Project, "hermes", SESSION_ID)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1110,19 +1167,26 @@ async fn user_sweep_keeps_canonical_turns_routed_to_registered_projects() {
     )
     .unwrap();
     drop(conn);
-    let user_db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+    let user_db = HostAdmissionTestRuntimeV1::profile(tmp.path().join("user-profile"))
         .await
         .unwrap();
+    let admission = user_db.facade();
 
     let stats = ingest_user_homes(
-        &user_db,
+        &admission,
         std::slice::from_ref(&hermes_home),
         std::slice::from_ref(&registered),
     )
     .await;
 
     assert_eq!(stats.messages_upserted, 4);
-    assert!(user_db.get_session("hermes", SESSION_ID).await.is_some());
+    assert!(
+        user_db
+            .session_for_test(HostAdmissionScope::Profile, "hermes", SESSION_ID)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1142,19 +1206,26 @@ async fn user_sweep_keeps_registered_session_cwd_as_canonical_history() {
     )
     .unwrap();
     drop(conn);
-    let user_db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+    let user_db = HostAdmissionTestRuntimeV1::profile(tmp.path().join("user-profile"))
         .await
         .unwrap();
+    let admission = user_db.facade();
 
     let stats = ingest_user_homes(
-        &user_db,
+        &admission,
         std::slice::from_ref(&hermes_home),
         std::slice::from_ref(&registered),
     )
     .await;
 
     assert_eq!(stats.messages_upserted, 3);
-    assert!(user_db.get_session("hermes", SESSION_ID).await.is_some());
+    assert!(
+        user_db
+            .session_for_test(HostAdmissionScope::Profile, "hermes", SESSION_ID)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1172,7 +1243,7 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let _ = ingest_registered_project_provider(&db, &project).await;
     let before = db.session_message_count().await.unwrap();
     assert_eq!(before, 4);
     let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
@@ -1190,10 +1261,9 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
     .unwrap();
     drop(conn);
 
-    set_projection_failure(&project, true).await;
     let rejected = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Hermes))
-        .await;
+    set_projection_failure(&rejected, true).await;
+    let _ = ingest_registered_project_provider(&rejected, &project).await;
     let committed_cursor = observation_source_cursor(&rejected, "hermes", SESSION_ID, &project)
         .await
         .expect("committed Hermes observation cursor");
@@ -1208,10 +1278,9 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
     );
     drop(rejected);
 
-    set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
-        .await;
+    set_projection_failure(&recovered, false).await;
+    let _ = ingest_registered_project_provider(&recovered, &project).await;
     assert_eq!(recovered.session_message_count().await.unwrap(), before + 1);
     assert_eq!(
         recovered
@@ -1221,7 +1290,7 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
         1
     );
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
+        ingest_registered_project_provider(&recovered, &project)
             .await
             .messages_upserted,
         0
@@ -1247,7 +1316,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let _ = ingest_registered_project_provider(&db, &project).await;
     let before = db.session_message_count().await.unwrap();
     assert_eq!(before, 4);
     let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
@@ -1265,8 +1334,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
     .unwrap();
     drop(conn);
 
-    let covered =
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let covered = ingest_registered_project_provider(&db, &project).await;
     assert_eq!(covered.messages_upserted, 0);
     assert_eq!(db.session_message_count().await.unwrap(), before);
     let malformed_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
@@ -1292,7 +1360,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
     drop(conn);
 
     assert_eq!(
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes))
+        ingest_registered_project_provider(&db, &project)
             .await
             .messages_upserted,
         1
@@ -1317,7 +1385,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
         1
     );
     assert_eq!(
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes))
+        ingest_registered_project_provider(&db, &project)
             .await
             .messages_upserted,
         0
@@ -1351,7 +1419,7 @@ async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() 
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let _ = ingest_registered_project_provider(&db, &project).await;
     let before = db.session_message_count().await.unwrap();
     assert_eq!(before, 4);
     assert_eq!(
@@ -1374,7 +1442,7 @@ async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() 
     .unwrap();
     drop(conn);
 
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let _ = ingest_registered_project_provider(&db, &project).await;
     assert_eq!(db.session_message_count().await.unwrap(), before);
     assert_eq!(
         db.search_session_messages("hermes", None, "fixed", 10)
@@ -1408,12 +1476,9 @@ async fn hermes_observation_commit_before_ack_survives_reopen() {
     init_git_repo(&project);
     mark_test_project(&project);
 
-    drop(open_project_session_db(&project).await.unwrap());
-    set_projection_failure(&project, true).await;
-
     let rejected = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Hermes))
-        .await;
+    set_projection_failure(&rejected, true).await;
+    let _ = ingest_registered_project_provider(&rejected, &project).await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 0);
     assert!(
         rejected
@@ -1427,9 +1492,10 @@ async fn hermes_observation_commit_before_ack_survives_reopen() {
     assert!(committed_cursor.position() > 0);
     drop(rejected);
 
-    let observations = durable_table_count(&project, "observations").await;
-    let receipts = durable_table_count(&project, "sanitization_receipts").await;
-    let queued = durable_table_count(&project, "projection_queue").await;
+    let committed = open_project_session_db(&project).await.unwrap();
+    let observations = durable_table_count(&committed, "observations").await;
+    let receipts = durable_table_count(&committed, "sanitization_receipts").await;
+    let queued = durable_table_count(&committed, "projection_queue").await;
     assert!(
         observations >= 1,
         "Hermes observation commits before projection ack"
@@ -1443,12 +1509,13 @@ async fn hermes_observation_commit_before_ack_survives_reopen() {
         "Hermes projection work stays queued across the failed ack"
     );
 
-    set_projection_failure(&project, false).await;
+    set_projection_failure(&committed, false).await;
+    drop(committed);
     let recovered = open_project_session_db(&project).await.unwrap();
     // Reopen drains the already-committed projection queue before source
     // discovery runs, so the source replay itself is a no-op.
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
+        ingest_registered_project_provider(&recovered, &project)
             .await
             .messages_upserted,
         0
@@ -1462,16 +1529,16 @@ async fn hermes_observation_commit_before_ack_survives_reopen() {
         1
     );
     assert_eq!(
-        durable_table_count(&project, "observations").await,
+        durable_table_count(&recovered, "observations").await,
         observations
     );
     assert_eq!(
-        durable_table_count(&project, "sanitization_receipts").await,
+        durable_table_count(&recovered, "sanitization_receipts").await,
         receipts
     );
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
+        ingest_registered_project_provider(&recovered, &project)
             .await
             .messages_upserted,
         0
@@ -1493,7 +1560,7 @@ async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let _ = ingest_registered_project_provider(&db, &project).await;
     let before = db.session_message_count().await.unwrap();
     let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
         .await
@@ -1518,8 +1585,7 @@ async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
     .unwrap();
     drop(conn);
 
-    let covered =
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let covered = ingest_registered_project_provider(&db, &project).await;
     let after_count = db.session_message_count().await.unwrap();
     assert_eq!(
         after_count,

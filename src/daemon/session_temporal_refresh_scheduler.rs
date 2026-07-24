@@ -13,3 +13,80 @@ pub(crate) use wake::{
 };
 
 const MAX_PENDING_REFRESH_REQUESTS: usize = 128;
+
+#[cfg(test)]
+pub(crate) struct SessionTemporalRefreshTestAuthority {
+    _runtime: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+    database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+}
+
+#[cfg(test)]
+impl SessionTemporalRefreshTestAuthority {
+    pub(crate) fn new(
+        runtime: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+        database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    ) -> Self {
+        Self {
+            _runtime: runtime,
+            database,
+        }
+    }
+
+    fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
+        self.database.as_ref()
+    }
+
+    fn database_identity(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.database) as usize
+    }
+
+    fn project<'a>(
+        &'a self,
+        projector: &'a dyn projector::SessionTemporalRefreshProjector,
+        recovery: crate::store::SessionRefreshRecoveryV1,
+    ) -> projector::SessionTemporalRefreshProjectionFuture<'a> {
+        projector.project(&self.database, recovery)
+    }
+
+    async fn run_pass(
+        &self,
+        state: &std::sync::Arc<wake::SessionTemporalRefreshWakeState>,
+        projector: &dyn projector::SessionTemporalRefreshProjector,
+        policy: projector::SessionTemporalRefreshPolicy,
+    ) -> registry::SessionTemporalRefreshPassReport {
+        worker::run_session_temporal_refresh_pass(&self.database, state, projector, policy).await
+    }
+
+    async fn ensure_profile(
+        &self,
+        registry: &registry::SessionTemporalRefreshSchedulerRegistry,
+    ) -> wake::SessionTemporalRefreshWake {
+        registry
+            .ensure_profile(
+                self.database.db_path().to_path_buf(),
+                std::sync::Arc::clone(&self.database),
+            )
+            .await
+    }
+
+    async fn ensure_project(
+        &self,
+        registry: &registry::SessionTemporalRefreshSchedulerRegistry,
+        owner: super::StoreOwnerKey,
+    ) -> wake::SessionTemporalRefreshWake {
+        registry
+            .ensure_project(owner, std::sync::Arc::clone(&self.database))
+            .await
+    }
+
+    async fn rekey_project(
+        &self,
+        registry: &registry::SessionTemporalRefreshSchedulerRegistry,
+        old_owner: &super::StoreOwnerKey,
+        new_owner: super::StoreOwnerKey,
+    ) {
+        registry
+            .rekey_project(old_owner, new_owner, std::sync::Arc::clone(&self.database))
+            .await;
+    }
+}

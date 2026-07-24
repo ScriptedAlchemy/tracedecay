@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::errors::Result;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::memory::types::FeedbackRequest;
 use crate::tracedecay::TraceDecay;
@@ -17,7 +17,7 @@ use super::{
 pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     if project_selector_present(&args, &["project_path"]) {

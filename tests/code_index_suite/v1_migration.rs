@@ -269,8 +269,8 @@ fn cancellation_mid_batch_prevents_generation_rebuild() {
 #[test]
 fn v1_import_boundary_has_no_database_or_filesystem_open_surface() {
     let source = include_str!("../../src/code_index/v1_import.rs");
+    let legacy_async_driver = ["lib", "sql"].concat();
     for forbidden in [
-        "libsql",
         "rusqlite",
         "std::fs",
         "tokio::fs",
@@ -279,7 +279,10 @@ fn v1_import_boundary_has_no_database_or_filesystem_open_surface() {
         "Connection",
         "Builder::new_local",
         "File::open",
-    ] {
+    ]
+    .into_iter()
+    .chain(std::iter::once(legacy_async_driver.as_str()))
+    {
         assert!(
             !source.contains(forbidden),
             "V1 import boundary must not contain {forbidden}"

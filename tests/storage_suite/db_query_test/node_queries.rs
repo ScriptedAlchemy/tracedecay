@@ -445,26 +445,18 @@ async fn test_attrs_start_line_null_falls_back_to_start_line() {
 
     // The fresh schema declares attrs_start_line nullable, so a raw connection
     // can persist an explicit NULL for this row.
-    let raw = libsql::Builder::new_local(&db_path)
-        .build()
-        .await
-        .expect("build raw db");
-    let conn = raw.connect().expect("connect raw");
+    let conn = rusqlite::Connection::open(&db_path).expect("open offline fixture database");
     conn.execute(
         "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
                             start_line, end_line, start_column, end_column,
                             updated_at, attrs_start_line)
          VALUES ('legacy', 'function', 'legacy_fn', 'crate::legacy_fn', 'src/lib.rs',
                  12, 20, 0, 1, 1000, NULL)",
-        (),
+        [],
     )
-    .await
     .expect("insert legacy row");
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ())
-        .await
-        .ok();
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
     drop(conn);
-    drop(raw);
 
     let (db, _migrated) = crate::common::open_test_database(&db_path)
         .await

@@ -8,7 +8,7 @@ mod read;
 mod schema;
 mod store;
 
-pub(super) use schema::ensure_git_index_transaction_schema;
+pub(crate) use schema::ensure_git_index_transaction_schema;
 pub(crate) use store::GlobalDbGitIndexTransactionStore;
 
 #[cfg(test)]

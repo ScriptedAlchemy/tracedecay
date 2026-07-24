@@ -15,10 +15,10 @@ pub(super) fn def_search() -> ToolDefinition {
     def_always_load(
         "tracedecay_search",
         "Search Symbols",
-        "Search for symbols (functions, structs, traits, etc.) in the code graph by name or keyword. Defaults to the active project; pass project_id/project_path only when intentionally searching another registered project.",
+        "Search for symbols (functions, structs, traits, etc.) in the active project's code graph by name or keyword.",
         json!({
             "type": "object",
-            "properties": with_project_selector_properties(json!({
+            "properties": {
                 "query": {
                     "type": "string",
                     "description": "Search query string to match against symbol names"
@@ -27,11 +27,16 @@ pub(super) fn def_search() -> ToolDefinition {
                     "type": "number",
                     "description": "Maximum number of results to return (default: 10)"
                 },
+                "semantic_mode": {
+                    "type": "string",
+                    "enum": ["fallback_allowed", "strict_semantic"],
+                    "description": "Optional semantic policy. fallback_allowed (default) preserves the exact existing search response when semantic retrieval is unavailable; strict_semantic returns a typed unavailable result instead."
+                },
                 "lazy_index_ignored_dependencies": {
                     "type": "boolean",
                     "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
                 }
-            })),
+            },
             "required": ["query"]
         }),
     )
@@ -400,6 +405,20 @@ pub(super) fn def_derives() -> ToolDefinition {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod semantic_search_tests {
+    use super::def_search;
+
+    #[test]
+    fn search_schema_exposes_only_the_two_planned_semantic_modes() {
+        let definition = def_search();
+        assert_eq!(
+            definition.input_schema["properties"]["semantic_mode"]["enum"],
+            serde_json::json!(["fallback_allowed", "strict_semantic"])
+        );
+    }
 }
 
 pub(super) fn def_body() -> ToolDefinition {

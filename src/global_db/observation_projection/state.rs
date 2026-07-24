@@ -1,10 +1,11 @@
-use libsql::{Connection, params};
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SessionMessageProjection,
 };
+
+use crate::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
@@ -30,7 +31,7 @@ pub(super) fn decode_sequence(value: i64, operation: &'static str) -> Projection
 }
 
 pub(super) fn decode_observation_row(
-    row: &libsql::Row,
+    row: &Row,
     operation: &'static str,
 ) -> ProjectionStoreResult<(u64, DurableObservationV1)> {
     let sequence = decode_sequence(
@@ -47,7 +48,7 @@ pub(super) fn decode_observation_row(
 }
 
 pub(super) async fn read_observation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<Option<(u64, DurableObservationV1)>> {
     let mut rows = conn
@@ -68,7 +69,7 @@ pub(super) async fn read_observation(
 }
 
 pub(super) async fn read_checkpoint(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> ProjectionStoreResult<ProjectionCheckpoint> {
     let mut rows = conn
         .query(
@@ -94,7 +95,7 @@ pub(super) async fn read_checkpoint(
 }
 
 pub(super) async fn write_checkpoint(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
 ) -> ProjectionStoreResult<ProjectionCheckpoint> {
     let sequence_i64 =
@@ -111,7 +112,7 @@ pub(super) async fn write_checkpoint(
 }
 
 pub(super) async fn queued_sequence(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<Option<u64>> {
     let mut rows = conn
@@ -137,7 +138,7 @@ pub(super) async fn queued_sequence(
 }
 
 pub(super) async fn consume_projection_queue_item(
-    conn: &Connection,
+    conn: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<()> {
     conn.execute(
@@ -150,7 +151,7 @@ pub(super) async fn consume_projection_queue_item(
 }
 
 pub(super) async fn read_session(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
 ) -> ProjectionStoreResult<Option<crate::sessions::SessionRecord>> {
@@ -171,13 +172,52 @@ pub(super) async fn read_session(
     else {
         return Ok(None);
     };
-    super::super::row_to_session_result(&row)
-        .map(Some)
-        .map_err(|error| storage("decode projected session", error))
+    Ok(Some(crate::sessions::SessionRecord {
+        provider: row
+            .get(0)
+            .map_err(|error| storage("decode projected session", error))?,
+        session_id: row
+            .get(1)
+            .map_err(|error| storage("decode projected session", error))?,
+        project_key: row
+            .get(2)
+            .map_err(|error| storage("decode projected session", error))?,
+        project_path: row
+            .get(3)
+            .map_err(|error| storage("decode projected session", error))?,
+        title: row
+            .get(4)
+            .map_err(|error| storage("decode projected session", error))?,
+        started_at: row
+            .get(5)
+            .map_err(|error| storage("decode projected session", error))?,
+        ended_at: row
+            .get(6)
+            .map_err(|error| storage("decode projected session", error))?,
+        transcript_path: row
+            .get(7)
+            .map_err(|error| storage("decode projected session", error))?,
+        metadata_json: row
+            .get(8)
+            .map_err(|error| storage("decode projected session", error))?,
+        parent_session_id: row
+            .get(9)
+            .map_err(|error| storage("decode projected session", error))?,
+        is_subagent: row
+            .get::<i64>(10)
+            .map_err(|error| storage("decode projected session", error))?
+            != 0,
+        agent_id: row
+            .get(11)
+            .map_err(|error| storage("decode projected session", error))?,
+        parent_tool_use_id: row
+            .get(12)
+            .map_err(|error| storage("decode projected session", error))?,
+    }))
 }
 
 pub(super) async fn read_message(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     message_id: &str,
 ) -> ProjectionStoreResult<Option<crate::sessions::SessionMessageRecord>> {
@@ -197,9 +237,27 @@ pub(super) async fn read_message(
     else {
         return Ok(None);
     };
-    super::super::row_to_message(&row, 0)
-        .map(Some)
-        .ok_or_else(|| storage_message("decode projected message", "invalid row"))
+    macro_rules! cell {
+        ($index:literal) => {
+            row.get($index)
+                .map_err(|error| storage("decode projected message", error))?
+        };
+    }
+    Ok(Some(crate::sessions::SessionMessageRecord {
+        provider: cell!(0),
+        message_id: cell!(1),
+        session_id: cell!(2),
+        role: cell!(3),
+        timestamp: cell!(4),
+        ordinal: cell!(5),
+        text: cell!(6),
+        kind: cell!(7),
+        model: cell!(8),
+        tool_names: cell!(9),
+        source_path: cell!(10),
+        source_offset: cell!(11),
+        metadata_json: cell!(12),
+    }))
 }
 
 pub(super) struct ProjectionOutputOwner {
@@ -215,7 +273,7 @@ pub(super) struct ProjectionOutputState {
 }
 
 pub(super) async fn ensure_projection_output_state_cache(
-    conn: &Connection,
+    conn: &impl Executor,
 ) -> ProjectionStoreResult<()> {
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state (
@@ -392,7 +450,7 @@ pub(super) async fn ensure_projection_output_state_cache(
 }
 
 pub(super) async fn inherit_predecessor_output_state(
-    conn: &Connection,
+    conn: &impl Executor,
     observation_id: &str,
     predecessor_version: &str,
 ) -> ProjectionStoreResult<()> {
@@ -427,7 +485,7 @@ pub(super) async fn inherit_predecessor_output_state(
 }
 
 pub(super) async fn read_output_state(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<Option<ProjectionOutputState>> {
     let message = projection.message();
@@ -500,7 +558,7 @@ pub(super) async fn read_output_state(
 }
 
 pub(super) async fn has_other_projector_output_owner(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<bool> {
     let message = projection.message();
@@ -545,7 +603,7 @@ pub(super) async fn has_other_projector_output_owner(
 }
 
 async fn message_projection(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     provider: &str,
     message_id: &str,
@@ -562,7 +620,7 @@ async fn message_projection(
 }
 
 async fn verify_rows(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let session = projection.session();
@@ -607,7 +665,7 @@ pub(super) fn same_projection_lineage(
 }
 
 pub(super) async fn verify_output_state(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     state: &ProjectionOutputState,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
@@ -627,7 +685,7 @@ pub(super) async fn verify_output_state(
 }
 
 pub(in super::super) async fn verify_output_authority(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let message = projection.message();
@@ -935,7 +993,7 @@ pub(super) fn message_rows_compatible(
 }
 
 pub(super) async fn protected_message_rows_compatible(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     actual: &crate::sessions::SessionMessageRecord,
     expected: &crate::sessions::SessionMessageRecord,
 ) -> ProjectionStoreResult<bool> {

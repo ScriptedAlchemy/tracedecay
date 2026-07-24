@@ -14,7 +14,6 @@ pub mod global_db;
 pub mod memory;
 pub mod observation;
 pub mod session;
-pub(crate) mod sqlite_runtime;
 pub(crate) mod vector_generations;
 
 pub use global_db::GlobalDbTranscriptStore;
@@ -23,6 +22,29 @@ pub use observation::GlobalDbObservationStore;
 pub use session::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
+
+/// Typed integration-test surface for the vector-generation state machine.
+///
+/// This keeps tests on the same nominal projector and store types used by the
+/// product without exposing database-engine connections or SQL primitives.
+#[doc(hidden)]
+pub mod vector_generation_test_support {
+    pub use crate::semantic_code::projector::{
+        CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, ProjectedChunkVectorV1,
+        SemanticProjectionErrorV1, prepare_vector_generation, prepare_vector_generation_async,
+    };
+
+    pub use super::vector_generations::{
+        DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
+        VectorGenerationBuildIdV1, VectorGenerationIdV1, VectorGenerationPlanV1,
+        VectorGenerationPublicationV1, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
+    };
+
+    /// Inject one failure immediately before the oracle's publication swap.
+    pub fn fail_before_publication_swap_once(store: &mut FakeVectorGenerationStoreV1) {
+        store.fail_before_publication_swap_once();
+    }
+}
 
 /// Application boundary required by production transcript ingestion.
 ///

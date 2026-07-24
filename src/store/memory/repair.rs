@@ -3,7 +3,8 @@
 use crate::db::{Database, MemoryV2FeedbackHistoryRepairBatchOutcome};
 use crate::memory::encoding::HolographicEncoder;
 
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::{Value, json};
 
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
@@ -51,7 +52,7 @@ fn compatibility_repair_batches_saturated(
 
 async fn advance_compatibility_feedback_history_repair_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactCompatibilityResult<CompatibilityFeedbackRepairProgressV1> {
     let source_store_id = compatibility_source_store_id()?;
@@ -203,7 +204,7 @@ pub(super) fn compatibility_receipt_feedback_history_repair(
 
 pub(super) async fn compatibility_repair_vector_for_fact_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation: &CompatibilityFactRepairVectorV1,
     now: UtcMicros,
@@ -256,7 +257,7 @@ pub(super) fn compatibility_repair_request_digest(
 
 pub(super) async fn repair_compatibility_memory_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityMemoryRepairCommandV1,
 ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1> {
     let request_digest = compatibility_repair_request_digest(request)?;
@@ -325,7 +326,7 @@ pub(super) async fn repair_compatibility_memory_tx(
 
 pub(super) async fn compatibility_repair_missing_vectors_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     limit: i64,
 ) -> FactStoreResult<u64> {
@@ -452,7 +453,7 @@ fn compatibility_average_vectors(vectors: &[Vec<f64>]) -> Vec<f64> {
 /// then rebuilds them in the same pass; stores with any banks are untouched.
 async fn compatibility_mark_absent_banks_dirty_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     now: UtcMicros,
 ) -> FactStoreResult<()> {
@@ -529,7 +530,7 @@ async fn compatibility_mark_absent_banks_dirty_tx(
 
 pub(super) async fn compatibility_rebuild_dirty_banks_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactStoreResult<u64> {
     let key = OwnerKey::new(owner)?;
@@ -626,13 +627,15 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
             let legacy_fact_id = row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)?;
             let fact_id = FactId::new(row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)?)
                 .map_err(FactStoreError::from)?;
-            let vector = match row.get_value(2) {
-                Ok(libsql::Value::Blob(bytes)) => HolographicEncoder::deserialize(&bytes)
-                    .ok()
-                    .filter(|vector| {
-                        vector.len() == HolographicEncoder::DIMENSIONS
-                            && vector.iter().all(|value| value.is_finite())
-                    }),
+            let vector = match row.get::<crate::db::engine::Value>(2) {
+                Ok(crate::db::engine::Value::Blob(bytes)) => {
+                    HolographicEncoder::deserialize(&bytes)
+                        .ok()
+                        .filter(|vector| {
+                            vector.len() == HolographicEncoder::DIMENSIONS
+                                && vector.iter().all(|value| value.is_finite())
+                        })
+                }
                 Ok(_) | Err(_) => None,
             };
             match vector {
@@ -740,7 +743,7 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
 }
 
 pub(super) async fn compatibility_feedback_history_repair_progress_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactCompatibilityResult<CompatibilityFeedbackRepairProgressV1> {
     let key = OwnerKey::new(owner)?;

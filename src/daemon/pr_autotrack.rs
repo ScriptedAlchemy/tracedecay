@@ -44,7 +44,6 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use crate::branch::{BranchAdminAction, BranchAdminOutcome};
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
@@ -675,6 +674,9 @@ async fn track_pr(
     let worktree = data_root
         .join("pr-worktrees")
         .join(format!("pr-{}", pr.number));
+    let Some(graph) = retained_project_graph(administration.daemon, repo_root).await else {
+        return Err("retained project graph is unavailable".to_string());
+    };
 
     let graph_ready = crate::branch_meta::load_branch_meta(data_root)
         .and_then(|meta| crate::branch::resolve_branch_db_path(data_root, &label, &meta))
@@ -735,18 +737,9 @@ async fn track_pr(
     // The branch add prepares metadata, syncs its new SQLite family, and then
     // finalizes metadata. Construct its future only after the writer gate is
     // acquired so a coordinator removal cannot observe a half-prepared branch.
-    let add_worktree = worktree.clone();
-    let add_label = label.clone();
     match administration
         .daemon
-        .with_writer(move || async move {
-            TraceDecay::add_branch_tracking_with_options(
-                &add_worktree,
-                &add_label,
-                TraceDecayOpenOptions::default(),
-            )
-            .await
-        })
+        .with_writer(|| async { graph.track_worktree_branch(&worktree, &label).await })
         .await
     {
         Ok(crate::branch::BranchAddOutcome::Added) => Ok(ManagedPr {
@@ -1073,37 +1066,40 @@ pub fn spawn(global_db_path: Option<PathBuf>) -> tokio::task::JoinHandle<()> {
 /// The coordinator serializes PR additions and destructive branch administration
 /// with every other daemon connection that owns the same store family.
 pub(super) fn spawn_with_administration(
-    global_db_path: Option<PathBuf>,
+    _global_db_path: Option<PathBuf>,
     administration: StoreAdministration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(global_db_path, administration).await;
+        run(administration).await;
     })
 }
 
-async fn run(global_db_path: Option<PathBuf>, administration: StoreAdministration) {
+async fn run(administration: StoreAdministration) {
+    let Ok(database) = administration.registered_profile_database().await else {
+        return;
+    };
     let mut last_poll: HashMap<PathBuf, Instant> = HashMap::new();
     loop {
-        tick(global_db_path.as_deref(), &mut last_poll, &administration).await;
+        tick(database.as_ref(), &mut last_poll, &administration).await;
         tokio::time::sleep(BASE_TICK).await;
     }
 }
 
 async fn tick(
-    global_db_path: Option<&Path>,
+    database: &crate::global_db::RegisteredGlobalDb,
     last_poll: &mut HashMap<PathBuf, Instant>,
     administration: &StoreAdministration,
 ) {
     let window = 14 * 86_400;
     let cap = 64;
-    let db = match global_db_path {
-        Some(path) => crate::global_db::GlobalDb::open_at(path).await,
-        None => crate::global_db::GlobalDb::open().await,
-    };
-    let Some(db) = db else {
+    let cutoff = crate::tracedecay::current_timestamp().saturating_sub(window);
+    let Ok(records) = database.list_code_projects(cap).await else {
         return;
     };
-    for record in db.code_projects_seen_within(window, cap).await {
+    for record in records
+        .into_iter()
+        .filter(|record| record.last_seen_at >= cutoff)
+    {
         let root = PathBuf::from(&record.canonical_root);
         if !root.is_dir() {
             continue;
@@ -1135,14 +1131,26 @@ async fn tick(
     }
 }
 
+async fn retained_project_graph(
+    administration: &StoreAdministration,
+    project_root: &Path,
+) -> Option<std::sync::Arc<crate::tracedecay::TraceDecay>> {
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    administration
+        .mounted_project_graphs()
+        .await
+        .into_iter()
+        .find(|graph| graph.project_root() == canonical)
+}
+
 /// Runs one discovery + reconcile pass for a project and logs a poll summary.
 async fn poll_project(repo_root: PathBuf, administration: &StoreAdministration) {
-    let opts = TraceDecayOpenOptions::default();
-    let Some(layout) = TraceDecay::initialized_store_layout_with_options(&repo_root, &opts).await
-    else {
+    let Some(graph) = retained_project_graph(administration, &repo_root).await else {
         return; // not indexed — nothing to attach PR branches to yet
     };
-    let data_root = layout.data_root;
+    let data_root = graph.store_layout().data_root.clone();
 
     let repo_for_discovery = repo_root.clone();
     let discovery =
@@ -1207,12 +1215,10 @@ async fn teardown_disabled_project_with_administration(
     repo_root: &Path,
     administration: &StoreAdministration,
 ) {
-    let opts = TraceDecayOpenOptions::default();
-    let Some(layout) = TraceDecay::initialized_store_layout_with_options(repo_root, &opts).await
-    else {
+    let Some(graph) = retained_project_graph(administration, repo_root).await else {
         return; // not indexed — no managed state to tear down
     };
-    let data_root = layout.data_root;
+    let data_root = graph.store_layout().data_root.clone();
     if load_state(&data_root).managed.is_empty() {
         return; // nothing stranded — the common case, kept cheap
     }

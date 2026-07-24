@@ -1,6 +1,7 @@
-use libsql::{Connection, params};
 use tracedecay_domain::EvidenceAvailabilityV1;
 use tracedecay_store::RepositoryProvenanceAttachmentV1;
+
+use crate::db::engine::{Executor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::schema::OBSERVATION_SCHEMA_OPERATION;
@@ -8,7 +9,7 @@ use super::schema::OBSERVATION_SCHEMA_OPERATION;
 const OBSERVATION_PROVENANCE_SCHEMA_MIGRATION: &str = "observation-repository-provenance-v1";
 
 pub(super) async fn backfill_observation_repository_provenance(
-    conn: &Connection,
+    conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     let availability_json = serde_json::to_string(
         RepositoryProvenanceAttachmentV1::new(EvidenceAvailabilityV1::Unknown, None)

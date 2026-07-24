@@ -20,7 +20,7 @@ fn grep_request(query: &str) -> LcmGrepRequest {
 #[tokio::test]
 async fn grep_all_provider_searches_raw_messages_across_providers() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "cursor-session").await;
     insert_session(&db, "codex", "codex-session").await;
     assert!(
@@ -47,7 +47,7 @@ async fn grep_all_provider_searches_raw_messages_across_providers() {
     let mut request = grep_request("cross provider grep search");
     request.provider = "all".into();
     let hits = db
-        .lcm_grep(request)
+        .lcm_grep_for_test(request)
         .await
         .expect("all-provider grep should succeed")
         .hits;
@@ -65,7 +65,7 @@ async fn grep_all_provider_searches_raw_messages_across_providers() {
 #[tokio::test]
 async fn grep_does_not_match_role_or_metadata_text() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-fts-scope").await;
     let message = raw_message_with_role_source_timestamp(
         "cursor",
@@ -83,7 +83,7 @@ async fn grep_does_not_match_role_or_metadata_text() {
 
     // Positive control: content terms still match through the FTS index.
     let content_hits = db
-        .lcm_grep(grep_request("pipeline"))
+        .lcm_grep_for_test(grep_request("pipeline"))
         .await
         .expect("content grep should succeed")
         .hits;
@@ -95,7 +95,7 @@ async fn grep_does_not_match_role_or_metadata_text() {
 
     // Role text ("assistant") must not over-match the row.
     let role_hits = db
-        .lcm_grep(grep_request("assistant"))
+        .lcm_grep_for_test(grep_request("assistant"))
         .await
         .expect("role grep should succeed")
         .hits;
@@ -106,7 +106,7 @@ async fn grep_does_not_match_role_or_metadata_text() {
 
     // Metadata text (the source marker) must not over-match the row either.
     let metadata_hits = db
-        .lcm_grep(grep_request("zephyrsource"))
+        .lcm_grep_for_test(grep_request("zephyrsource"))
         .await
         .expect("metadata grep should succeed")
         .hits;
@@ -119,11 +119,10 @@ async fn grep_does_not_match_role_or_metadata_text() {
 #[tokio::test]
 async fn grep_downranks_transcript_inventory_below_substantive_hits() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     // Genuine implementation message in one session.
     insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "impl-session",
         &["implemented branch redundancy scoring in the ranker".to_string()],
@@ -133,7 +132,6 @@ async fn grep_downranks_transcript_inventory_below_substantive_hits() {
     // just a glob listing over transcript directories.
     insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "review-session",
         &["Glob **/*.jsonl over .claude sessions for branch redundancy".to_string()],
@@ -141,7 +139,7 @@ async fn grep_downranks_transcript_inventory_below_substantive_hits() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "branch redundancy".into(),
             scope: LcmScope::All,
@@ -178,21 +176,13 @@ async fn grep_downranks_transcript_inventory_below_substantive_hits() {
 #[tokio::test]
 async fn grep_caps_hits_per_session_in_cross_session_scope() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let flood: Vec<String> = (0..5)
         .map(|i| format!("apricot ledger note number {i}"))
         .collect();
+    insert_raw_messages(&db, "cursor", "flood-session", &flood).await;
     insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
-        "cursor",
-        "flood-session",
-        &flood,
-    )
-    .await;
-    insert_raw_messages(
-        &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "other-session",
         &["apricot ledger summary".to_string()],
@@ -200,7 +190,7 @@ async fn grep_caps_hits_per_session_in_cross_session_scope() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "apricot ledger".into(),
             scope: LcmScope::All,
@@ -235,7 +225,7 @@ async fn grep_caps_hits_per_session_in_cross_session_scope() {
 #[tokio::test]
 async fn grep_collapses_parent_prompt_copies_from_eight_subagents() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let prompt = "Open pull requests to fix any issues.";
     insert_session(&db, "codex", "parent").await;
     assert!(
@@ -282,7 +272,7 @@ async fn grep_collapses_parent_prompt_copies_from_eight_subagents() {
     }
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "codex".into(),
             query: "open pull requests".into(),
             scope: LcmScope::All,
@@ -307,7 +297,7 @@ async fn grep_collapses_parent_prompt_copies_from_eight_subagents() {
 #[tokio::test]
 async fn grep_disclosed_cap_reserves_a_tool_slot_for_capped_sessions() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "codex", "busy-session").await;
     insert_session(&db, "codex", "quiet-session").await;
     // Four narration rows plus one exact-action tool row, all matching. The
@@ -352,7 +342,7 @@ async fn grep_disclosed_cap_reserves_a_tool_slot_for_capped_sessions() {
     );
 
     let outcome = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "codex".into(),
             query: "quokka merge".into(),
             scope: LcmScope::All,
@@ -393,7 +383,7 @@ async fn grep_disclosed_cap_reserves_a_tool_slot_for_capped_sessions() {
 
     // Session scope is uncapped and undisclosed: the full set comes back.
     let scoped = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "codex".into(),
             query: "quokka merge".into(),
             scope: LcmScope::Session,

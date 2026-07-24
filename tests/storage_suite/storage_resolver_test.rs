@@ -7,18 +7,18 @@ use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::config::{
     discover_project_root, get_config_path, load_config, save_config_to_path,
 };
-use tracedecay::global_db::{GlobalDb, ProjectObservationStoreError, StoreInstanceUpsert};
+use tracedecay::global_db::{ProjectObservationStoreError, StoreInstanceUpsert};
 use tracedecay::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 use tracedecay::sessions::SessionRecord;
-use tracedecay::sessions::cursor::{project_session_db_path, resolved_project_session_db_path};
 use tracedecay::storage::{
     ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath,
@@ -30,6 +30,7 @@ use tracedecay::storage::{
     write_store_manifest_to_path,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_domain::ProjectId;
 
 use crate::support::HOME_ENV_LOCK;
 
@@ -238,7 +239,7 @@ async fn initialize_empty_profile_layout(layout: &tracedecay::storage::StoreLayo
 }
 
 async fn register_observation_store(
-    db: &GlobalDb,
+    db: &HostAdmissionTestRuntimeV1,
     profile_root: &Path,
     project_id: &str,
     project_root: &Path,
@@ -287,12 +288,12 @@ async fn register_observation_store(
 // --- Repository identity across symlinks / renames / moves (regression) -----
 //
 // These pin the resolution semantics for `read_repository_identity_marker` and
-// `GlobalDb::resolve_project_store_by_identity`: canonicalized aliases and moved
+// registered project-store resolution: canonicalized aliases and moved
 // checkouts keep one project identity, a moved repo whose old path is later
 // reused by an unrelated repo self-heals, and a genuine copy still fails closed.
 
 async fn register_identity_store(
-    db: &GlobalDb,
+    db: &HostAdmissionTestRuntimeV1,
     project_id: &str,
     project_root: &Path,
     git_common_dir: &Path,

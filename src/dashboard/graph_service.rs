@@ -3,6 +3,8 @@ use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 
+use crate::types::{FileRecord, GraphStats};
+
 use super::DashboardState;
 use super::graph_queries;
 use super::util::{i64_field, str_field};
@@ -50,10 +52,10 @@ fn language_for_path(path: &str) -> &'static str {
     }
 }
 
-fn rows_by_language(files: &[Value]) -> Vec<Value> {
+fn rows_by_language(files: &[FileRecord]) -> Vec<Value> {
     let mut counts: BTreeMap<&'static str, i64> = BTreeMap::new();
     for file in files {
-        let language = language_for_path(str_field(file, "path"));
+        let language = language_for_path(&file.path);
         let count = counts.entry(language).or_insert(0);
         *count += 1;
     }
@@ -67,6 +69,61 @@ fn rows_by_language(files: &[Value]) -> Vec<Value> {
             .then_with(|| str_field(a, "language").cmp(str_field(b, "language")))
     });
     rows
+}
+
+fn kind_count_rows(counts: &HashMap<String, u64>) -> Vec<Value> {
+    let mut entries: Vec<_> = counts.iter().collect();
+    entries.sort_by(|(left_label, left_count), (right_label, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_label.cmp(right_label))
+    });
+    entries
+        .into_iter()
+        .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+        .collect()
+}
+
+fn largest_file_rows(files: &[FileRecord]) -> Vec<Value> {
+    let mut files: Vec<_> = files.iter().collect();
+    files.sort_by(|left, right| {
+        right
+            .node_count
+            .cmp(&left.node_count)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    files
+        .into_iter()
+        .take(12)
+        .map(|file| {
+            json!({
+                "path": file.path,
+                "node_count": file.node_count,
+                "size": file.size,
+            })
+        })
+        .collect()
+}
+
+/// Adapts typed graph-database aggregates to the legacy dashboard JSON shape.
+/// Storage access stays behind [`crate::db::Database`]; this layer only sorts
+/// and labels presentation rows.
+fn overview_metrics(stats: Option<&GraphStats>, files: &[FileRecord]) -> Value {
+    json!({
+        "totals": {
+            "nodes": stats.map_or(0, |stats| stats.node_count),
+            "edges": stats.map_or(0, |stats| stats.edge_count),
+            "files": stats.map_or(0, |stats| stats.file_count),
+        },
+        "nodes_by_kind": stats
+            .map(|stats| kind_count_rows(&stats.nodes_by_kind))
+            .unwrap_or_default(),
+        "edges_by_kind": stats
+            .map(|stats| kind_count_rows(&stats.edges_by_kind))
+            .unwrap_or_default(),
+        "files_by_language": rows_by_language(files),
+        "largest_files": largest_file_rows(files),
+    })
 }
 
 fn add_span(row: &mut Map<String, Value>) {
@@ -201,22 +258,17 @@ async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
 }
 
 pub(crate) async fn overview_payload(state: &DashboardState) -> Value {
-    let files = graph_queries::overview_file_rows(&state.graph_conn).await;
-    let summary = degree_summary(state).await;
-
-    json!({
-        "path": state.graph_db_path,
-        "totals": {
-            "nodes": graph_queries::total_nodes(&state.graph_conn).await,
-            "edges": graph_queries::total_edges(&state.graph_conn).await,
-            "files": graph_queries::total_files(&state.graph_conn).await,
-        },
-        "nodes_by_kind": graph_queries::node_counts_by_kind(&state.graph_conn).await,
-        "edges_by_kind": graph_queries::edge_counts_by_kind(&state.graph_conn).await,
-        "files_by_language": rows_by_language(&files),
-        "top_connected": summary.top_connected,
-        "largest_files": graph_queries::largest_files(&state.graph_conn).await,
-    })
+    let (stats, files, summary) = tokio::join!(
+        state.mem_db.get_stats(),
+        state.mem_db.get_all_files(),
+        degree_summary(state),
+    );
+    let mut payload = overview_metrics(stats.as_ref().ok(), files.as_deref().unwrap_or_default());
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("path".into(), json!(state.graph_db_path));
+        object.insert("top_connected".into(), json!(summary.top_connected));
+    }
+    payload
 }
 
 pub(crate) async fn search_payload(
@@ -568,4 +620,71 @@ pub(crate) async fn path_payload(
         obj.insert("edges".into(), json!(path_edges));
     }
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::types::{FileRecord, GraphStats};
+    use serde_json::json;
+
+    use super::overview_metrics;
+
+    #[test]
+    fn overview_metrics_adapts_typed_database_results_deterministically() {
+        let stats = GraphStats {
+            node_count: 8,
+            edge_count: 5,
+            file_count: 3,
+            nodes_by_kind: HashMap::from([("struct".to_string(), 2), ("function".to_string(), 6)]),
+            edges_by_kind: HashMap::from([("contains".to_string(), 1), ("calls".to_string(), 4)]),
+            db_size_bytes: 0,
+            last_updated: 0,
+            total_source_bytes: 0,
+            files_by_language: HashMap::new(),
+            last_sync_at: 0,
+            last_full_sync_at: 0,
+            last_sync_duration_ms: 0,
+        };
+        let files = vec![
+            file_record("src/a.rs", 12, 100),
+            file_record("src/b.ts", 7, 200),
+            file_record("src/c.rs", 7, 300),
+        ];
+
+        let payload = overview_metrics(Some(&stats), &files);
+
+        assert_eq!(
+            payload["totals"],
+            json!({ "nodes": 8, "edges": 5, "files": 3 })
+        );
+        assert_eq!(
+            payload["nodes_by_kind"],
+            json!([
+                { "kind": "function", "count": 6 },
+                { "kind": "struct", "count": 2 },
+            ])
+        );
+        assert_eq!(
+            payload["files_by_language"],
+            json!([
+                { "language": "rust", "count": 2 },
+                { "language": "typescript", "count": 1 },
+            ])
+        );
+        assert_eq!(payload["largest_files"][0]["path"], "src/a.rs");
+        assert_eq!(payload["largest_files"][1]["path"], "src/b.ts");
+    }
+
+    fn file_record(path: &str, node_count: u32, size: u64) -> FileRecord {
+        FileRecord {
+            path: path.to_string(),
+            content_hash: format!("hash-{path}"),
+            size,
+            modified_at: 1,
+            indexed_at: 1,
+            node_count,
+        }
+    }
 }

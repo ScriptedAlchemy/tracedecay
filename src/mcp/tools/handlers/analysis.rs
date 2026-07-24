@@ -1650,15 +1650,12 @@ fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> T
 /// (with a remediation notice) rather than omitted — so an unpopulated
 /// `session_git_spans` (which makes `tracedecay_sessions_for` silently return
 /// nothing) is always visible here.
-async fn session_correlation_health_json(cg: &TraceDecay) -> Value {
-    let db_path = cg.store_layout().sessions_db_path.clone();
-    let health = if db_path.is_file() {
-        match crate::global_db::GlobalDb::open_read_only_at(&db_path).await {
-            Some(db) => db.git_correlation_index_health().await.ok(),
-            None => None,
-        }
-    } else {
-        None
+async fn session_correlation_health_json(
+    session_db: Option<&crate::global_db::RegisteredGlobalDb>,
+) -> Value {
+    let health = match session_db {
+        Some(db) => db.git_correlation_index_health().await.ok(),
+        None => None,
     };
     match health {
         Some(health) if health.tables_present => {
@@ -1694,6 +1691,7 @@ pub(super) async fn handle_diagnostics(
     args: Value,
     diagnostics_cache: Option<&crate::diagnostics::DiagnosticsCache>,
     diagnostics_lsp: Option<&tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    session_db: Option<&crate::global_db::RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
     use crate::diagnostics::run_all;
 
@@ -1759,7 +1757,7 @@ pub(super) async fn handle_diagnostics(
         "error_count": error_count,
         "warning_count": warning_count,
         "diagnostics": entries,
-        "session_correlation": session_correlation_health_json(cg).await,
+        "session_correlation": session_correlation_health_json(session_db).await,
     });
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
         render::generic_md(&payload)

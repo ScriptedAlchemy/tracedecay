@@ -1,6 +1,6 @@
 //! Process-local singleton ownership for PR11 Git index transaction stores.
 //!
-//! One bounded store actor is retained per canonical project `GlobalDb` path.
+//! One bounded store actor is retained per registered project-session path.
 //! Startup recovery and later mutation services must share that actor so a
 //! second queue/journal authority cannot appear for the same database.
 
@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_store::{GitIndexTransactionStoreError, GitIndexTransactionStoreResult};
 
-use crate::global_db::GlobalDb;
+#[cfg(test)]
+use crate::db::engine::TestConnection;
+use crate::global_db::RegisteredGlobalDb;
 
 use super::DaemonGitIndexTransactionStore;
 use super::SharedDaemonGitIndexTransactionStore;
@@ -27,7 +29,7 @@ impl GitIndexTransactionStoreRegistry {
     /// Returns the existing actor for `database`, or opens exactly one.
     pub(crate) fn ensure(
         &self,
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
     ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
         let path = database
             .db_path()
@@ -42,6 +44,28 @@ impl GitIndexTransactionStoreRegistry {
         }
         let store = SharedDaemonGitIndexTransactionStore::from_arc(Arc::new(
             DaemonGitIndexTransactionStore::open(database)?,
+        ));
+        stores.insert(path, store.clone());
+        Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ensure_engine_test(
+        &self,
+        path: PathBuf,
+    ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
+        let path = path
+            .canonicalize()
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        let mut stores = self
+            .stores
+            .lock()
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        if let Some(existing) = stores.get(&path) {
+            return Ok(existing.clone());
+        }
+        let store = SharedDaemonGitIndexTransactionStore::from_arc(Arc::new(
+            DaemonGitIndexTransactionStore::open_engine_test(TestConnection::open(&path))?,
         ));
         stores.insert(path, store.clone());
         Ok(store)

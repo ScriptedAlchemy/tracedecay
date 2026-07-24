@@ -113,20 +113,12 @@ async fn compress_persists_summary_frontier_and_remaining_backlog_debt() {
 #[tokio::test]
 async fn compress_rolls_back_summary_and_lifecycle_when_debt_write_fails() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let conn = open_lcm_conn(&tmp).await;
-    conn.execute_batch(
-        "CREATE TRIGGER abort_compression_debt_insert
-         BEFORE INSERT ON lcm_maintenance_debt
-         BEGIN
-            SELECT RAISE(ABORT, 'forced maintenance debt failure');
-         END;",
-    )
-    .await
-    .expect("install maintenance debt trigger");
-    drop(conn);
+    let db = open_registered_lcm_runtime(&tmp).await;
+    db.set_lcm_compression_debt_insert_failure_for_test(HostAdmissionScope::Profile, true)
+        .await
+        .expect("install maintenance debt trigger");
 
-    insert_raw_messages(
+    insert_registered_raw_messages(
         &db,
         "cursor",
         "session-write-rollback",
@@ -135,7 +127,7 @@ async fn compress_rolls_back_summary_and_lifecycle_when_debt_write_fails() {
     .await;
 
     let err = db
-        .lcm_compress(limited_compress_request(
+        .lcm_compress_for_test(limited_compress_request(
             "cursor",
             "session-write-rollback",
             LcmSummarizerMode::Fake {
@@ -153,14 +145,14 @@ async fn compress_rolls_back_summary_and_lifecycle_when_debt_write_fails() {
         "unexpected error: {err:?}"
     );
     assert_eq!(
-        db.lcm_status("cursor", Some("session-write-rollback"))
+        db.lcm_status_for_test("cursor", Some("session-write-rollback"))
             .await
             .unwrap()
             .summary_node_count,
         0
     );
     assert!(
-        db.lcm_lifecycle_state("cursor", "session-write-rollback")
+        db.lcm_lifecycle_state_for_test("cursor", "session-write-rollback")
             .await
             .is_err(),
         "failed write should roll back lifecycle state"
@@ -170,19 +162,10 @@ async fn compress_rolls_back_summary_and_lifecycle_when_debt_write_fails() {
 #[tokio::test]
 async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_rows() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let conn = open_lcm_conn(&tmp).await;
-    conn.execute_batch(
-        "CREATE TRIGGER abort_late_summary_projection
-         BEFORE INSERT ON lcm_summary_nodes
-         BEGIN
-            SELECT RAISE(ABORT, 'forced late summary projection failure');
-         END;",
-    )
-    .await
-    .expect("install late projection trigger");
-    drop(conn);
+    let db = open_registered_lcm_runtime(&tmp).await;
+    db.set_lcm_late_summary_projection_failure_for_test(HostAdmissionScope::Profile, true)
+        .await
+        .expect("install late projection trigger");
 
     let mut request = limited_compress_request(
         "cursor",
@@ -209,7 +192,7 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
     ];
 
     let error = db
-        .lcm_compress(request)
+        .lcm_compress_for_test(request)
         .await
         .expect_err("late compatibility failure must abort the whole publication");
     assert!(
@@ -217,21 +200,21 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
         "unexpected error: {error:?}"
     );
     assert_eq!(
-        scalar_i64(
-            &db_path,
-            "SELECT COUNT(*) FROM session_summary_nodes
-             WHERE session_id = 'session-late-payload-rollback'",
+        db.session_summary_node_count_for_test(
+            HostAdmissionScope::Profile,
+            "session-late-payload-rollback",
         )
-        .await,
+        .await
+        .unwrap(),
         0
     );
     assert_eq!(
-        scalar_i64(
-            &db_path,
-            "SELECT COUNT(*) FROM lcm_raw_messages
-             WHERE session_id = 'session-late-payload-rollback'",
+        db.lcm_raw_message_count_for_test(
+            HostAdmissionScope::Profile,
+            "session-late-payload-rollback",
         )
-        .await,
+        .await
+        .unwrap(),
         0
     );
     let payload_dir = tmp.path().join(".tracedecay").join("lcm-payloads");
@@ -247,8 +230,7 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
 #[tokio::test]
 async fn lifecycle_frontier_survives_reopen() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = open_lcm_db(&tmp).await;
 
     db.lcm_update_lifecycle(LcmLifecycleUpdate {
         provider: "cursor".into(),
@@ -266,7 +248,7 @@ async fn lifecycle_frontier_survives_reopen() {
     .unwrap();
     drop(db);
 
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let reopened = open_lcm_db(&tmp).await;
     let state = reopened
         .lcm_lifecycle_state("cursor", "conversation-1")
         .await

@@ -623,7 +623,8 @@ pub fn inspect_install_target(root: &Path, relative: &Path) -> Result<PathBuf, H
     Ok(target)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ObservedArtifactKindV1 {
     Missing,
     RegularFile,
@@ -631,7 +632,7 @@ pub enum ObservedArtifactKindV1 {
     Symlink,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ObservedHostArtifactV1 {
     pub relative_path: String,
     pub kind: ObservedArtifactKindV1,
@@ -642,7 +643,8 @@ pub struct ObservedHostArtifactV1 {
     pub owned_artifact_digest: Option<[u8; 32]>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HostArtifactActionV1 {
     Noop,
     WriteNew,
@@ -650,7 +652,7 @@ pub enum HostArtifactActionV1 {
     BackupThenRemove,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostArtifactMutationV1 {
     pub relative_path: String,
     pub action: HostArtifactActionV1,
@@ -667,7 +669,7 @@ pub struct HostBundleLifecycleRequestV1 {
     pub hermes_profile_bindings: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostBundleMutationPlanV1 {
     pub operation: HostBundleLifecycleOpV1,
     pub host: HostKindV1,
@@ -708,6 +710,8 @@ pub enum HostBundleError {
     StorageFailure,
     #[error("host bundle interrupted operation requires recovery before mutation")]
     RecoveryRequired,
+    #[error("confirmed host lifecycle preview is stale or does not match apply")]
+    StalePreview,
 }
 
 /// Refuse silent emulation of unsupported/degraded host capabilities.
@@ -978,6 +982,20 @@ pub struct HostComponentSetExecutionRequestV1 {
     pub operation_id: [u8; 16],
 }
 
+/// Immutable component-set dry run consumed by confirmed apply. The plan
+/// digest binds the operation id, complete component inventory, artifact
+/// actions, and exact registration revision observed before preview returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostComponentSetLifecyclePreviewV1 {
+    pub operation_id: [u8; 16],
+    pub plan_digest: [u8; 32],
+    pub base_registration_revision: [u8; 32],
+    pub current_registration_revision: [u8; 32],
+    pub artifact_state_revision: [u8; 32],
+    pub component_plans: Vec<HostBundleMutationPlanV1>,
+    pub confirmation_required: bool,
+}
+
 /// A third-party host extension claiming a surface `TraceDecay` would register.
 /// The digest points to bounded discovery evidence; raw host config is never
 /// retained in lifecycle requests or receipts.
@@ -1046,6 +1064,14 @@ pub struct HostComponentSetReceiptV1 {
     pub operation: HostBundleLifecycleOpV1,
     pub component_manifests: Vec<HostBundleManifestV1>,
     pub component_receipts: Vec<HostBundleInstallReceiptV1>,
+    #[serde(default)]
+    pub confirmed_plan_digest: Option<[u8; 32]>,
+    #[serde(default)]
+    pub base_registration_revision: Option<[u8; 32]>,
+    #[serde(default)]
+    pub current_registration_revision: Option<[u8; 32]>,
+    #[serde(default)]
+    pub artifact_state_revision: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1127,6 +1153,35 @@ pub trait HostBundleLifecycleStorageV1 {
 /// `stage`; the aggregate writer records the state transition in its recovery
 /// journal and invokes these hooks in reverse on failure or restart.
 pub trait HostComponentSetRegistrationV1 {
+    /// Exact revision of the host registration state that this adapter may
+    /// mutate. Concrete host adapters hash their bounded native config;
+    /// artifact-only adapters use this stable no-registration revision.
+    fn current_revision(
+        &self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<[u8; 32], HostBundleError> {
+        Ok(Sha256::digest(b"tracedecay.host-registration.none.v1").into())
+    }
+
+    /// Bind the adapter to the confirmed preview immediately before staging.
+    /// Implementations may retain the revision and recheck it while capturing
+    /// their rollback backup.
+    fn confirm_preview(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        preview: &HostComponentSetLifecyclePreviewV1,
+    ) -> Result<(), HostBundleError> {
+        if preview.operation_id != request.operation_id
+            || preview.current_registration_revision != preview.base_registration_revision
+            || self.current_revision(component_set, request)? != preview.base_registration_revision
+        {
+            return Err(HostBundleError::StalePreview);
+        }
+        Ok(())
+    }
+
     fn preflight(
         &mut self,
         _component_set: &HostComponentSetV1,
@@ -1196,6 +1251,87 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         self.writer.recover_interrupted_operation()
     }
 
+    pub fn preview<V: HostBundleVerificationAdapterV1, R: HostComponentSetRegistrationV1>(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        verifier: &V,
+        registration: &mut R,
+    ) -> Result<HostComponentSetLifecyclePreviewV1, HostBundleError> {
+        if self.writer.load_journal()?.is_some()
+            || self.writer.load_component_set_journal()?.is_some()
+        {
+            return Err(HostBundleError::RecoveryRequired);
+        }
+        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+            &self.writer.root_path,
+            &self.writer.lifecycle_root_path,
+            component_set,
+            request,
+            verifier,
+            registration,
+        )
+    }
+
+    pub fn execute_confirmed<
+        V: HostBundleVerificationAdapterV1,
+        R: HostComponentSetRegistrationV1,
+    >(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        preview: &HostComponentSetLifecyclePreviewV1,
+        verifier: &V,
+        registration: &mut R,
+    ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+        if !request.lifecycle.explicit_confirmation {
+            return Err(HostBundleError::ConfirmationRequired);
+        }
+        validate_component_set_request(component_set, request)?;
+        if preview.operation_id != request.operation_id {
+            return Err(HostBundleError::StalePreview);
+        }
+        if let Some(receipt) = self
+            .writer
+            .load_component_set_receipt(request.operation_id)?
+        {
+            if !component_set_receipt_matches(&receipt, component_set, request)? {
+                return Err(HostBundleError::ReceiptCorrupted);
+            }
+            return component_set_receipt_matches_preview(&receipt, preview)
+                .then_some(receipt)
+                .ok_or(HostBundleError::StalePreview);
+        }
+        let current = match self.preview(component_set, request, verifier, registration) {
+            Ok(current) => current,
+            Err(
+                HostBundleError::OwnershipConflict
+                | HostBundleError::InvalidObservedState
+                | HostBundleError::ArtifactContentMismatch
+                | HostBundleError::WrongTarget
+                | HostBundleError::CatalogMismatch,
+            ) => return Err(HostBundleError::StalePreview),
+            Err(error) => return Err(error),
+        };
+        if current.operation_id != preview.operation_id
+            || current.plan_digest != preview.plan_digest
+            || current.base_registration_revision != preview.base_registration_revision
+            || current.current_registration_revision != preview.current_registration_revision
+            || current.artifact_state_revision != preview.artifact_state_revision
+            || current.component_plans != preview.component_plans
+        {
+            return Err(HostBundleError::StalePreview);
+        }
+        registration.confirm_preview(component_set, request, preview)?;
+        self.writer.execute_confirmed_component_set(
+            component_set,
+            request,
+            preview,
+            verifier,
+            registration,
+        )
+    }
+
     pub fn execute<V: HostBundleVerificationAdapterV1, R: HostComponentSetRegistrationV1>(
         &mut self,
         component_set: &HostComponentSetV1,
@@ -1207,6 +1343,133 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         self.writer
             .execute_component_set(component_set, request, verifier, registration)
     }
+}
+
+#[derive(Serialize)]
+struct HostComponentSetPlanDigestPayloadV1 {
+    domain: &'static str,
+    schema_version: u16,
+    operation_id: [u8; 16],
+    operation: HostBundleLifecycleOpV1,
+    host: HostKindV1,
+    expected_components: Vec<HostBundleComponentV1>,
+    hermes_profile_bindings: u8,
+    base_registration_revision: [u8; 32],
+    current_registration_revision: [u8; 32],
+    artifact_state_revision: [u8; 32],
+    component_plans: Vec<HostBundleMutationPlanV1>,
+}
+
+#[derive(Serialize)]
+struct HostComponentSetArtifactStatePayloadV1 {
+    domain: &'static str,
+    schema_version: u16,
+    components: Vec<HostComponentArtifactStateV1>,
+}
+
+#[derive(Serialize)]
+struct HostComponentArtifactStateV1 {
+    component: HostBundleComponentV1,
+    manifest_digest: [u8; 32],
+    receipt_digest: Option<[u8; 32]>,
+    observed: Vec<ObservedHostArtifactV1>,
+}
+
+fn component_set_artifact_state_revision(
+    artifact_root: &Path,
+    lifecycle_root: &Path,
+    component_set: &HostComponentSetV1,
+) -> Result<[u8; 32], HostBundleError> {
+    let mut components = component_set.components.iter().collect::<Vec<_>>();
+    components.sort_by_key(|component| component.manifest.component);
+    let mut states = Vec::with_capacity(components.len());
+    for component in components {
+        let receipt = read_receipt_at(
+            lifecycle_root,
+            component.manifest.host,
+            component.manifest.component,
+        )?;
+        let receipt_digest = receipt
+            .as_ref()
+            .map(canonical_json_bytes)
+            .transpose()
+            .map_err(|_| HostBundleError::CanonicalizationFailed)?
+            .map(|bytes| Sha256::digest(bytes).into());
+        let mut paths = BTreeMap::new();
+        for artifact in &component.manifest.artifacts {
+            paths.insert(artifact.relative_path.clone(), (None, None));
+        }
+        if let Some(receipt) = &receipt {
+            for artifact in &receipt.artifacts {
+                paths.insert(
+                    artifact.relative_path.clone(),
+                    (
+                        Some(artifact.ownership_marker.clone()),
+                        Some(artifact.artifact_digest),
+                    ),
+                );
+            }
+        }
+        let observed = paths
+            .into_iter()
+            .map(
+                |(relative_path, (ownership_marker, owned_artifact_digest))| {
+                    observe_artifact_at(
+                        artifact_root,
+                        &relative_path,
+                        ownership_marker,
+                        owned_artifact_digest,
+                    )
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        states.push(HostComponentArtifactStateV1 {
+            component: component.manifest.component,
+            manifest_digest: component.manifest.canonical_digest()?,
+            receipt_digest,
+            observed,
+        });
+    }
+    canonical_json_bytes(&HostComponentSetArtifactStatePayloadV1 {
+        domain: "tracedecay.host-component-set.artifact-state.v1",
+        schema_version: 1,
+        components: states,
+    })
+    .map(|bytes| Sha256::digest(bytes).into())
+    .map_err(|_| HostBundleError::CanonicalizationFailed)
+}
+
+fn component_set_plan_digest(
+    request: &HostComponentSetExecutionRequestV1,
+    base_registration_revision: [u8; 32],
+    current_registration_revision: [u8; 32],
+    artifact_state_revision: [u8; 32],
+    component_plans: &[HostBundleMutationPlanV1],
+) -> Result<[u8; 32], HostBundleError> {
+    let mut expected_components = request.lifecycle.expected_components.clone();
+    expected_components.sort_unstable();
+    let mut component_plans = component_plans.to_vec();
+    for plan in &mut component_plans {
+        plan.mutations
+            .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    }
+    component_plans.sort_by_key(|plan| plan.component);
+    let payload = HostComponentSetPlanDigestPayloadV1 {
+        domain: "tracedecay.host-component-set.plan.v1",
+        schema_version: 1,
+        operation_id: request.operation_id,
+        operation: request.lifecycle.operation,
+        host: request.lifecycle.expected_host,
+        expected_components,
+        hermes_profile_bindings: request.lifecycle.hermes_profile_bindings,
+        base_registration_revision,
+        current_registration_revision,
+        artifact_state_revision,
+        component_plans,
+    };
+    canonical_json_bytes(&payload)
+        .map(|bytes| Sha256::digest(bytes).into())
+        .map_err(|_| HostBundleError::CanonicalizationFailed)
 }
 
 /// Production-composition seam for independently injected cryptographic and
@@ -1436,6 +1699,89 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
             interrupted_recovery_required: plan.rollback_required,
         },
         plan,
+    })
+}
+
+/// Read-only component-set preview for the official CLI. The registration
+/// adapter contributes the exact native-config revision, while every artifact
+/// plan is derived through the same ownership-aware planner used by apply.
+pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
+    V: HostBundleVerificationAdapterV1,
+    R: HostComponentSetRegistrationV1,
+>(
+    artifact_root: &Path,
+    lifecycle_root: &Path,
+    component_set: &HostComponentSetV1,
+    request: &HostComponentSetExecutionRequestV1,
+    verifier: &V,
+    registration: &mut R,
+) -> Result<HostComponentSetLifecyclePreviewV1, HostBundleError> {
+    let mut planning_request = request.clone();
+    planning_request.lifecycle.explicit_confirmation = true;
+    validate_component_set_request(component_set, &planning_request)?;
+    let base_registration_revision =
+        registration.current_revision(component_set, &planning_request)?;
+    if base_registration_revision == [0; 32] {
+        return Err(HostBundleError::InvalidObservedState);
+    }
+    registration.preflight(component_set, &planning_request)?;
+    let base_artifact_state_revision =
+        component_set_artifact_state_revision(artifact_root, lifecycle_root, component_set)?;
+    let mut component_plans = Vec::with_capacity(component_set.components.len());
+    for component in &component_set.components {
+        validate_artifact_contents_for_operation(
+            &component.manifest,
+            planning_request.lifecycle.operation,
+            &component.contents,
+        )?;
+        let component_request = HostBundleExecutionRequestV1 {
+            lifecycle: HostBundleLifecycleRequestV1 {
+                operation: planning_request.lifecycle.operation,
+                expected_host: planning_request.lifecycle.expected_host,
+                expected_component: component.manifest.component,
+                explicit_confirmation: true,
+                hermes_profile_bindings: planning_request.lifecycle.hermes_profile_bindings,
+            },
+            operation_id: planning_request.operation_id,
+        };
+        component_plans.push(
+            dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+                artifact_root,
+                lifecycle_root,
+                &component.manifest,
+                &component_request,
+                verifier,
+                &[],
+            )?
+            .plan,
+        );
+    }
+    let current_registration_revision =
+        registration.current_revision(component_set, &planning_request)?;
+    if current_registration_revision != base_registration_revision {
+        return Err(HostBundleError::StalePreview);
+    }
+    let current_artifact_state_revision =
+        component_set_artifact_state_revision(artifact_root, lifecycle_root, component_set)?;
+    if current_artifact_state_revision != base_artifact_state_revision {
+        return Err(HostBundleError::StalePreview);
+    }
+    let artifact_state_revision = base_artifact_state_revision;
+    let plan_digest = component_set_plan_digest(
+        &planning_request,
+        base_registration_revision,
+        current_registration_revision,
+        artifact_state_revision,
+        &component_plans,
+    )?;
+    Ok(HostComponentSetLifecyclePreviewV1 {
+        operation_id: request.operation_id,
+        plan_digest,
+        base_registration_revision,
+        current_registration_revision,
+        artifact_state_revision,
+        component_plans,
+        confirmation_required: !request.lifecycle.explicit_confirmation,
     })
 }
 
@@ -2499,16 +2845,60 @@ impl HostBundleWriterV1 {
         verifier: &V,
         registration: &mut R,
     ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+        self.execute_component_set_with_preview(
+            component_set,
+            request,
+            None,
+            verifier,
+            registration,
+        )
+    }
+
+    fn execute_confirmed_component_set<
+        V: HostBundleVerificationAdapterV1,
+        R: HostComponentSetRegistrationV1,
+    >(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        preview: &HostComponentSetLifecyclePreviewV1,
+        verifier: &V,
+        registration: &mut R,
+    ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+        self.execute_component_set_with_preview(
+            component_set,
+            request,
+            Some(preview),
+            verifier,
+            registration,
+        )
+    }
+
+    fn execute_component_set_with_preview<
+        V: HostBundleVerificationAdapterV1,
+        R: HostComponentSetRegistrationV1,
+    >(
+        &mut self,
+        component_set: &HostComponentSetV1,
+        request: &HostComponentSetExecutionRequestV1,
+        confirmed_preview: Option<&HostComponentSetLifecyclePreviewV1>,
+        verifier: &V,
+        registration: &mut R,
+    ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
         validate_component_set_request(component_set, request)?;
         if self.load_journal()?.is_some() {
             return Err(HostBundleError::RecoveryRequired);
         }
         if let Some(receipt) = self.load_component_set_receipt(request.operation_id)? {
-            return if component_set_receipt_matches(&receipt, component_set, request)? {
-                Ok(receipt)
-            } else {
-                Err(HostBundleError::ReceiptCorrupted)
-            };
+            if !component_set_receipt_matches(&receipt, component_set, request)? {
+                return Err(HostBundleError::ReceiptCorrupted);
+            }
+            if confirmed_preview
+                .is_some_and(|preview| !component_set_receipt_matches_preview(&receipt, preview))
+            {
+                return Err(HostBundleError::StalePreview);
+            }
+            return Ok(receipt);
         }
 
         let prepared = self.preflight_component_set(component_set, request, verifier)?;
@@ -2585,7 +2975,8 @@ impl HostBundleWriterV1 {
             journal.state = HostComponentSetJournalStateV1::Verified;
             self.write_component_set_journal(&journal)?;
 
-            let receipt = component_set_receipt_from_prepared(&prepared, request)?;
+            let receipt =
+                component_set_receipt_from_prepared(&prepared, request, confirmed_preview)?;
             for component_receipt in &receipt.component_receipts {
                 self.write_receipt(component_receipt)?;
             }
@@ -3319,6 +3710,10 @@ impl HostBundleWriterV1 {
             operation: component_receipt.operation,
             component_manifests: vec![manifest.clone()],
             component_receipts: vec![component_receipt.clone()],
+            confirmed_plan_digest: None,
+            base_registration_revision: None,
+            current_registration_revision: None,
+            artifact_state_revision: None,
         };
         self.write_component_set_receipt(&receipt)?;
         Ok(receipt)
@@ -3751,6 +4146,7 @@ fn validate_component_set_request(
 fn component_set_receipt_from_prepared(
     prepared: &[PreparedHostComponentSetComponentV1],
     request: &HostComponentSetExecutionRequestV1,
+    confirmed_preview: Option<&HostComponentSetLifecyclePreviewV1>,
 ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
     let component_receipts = prepared
         .iter()
@@ -3795,6 +4191,12 @@ fn component_set_receipt_from_prepared(
             .map(|component| component.manifest.clone())
             .collect(),
         component_receipts,
+        confirmed_plan_digest: confirmed_preview.map(|preview| preview.plan_digest),
+        base_registration_revision: confirmed_preview
+            .map(|preview| preview.base_registration_revision),
+        current_registration_revision: confirmed_preview
+            .map(|preview| preview.current_registration_revision),
+        artifact_state_revision: confirmed_preview.map(|preview| preview.artifact_state_revision),
     };
     validate_component_set_receipt(&receipt)?;
     Ok(receipt)
@@ -3831,6 +4233,17 @@ fn component_set_receipt_matches(
     Ok(true)
 }
 
+fn component_set_receipt_matches_preview(
+    receipt: &HostComponentSetReceiptV1,
+    preview: &HostComponentSetLifecyclePreviewV1,
+) -> bool {
+    receipt.operation_id == preview.operation_id
+        && receipt.confirmed_plan_digest == Some(preview.plan_digest)
+        && receipt.base_registration_revision == Some(preview.base_registration_revision)
+        && receipt.current_registration_revision == Some(preview.current_registration_revision)
+        && receipt.artifact_state_revision == Some(preview.artifact_state_revision)
+}
+
 fn validate_component_set_receipt(
     receipt: &HostComponentSetReceiptV1,
 ) -> Result<(), HostBundleError> {
@@ -3840,6 +4253,18 @@ fn validate_component_set_receipt(
         || receipt.component_receipts.is_empty()
         || receipt.component_manifests.len() != receipt.component_receipts.len()
         || receipt.component_receipts.len() > MAX_HOST_COMPONENTS
+        || match (
+            receipt.confirmed_plan_digest,
+            receipt.base_registration_revision,
+            receipt.current_registration_revision,
+            receipt.artifact_state_revision,
+        ) {
+            (None, None, None, None) => false,
+            (Some(plan), Some(base), Some(current), Some(artifacts)) => {
+                plan == [0; 32] || base == [0; 32] || current != base || artifacts == [0; 32]
+            }
+            _ => true,
+        }
     {
         return Err(HostBundleError::ReceiptCorrupted);
     }
@@ -4204,6 +4629,20 @@ mod tests {
 
     impl HostComponentSetRegistrationV1 for ArtifactOnlyTestRegistration {}
 
+    struct RevisionedTestRegistration {
+        revision: [u8; 32],
+    }
+
+    impl HostComponentSetRegistrationV1 for RevisionedTestRegistration {
+        fn current_revision(
+            &self,
+            _component_set: &HostComponentSetV1,
+            _request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<[u8; 32], HostBundleError> {
+            Ok(self.revision)
+        }
+    }
+
     impl HostComponentSetRegistrationV1 for FailingSetRegistration {
         fn apply(
             &mut self,
@@ -4382,6 +4821,110 @@ mod tests {
             !root.path().join("plugins").exists(),
             "cross-component conflicts are rejected before artifact paths are created"
         );
+    }
+
+    #[test]
+    fn confirmed_component_set_rejects_stale_registration_revision_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let component_set = component_set(HostKindV1::OpenCode, b"core", b"agent");
+        let request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 24);
+        let verifier = ComponentSetVerifier::from_set(&component_set);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = RevisionedTestRegistration { revision: [1; 32] };
+        let preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(&component_set, &request, &verifier, &mut registration)
+            .unwrap();
+        assert_eq!(preview.operation_id, request.operation_id);
+        assert_eq!(preview.base_registration_revision, [1; 32]);
+        assert_eq!(preview.current_registration_revision, [1; 32]);
+        assert_ne!(preview.plan_digest, [0; 32]);
+        let repeated = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(&component_set, &request, &verifier, &mut registration)
+            .unwrap();
+        assert_eq!(repeated, preview);
+
+        registration.revision = [2; 32];
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
+                &component_set,
+                &request,
+                &preview,
+                &verifier,
+                &mut registration,
+            ),
+            Err(HostBundleError::StalePreview)
+        );
+        assert!(!root.path().join("plugins").exists());
+    }
+
+    #[test]
+    fn confirmed_component_set_rejects_narrowed_plan_identity_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let full = component_set(HostKindV1::OpenCode, b"core", b"agent");
+        let full_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 25);
+        let verifier = ComponentSetVerifier::from_set(&full);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = RevisionedTestRegistration { revision: [3; 32] };
+        let preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(&full, &full_request, &verifier, &mut registration)
+            .unwrap();
+        let narrowed = HostComponentSetV1 {
+            host: full.host,
+            components: vec![full.components[0].clone()],
+        };
+        let narrowed_request = HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                expected_components: vec![HostBundleComponentV1::Core],
+                ..full_request.lifecycle.clone()
+            },
+            operation_id: full_request.operation_id,
+        };
+
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
+                &narrowed,
+                &narrowed_request,
+                &preview,
+                &verifier,
+                &mut registration,
+            ),
+            Err(HostBundleError::StalePreview)
+        );
+        assert!(!root.path().join("plugins").exists());
+    }
+
+    #[test]
+    fn confirmed_component_set_rejects_changed_artifact_state_without_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let component_set = component_set(HostKindV1::OpenCode, b"core", b"agent");
+        let request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 26);
+        let verifier = ComponentSetVerifier::from_set(&component_set);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = RevisionedTestRegistration { revision: [4; 32] };
+        let preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(&component_set, &request, &verifier, &mut registration)
+            .unwrap();
+
+        std::fs::create_dir_all(root.path().join("plugins")).unwrap();
+        std::fs::write(root.path().join("plugins/core.json"), b"external").unwrap();
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
+                &component_set,
+                &request,
+                &preview,
+                &verifier,
+                &mut registration,
+            ),
+            Err(HostBundleError::StalePreview)
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/core.json")).unwrap(),
+            b"external"
+        );
+        assert!(!root.path().join("plugins/agent.json").exists());
     }
 
     #[test]

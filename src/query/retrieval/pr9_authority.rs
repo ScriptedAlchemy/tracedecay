@@ -19,6 +19,12 @@ use super::fusion::{
     FusionStageInput, QueryDigestAuthenticationError, RetrievalCursorKeyringV1,
 };
 
+/// Immutable comparator/ranking revision shared by the PR9 evaluator,
+/// production authority, and cursor validation.
+pub const PR9_RANKING_REVISION_V1: &str = "ranking.candidate.v1";
+/// Versioned request-local cursor lifetime for the canonical PR9 authority.
+pub const PR9_CURSOR_TTL_MICROS_V1: u64 = 15 * 60 * 1_000_000;
+
 /// Complete authenticated PR9 composition retained for semantic augmentation
 /// and server-side audit. The fallback payload is independently canonical and
 /// cannot be changed by later optional lanes.
@@ -27,6 +33,10 @@ pub struct AuthorizedPr9FallbackV1 {
     pub query_digest: QueryDigest,
     pub fallback: Arc<Pr9FallbackSubpayload>,
     pub composition: CompositionOutputV1,
+    /// Exact compact lane inputs retained for one optional-stage recomposition.
+    /// Already-ranked fallback candidates must never be treated as a lane.
+    pub pr9_lanes: Vec<CompositionLaneInput>,
+    pub page_size: usize,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -132,6 +142,7 @@ impl Pr9QueryAuthorityV1 {
         self.validate_request(request)?;
         validate_lane_set(&lanes)?;
         let query_digest = self.keyring.digest_active_query(request, query_view)?;
+        let pr9_lanes = lanes.clone();
         let composition = self.kernel.compose(
             &FusionStageInput {
                 profile: self.profile.clone(),
@@ -164,6 +175,8 @@ impl Pr9QueryAuthorityV1 {
             query_digest,
             fallback: Arc::new(fallback),
             composition,
+            pr9_lanes,
+            page_size,
         })
     }
 

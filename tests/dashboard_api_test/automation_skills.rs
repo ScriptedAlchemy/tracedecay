@@ -76,13 +76,13 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         )
         .await
         .unwrap();
-        let global_db = GlobalDb::open()
-            .await
-            .expect("dashboard fixture global db opens");
-        global_db
-            .append_analytics_event(&tracedecay::global_db::AnalyticsEventInsert {
+        fixture
+            .host_runtime
+            .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
                 provider: "mcp".to_string(),
-                project_id: GlobalDb::canonical_project_key(&fixture.project_root),
+                project_id: HostAdmissionTestRuntimeV1::canonical_project_key(
+                    &fixture.project_root,
+                ),
                 session_id: Some("dashboard-skill-session".to_string()),
                 timestamp: tracedecay::tracedecay::current_timestamp(),
                 event_kind: "mcp_tool_call".to_string(),

@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use libsql::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+
+use crate::db::engine::{Executor, params};
 
 use super::{LcmGcError, LcmGcPhaseReport, MAX_SAMPLES};
 use crate::sessions::lcm::{LcmError, payload, schema};
@@ -75,7 +76,7 @@ pub(super) fn pending_payload_delete_key(payload_ref: &str) -> String {
 }
 
 pub(crate) async fn stage_payload_delete(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     payload_ref: &str,
     content_hash: Option<&str>,
     byte_count: u64,
@@ -91,64 +92,28 @@ pub(crate) async fn stage_payload_delete(
     schema::set_gc_meta(conn, &pending_payload_delete_key(payload_ref), &value).await
 }
 
-pub(crate) async fn drain_pending_payload_deletes(
-    conn: &Connection,
+pub(crate) async fn drain_pending_payload_deletes_in_transaction(
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
 ) -> Result<PayloadDeleteDrain, LcmError> {
-    drain_pending_payload_deletes_transaction(conn, storage_root, None).await
+    drain_pending_payload_deletes_matching(conn, storage_root, None).await
 }
 
-pub(crate) async fn drain_pending_payload_delete(
-    conn: &Connection,
+pub(crate) async fn drain_pending_payload_delete_in_transaction(
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
 ) -> Result<Option<u64>, LcmError> {
     payload::validate_payload_ref(payload_ref)?;
     Ok(
-        drain_pending_payload_deletes_transaction(conn, storage_root, Some(payload_ref))
+        drain_pending_payload_deletes_matching(conn, storage_root, Some(payload_ref))
             .await?
             .removed_bytes(payload_ref),
     )
 }
 
-async fn drain_pending_payload_deletes_transaction(
-    conn: &Connection,
-    storage_root: &Path,
-    payload_ref: Option<&str>,
-) -> Result<PayloadDeleteDrain, LcmError> {
-    let mut rows = match payload_ref {
-        Some(payload_ref) => {
-            conn.query(
-                "SELECT 1 FROM lcm_gc_meta WHERE key = ?1 LIMIT 1",
-                params![pending_payload_delete_key(payload_ref)],
-            )
-            .await?
-        }
-        None => {
-            conn.query(
-                "SELECT 1 FROM lcm_gc_meta WHERE key GLOB 'pending_payload_delete:*' LIMIT 1",
-                (),
-            )
-            .await?
-        }
-    };
-    let has_pending = rows.next().await?.is_some();
-    drop(rows);
-    if !has_pending {
-        return Ok(PayloadDeleteDrain::default());
-    }
-
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await?;
-    let drain =
-        drain_pending_payload_deletes_matching(&transaction, storage_root, payload_ref).await?;
-    transaction.commit().await?;
-    Ok(drain)
-}
-
 async fn drain_pending_payload_deletes_matching(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: Option<&str>,
 ) -> Result<PayloadDeleteDrain, LcmError> {
@@ -281,7 +246,7 @@ async fn drain_pending_payload_deletes_matching(
 }
 
 async fn record_pending_delete_diagnostics(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     drain: &PayloadDeleteDrain,
 ) -> Result<(), LcmError> {
     if drain.outcomes.failed.is_empty() {

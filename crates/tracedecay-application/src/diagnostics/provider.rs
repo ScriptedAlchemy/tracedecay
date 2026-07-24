@@ -357,6 +357,25 @@ impl AnalyzerAdmittedDiagnosticProviderV1 {
         &self.admission_snapshot
     }
 
+    /// True when the same immutable analyzer-policy admission covers a
+    /// generation/document-exact provider identity for a later request.
+    ///
+    /// Source, document, observation time, and coverage are request evidence.
+    /// Analyzer selection, scope, producer, configuration, policy, capability,
+    /// and provenance remain pinned to the admission snapshot.
+    pub fn admits_identity(&self, identity: &DiagnosticProviderIdentity) -> bool {
+        identity.validate().is_ok()
+            && self.validate().is_ok()
+            && identity.scope == self.identity.scope
+            && identity.source.is_overlay() == self.identity.source.is_overlay()
+            && identity.producer == self.identity.producer
+            && identity.requested_capability == self.identity.requested_capability
+            && identity.provenance == self.identity.provenance
+            && identity.configuration == self.identity.configuration
+            && identity.policy == self.identity.policy
+            && identity.freshness.state == self.identity.freshness.state
+    }
+
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.identity.validate()?;
         if !self.admission_snapshot.is_bound_to(&self.admission_input)

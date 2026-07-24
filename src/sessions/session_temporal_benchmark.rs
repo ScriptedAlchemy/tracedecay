@@ -1,7 +1,7 @@
 //! PR8 session-temporal benchmark harness.
 //!
 //! Drives production Codex admission, `CanonicalSessionTemporalProjector`
-//! materialization (via [`GlobalDb::materialize_session_temporal_refresh_batch_result`]),
+//! materialization through the registered session database,
 //! [`SessionRefreshService`], and [`SessionRetrievalService`]. Output is a
 //! Linux measurement capture with descriptive sample quantiles only.
 
@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -39,7 +40,9 @@ use crate::application::session::{
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
 };
-use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution};
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::codex;
@@ -217,7 +220,7 @@ impl VersionedTokenEstimator for Words {
 }
 
 struct PreparedRepetition {
-    db: GlobalDb,
+    registered: Arc<RegisteredGlobalDb>,
     session: SessionId,
     context: RequestContext,
     complete_request: SessionRefreshCompletionRequestV1,
@@ -445,41 +448,45 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let project_id = enroll_benchmark_project(&project)?;
 
     let profile = env.data_dir().join("profile");
-    fs::create_dir_all(&profile).map_err(|error| format!("create profile: {error}"))?;
-    let db_path = profile.join("sessions.db");
+    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile)
+        .map_err(|error| format!("create benchmark profile identity: {error}"))?;
+    let brain_id = profile_identity.brain_id().clone();
+    let profile_id = profile_identity.profile_id().clone();
     let _daemon_scope = crate::db::enter_daemon_database_scope(
         &profile,
         u64::try_from(repetition).unwrap() + 1,
         &format!("pr8-bench-{repetition}"),
     )
     .map_err(|error| format!("enter daemon scope: {error}"))?;
-    let db = GlobalDb::open_at(&db_path)
+    let session_registry = DaemonSessionRuntimeRegistryV1::open(profile_identity)
         .await
-        .ok_or_else(|| format!("open GlobalDb at {}", db_path.display()))?;
-    db.ensure_active_session_cursor_key_result()
+        .map_err(|error| format!("open benchmark session registry: {error}"))?;
+    let registered = session_registry
+        .project_sessions(project_id.clone(), [project.clone()])
         .await
-        .map_err(|error| format!("provision active session cursor key: {error:?}"))?;
-
+        .map_err(|error| format!("mount benchmark project sessions: {error}"))?;
     let session_id = format!("benchmark-codex-session-{repetition}");
     let rollout = write_codex_rollout(env.home(), &project, &session_id)?;
-    codex::try_admit_codex_jsonl_observations_for_project(
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        brain_id,
+        profile_id,
+        project_id.clone(),
+        registered.as_ref(),
+    ));
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
         &rollout,
-        &db,
         &project,
         project_id.clone(),
+        &admission,
         None,
     )
     .await
     .map_err(|error| format!("Codex production admit failed: {error}"))?;
 
-    let observation_count = count_observations(&db).await?;
+    let observation_count = count_observations(registered.as_ref()).await?;
     if observation_count == 0 {
         return Err("Codex admit produced zero observations".to_owned());
     }
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        &db,
-        project_id.clone(),
-    ));
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
@@ -497,7 +504,8 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         return Err("Codex canonical projector produced zero outputs".to_owned());
     }
 
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let db = registered.as_ref();
+    let store = GlobalDbSessionTemporalStore::new(db);
     let refresh = SessionRefreshService::new(
         AllowAuthorizer,
         store,
@@ -535,7 +543,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         {
             Some((progress, batch)) => {
                 projected = projected.saturating_add(batch.item_count() as u64);
-                GlobalDbSessionTemporalStore::new(&db)
+                GlobalDbSessionTemporalStore::new(db)
                     .persist_session_refresh_projection_batch(progress, batch)
                     .await
                     .map_err(|error| format!("persist projection batch: {error:?}"))?;
@@ -569,7 +577,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     }
 
     Ok(PreparedRepetition {
-        db,
+        registered,
         session,
         context,
         complete_request,
@@ -586,13 +594,13 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
     }
     let replay_started = Instant::now();
     prepared
-        .db
+        .registered
         .complete_session_refresh_result(prepared.complete_request.clone())
         .await
         .map_err(|error| format!("exact replay complete: {error:?}"))?;
     let exact_replay_ns = elapsed_ns(replay_started);
 
-    let execution = GlobalDbSessionTemporalExecution::new(&prepared.db);
+    let execution = RegisteredGlobalDbSessionTemporalExecution::new(prepared.registered.as_ref());
     let retrieval = SessionRetrievalService::new(
         AllowAuthorizer,
         &execution,
@@ -716,7 +724,7 @@ fn write_codex_rollout(home: &Path, project: &Path, session_id: &str) -> BenchRe
     Ok(path)
 }
 
-async fn count_observations(db: &GlobalDb) -> BenchResult<u64> {
+async fn count_observations(db: &RegisteredGlobalDb) -> BenchResult<u64> {
     let mut rows = db
         .read_connection()
         .query("SELECT COUNT(*) FROM observations", ())

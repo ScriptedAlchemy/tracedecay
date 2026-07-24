@@ -21,8 +21,9 @@ use super::{
     compatibility_mirror_insert_tx, compatibility_mirror_update_tx, compatibility_payload_metadata,
     compatibility_sanitize_payload, load_current_fact_tx, load_current_projection,
 };
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use crate::db::{Database, tombstone_fact_derivatives_tx};
-use libsql::{Transaction, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
@@ -54,7 +55,7 @@ pub(super) fn compatibility_feedback_delta(action: CompatibilityFactFeedbackActi
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn compatibility_mirror_feedback_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     legacy_fact_id: i64,
     action: CompatibilityFactFeedbackActionV1,
     old_trust: Confidence,
@@ -114,7 +115,7 @@ pub(super) async fn compatibility_mirror_feedback_tx(
 }
 
 pub(super) async fn compatibility_update_feedback_projection_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
     action: CompatibilityFactFeedbackActionV1,
@@ -250,7 +251,7 @@ fn compatibility_removal_batch(
 }
 
 async fn compatibility_replay_add_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1> {
@@ -320,7 +321,7 @@ async fn compatibility_replay_add_tx(
 
 pub(in crate::store::memory) async fn add_compatibility_fact_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactAddCommandV1,
 ) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1> {
     let payload_metadata = compatibility_payload_metadata(request.metadata());
@@ -474,7 +475,7 @@ pub(in crate::store::memory) async fn add_compatibility_fact_tx(
 }
 
 async fn compatibility_replay_update_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1> {
@@ -508,7 +509,7 @@ async fn compatibility_replay_update_tx(
 
 pub(in crate::store::memory) async fn update_compatibility_fact_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactUpdateCommandV1,
 ) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1> {
     let request_digest = compatibility_digest(json!({
@@ -649,7 +650,7 @@ pub(in crate::store::memory) async fn update_compatibility_fact_tx(
 }
 
 async fn compatibility_replay_remove_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1> {
@@ -687,7 +688,7 @@ async fn compatibility_replay_remove_tx(
 
 pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactRemoveCommandV1,
 ) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1> {
     let request_digest = compatibility_digest(json!({

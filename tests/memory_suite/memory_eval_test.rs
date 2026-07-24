@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::memory::store::MemoryStore;
 use tracedecay::memory::trust::DEFAULT_TRUST;
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -373,48 +372,32 @@ fn runtime() -> tokio::runtime::Runtime {
 /// holds a lock across subprocess writes.
 fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
     let db_path = fixture.db_path();
-    runtime().block_on(async move {
-        let db = libsql::Builder::new_local(&db_path)
-            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-        let conn = db.connect().expect("db connect");
-        let mut rows = conn
-            .query(sql, ())
-            .await
-            .unwrap_or_else(|e| panic!("query `{sql}`: {e}"));
-        let row = rows
-            .next()
-            .await
-            .unwrap_or_else(|e| panic!("row for `{sql}`: {e}"))
-            .unwrap_or_else(|| panic!("no rows for `{sql}`"));
-        row.get::<i64>(0)
-            .unwrap_or_else(|e| panic!("scalar for `{sql}`: {e}"))
-    })
+    conn.query_row(sql, (), |row| row.get::<_, i64>(0))
+        .unwrap_or_else(|e| panic!("scalar for `{sql}`: {e}"))
 }
 
 fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
     let db_path = fixture.db_path();
-    runtime().block_on(async move {
-        let db = libsql::Builder::new_local(&db_path)
-            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-        let conn = db.connect().expect("db connect");
-        let mut rows = conn
-            .query("SELECT source, fact_id FROM memory_facts", ())
-            .await
-            .expect("list fact sources");
-        let mut map: HashMap<String, HashSet<i64>> = HashMap::new();
-        while let Some(row) = rows.next().await.expect("source row") {
-            let source = row.get::<String>(0).expect("source column");
-            let fact_id = row.get::<i64>(1).expect("fact_id column");
-            map.entry(source).or_default().insert(fact_id);
-        }
-        map
-    })
+    let mut statement = conn
+        .prepare("SELECT source, fact_id FROM memory_facts")
+        .expect("prepare fact source query");
+    let rows = statement
+        .query_map((), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .expect("list fact sources");
+    let mut map: HashMap<String, HashSet<i64>> = HashMap::new();
+    for row in rows {
+        let (source, fact_id) = row.expect("source row");
+        map.entry(source).or_default().insert(fact_id);
+    }
+    map
 }
 
 fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
@@ -423,13 +406,16 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
     }
 
     let db_path = fixture.db_path();
+    let open_path = db_path.clone();
     runtime().block_on(async move {
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
+        let (db, _) = common::open_test_database(&open_path)
             .await
-            .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-        let conn = db.connect().expect("db connect");
-        let store = MemoryStore::new(&conn);
+            .unwrap_or_else(|e| panic!("open {}: {e}", open_path.display()));
+        let writer = db
+            .memory_writer()
+            .await
+            .unwrap_or_else(|e| panic!("open memory writer: {e}"));
+        let store = writer.store();
         for fact in facts {
             let category = fact
                 .category
@@ -455,20 +441,30 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
                 "seed setup fact should be stored: {}",
                 fact.content
             );
-            conn.execute(
+        }
+        drop(writer);
+        db.close();
+    });
+    let conn = rusqlite::Connection::open(&db_path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
+    let transaction = conn
+        .unchecked_transaction()
+        .expect("begin setup fact update");
+    for fact in facts {
+        transaction
+            .execute(
                 "UPDATE memory_facts SET trust_score = ?1, retrieval_count = ?2, source = ?3 \
                  WHERE content = ?4",
-                libsql::params![
+                rusqlite::params![
                     fact.trust,
                     fact.retrieval_count,
                     fact.source.as_str(),
                     fact.content.as_str()
                 ],
             )
-            .await
             .unwrap_or_else(|e| panic!("update seed setup fact `{}`: {e}", fact.content));
-        }
-    });
+    }
+    transaction.commit().expect("commit setup fact updates");
 }
 
 fn canonical_test_dir(path: &Path) -> PathBuf {

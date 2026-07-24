@@ -1,8 +1,8 @@
-use libsql::params;
+use std::path::Path;
+
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowEvidenceKindV1,
@@ -16,14 +16,20 @@ use tracedecay_domain::{
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::common::{global_message, isolated_lcm_db_path, open_lcm_db};
+use crate::common::global_message;
 
 const FIXTURE_PROVIDER: &str = "provider-neutral-fixture";
 const FIXTURE_SESSION: &str = "session.workflow-lifecycle";
+
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct WorkflowRow {
@@ -174,11 +180,14 @@ fn write(
     AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation).unwrap()
 }
 
-async fn persist_and_project(
-    store: &GlobalDbObservationStore<'_>,
+async fn persist_and_project<S>(
+    store: &S,
     observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
-) -> ObservationSourceCursorV1 {
+) -> ObservationSourceCursorV1
+where
+    S: ObservationStore + ObservationProjectionStore,
+{
     let observation_id = observation.observation_id().clone();
     let outcome = store
         .persist_observation(write(observation, expected_cursor))
@@ -195,65 +204,351 @@ async fn persist_and_project(
     receipt.committed_cursor().clone()
 }
 
-async fn workflow_rows(tmp: &TempDir) -> Vec<WorkflowRow> {
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
+fn workflow_rows(database_path: &Path) -> Vec<WorkflowRow> {
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT semantic_kind, provider_reference, item_id, parent_reference,
                     list_reference, state, status, item_order, native_revision,
                     event_sequence, content_text
              FROM observation_workflow_facts
              ORDER BY observation_sequence, fact_ordinal",
-            (),
         )
-        .await
         .unwrap();
-    let mut projected = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        projected.push(WorkflowRow {
-            semantic_kind: row.get(0).unwrap(),
-            provider_reference: row.get(1).unwrap(),
-            item_id: row.get(2).unwrap(),
-            parent_reference: row.get(3).unwrap(),
-            list_reference: row.get(4).unwrap(),
-            state: row.get(5).unwrap(),
-            status: row.get(6).unwrap(),
-            item_order: row.get(7).unwrap(),
-            revision: row.get(8).unwrap(),
-            event_sequence: row.get(9).unwrap(),
-            content_text: row.get(10).unwrap(),
-        });
-    }
-    projected
+    statement
+        .query_map((), |row| {
+            Ok(WorkflowRow {
+                semantic_kind: row.get(0)?,
+                provider_reference: row.get(1)?,
+                item_id: row.get(2)?,
+                parent_reference: row.get(3)?,
+                list_reference: row.get(4)?,
+                state: row.get(5)?,
+                status: row.get(6)?,
+                item_order: row.get(7)?,
+                revision: row.get(8)?,
+                event_sequence: row.get(9)?,
+                content_text: row.get(10)?,
+            })
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
-async fn table_count(tmp: &TempDir, table: &str) -> i64 {
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = raw_db.connect().unwrap();
+fn table_count(database_path: &Path, table: &str) -> i64 {
+    let conn = rusqlite::Connection::open(database_path).unwrap();
     let quoted = table.replace('"', "\"\"");
-    let mut rows = conn
-        .query(&format!("SELECT COUNT(*) FROM \"{quoted}\""), ())
-        .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+    conn.query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), (), |row| {
+        row.get(0)
+    })
+    .unwrap()
 }
 
-async fn workflow_count(tmp: &TempDir) -> i64 {
-    table_count(tmp, "observation_workflow_facts").await
+fn workflow_count(database_path: &Path) -> i64 {
+    table_count(database_path, "observation_workflow_facts")
+}
+
+struct SessionMessageSearchHit {
+    message: SessionMessageRecord,
+}
+
+fn workflow_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMessageRecord> {
+    let observation_id: String = row.get(1)?;
+    let fact_ordinal: i64 = row.get(2)?;
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "observation_id".to_owned(),
+        Value::String(observation_id.clone()),
+    );
+    metadata.insert("fact_ordinal".to_owned(), Value::from(fact_ordinal));
+    metadata.insert("ordering_domain".to_owned(), Value::String(row.get(17)?));
+    for (key, value) in [
+        ("provider_reference", row.get(5)?),
+        ("item_id", row.get(6)?),
+        ("parent_reference", row.get(7)?),
+        ("list_reference", row.get(8)?),
+        ("state", row.get(9)?),
+        ("status", row.get(10)?),
+        ("revision", row.get(12)?),
+    ] {
+        if let Some(value) = value {
+            metadata.insert(key.to_owned(), Value::String(value));
+        }
+    }
+    let event_sequence: Option<i64> = row.get(13)?;
+    let source_sequence: Option<i64> = row.get(14)?;
+    for (key, value) in [
+        ("item_order", row.get(11)?),
+        ("event_sequence", event_sequence),
+        ("source_sequence", source_sequence),
+    ] {
+        if let Some(value) = value {
+            metadata.insert(key.to_owned(), Value::from(value));
+        }
+    }
+    if let Some(content_json) = row.get::<_, Option<String>>(18)?
+        && let Ok(content) = serde_json::from_str(&content_json)
+    {
+        metadata.insert("content".to_owned(), content);
+    }
+    let observation_sequence: i64 = row.get(15)?;
+
+    Ok(SessionMessageRecord {
+        provider: row.get(0)?,
+        message_id: format!("workflow/{observation_id}/{fact_ordinal}"),
+        session_id: row.get(3)?,
+        role: "system".to_owned(),
+        timestamp: row.get(16)?,
+        ordinal: event_sequence
+            .or(source_sequence)
+            .unwrap_or(observation_sequence),
+        text: row.get(19)?,
+        kind: row.get(4)?,
+        model: None,
+        tool_names: None,
+        source_path: None,
+        source_offset: None,
+        metadata_json: Some(Value::Object(metadata).to_string()),
+    })
+}
+
+fn search_session_messages(
+    database_path: &Path,
+    provider: &str,
+    project_key: Option<&str>,
+    query: &str,
+    limit: usize,
+) -> Vec<SessionMessageSearchHit> {
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let terms = query
+        .split_whitespace()
+        .map(|term| {
+            term.trim_matches(|character: char| {
+                !character.is_alphanumeric() && character != '-' && character != '_'
+            })
+            .to_lowercase()
+        })
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    let mut workflow_sql = "SELECT
+            w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
+            w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
+            w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
+            w.source_sequence, w.observation_sequence, w.native_timestamp,
+            w.ordering_domain, w.content_json, w.content_text
+         FROM observation_workflow_facts w
+         JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+         WHERE w.projector_version = 'claude-session-message-v4'
+           AND w.provider = ?1"
+        .to_owned();
+    let mut values = vec![rusqlite::types::Value::Text(provider.to_owned())];
+    if let Some(project_key) = project_key {
+        values.push(rusqlite::types::Value::Text(project_key.to_owned()));
+        workflow_sql.push_str(&format!(
+            " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
+            values.len()
+        ));
+    }
+    for term in &terms {
+        values.push(rusqlite::types::Value::Text(term.clone()));
+        workflow_sql.push_str(&format!(
+            " AND instr(lower(w.content_text), ?{}) > 0",
+            values.len()
+        ));
+    }
+    workflow_sql.push_str(
+        " ORDER BY CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END,
+                   w.item_order, COALESCE(w.native_timestamp, 0) DESC,
+                   w.observation_sequence DESC, w.fact_ordinal",
+    );
+    let mut statement = conn.prepare(&workflow_sql).unwrap();
+    let mut results = statement
+        .query_map(rusqlite::params_from_iter(values), |row| {
+            Ok(SessionMessageSearchHit {
+                message: workflow_message(row)?,
+            })
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    if results.len() < limit {
+        let fts_query = terms
+            .iter()
+            .map(|term| format!("\"{}\"*", term.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let mut statement = conn
+            .prepare(
+                "SELECT message.provider, message.message_id, message.session_id, message.role,
+                        message.timestamp, message.ordinal, message.text, message.kind,
+                        message.model, message.tool_names, message.source_path,
+                        message.source_offset, message.metadata_json
+                 FROM session_messages_fts
+                 JOIN session_messages AS message
+                   ON message.rowid = session_messages_fts.rowid
+                 JOIN sessions AS session
+                   ON session.provider = message.provider
+                  AND session.session_id = message.session_id
+                 WHERE session_messages_fts MATCH ?1
+                   AND message.provider = ?2
+                   AND (?3 IS NULL OR session.project_key = ?3 OR session.project_path = ?3)
+                 ORDER BY bm25(session_messages_fts)
+                 LIMIT ?4",
+            )
+            .unwrap();
+        let transcript_results = statement
+            .query_map(
+                rusqlite::params![
+                    fts_query,
+                    provider,
+                    project_key,
+                    i64::try_from(limit - results.len()).unwrap()
+                ],
+                |row| {
+                    Ok(SessionMessageSearchHit {
+                        message: SessionMessageRecord {
+                            provider: row.get(0)?,
+                            message_id: row.get(1)?,
+                            session_id: row.get(2)?,
+                            role: row.get(3)?,
+                            timestamp: row.get(4)?,
+                            ordinal: row.get(5)?,
+                            text: row.get(6)?,
+                            kind: row.get(7)?,
+                            model: row.get(8)?,
+                            tool_names: row.get(9)?,
+                            source_path: row.get(10)?,
+                            source_offset: row.get(11)?,
+                            metadata_json: row.get(12)?,
+                        },
+                    })
+                },
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        results.extend(transcript_results);
+    }
+    results.truncate(limit);
+    results
+}
+
+fn recent_session_goals_filtered(
+    database_path: &Path,
+    provider: Option<&str>,
+    project_key: Option<&str>,
+    session_id: Option<&str>,
+    status: Option<&str>,
+    limit: usize,
+) -> Vec<SessionMessageSearchHit> {
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let mut statement = conn
+        .prepare(
+            "WITH ranked_goals AS (
+                 SELECT w.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY w.provider, w.session_id
+                            ORDER BY w.observation_sequence DESC, w.fact_ordinal DESC
+                        ) AS goal_rank
+                 FROM observation_workflow_facts w
+                 WHERE w.projector_version = 'claude-session-message-v4'
+                   AND w.semantic_kind = 'goal'
+             )
+             SELECT
+                 w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
+                 w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
+                 w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
+                 w.source_sequence, w.observation_sequence, w.native_timestamp,
+                 w.ordering_domain, w.content_json, w.content_text
+             FROM ranked_goals w
+             JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+             WHERE w.goal_rank = 1
+               AND (?1 IS NULL OR w.provider = ?1)
+               AND (?2 IS NULL OR s.project_key = ?2 OR s.project_path = ?2)
+               AND (?3 IS NULL OR w.session_id = ?3)
+               AND (?4 IS NULL OR w.status = ?4)
+             ORDER BY COALESCE(w.native_timestamp, 0) DESC,
+                      w.observation_sequence DESC, w.fact_ordinal DESC
+             LIMIT ?5",
+        )
+        .unwrap();
+    statement
+        .query_map(
+            rusqlite::params![
+                provider,
+                project_key,
+                session_id,
+                status,
+                i64::try_from(limit).unwrap()
+            ],
+            |row| {
+                Ok(SessionMessageSearchHit {
+                    message: workflow_message(row)?,
+                })
+            },
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn upsert_session_message(database_path: &Path, message: &SessionMessageRecord) -> bool {
+    rusqlite::Connection::open(database_path)
+        .and_then(|conn| {
+            conn.execute(
+                "INSERT INTO session_messages
+                     (provider, message_id, session_id, role, timestamp, ordinal, text, kind,
+                      model, tool_names, source_path, source_offset, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(provider, message_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    role = excluded.role,
+                    timestamp = excluded.timestamp,
+                    ordinal = excluded.ordinal,
+                    text = excluded.text,
+                    kind = excluded.kind,
+                    model = excluded.model,
+                    tool_names = excluded.tool_names,
+                    source_path = excluded.source_path,
+                    source_offset = excluded.source_offset,
+                    metadata_json = excluded.metadata_json",
+                rusqlite::params![
+                    message.provider,
+                    message.message_id,
+                    message.session_id,
+                    message.role,
+                    message.timestamp,
+                    message.ordinal,
+                    message.text,
+                    message.kind,
+                    message.model,
+                    message.tool_names,
+                    message.source_path,
+                    message.source_offset,
+                    message.metadata_json,
+                ],
+            )
+        })
+        .is_ok()
 }
 
 #[tokio::test]
 async fn legacy_plan_and_task_facts_replay_into_canonical_workflow_rows() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         FIXTURE_SESSION,
         "record.workflow-legacy",
@@ -273,7 +568,7 @@ async fn legacy_plan_and_task_facts_replay_into_canonical_workflow_rows() {
     );
     persist_and_project(&store, candidate, None).await;
 
-    let rows = workflow_rows(&tmp).await;
+    let rows = workflow_rows(&database_path);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].semantic_kind, "plan");
     assert_eq!(rows[1].semantic_kind, "task");
@@ -290,8 +585,14 @@ async fn legacy_plan_and_task_facts_replay_into_canonical_workflow_rows() {
 #[tokio::test]
 async fn message_and_every_colocated_workflow_fact_project_independently() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         FIXTURE_SESSION,
         "record.workflow-multi",
@@ -338,7 +639,7 @@ async fn message_and_every_colocated_workflow_fact_project_independently() {
     let observation_id = candidate.observation_id().clone();
     persist_and_project(&store, candidate, None).await;
 
-    let rows = workflow_rows(&tmp).await;
+    let rows = workflow_rows(&database_path);
     assert_eq!(rows.len(), 3);
     assert_eq!(
         rows.iter()
@@ -347,32 +648,42 @@ async fn message_and_every_colocated_workflow_fact_project_independently() {
         vec!["plan.native.1", "task.native.1", "task.native.2"]
     );
     assert!(
-        db.search_session_messages(
+        search_session_messages(
+            &database_path,
             FIXTURE_PROVIDER,
             Some("user"),
             "workflow summary survives",
             10
         )
-        .await
         .iter()
         .any(|result| result.message.text == "workflow summary survives")
     );
-    let workflow_results = db
-        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release task", 10)
-        .await;
+    let workflow_results = search_session_messages(
+        &database_path,
+        FIXTURE_PROVIDER,
+        Some("user"),
+        "release task",
+        10,
+    );
     assert_eq!(workflow_results.len(), 2);
     assert!(matches!(
         store.project_observation(&observation_id).await.unwrap(),
         ProjectionPersistOutcome::ExactDuplicate(_)
     ));
-    assert_eq!(workflow_count(&tmp).await, 3);
+    assert_eq!(workflow_count(&database_path), 3);
 }
 
 #[tokio::test]
 async fn latest_goal_state_filters_provider_session_and_status() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let first = observation(
         FIXTURE_SESSION,
         "record.goal-started",
@@ -406,15 +717,14 @@ async fn latest_goal_state_filters_provider_session_and_status() {
     );
     persist_and_project(&store, completed, Some(cursor)).await;
 
-    let goals = db
-        .recent_session_goals_filtered(
-            Some(FIXTURE_PROVIDER),
-            Some("user"),
-            Some(FIXTURE_SESSION),
-            Some("completed"),
-            10,
-        )
-        .await;
+    let goals = recent_session_goals_filtered(
+        &database_path,
+        Some(FIXTURE_PROVIDER),
+        Some("user"),
+        Some(FIXTURE_SESSION),
+        Some("completed"),
+        10,
+    );
     assert_eq!(goals.len(), 1);
     assert_eq!(goals[0].message.kind.as_deref(), Some("goal"));
     let metadata: Value =
@@ -423,26 +733,26 @@ async fn latest_goal_state_filters_provider_session_and_status() {
     assert_eq!(metadata["item_id"], "goal.stable.main");
     assert_eq!(metadata["event_sequence"], 2);
     assert!(
-        db.recent_session_goals_filtered(
+        recent_session_goals_filtered(
+            &database_path,
             Some(FIXTURE_PROVIDER),
             Some("user"),
             Some(FIXTURE_SESSION),
             Some("in_progress"),
             10,
         )
-        .await
         .is_empty(),
         "status filtering must apply after selecting the latest transition"
     );
     assert!(
-        db.recent_session_goals_filtered(
+        recent_session_goals_filtered(
+            &database_path,
             Some("another-provider"),
             Some("user"),
             Some(FIXTURE_SESSION),
             Some("completed"),
             10,
         )
-        .await
         .is_empty()
     );
 }
@@ -450,8 +760,14 @@ async fn latest_goal_state_filters_provider_session_and_status() {
 #[tokio::test]
 async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         FIXTURE_SESSION,
         "record.todo-list",
@@ -481,9 +797,13 @@ async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields
     );
     persist_and_project(&store, candidate, None).await;
 
-    let results = db
-        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release-item", 10)
-        .await;
+    let results = search_session_messages(
+        &database_path,
+        FIXTURE_PROVIDER,
+        Some("user"),
+        "release-item",
+        10,
+    );
     assert_eq!(results.len(), 2);
     let metadata = results
         .iter()
@@ -500,8 +820,14 @@ async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields
 #[tokio::test]
 async fn canonical_workflow_fact_survives_a_saturated_transcript_limit() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         FIXTURE_SESSION,
         "record.todo-search-saturation",
@@ -520,25 +846,24 @@ async fn canonical_workflow_fact_survives_a_saturated_transcript_limit() {
     persist_and_project(&store, candidate, None).await;
 
     for ordinal in 0..12 {
-        assert!(
-            db.upsert_session_message(&global_message(
+        assert!(upsert_session_message(
+            &database_path,
+            &global_message(
                 FIXTURE_PROVIDER,
                 &format!("ordinary-saturation-{ordinal}"),
                 FIXTURE_SESSION,
                 &format!("canonical saturation marker in transcript {ordinal}"),
-            ))
-            .await
-        );
+            ),
+        ));
     }
 
-    let results = db
-        .search_session_messages(
-            FIXTURE_PROVIDER,
-            Some("user"),
-            "canonical saturation marker",
-            4,
-        )
-        .await;
+    let results = search_session_messages(
+        &database_path,
+        FIXTURE_PROVIDER,
+        Some("user"),
+        "canonical saturation marker",
+        4,
+    );
 
     assert_eq!(results.len(), 4);
     assert_eq!(results[0].message.kind.as_deref(), Some("todo_item"));
@@ -548,8 +873,14 @@ async fn canonical_workflow_fact_survives_a_saturated_transcript_limit() {
 #[tokio::test]
 async fn untyped_message_fields_never_become_workflow_projection_rows() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         FIXTURE_SESSION,
         "record.untyped-task-shaped-message",
@@ -567,14 +898,20 @@ async fn untyped_message_fields_never_become_workflow_projection_rows() {
     );
     persist_and_project(&store, candidate, None).await;
 
-    assert_eq!(workflow_count(&tmp).await, 0);
+    assert_eq!(workflow_count(&database_path), 0);
 }
 
 #[tokio::test]
 async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         FIXTURE_SESSION,
         "record.workflow-recovery",
@@ -597,11 +934,7 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
         .unwrap();
     assert!(matches!(persisted, ObservationPersistOutcome::Committed(_)));
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TRIGGER fail_workflow_projection
@@ -609,7 +942,6 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
                 SELECT RAISE(ABORT, 'injected workflow projection failure');
              END;",
         )
-        .await
         .unwrap();
     let error = store
         .project_observation(&observation_id)
@@ -620,16 +952,15 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         0
     );
-    assert_eq!(workflow_count(&tmp).await, 0);
+    assert_eq!(workflow_count(&database_path), 0);
     raw_conn
         .execute("DROP TRIGGER fail_workflow_projection", ())
-        .await
         .unwrap();
     assert!(matches!(
         store.project_observation(&observation_id).await.unwrap(),
         ProjectionPersistOutcome::Projected(_)
     ));
-    let before = workflow_rows(&tmp).await;
+    let before = workflow_rows(&database_path);
     assert_eq!(before.len(), 1);
     raw_conn
         .execute_batch(
@@ -638,62 +969,57 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
                 SELECT RAISE(ABORT, 'injected workflow rebuild activation failure');
              END;",
         )
-        .await
         .unwrap();
     let error = store
         .rebuild_projection(1)
         .await
         .expect_err("activation failure must roll back the active projection atomically");
     assert!(matches!(error, ProjectionStoreError::Storage { .. }));
-    assert_eq!(workflow_rows(&tmp).await, before);
+    assert_eq!(workflow_rows(&database_path), before);
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
         1
     );
     assert_eq!(
-        table_count(&tmp, "observation_projection_rebuilds").await,
+        table_count(&database_path, "observation_projection_rebuilds"),
         1,
         "the durable staged generation must survive a failed activation"
     );
     raw_conn
         .execute("DROP TRIGGER fail_workflow_rebuild_activation", ())
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
-    drop(db);
+    drop(store);
+    drop(runtime);
 
-    let reopened = open_lcm_db(&tmp).await;
-    let reopened_store = GlobalDbObservationStore::new(&reopened);
+    let reopened = profile_runtime(&tmp).await;
+    let reopened_store = reopened
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let rebuilt = reopened_store.rebuild_projection(1).await.unwrap();
     assert!(rebuilt.is_complete());
     assert_eq!(rebuilt.projected_rows(), 1);
-    assert_eq!(workflow_rows(&tmp).await, before);
+    assert_eq!(workflow_rows(&database_path), before);
     assert_eq!(
-        table_count(&tmp, "observation_projection_rebuilds").await,
+        table_count(&database_path, "observation_projection_rebuilds"),
         0
     );
+    drop(reopened_store);
     drop(reopened);
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
     raw_conn
         .execute(
             "UPDATE observation_workflow_facts
              SET status = 'tampered'
              WHERE item_id = ?1",
-            params!["task.stable.recovery"],
+            rusqlite::params!["task.stable.recovery"],
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
     assert!(
-        GlobalDb::try_open_at_without_structured_backfill(&isolated_lcm_db_path(&tmp))
+        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
             .await
             .is_err(),
         "authority audit must reject a workflow projection row that disagrees with its observation"

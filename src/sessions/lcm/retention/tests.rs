@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use libsql::{Connection, params};
-
+use crate::db::engine::{Connection, Executor, IntoParams, QueryExecutor, TestConnection, params};
 use crate::sessions::lcm::schema;
 
 use super::*;
@@ -12,19 +11,17 @@ const DAY: i64 = 24 * 60 * 60;
 const NOW: i64 = 1_900_000_000;
 
 struct TestStore {
-    _temp: tempfile::TempDir,
-    storage_root: PathBuf,
     conn: Connection,
+    _runtime: TestConnection,
+    storage_root: PathBuf,
+    _temp: tempfile::TempDir,
 }
 
 async fn test_store() -> Result<TestStore, String> {
     let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
     let storage_root = temp.path().to_path_buf();
-    let db = libsql::Builder::new_local(":memory:")
-        .build()
-        .await
-        .map_err(|err| format!("build db: {err}"))?;
-    let conn = db.connect().map_err(|err| format!("connect: {err}"))?;
+    let runtime = TestConnection::open(&storage_root.join("sessions.db"));
+    let conn = (*runtime).clone();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -81,16 +78,17 @@ async fn test_store() -> Result<TestStore, String> {
     .await
     .map_err(|err| format!("insert session: {err}"))?;
     Ok(TestStore {
-        _temp: temp,
-        storage_root,
         conn,
+        _runtime: runtime,
+        storage_root,
+        _temp: temp,
     })
 }
 
 /// Inserts an inline raw message (and its projected `session_messages` twin)
 /// with the given age. Returns the assigned `store_id`.
 async fn insert_message(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     ordinal: i64,
     age_days: i64,
     content: &str,
@@ -142,7 +140,10 @@ async fn insert_message(
 
 /// Marks a raw row projection-durable by adding a summary node whose lineage
 /// covers `store_id`.
-async fn make_projection_durable(conn: &Connection, store_id: i64) -> Result<(), String> {
+async fn make_projection_durable(
+    conn: &(impl Executor + ?Sized),
+    store_id: i64,
+) -> Result<(), String> {
     let node_id = format!("node-{store_id}");
     conn.execute(
         "INSERT INTO lcm_summary_nodes(
@@ -165,9 +166,9 @@ async fn make_projection_durable(conn: &Connection, store_id: i64) -> Result<(),
 }
 
 async fn fetch_i64(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     sql: &str,
-    params: impl libsql::params::IntoParams,
+    params: impl IntoParams,
 ) -> Result<i64, String> {
     let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
     let row = rows
@@ -178,7 +179,7 @@ async fn fetch_i64(
     row.get::<i64>(0).map_err(|e| e.to_string())
 }
 
-async fn count(conn: &Connection, table: &str) -> Result<i64, String> {
+async fn count(conn: &(impl QueryExecutor + ?Sized), table: &str) -> Result<i64, String> {
     fetch_i64(conn, &format!("SELECT COUNT(*) FROM {table}"), ()).await
 }
 
@@ -188,6 +189,104 @@ fn drop_config(days: u32) -> LcmRetentionConfig {
         drop_after_days: Some(days),
         ..LcmRetentionConfig::default()
     }
+}
+
+async fn run_apply(
+    conn: &Connection,
+    storage_root: &std::path::Path,
+    config: &LcmRetentionConfig,
+) -> Result<LcmRetentionReport, String> {
+    run_session_retention_authorized(
+        conn,
+        storage_root,
+        PROVIDER,
+        None,
+        config,
+        RetentionMode::Apply,
+        NOW,
+        &|_| Ok(()),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tokio::test]
+async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result<(), String> {
+    let store = test_store().await?;
+    let durable = insert_message(&store.conn, 1, 90, "must survive").await?;
+    make_projection_durable(&store.conn, durable).await?;
+    let scope = std::sync::Mutex::new(Some(
+        crate::db::enter_daemon_database_scope(
+            &store.storage_root,
+            1,
+            "session-retention-revocation-test",
+        )
+        .map_err(|error| error.to_string())?,
+    ));
+    let authority = crate::db::DatabaseAuthority::for_runtime(
+        &store.storage_root.join("sessions.db"),
+        "session retention revocation test",
+    )
+    .map_err(|error| error.to_string())?;
+    let commit_revoked = std::sync::atomic::AtomicBool::new(false);
+
+    let error = run_session_retention_authorized(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &drop_config(30),
+        RetentionMode::Apply,
+        NOW,
+        &|intent| {
+            if intent == "commit session retention drop pass" {
+                commit_revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(),
+                );
+            }
+            authority
+                .require_active_write_scope(intent)
+                .map_err(|error| LcmError::Db(error.to_string()))
+        },
+    )
+    .await
+    .expect_err("authority loss must reject retention commit");
+
+    assert!(error.to_string().contains("active daemon"));
+    assert!(
+        commit_revoked.load(std::sync::atomic::Ordering::SeqCst),
+        "authority is revoked only after the drop mutations, at precommit"
+    );
+    assert_eq!(count(&store.conn, "lcm_raw_messages").await?, 1);
+    assert_eq!(count(&store.conn, "session_messages").await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unauthorised_entry_rejects_apply() -> Result<(), String> {
+    let store = test_store().await?;
+    let error = run_session_retention(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        None,
+        &drop_config(30),
+        RetentionMode::Apply,
+        NOW,
+    )
+    .await
+    .expect_err("apply must require the authority-bound entry point");
+
+    assert!(
+        error
+            .to_string()
+            .contains("authority-bound session retention entry point")
+    );
+    Ok(())
 }
 
 // (a)+(d) drop acts only on projection-durable rows; un-projected live evidence
@@ -200,17 +299,7 @@ async fn drop_reaps_only_projection_durable_rows() -> Result<(), String> {
     let _live = insert_message(conn, 2, 90, "live un-projected content").await?;
     make_projection_durable(conn, durable).await?;
 
-    let report = run_session_retention(
-        conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &drop_config(30),
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
 
     assert_eq!(
         report.dropped.eligible, 1,
@@ -242,17 +331,7 @@ async fn drop_honors_retention_window() -> Result<(), String> {
     make_projection_durable(conn, recent).await?;
     make_projection_durable(conn, old).await?;
 
-    let report = run_session_retention(
-        conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &drop_config(30),
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
 
     assert_eq!(report.dropped.acted, 1, "only the >30d row is dropped");
     let survivor: i64 = fetch_i64(conn, "SELECT store_id FROM lcm_raw_messages", ()).await?;
@@ -282,6 +361,11 @@ async fn dry_run_counts_without_mutating() -> Result<(), String> {
 
     assert_eq!(report.dropped.eligible, 1);
     assert_eq!(report.dropped.acted, 0, "dry run acts on nothing");
+    assert_eq!(
+        report.dropped.oldest_eligible_at,
+        Some(NOW - 90 * DAY),
+        "backlog age comes from the oldest real eligible row"
+    );
     assert!(report.dropped.bytes_reclaimed > 0, "dry run still measures");
     assert_eq!(count(conn, "lcm_raw_messages").await?, 1, "no mutation");
     Ok(())
@@ -302,17 +386,7 @@ async fn dedupe_drops_projected_duplicate_and_keeps_raw() -> Result<(), String> 
         ..LcmRetentionConfig::default()
     };
     let fts_before = count(conn, "session_messages_fts").await?;
-    let report = run_session_retention(
-        conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &config,
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(conn, &store.storage_root, &config).await?;
 
     assert_eq!(report.projected_deduped.acted, 1);
     assert_eq!(
@@ -350,17 +424,7 @@ async fn dedupe_never_touches_sole_projected_copy() -> Result<(), String> {
         dedupe_projected_after_days: Some(30),
         ..LcmRetentionConfig::default()
     };
-    let report = run_session_retention(
-        conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &config,
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(conn, &store.storage_root, &config).await?;
 
     assert_eq!(report.projected_deduped.acted, 0);
     assert_eq!(
@@ -388,17 +452,7 @@ async fn offload_externalizes_durable_content_after_durability() -> Result<(), S
         offload_after_days: Some(30),
         ..LcmRetentionConfig::default()
     };
-    let report = run_session_retention(
-        conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &config,
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(conn, &store.storage_root, &config).await?;
 
     assert_eq!(
         report.offloaded.acted, 1,
@@ -427,6 +481,70 @@ async fn offload_externalizes_durable_content_after_durability() -> Result<(), S
     Ok(())
 }
 
+#[tokio::test]
+async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<(), String> {
+    let store = test_store().await?;
+    let original = "stale content".repeat(128);
+    let store_id = insert_message(&store.conn, 1, 90, &original).await?;
+    make_projection_durable(&store.conn, store_id).await?;
+    let target = OffloadRow {
+        store_id,
+        provider: PROVIDER.to_string(),
+        session_id: SESSION.to_string(),
+        message_id: "msg-1".to_string(),
+        timestamp: NOW - 90 * DAY,
+        content: original,
+    };
+    let revived = "revived content";
+    let revived_hash = crate::sessions::lcm::util::sha256_hex(revived.as_bytes());
+    store
+        .conn
+        .execute(
+            "UPDATE lcm_raw_messages
+             SET timestamp = ?2, content = ?3, content_hash = ?4,
+                 snippet_text = ?3, index_text = ?3
+             WHERE store_id = ?1",
+            params![store_id, NOW, revived, revived_hash.as_str()],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let error = offload_one(&store.conn, &store.storage_root, &target, &|_| Ok(()))
+        .await
+        .expect_err("stale candidate must fail the offload compare-and-swap");
+
+    assert!(error.to_string().contains("compare-and-swap rejected"));
+    assert_eq!(
+        fetch_str(
+            &store.conn,
+            "SELECT content FROM lcm_raw_messages WHERE store_id = ?1",
+            params![store_id],
+        )
+        .await?,
+        revived
+    );
+    assert_eq!(
+        fetch_str(
+            &store.conn,
+            "SELECT storage_kind FROM lcm_raw_messages WHERE store_id = ?1",
+            params![store_id],
+        )
+        .await?,
+        "inline"
+    );
+    assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 0);
+    assert_eq!(
+        std::fs::read_dir(crate::sessions::lcm::payload::payload_dir(
+            &store.storage_root
+        ))
+        .map_err(|error| error.to_string())?
+        .count(),
+        0,
+        "failed CAS removes the newly-created payload file"
+    );
+    Ok(())
+}
+
 // (e) reclaimed space is measurable via row and page/free-list metrics.
 #[tokio::test]
 async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
@@ -436,17 +554,7 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
         let store_id = insert_message(conn, ordinal, 90, &"y".repeat(2048)).await?;
         make_projection_durable(conn, store_id).await?;
     }
-    let report = run_session_retention(
-        conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &drop_config(30),
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
 
     assert_eq!(report.raw_rows_before, 8);
     assert_eq!(report.raw_rows_after, 0, "row-count delta is measurable");
@@ -472,17 +580,7 @@ async fn disabled_config_is_a_no_op() -> Result<(), String> {
         drop_after_days: Some(1),
         ..LcmRetentionConfig::default()
     };
-    let report = run_session_retention(
-        conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &config,
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(conn, &store.storage_root, &config).await?;
 
     assert_eq!(report.dropped.acted, 0);
     assert_eq!(count(conn, "lcm_raw_messages").await?, 1);
@@ -490,9 +588,9 @@ async fn disabled_config_is_a_no_op() -> Result<(), String> {
 }
 
 async fn fetch_str(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     sql: &str,
-    params: impl libsql::params::IntoParams,
+    params: impl IntoParams,
 ) -> Result<String, String> {
     let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
     let row = rows

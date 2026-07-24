@@ -71,6 +71,7 @@ fn graph_table_disposition(table: &str) -> Option<&'static str> {
         | "memory_v2_assertions"
         | "memory_v2_assertion_evidence"
         | "memory_v2_assertion_payloads"
+        | "memory_v2_assertion_vectors"
         | "memory_v2_assertion_supersession"
         | "memory_v2_evidence"
         | "memory_v2_fact_relations"
@@ -102,9 +103,10 @@ fn graph_table_disposition(table: &str) -> Option<&'static str> {
         | "evidence_spans" => Some("merged"),
         // Derived compatibility projections rebuilt from the merged lineage:
         // current_facts is re-derived with deletion terminality, banks are
-        // marked dirty, vectors and the assertion-payload FTS shadow rebuild.
+        // marked dirty, and the assertion-payload FTS shadow follows the
+        // canonical payload triggers. Owner-bound assertion vectors are copied
+        // with their payload rows, then removed for terminal facts.
         "memory_v2_current_facts"
-        | "memory_v2_assertion_vectors"
         | "memory_v2_compatibility_banks"
         | "memory_v2_compatibility_bank_dirty" => Some("derived/rebuilt"),
         name if name == "memory_v2_assertion_payloads_fts"

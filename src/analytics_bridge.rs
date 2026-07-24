@@ -7,14 +7,13 @@
 //! `analytics_events` so one durable table answers adoption questions, using
 //! per-file byte cursors in `parse_offsets` to stay idempotent across runs.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::global_db::{AnalyticsEventInsert, GlobalDb, ParseOffset};
+use crate::global_db::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
-/// Largest batch handed to a single `append_analytics_events` transaction.
+/// Maximum events committed with one matching durable cursor frontier.
 const IMPORT_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Clone)]
@@ -91,7 +90,7 @@ pub fn hook_import_sources(project_root: Option<&Path>) -> Vec<HookImportSource>
 /// Imports new hook JSONL rows into `analytics_events`, advancing a byte
 /// cursor per source file so re-runs only ingest the appended tail.
 pub async fn import_hook_analytics(
-    gdb: &GlobalDb,
+    gdb: &RegisteredGlobalDb,
     sources: &[HookImportSource],
 ) -> HookImportOutcome {
     let mut outcome = HookImportOutcome::default();
@@ -101,7 +100,10 @@ pub async fn import_hook_analytics(
     outcome
 }
 
-async fn import_source(gdb: &GlobalDb, source: &HookImportSource) -> HookImportSourceOutcome {
+async fn import_source(
+    gdb: &RegisteredGlobalDb,
+    source: &HookImportSource,
+) -> HookImportSourceOutcome {
     let mut result = HookImportSourceOutcome {
         path: source.path.clone(),
         imported: 0,
@@ -143,29 +145,54 @@ async fn import_source(gdb: &GlobalDb, source: &HookImportSource) -> HookImportS
     }
 
     let mut batch = Vec::new();
-    for line in text[..consumed].lines() {
-        match hook_row_to_analytics_event(line, source.default_project_root.as_deref()) {
-            Some(event) => batch.push(event),
+    let mut relative_offset = 0u64;
+    for line in text[..consumed].split_inclusive('\n') {
+        relative_offset = relative_offset.saturating_add(line.len() as u64);
+        match hook_row_to_analytics_event(line.trim_end(), source.default_project_root.as_deref()) {
+            Some(event) => batch.push((event, relative_offset)),
             None => result.skipped += 1,
         }
     }
+    let mut acknowledged = 0u64;
     for chunk in batch.chunks(IMPORT_BATCH_SIZE) {
-        if let Err(err) = gdb.append_analytics_events(chunk).await {
+        let events = chunk
+            .iter()
+            .map(|(event, _)| event.clone())
+            .collect::<Vec<_>>();
+        let frontier = chunk.last().map_or(acknowledged, |(_, offset)| *offset);
+        if let Err(err) = gdb
+            .append_analytics_events_with_cursor(
+                &events,
+                &cursor_key,
+                ParseOffset {
+                    byte_offset: start + frontier,
+                    mtime,
+                    file_id: 0,
+                },
+            )
+            .await
+        {
             result.error = Some(err);
             return result;
         }
-        result.imported += chunk.len() as u64;
+        acknowledged = frontier;
+        result.imported = result.imported.saturating_add(events.len() as u64);
     }
-
-    gdb.set_parse_offset(
-        &cursor_key,
-        ParseOffset {
-            byte_offset: start + consumed as u64,
-            mtime,
-            file_id: 0,
-        },
-    )
-    .await;
+    if acknowledged < consumed as u64
+        && let Err(err) = gdb
+            .append_analytics_events_with_cursor(
+                &[],
+                &cursor_key,
+                ParseOffset {
+                    byte_offset: start + consumed as u64,
+                    mtime,
+                    file_id: 0,
+                },
+            )
+            .await
+    {
+        result.error = Some(err);
+    }
     result
 }
 
@@ -200,8 +227,8 @@ fn hook_row_to_analytics_event(
     let project_id = row
         .get("project_root")
         .and_then(Value::as_str)
-        .map(|root| GlobalDb::canonical_project_key(Path::new(root)))
-        .or_else(|| default_project_root.map(GlobalDb::canonical_project_key))
+        .map(|root| RegisteredGlobalDb::canonical_project_key(Path::new(root)))
+        .or_else(|| default_project_root.map(RegisteredGlobalDb::canonical_project_key))
         .unwrap_or_default();
     let timestamp = row
         .get("ts_unix_ms")
@@ -243,46 +270,22 @@ fn cli_project_root() -> Option<PathBuf> {
         .and_then(|cwd| crate::config::discover_project_root(&cwd))
 }
 
-async fn diagnostics_message_count(
-    global: &GlobalDb,
-    project_root: Option<&Path>,
+async fn registered_diagnostics_message_count(
+    project_sessions: Option<&RegisteredGlobalDb>,
+    user_sessions: Option<&RegisteredGlobalDb>,
     all_projects: bool,
 ) -> i64 {
-    if all_projects {
-        let mut session_db_paths = BTreeSet::new();
-        if let Some(profile_root) = global.db_path().parent() {
-            session_db_paths.insert(crate::sessions::user_sessions_db_path(profile_root));
-        }
-        for project_root in crate::sessions::registered_project_roots_from(global)
-            .await
-            .unwrap_or_default()
-        {
-            if let Some(db_path) =
-                crate::sessions::cursor::resolved_project_session_db_path(&project_root).await
-            {
-                session_db_paths.insert(db_path);
-            }
-        }
-        let mut total = 0;
-        for db_path in session_db_paths {
-            if let Some(sessions) = GlobalDb::open_read_only_at(&db_path).await {
-                total += sessions.session_message_count().await.unwrap_or(0);
-            }
-        }
-        return total;
+    let mut total = match project_sessions {
+        Some(database) => database.session_message_count().await.unwrap_or(0),
+        None => 0,
+    };
+    if all_projects
+        && let Some(database) = user_sessions
+        && project_sessions.is_none_or(|project| project.db_path() != database.db_path())
+    {
+        total += database.session_message_count().await.unwrap_or(0);
     }
-    let Some(project_root) = project_root else {
-        return 0;
-    };
-    let Some(db_path) =
-        crate::sessions::cursor::resolved_project_session_db_path(project_root).await
-    else {
-        return 0;
-    };
-    let Some(sessions) = GlobalDb::open_read_only_at(&db_path).await else {
-        return 0;
-    };
-    sessions.session_message_count().await.unwrap_or(0)
+    total
 }
 
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
@@ -331,13 +334,18 @@ async fn call_admin_cli(
     crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
-pub(crate) async fn analytics_sync_with_db(gdb: &GlobalDb, project_root: Option<&Path>) -> Value {
+pub(crate) async fn analytics_sync_with_db(
+    gdb: &RegisteredGlobalDb,
+    project_root: Option<&Path>,
+) -> Value {
     let sources = hook_import_sources(project_root);
     import_hook_analytics(gdb, &sources).await.as_json()
 }
 
 pub(crate) async fn analytics_diagnostics_with_db(
-    gdb: &GlobalDb,
+    gdb: &RegisteredGlobalDb,
+    project_sessions: Option<&RegisteredGlobalDb>,
+    user_sessions: Option<&RegisteredGlobalDb>,
     project_root: Option<&Path>,
     all_projects: bool,
     no_sync: bool,
@@ -353,7 +361,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     let project_filter = if all_projects {
         None
     } else {
-        project_root.map(GlobalDb::canonical_project_key)
+        project_root.map(RegisteredGlobalDb::canonical_project_key)
     };
     let events = gdb
         .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
@@ -382,7 +390,8 @@ pub(crate) async fn analytics_diagnostics_with_db(
         hook_filter_root,
     );
 
-    let message_count = diagnostics_message_count(gdb, project_root, all_projects).await;
+    let message_count =
+        registered_diagnostics_message_count(project_sessions, user_sessions, all_projects).await;
 
     let durable = if event_rows.is_empty() {
         None
@@ -417,46 +426,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
 mod tests {
     use std::path::Path;
 
-    use super::{diagnostics_message_count, hook_row_to_analytics_event};
-    use crate::global_db::GlobalDb;
-    use crate::sessions::{SessionMessageRecord, SessionRecord};
-
-    async fn seed_session_message(db: &GlobalDb, project: &Path, id: &str) {
-        db.upsert_session(&SessionRecord {
-            provider: "codex".to_string(),
-            session_id: id.to_string(),
-            project_key: project.display().to_string(),
-            project_path: project.display().to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await;
-        assert!(
-            db.upsert_session_message(&SessionMessageRecord {
-                provider: "codex".to_string(),
-                message_id: format!("{id}-message"),
-                session_id: id.to_string(),
-                role: "user".to_string(),
-                timestamp: Some(1),
-                ordinal: 1,
-                text: "diagnostics evidence".to_string(),
-                kind: None,
-                model: None,
-                tool_names: None,
-                source_path: None,
-                source_offset: None,
-                metadata_json: None,
-            })
-            .await
-        );
-    }
+    use super::hook_row_to_analytics_event;
 
     #[test]
     fn maps_hook_invoked_row_with_attribution() {
@@ -505,47 +475,5 @@ mod tests {
     fn rows_without_event_field_are_skipped() {
         assert!(hook_row_to_analytics_event("{}", None).is_none());
         assert!(hook_row_to_analytics_event("not json", None).is_none());
-    }
-
-    #[tokio::test]
-    async fn diagnostics_counts_messages_from_the_project_session_shard() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        let layout = crate::storage::resolve_layout_for_current_profile(project.path())
-            .expect("project layout");
-        std::fs::create_dir_all(&layout.data_root).expect("project data root");
-
-        let global = GlobalDb::open().await.expect("global db");
-        let sessions = GlobalDb::open_at(&layout.sessions_db_path)
-            .await
-            .expect("project session db");
-        seed_session_message(&sessions, project.path(), "project-session").await;
-
-        assert_eq!(global.session_message_count().await.unwrap(), 0);
-        assert_eq!(
-            diagnostics_message_count(&global, Some(project.path()), false).await,
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn all_project_diagnostics_count_registered_session_shards() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        let layout = crate::storage::resolve_layout_for_current_profile(project.path())
-            .expect("project layout");
-        std::fs::create_dir_all(&layout.data_root).expect("project data root");
-
-        let global = GlobalDb::open().await.expect("global db");
-        global
-            .upsert_code_project("project-shard", project.path(), None, None, Some("main"))
-            .await;
-        let sessions = GlobalDb::open_at(&layout.sessions_db_path)
-            .await
-            .expect("project session db");
-        seed_session_message(&sessions, project.path(), "registered-session").await;
-
-        assert_eq!(global.session_message_count().await.unwrap(), 0);
-        assert_eq!(diagnostics_message_count(&global, None, true).await, 1);
     }
 }

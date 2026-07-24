@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::db::engine::Executor;
+
 /// Version of the sealed complete topology value stored by this schema.
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME: &str = "work-topology-policy";
@@ -9,7 +11,7 @@ pub const WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME: &str = "work-topology-pol
 #[derive(Debug, Error)]
 pub enum ConfigurationSchemaError {
     #[error("configuration schema operation failed: {0}")]
-    Storage(#[from] libsql::Error),
+    Storage(#[from] crate::db::engine::Error),
 }
 
 /// Tables are additive and append-only. Registration from the global schema
@@ -385,7 +387,7 @@ BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutab
 ";
 
 pub async fn ensure_configuration_schema(
-    connection: &libsql::Connection,
+    connection: &impl Executor,
 ) -> Result<(), ConfigurationSchemaError> {
     connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;
     Ok(())
@@ -395,18 +397,15 @@ pub async fn ensure_configuration_schema(
 mod tests {
     use super::*;
 
-    async fn connection() -> (tempfile::TempDir, libsql::Connection) {
+    async fn connection() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
         let directory = tempfile::tempdir().unwrap();
-        let database = libsql::Builder::new_local(directory.path().join("configuration.db"))
-            .build()
-            .await
-            .unwrap();
-        let connection = database.connect().unwrap();
+        let connection =
+            crate::db::engine::TestConnection::open(&directory.path().join("configuration.db"));
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .await
             .unwrap();
-        ensure_configuration_schema(&connection).await.unwrap();
+        ensure_configuration_schema(&*connection).await.unwrap();
         (directory, connection)
     }
 

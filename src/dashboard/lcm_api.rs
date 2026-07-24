@@ -14,7 +14,10 @@
 //! - `summary_nodes.source_ids` JSON → `lcm_summary_sources` rows
 //! - FTS mirrors → `lcm_raw_messages_fts` / `lcm_summary_nodes_fts`
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,7 +28,7 @@ use serde_json::{Map, Value, json};
 use super::DashboardState;
 use super::lcm_service;
 use super::util::{JsonPath, JsonQuery, coerce_limit};
-use crate::sessions::lcm::{LcmGcConfig, gc, query};
+use crate::sessions::lcm::{LcmGcConfig, query};
 use crate::tracedecay::current_timestamp;
 
 type LcmResponse = (StatusCode, Json<Value>);
@@ -34,6 +37,7 @@ type LcmResult = Result<LcmResponse, LcmResponse>;
 #[derive(Debug, Clone)]
 struct PayloadGcPreview {
     token: String,
+    store_path: String,
     provider: String,
     session_id: Option<String>,
     created_at: i64,
@@ -41,6 +45,7 @@ struct PayloadGcPreview {
 
 static PAYLOAD_GC_PREVIEW: LazyLock<Mutex<Option<PayloadGcPreview>>> =
     LazyLock::new(|| Mutex::new(None));
+static PAYLOAD_GC_PREVIEW_NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn ok(payload: Map<String, Value>) -> LcmResponse {
     (StatusCode::OK, Json(Value::Object(payload)))
@@ -91,25 +96,25 @@ pub(crate) async fn overview(
 ) -> LcmResult {
     let limit = coerce_limit(params.limit, 25, 200);
     let mut payload = lcm_service::overview_payload(&state, &params.q, limit).await?;
-    if let Some(conn) = &state.lcm_conn {
+    if let Some(db) = &state.lcm_db {
         let provider = "cursor";
         let storage_root = lcm_storage_root(&state);
-        let detail = query::payload_health_detail(
-            conn,
-            &storage_root,
-            provider,
-            None,
-            false,
-            20,
-            &LcmGcConfig::default(),
-        )
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("overview payload health failed: {e}"),
+        let detail = db
+            .lcm_payload_health_detail(
+                &storage_root,
+                provider,
+                None,
+                false,
+                20,
+                &LcmGcConfig::default(),
             )
-        })?;
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("overview payload health failed: {e}"),
+                )
+            })?;
         payload.insert("payload_health".into(), payload_health_value(&detail));
     } else {
         payload.insert("payload_health".into(), Value::Null);
@@ -236,8 +241,8 @@ pub(crate) async fn payloads_health(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<PayloadHealthParams>,
 ) -> LcmResult {
-    let conn = state
-        .lcm_conn
+    let db = state
+        .lcm_db
         .as_ref()
         .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LCM store unavailable"))?;
     let provider = if params.provider.trim().is_empty() {
@@ -248,22 +253,22 @@ pub(crate) async fn payloads_health(
     let session_id = (!params.session_id.trim().is_empty()).then_some(params.session_id.trim());
     let deep = params.deep.unwrap_or(false);
     let sample_limit = coerce_limit(params.limit, 20, 100) as usize;
-    let detail = query::payload_health_detail(
-        conn,
-        &lcm_storage_root(&state),
-        provider,
-        session_id,
-        deep,
-        sample_limit,
-        &LcmGcConfig::default(),
-    )
-    .await
-    .map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("payload health failed: {e}"),
+    let detail = db
+        .lcm_payload_health_detail(
+            &lcm_storage_root(&state),
+            provider,
+            session_id,
+            deep,
+            sample_limit,
+            &LcmGcConfig::default(),
         )
-    })?;
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("payload health failed: {e}"),
+            )
+        })?;
 
     Ok(ok(Map::from_iter([
         ("status".into(), json!("ok")),
@@ -294,8 +299,8 @@ pub(crate) async fn payloads_gc_preview(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<PayloadHealthParams>,
 ) -> LcmResult {
-    let conn = state
-        .lcm_conn
+    let db = state
+        .lcm_db
         .as_ref()
         .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LCM store unavailable"))?;
     let provider = if params.provider.trim().is_empty() {
@@ -304,26 +309,26 @@ pub(crate) async fn payloads_gc_preview(
         params.provider.trim()
     };
     let session_id = (!params.session_id.trim().is_empty()).then_some(params.session_id.trim());
-    let report = gc::run_payload_gc_with_apply(
-        conn,
-        &lcm_storage_root(&state),
-        provider,
-        session_id,
-        &LcmGcConfig::default(),
-        false,
-        current_timestamp(),
-    )
-    .await
-    .map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("payload GC preview failed: {e}"),
+    let report = db
+        .lcm_preview_payload_gc(
+            &lcm_storage_root(&state),
+            provider,
+            session_id,
+            &LcmGcConfig::default(),
+            current_timestamp(),
         )
-    })?;
-    let token = make_preview_token(provider, session_id);
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("payload GC preview failed: {e}"),
+            )
+        })?;
+    let token = make_preview_token(&state.lcm_db_path, provider, session_id);
     if let Ok(mut preview) = PAYLOAD_GC_PREVIEW.lock() {
         *preview = Some(PayloadGcPreview {
             token: token.clone(),
+            store_path: state.lcm_db_path.clone(),
             provider: provider.to_string(),
             session_id: session_id.map(str::to_string),
             created_at: now_unix(),
@@ -383,6 +388,7 @@ pub(crate) async fn payloads_gc_apply(
             ));
         };
         if preview.token != body.dry_run_token
+            || preview.store_path != state.lcm_db_path
             || preview.provider != provider
             || preview.session_id.as_deref() != session_id
             || now_unix().saturating_sub(preview.created_at) > 300
@@ -469,13 +475,33 @@ fn now_unix() -> i64 {
         .unwrap_or_default()
 }
 
-fn make_preview_token(provider: &str, session_id: Option<&str>) -> String {
+fn make_preview_token(store_path: &str, provider: &str, session_id: Option<&str>) -> String {
     let session = session_id.unwrap_or("all");
+    let mut store_hasher = DefaultHasher::new();
+    store_path.hash(&mut store_hasher);
+    let store_digest = store_hasher.finish();
+    let nonce = PAYLOAD_GC_PREVIEW_NONCE.fetch_add(1, Ordering::Relaxed);
     format!(
-        "payload-gc-{}-{}-{}-{}",
+        "payload-gc-{store_digest:016x}-{}-{}-{}-{}-{nonce}",
         provider,
         session,
         std::process::id(),
         now_unix()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::make_preview_token;
+
+    #[test]
+    fn payload_gc_preview_tokens_bind_store_scope_and_are_single_use_unique() {
+        let first = make_preview_token("/profile/projects/a/sessions.db", "cursor", Some("s1"));
+        let repeated = make_preview_token("/profile/projects/a/sessions.db", "cursor", Some("s1"));
+        let other_store =
+            make_preview_token("/profile/projects/b/sessions.db", "cursor", Some("s1"));
+
+        assert_ne!(first, repeated);
+        assert_ne!(first, other_store);
+    }
 }

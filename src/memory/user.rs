@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::daemon::store_runtime::driver::{GraphLibsqlCompatDriver, GraphStoreOpenMode};
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::Database;
 use crate::errors::Result;
 
@@ -12,51 +12,11 @@ pub fn user_memory_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_MEMORY_DB_FILENAME)
 }
 
-pub async fn open_user_memory_db(profile_root: &Path) -> Result<Database> {
-    let path = user_memory_db_path(profile_root);
-    let authority = crate::db::DatabaseAuthority::for_runtime(&path, "open user memory")?;
-    let mode = if path.is_file() {
-        GraphStoreOpenMode::Open
-    } else {
-        GraphStoreOpenMode::Initialize
-    };
-    GraphLibsqlCompatDriver::open(mode, &path, &authority)
+pub(crate) async fn open_user_memory_db(
+    registry: &DaemonSessionRuntimeRegistryV1,
+) -> Result<Database> {
+    registry
+        .profile_memory()
         .await
-        .map(|(db, _)| db)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn fresh_profile_memory_database_installs_latest_schema() {
-        let profile_root = tempfile::tempdir().expect("create profile root");
-        let database = open_user_memory_db(profile_root.path())
-            .await
-            .expect("open fresh profile memory database");
-        assert!(user_memory_db_path(profile_root.path()).is_file());
-
-        let mut rows = database
-            .conn()
-            .query(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table'
-                   AND name IN (
-                       'memory_v2_fact_relations',
-                       'memory_v2_compatibility_banks',
-                       'memory_v2_compatibility_bank_dirty'
-                   )",
-                (),
-            )
-            .await
-            .expect("query fresh profile V23 tables");
-        let row = rows
-            .next()
-            .await
-            .expect("read fresh profile V23 table count")
-            .expect("fresh profile V23 table count row");
-        let count: i64 = row.get(0).expect("decode fresh profile V23 table count");
-        assert_eq!(count, 3);
-    }
+        .map(|database| database.as_ref().clone())
 }

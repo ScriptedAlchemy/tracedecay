@@ -121,6 +121,15 @@ fn binding_identity_from_scope(
     )
 }
 
+pub(crate) fn project_and_worktree_locators_for_scope(
+    scope: &ResolvedScope,
+) -> ([u8; 16], [u8; 16]) {
+    (
+        domain_hash16(scope.project_id.as_str(), "project"),
+        domain_hash16(scope.worktree_id.as_str(), "worktree"),
+    )
+}
+
 #[derive(Default, Deserialize)]
 struct NativeIdentityFields {
     id: Option<String>,
@@ -257,6 +266,7 @@ impl NativeIdentityFields {
 
 struct DaemonAdmissionPort<'a> {
     project_root: &'a Path,
+    session_id: Option<&'a str>,
 }
 
 fn daemon_admission_response(response: &serde_json::Value) -> HookImmediateAdmissionV1 {
@@ -298,6 +308,7 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
                 serde_json::json!({
                     "action": "hook_v2_admit",
                     "envelope": envelope,
+                    "native_session_id": self.session_id,
                 }),
                 None,
             )
@@ -370,6 +381,9 @@ async fn dispatch_decoded(
         return unavailable();
     };
     let binding = &snapshot.binding;
+    let native_fields =
+        serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
+    let native_session_id = native_fields.session_id().map(str::to_owned);
     let material = native_material(event_json, decoded.family(), now);
     let Ok(envelope) =
         decode_bound_native_hook_event(host, event_json.as_bytes(), binding, material)
@@ -378,7 +392,10 @@ async fn dispatch_decoded(
     };
 
     let started = Instant::now();
-    let port = DaemonAdmissionPort { project_root };
+    let port = DaemonAdmissionPort {
+        project_root,
+        session_id: native_session_id.as_deref(),
+    };
     let immediate = match tokio::time::timeout(
         Duration::from_millis(25),
         admit_async_exact_scope(
@@ -459,7 +476,7 @@ fn native_material(
     let tool = fields.tool_name().unwrap_or(event_key);
     NativeEnvelopeMaterialV1 {
         event_id: hash16(event_key.as_bytes()),
-        protected_session_id: hash32(session.as_bytes()),
+        protected_session_id: protected_session_id_for_native(session),
         observed_at,
         tool_id: (family == tracedecay_hooks::HookEventFamily::ToolLifecycle)
             .then(|| hash16(tool.as_bytes())),
@@ -482,6 +499,10 @@ fn hash16(bytes: &[u8]) -> [u8; 16] {
 
 fn hash32(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+pub(crate) fn protected_session_id_for_native(session_id: &str) -> [u8; 32] {
+    hash32(session_id.as_bytes())
 }
 
 fn domain_hash16(value: &str, domain: &str) -> [u8; 16] {

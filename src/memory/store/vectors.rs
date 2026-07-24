@@ -1,6 +1,6 @@
 //! Vector and category-bank maintenance operations for `MemoryStore`.
 
-use libsql::params;
+use crate::db::engine::params;
 
 use crate::errors::Result;
 use crate::memory::encoding::HolographicEncoder;
@@ -208,8 +208,10 @@ impl MemoryStore<'_> {
     }
 
     pub async fn repair_fact_vector(&self, fact_id: i64) -> Result<bool> {
-        self.with_immediate_tx("repair_fact_vector", self.repair_fact_vector_inner(fact_id))
-            .await
+        self.with_immediate_tx("repair_fact_vector", move |store| {
+            Box::pin(store.repair_fact_vector_inner(fact_id))
+        })
+        .await
     }
 
     pub(crate) async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {

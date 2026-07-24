@@ -10,7 +10,7 @@ use tracedecay_domain::{
     SourceStoreId, UtcMicros,
 };
 
-use crate::db::engine::{Executor, params};
+use crate::db::engine::params;
 use crate::db::{AnchorDerivativeKindV1, RetrievalAnchorDerivativeV1, publish_anchor_derivative};
 use crate::errors::Result;
 

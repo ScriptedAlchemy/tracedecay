@@ -357,6 +357,7 @@ fn append_sessions_for_hit(md: &mut Md, hit: &Value) {
 
 pub(in super::super) async fn handle_sessions_for(
     cg: &TraceDecay,
+    session_db: Option<&RegisteredGlobalDb>,
     args: Value,
 ) -> Result<ToolResult> {
     let kind = required_string_arg(&args, "git_ref")?;
@@ -376,23 +377,19 @@ pub(in super::super) async fn handle_sessions_for(
         limit,
     };
 
-    // Read-only lookup against the project session store; a missing store
-    // means nothing was ever recorded, which is a valid empty result (the
-    // tool never ghost-creates an empty sessions.db).
-    let db_path = cg.store_layout().sessions_db_path.clone();
-    let (results, index_health, observed_fallback) = if db_path.is_file() {
-        let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
-            return Ok(tool_json(
-                Some(cg.project_root()),
-                &args,
-                &json!({
-                    "status": "unavailable",
-                    "message": "could not open project tracedecay session database",
-                    "results": [],
-                    "count": 0
-                }),
-            ));
-        };
+    let Some(db) = session_db else {
+        return Ok(tool_json(
+            Some(cg.project_root()),
+            &args,
+            &json!({
+                "status": "unavailable",
+                "message": "registered project session database is unavailable",
+                "results": [],
+                "count": 0
+            }),
+        ));
+    };
+    let (results, index_health, observed_fallback) = {
         // Read the correlation-index health from the same open so an empty
         // index (never populated) can be reported distinctly from a populated
         // index that simply had no rows matching this git ref.
@@ -419,9 +416,6 @@ pub(in super::super) async fn handle_sessions_for(
             None
         };
         (results, health, observed_fallback)
-    } else {
-        // No store file at all: the correlation index was never created.
-        (Vec::new(), None, None)
     };
 
     // The index is "empty" when there is no store, the correlation tables are

@@ -5,14 +5,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
+use tracedecay::sessions::SessionProvider;
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::source::{StoredCursor, TranscriptSource, try_ingest_source};
-use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
+use tracedecay::sessions::source::{StoredCursor, TranscriptSource};
 
 use crate::codex::{write_codex_rollout, write_jsonl};
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
-use crate::restart_atomicity::{durable_table_count, mark_test_project};
+use crate::restart_atomicity::{
+    durable_table_count, ingest_global_sources_for_provider, mark_test_project,
+    open_project_session_db, try_ingest_source,
+};
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
 };
@@ -466,7 +468,7 @@ async fn codex_jsonl_path_relocation_keeps_session_identity_on_production_observ
         2
     );
     assert_eq!(db.session_message_count().await.unwrap(), 2);
-    let observations_before = durable_table_count(&project, "observations").await;
+    let observations_before = durable_table_count(&db, "observations").await;
     assert!(observations_before >= 1);
     assert!(db.get_session("codex", session).await.is_some());
     drop(db);
@@ -491,7 +493,7 @@ async fn codex_jsonl_path_relocation_keeps_session_identity_on_production_observ
     assert_eq!(retry.messages_upserted, 0);
     assert_eq!(relocated_db.session_message_count().await.unwrap(), 2);
     assert_eq!(
-        durable_table_count(&project, "observations").await,
+        durable_table_count(&relocated_db, "observations").await,
         observations_before
     );
     assert!(relocated_db.get_session("codex", session).await.is_some());

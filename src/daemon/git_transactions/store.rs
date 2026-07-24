@@ -1,10 +1,10 @@
-//! Bounded synchronous bridge to canonical `GlobalDb` transaction storage.
+//! Bounded synchronous bridge to the registered session-store runtime.
 //!
 //! The application Git port is deliberately synchronous because its native
 //! executor is synchronous.  Calling an async database through `block_on` on
 //! a Tokio worker would pin that worker while an `IMMEDIATE` writer waits. This
 //! adapter instead owns one bounded actor thread; the actor owns the async
-//! `GlobalDb` calls and every synchronous port call receives exactly one reply.
+//! rusqlite-runtime calls and every synchronous port call receives exactly one reply.
 //! It has no filesystem path and cannot create a JSON side-file authority.
 
 use std::sync::Arc;
@@ -21,13 +21,17 @@ use tracedecay_store::{
     GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
 };
 
-use crate::global_db::GlobalDb;
+#[cfg(test)]
+use crate::db::engine::TestConnection;
+use crate::global_db::{
+    GlobalDbGitIndexTransactionStore, RegisteredGlobalDb, ensure_git_index_transaction_schema,
+};
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
 /// accumulating unbounded mutation work while a durable writer is stalled.
 const GIT_INDEX_TRANSACTION_STORE_ACTOR_CAPACITY: usize = 64;
 // Keep the sync port bounded by the same five-second writer wait used by
-// `GlobalDb`; callers can reconcile durable state after an unavailable result
+// `RegisteredGlobalDb`; callers can reconcile durable state after an unavailable result
 // instead of pinning a daemon worker forever.
 const GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -62,7 +66,7 @@ enum StoreCommand {
 }
 
 /// Synchronous `tracedecay-store` contract adapter over one already-open,
-/// canonical project `GlobalDb`.
+/// canonical registered project session database.
 ///
 /// Dropping the last adapter closes the command channel and lets the dedicated
 /// actor exit. It intentionally has no `Clone` implementation: one daemon
@@ -71,8 +75,67 @@ pub(crate) struct DaemonGitIndexTransactionStore {
     commands: SyncSender<StoreCommand>,
 }
 
+enum ActorDatabase {
+    Registered(Arc<RegisteredGlobalDb>),
+    #[cfg(test)]
+    Engine(TestConnection),
+}
+
+impl ActorDatabase {
+    fn git_index_transaction_store(&self) -> GlobalDbGitIndexTransactionStore<'_> {
+        match self {
+            Self::Registered(database) => database.git_index_transaction_store(),
+            #[cfg(test)]
+            Self::Engine(database) => GlobalDbGitIndexTransactionStore::for_engine_test(database),
+        }
+    }
+
+    async fn ensure_schema(&self) -> GitIndexTransactionStoreResult<()> {
+        match self {
+            Self::Registered(database) => {
+                let transaction = database
+                    .begin_write_transaction()
+                    .await
+                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+                ensure_git_index_transaction_schema(&transaction)
+                    .await
+                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)
+            }
+            #[cfg(test)]
+            Self::Engine(database) => {
+                let transaction = database
+                    .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
+                    .await
+                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+                ensure_git_index_transaction_schema(&transaction)
+                    .await
+                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| GitIndexTransactionStoreError::Unavailable)
+            }
+        }
+    }
+}
+
 impl DaemonGitIndexTransactionStore {
-    pub(crate) fn open(database: Arc<GlobalDb>) -> GitIndexTransactionStoreResult<Self> {
+    pub(crate) fn open(database: Arc<RegisteredGlobalDb>) -> GitIndexTransactionStoreResult<Self> {
+        Self::open_actor(ActorDatabase::Registered(database))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_engine_test(
+        database: TestConnection,
+    ) -> GitIndexTransactionStoreResult<Self> {
+        Self::open_actor(ActorDatabase::Engine(database))
+    }
+
+    fn open_actor(database: ActorDatabase) -> GitIndexTransactionStoreResult<Self> {
         let (commands, receiver) = sync_channel(GIT_INDEX_TRANSACTION_STORE_ACTOR_CAPACITY);
         let (ready, started) = sync_channel::<GitIndexTransactionStoreResult<()>>(1);
         std::thread::Builder::new()
@@ -85,7 +148,9 @@ impl DaemonGitIndexTransactionStore {
                     let _ = ready.send(Err(GitIndexTransactionStoreError::Unavailable));
                     return;
                 };
-                if ready.send(Ok(())).is_err() {
+                let schema = runtime.block_on(database.ensure_schema());
+                let schema_ready = schema.is_ok();
+                if ready.send(schema).is_err() || !schema_ready {
                     return;
                 }
                 run_store_actor(&runtime, &database, &receiver);
@@ -221,7 +286,7 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
 
 fn run_store_actor(
     runtime: &tokio::runtime::Runtime,
-    database: &Arc<GlobalDb>,
+    database: &ActorDatabase,
     receiver: &Receiver<StoreCommand>,
 ) {
     while let Ok(command) = receiver.recv() {

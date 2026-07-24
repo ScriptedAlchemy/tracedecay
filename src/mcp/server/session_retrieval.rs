@@ -15,6 +15,7 @@ use tracedecay_domain::{
     ActorId, HydrationStateV1, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
 };
+use tracedecay_store::StoreShardIdV1;
 
 use crate::application::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
@@ -32,7 +33,8 @@ use crate::daemon::session_temporal_refresh_scheduler::{
     SessionTemporalRefreshUnavailableReason, SessionTemporalRefreshWake,
     SessionTemporalRefreshWorkerStatus,
 };
-use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext};
+use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use crate::mcp::tools::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
@@ -49,7 +51,7 @@ use crate::query::temporal::{TemporalHydratedResult, TemporalKernelResult};
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use crate::sessions::{SessionMessageSearchResult, SessionMessageType, SessionSearchScope};
+use crate::sessions::{SessionMessageSearchResult, SessionRecord};
 use crate::tracedecay::TraceDecay;
 
 const MESSAGE_SEARCH_ACTOR_ID: &str = "mcp.message-search";
@@ -70,18 +72,22 @@ pub(crate) struct DaemonSessionRetrievalRoot {
     project_id: Option<String>,
     project_paths: HashSet<PathBuf>,
     authorized_root: Option<String>,
+    expected_runtime_shard: Option<StoreShardIdV1>,
 }
 
 impl DaemonSessionRetrievalRoot {
-    pub(crate) async fn project(cg: &TraceDecay, registry: &GlobalDb) -> Option<Self> {
+    pub(crate) async fn project(cg: &TraceDecay, registry: &RegisteredGlobalDb) -> Option<Self> {
         let project_id = cg.store_layout().identity.project_id.as_deref()?;
-        let context = registry.project_registry_context_by_id(project_id).await?;
+        let context = registry
+            .project_registry_context_by_id(project_id)
+            .await
+            .ok()??;
         Self::from_project_context(cg, registry, context)
     }
 
     fn from_project_context(
         cg: &TraceDecay,
-        registry: &GlobalDb,
+        registry: &RegisteredGlobalDb,
         context: ProjectRegistryContext,
     ) -> Option<Self> {
         let profile_root = registry.db_path().parent()?;
@@ -133,6 +139,7 @@ impl DaemonSessionRetrievalRoot {
             project_id: Some(context.project.project_id),
             project_paths,
             authorized_root: Some(context.project.display_root),
+            expected_runtime_shard: None,
         })
     }
 
@@ -168,6 +175,7 @@ impl DaemonSessionRetrievalRoot {
             project_id,
             project_paths: HashSet::from([project_root.clone()]),
             authorized_root: Some(project_key_value),
+            expected_runtime_shard: None,
         }
     }
 
@@ -182,7 +190,69 @@ impl DaemonSessionRetrievalRoot {
             project_id: None,
             project_paths: HashSet::new(),
             authorized_root: None,
+            expected_runtime_shard: None,
         })
+    }
+
+    pub(crate) fn with_project_runtime_shard(
+        self,
+        profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    ) -> Option<Self> {
+        self.with_project_runtime_identity(
+            profile_identity.brain_id().clone(),
+            profile_identity.profile_id().clone(),
+        )
+    }
+
+    fn with_project_runtime_identity(
+        mut self,
+        brain_id: tracedecay_domain::BrainId,
+        profile_id: tracedecay_domain::UserProfileId,
+    ) -> Option<Self> {
+        let runtime_project_id = ProjectId::new(self.project_id.as_deref()?).ok()?;
+        let request_project_id = self.identity.project_id()?.clone();
+        let store_id = self.identity.store_id().clone();
+        let root_id = self.identity.root_id().clone();
+        let git_route = self.identity.git_route()?.clone();
+        self.identity = ResolvedSessionIdentity::for_project(
+            ProfileId::new(profile_id.as_str().to_owned()).ok()?,
+            request_project_id,
+            store_id,
+            root_id,
+            git_route,
+        );
+        self.expected_runtime_shard = Some(StoreShardIdV1::project_sessions(
+            brain_id,
+            profile_id,
+            runtime_project_id,
+        ));
+        Some(self)
+    }
+
+    pub(crate) fn with_profile_runtime_shard(
+        self,
+        profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    ) -> Option<Self> {
+        self.with_profile_runtime_identity(
+            profile_identity.brain_id().clone(),
+            profile_identity.profile_id().clone(),
+        )
+    }
+
+    fn with_profile_runtime_identity(
+        mut self,
+        brain_id: tracedecay_domain::BrainId,
+        profile_id: tracedecay_domain::UserProfileId,
+    ) -> Option<Self> {
+        let store_id = self.identity.store_id().clone();
+        let root_id = self.identity.root_id().clone();
+        self.identity = ResolvedSessionIdentity::for_profile(
+            ProfileId::new(profile_id.as_str().to_owned()).ok()?,
+            store_id,
+            root_id,
+        );
+        self.expected_runtime_shard = Some(StoreShardIdV1::profile_sessions(brain_id, profile_id));
+        Some(self)
     }
 
     fn owns(&self, command: &SessionRetrievalCommand) -> bool {
@@ -293,7 +363,7 @@ fn session_retrieval_worker_status(
 }
 
 pub(crate) struct DaemonSessionRetrievalService {
-    database: Arc<GlobalDb>,
+    database: Arc<RegisteredGlobalDb>,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
     calls: Arc<AtomicU64>,
@@ -302,13 +372,40 @@ pub(crate) struct DaemonSessionRetrievalService {
 
 impl DaemonSessionRetrievalService {
     pub(crate) fn new(
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
         root: DaemonSessionRetrievalRoot,
         calls: Arc<AtomicU64>,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
         Some(Self {
             database,
+            root,
+            configuration: SessionRetrievalConfiguration::new(
+                MESSAGE_SEARCH_SCHEMA_VERSION,
+                MESSAGE_SEARCH_RANKING_VERSION,
+            )
+            .ok()?,
+            calls,
+            refresh_status,
+        })
+    }
+
+    pub(crate) fn new_registered(
+        database: Arc<RegisteredGlobalDb>,
+        registered_database: Arc<RegisteredGlobalDb>,
+        root: DaemonSessionRetrievalRoot,
+        calls: Arc<AtomicU64>,
+        refresh_status: Option<SessionTemporalRefreshWake>,
+    ) -> Option<Self> {
+        let expected = root.expected_runtime_shard.as_ref()?;
+        if &registered_database.binding().shard_id != expected {
+            return None;
+        }
+        if database.binding() != registered_database.binding() {
+            return None;
+        }
+        Some(Self {
+            database: registered_database,
             root,
             configuration: SessionRetrievalConfiguration::new(
                 MESSAGE_SEARCH_SCHEMA_VERSION,
@@ -337,6 +434,14 @@ impl DaemonSessionRetrievalService {
             },
             worker: Some(session_retrieval_worker_status(status)),
         })
+    }
+
+    fn registered_execution(
+        &self,
+    ) -> Result<RegisteredGlobalDbSessionTemporalExecution<'_>, SessionTemporalExecutionError> {
+        Ok(RegisteredGlobalDbSessionTemporalExecution::new(
+            self.database.as_ref(),
+        ))
     }
 
     fn request_context(&self, provider: Option<&str>) -> Option<RequestContext> {
@@ -380,21 +485,26 @@ impl DaemonSessionRetrievalService {
             SessionRetrievalStoreScope::Project => "grant.mcp.message-search.project",
             SessionRetrievalStoreScope::Profile => "grant.mcp.message-search.profile",
         };
-        let service = SessionRetrievalService::new(
-            DaemonSessionRetrievalAuthorizer {
-                identity: self.root.identity.clone(),
-                session_id: query.session_id().clone(),
-                retrieval_scope: query.retrieval_scope().clone(),
-                temporal_mode: query.temporal_mode(),
-                grain: query.grain(),
-                provider: query.provider().map(str::to_owned),
-                grant_id,
-            },
-            GlobalDbSessionTemporalExecution::new(self.database.as_ref()),
+        let authorizer = DaemonSessionRetrievalAuthorizer {
+            identity: self.root.identity.clone(),
+            session_id: query.session_id().clone(),
+            retrieval_scope: query.retrieval_scope().clone(),
+            temporal_mode: query.temporal_mode(),
+            grain: query.grain(),
+            provider: query.provider().map(str::to_owned),
+            grant_id,
+        };
+        let Ok(execution) = self.registered_execution() else {
+            return SessionRetrievalOutcome::Unavailable;
+        };
+        SessionRetrievalService::new(
+            authorizer,
+            execution,
             MessageSearchWordEstimator,
             self.configuration,
-        );
-        service.retrieve(&context, query).await
+        )
+        .retrieve(&context, query)
+        .await
     }
 
     async fn execute_command(
@@ -411,28 +521,17 @@ impl DaemonSessionRetrievalService {
         if !self.root.owns(&command) {
             return SessionRetrievalServiceOutcome::WrongScope;
         }
-        if command.goals()
-            || !command.filters().git_filter.is_empty()
-            || command.filters().workflow_scope.is_some()
-        {
-            return SessionRetrievalServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::without_worker(
-                    SessionRetrievalUnavailableReason::UnsupportedQuery,
-                ),
-            );
-        }
         let outcome = self.execute_temporal_query(command.query().clone()).await;
-        self.public_outcome(outcome, &command).await
+        self.public_outcome(outcome).await
     }
 
     async fn public_outcome(
         &self,
         outcome: SessionRetrievalOutcome<TemporalKernelResult>,
-        command: &SessionRetrievalCommand,
     ) -> SessionRetrievalServiceOutcome {
         match outcome {
             SessionRetrievalOutcome::Complete { items, freshness } => {
-                match self.page(items, command).await {
+                match self.page(items).await {
                     Some(page) => SessionRetrievalServiceOutcome::Complete { page, freshness },
                     None => SessionRetrievalServiceOutcome::Unavailable(
                         SessionRetrievalUnavailable::without_worker(
@@ -455,7 +554,7 @@ impl DaemonSessionRetrievalService {
                 items,
                 freshness,
                 omitted,
-            } => match self.page(items, command).await {
+            } => match self.page(items).await {
                 Some(page) => SessionRetrievalServiceOutcome::Partial {
                     page,
                     freshness,
@@ -491,11 +590,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    async fn page(
-        &self,
-        items: Vec<TemporalKernelResult>,
-        command: &SessionRetrievalCommand,
-    ) -> Option<SessionRetrievalPageView> {
+    async fn page(&self, items: Vec<TemporalKernelResult>) -> Option<SessionRetrievalPageView> {
         let mut results = Vec::new();
         let mut anchors = Vec::new();
         let mut explanations = Vec::new();
@@ -532,9 +627,7 @@ impl DaemonSessionRetrievalService {
                         ranked.normalized_score_micros, ranked.knowledge_at_micros
                     ),
                 });
-                if message_search_result_matches(&result, command) {
-                    results.push(result);
-                }
+                results.push(result);
             }
         }
         source_coverage.sort_by(|left, right| left.source_id().cmp(right.source_id()));
@@ -566,14 +659,18 @@ impl DaemonSessionRetrievalService {
                     && hydrated.state() == HydrationStateV1::Available
             })?
             .content()?;
-        let message = GlobalDbSessionTemporalExecution::new(self.database.as_ref())
+        let message = self
+            .registered_execution()
+            .ok()?
             .session_message_from_hydrated_occurrence(snapshot, &ranked.anchor_id, content)
             .await
             .ok()?;
-        let session = self
-            .database
-            .get_session(&message.provider, &message.session_id)
-            .await?;
+        let session = registered_session(
+            self.database.as_ref(),
+            &message.provider,
+            &message.session_id,
+        )
+        .await?;
         if message.session_id != session.session_id {
             return None;
         }
@@ -703,12 +800,15 @@ impl DaemonSessionRetrievalService {
             return LcmDescribeServiceOutcome::Unavailable(unavailable);
         }
         self.calls.fetch_add(1, Ordering::Relaxed);
-        let executor = GlobalDbSessionTemporalExecution::new(self.database.as_ref());
+        let executor = match self.registered_execution() {
+            Ok(executor) => executor,
+            Err(error) => return describe_execution_error(error),
+        };
         let target = command.target().clone();
-        let direct = match executor
+        let direct_result = executor
             .resolve_lcm_describe_target(command.provider(), command.session_id(), &target)
-            .await
-        {
+            .await;
+        let direct = match direct_result {
             Ok(direct) => direct,
             Err(error) => return describe_execution_error(error),
         };
@@ -762,14 +862,13 @@ impl DaemonSessionRetrievalService {
             (Some(_), None) => return LcmDescribeServiceOutcome::Deleted,
             (None, _) => HydrationStateV1::Available,
         };
-        let description = match executor
-            .render_lcm_describe(LcmDescribeRequest {
-                provider: command.provider().to_string(),
-                session_id: command.session_id().as_str().to_string(),
-                target,
-            })
-            .await
-        {
+        let request = LcmDescribeRequest {
+            provider: command.provider().to_string(),
+            session_id: command.session_id().as_str().to_string(),
+            target,
+        };
+        let rendered = executor.render_lcm_describe(request).await;
+        let description = match rendered {
             Ok(description) => description,
             Err(error) => return describe_execution_error(error),
         };
@@ -807,12 +906,15 @@ impl DaemonSessionRetrievalService {
             return LcmExpandServiceOutcome::Unavailable(unavailable);
         }
         self.calls.fetch_add(1, Ordering::Relaxed);
-        let executor = GlobalDbSessionTemporalExecution::new(self.database.as_ref());
+        let executor = match self.registered_execution() {
+            Ok(executor) => executor,
+            Err(error) => return expand_execution_error(error),
+        };
         let target = command.target().clone();
-        let direct = match executor
+        let direct_result = executor
             .resolve_lcm_expand_target(command.provider(), command.session_id(), &target)
-            .await
-        {
+            .await;
+        let direct = match direct_result {
             Ok(direct) => direct,
             Err(error) => return expand_execution_error(error),
         };
@@ -882,21 +984,16 @@ impl DaemonSessionRetrievalService {
             },
             None => command.source_offset(),
         };
-        let expansion = match executor
-            .render_lcm_expand(
-                &result.snapshot,
-                LcmExpandRequest {
-                    provider: command.provider().to_string(),
-                    session_id: command.session_id().as_str().to_string(),
-                    target,
-                    content_slice: Some(command.content_slice()),
-                    source_offset,
-                    source_limit: command.source_limit(),
-                },
-                canonical_content,
-            )
-            .await
-        {
+        let request = LcmExpandRequest {
+            provider: command.provider().to_string(),
+            session_id: command.session_id().as_str().to_string(),
+            target,
+            content_slice: Some(command.content_slice()),
+            source_offset,
+            source_limit: command.source_limit(),
+        };
+        let rendered = executor.render_lcm_expand(request, canonical_content).await;
+        let expansion = match rendered {
             Ok(expansion) => expansion,
             Err(error) => return expand_execution_error(error),
         };
@@ -1121,61 +1218,133 @@ fn message_search_policy_digest() -> Option<[u8; 32]> {
     hex::decode(digest).ok()?.try_into().ok()
 }
 
-fn message_search_result_matches(
-    result: &SessionMessageSearchResult,
-    command: &SessionRetrievalCommand,
-) -> bool {
-    let filters = command.filters();
-    if filters
-        .project_key
-        .as_deref()
-        .is_some_and(|project_key| result.session.project_key != project_key)
-        || filters
-            .parent_session_id
-            .as_deref()
-            .is_some_and(|parent| result.session.parent_session_id.as_deref() != Some(parent))
+async fn registered_session(
+    database: &RegisteredGlobalDb,
+    provider: &str,
+    session_id: &str,
+) -> Option<SessionRecord> {
+    let snapshot = database.read_snapshot().await.ok()?;
+    let mut rows = snapshot
+        .query(
+            "SELECT provider, session_id, project_key, project_path, title, started_at,
+                    ended_at, transcript_path, metadata_json, parent_session_id,
+                    is_subagent, agent_id, parent_tool_use_id
+             FROM sessions
+             WHERE provider = ?1 AND session_id = ?2",
+            crate::db::engine::params![provider, session_id],
+        )
+        .await
+        .ok()?;
+    let row = rows.next().await.ok()??;
+    Some(SessionRecord {
+        provider: row.get(0).ok()?,
+        session_id: row.get(1).ok()?,
+        project_key: row.get(2).ok()?,
+        project_path: row.get(3).ok()?,
+        title: row.get(4).ok(),
+        started_at: row.get(5).ok(),
+        ended_at: row.get(6).ok(),
+        transcript_path: row.get(7).ok(),
+        metadata_json: row.get(8).ok(),
+        parent_session_id: row.get(9).ok(),
+        is_subagent: row.get::<i64>(10).unwrap_or_default() != 0,
+        agent_id: row.get(11).ok(),
+        parent_tool_use_id: row.get(12).ok(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn typed<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
     {
-        return false;
+        T::try_from(value.to_owned()).expect("typed test identity")
     }
-    match filters.scope {
-        SessionSearchScope::ParentsOnly if result.session.is_subagent => return false,
-        SessionSearchScope::SubagentsOnly if !result.session.is_subagent => return false,
-        SessionSearchScope::All
-        | SessionSearchScope::ParentsOnly
-        | SessionSearchScope::SubagentsOnly => {}
+
+    #[test]
+    fn registered_profile_binding_replaces_the_legacy_request_profile_identity() {
+        let brain_id = typed::<tracedecay_domain::BrainId>("brain.session-retrieval");
+        let profile_id =
+            typed::<tracedecay_domain::UserProfileId>("profile.durable-session-retrieval");
+        let root = DaemonSessionRetrievalRoot::profile().expect("profile root");
+        assert_eq!(
+            root.identity.profile_id().as_str(),
+            MESSAGE_SEARCH_PROFILE_ID
+        );
+
+        let root = root
+            .with_profile_runtime_identity(brain_id.clone(), profile_id.clone())
+            .expect("durable profile binding");
+
+        assert_eq!(root.identity.profile_id().as_str(), profile_id.as_str());
+        assert_eq!(
+            root.expected_runtime_shard,
+            Some(StoreShardIdV1::profile_sessions(brain_id, profile_id))
+        );
     }
-    match filters.message_type {
-        SessionMessageType::DirectUser
-            if result.message.role != "user"
-                || result.message.kind.as_deref() == Some("tool_result") =>
-        {
-            return false;
+
+    #[test]
+    fn registered_project_binding_uses_one_durable_profile_and_typed_project() {
+        let brain_id = typed::<tracedecay_domain::BrainId>("brain.session-retrieval");
+        let profile_id =
+            typed::<tracedecay_domain::UserProfileId>("profile.durable-session-retrieval");
+        let project_id = ProjectId::new("project.session-retrieval").expect("project identity");
+        let identity = ResolvedSessionIdentity::for_project(
+            ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).expect("legacy profile"),
+            project_id.clone(),
+            SessionStoreId::new("store.project.test").expect("store identity"),
+            SessionRootId::new("root.project.test").expect("root identity"),
+            ResolvedGitRoute::new(
+                RepositoryId::new("repository.project.test").expect("repository identity"),
+                WorktreeId::new("/project/test").expect("worktree identity"),
+                BranchId::new("branch.project.test").expect("branch identity"),
+            ),
+        );
+        let root = DaemonSessionRetrievalRoot {
+            store_scope: SessionRetrievalStoreScope::Project,
+            identity,
+            project_id: Some(project_id.as_str().to_owned()),
+            project_paths: HashSet::new(),
+            authorized_root: None,
+            expected_runtime_shard: None,
         }
-        SessionMessageType::ToolResult
-            if result.message.kind.as_deref() != Some("tool_result")
-                && result.message.role != "tool" =>
-        {
-            return false;
-        }
-        SessionMessageType::All
-        | SessionMessageType::DirectUser
-        | SessionMessageType::ToolResult => {}
+        .with_project_runtime_identity(brain_id.clone(), profile_id.clone())
+        .expect("durable project binding");
+
+        assert_eq!(root.identity.profile_id().as_str(), profile_id.as_str());
+        assert_eq!(root.identity.project_id(), Some(&project_id));
+        assert_eq!(
+            root.expected_runtime_shard,
+            Some(StoreShardIdV1::project_sessions(
+                brain_id, profile_id, project_id,
+            ))
+        );
     }
-    if !filters.roles.is_empty()
-        && !filters
-            .roles
-            .iter()
-            .any(|role| role == &result.message.role)
-    {
-        return false;
+
+    #[test]
+    fn semantic_filters_are_not_applied_after_temporal_ranking_or_hydration() {
+        let adapter = include_str!("session_retrieval.rs");
+        let production = adapter
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("test module boundary")
+            .0;
+        assert!(!production.contains("message_search_result_matches"));
+        assert!(!production.contains("UnsupportedQuery"));
+
+        let read_port = include_str!("../../global_db/session_temporal/retrieval.rs");
+        let eligibility = read_port
+            .find("candidate_matches_filter(")
+            .expect("canonical eligibility gate");
+        let ranked_sink = read_port
+            .find("sink.push(candidate)")
+            .expect("candidate ranking sink");
+        assert!(
+            eligibility < ranked_sink,
+            "semantic eligibility must run before the ranking candidate sink"
+        );
     }
-    let timestamp = result.message.timestamp;
-    filters
-        .time_range
-        .start_time
-        .is_none_or(|start| timestamp.is_some_and(|value| value >= start))
-        && filters
-            .time_range
-            .end_time
-            .is_none_or(|end| timestamp.is_some_and(|value| value <= end))
 }

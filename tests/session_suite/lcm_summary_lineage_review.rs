@@ -1,7 +1,7 @@
-use sha2::Digest;
-use std::fs;
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
+};
 use tracedecay::sessions::lcm::types::{
     LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
 };
@@ -10,12 +10,57 @@ use tracedecay::sessions::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
 
-use crate::common::{isolated_lcm_db_path, lcm_dag_message, lcm_dag_session, open_lcm_db};
+use crate::common::{lcm_dag_message, lcm_dag_session};
 
 const FOREIGN_CANARY: &str = "sk-proj-lineage-foreign-canary-1234567890";
 
+async fn registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("registered LCM test runtime")
+}
+
+trait ProfileLcmFixture {
+    async fn upsert_session(&self, session: &tracedecay::sessions::SessionRecord) -> bool;
+
+    async fn upsert_session_message(
+        &self,
+        message: &tracedecay::sessions::SessionMessageRecord,
+    ) -> bool;
+
+    async fn lcm_publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> Result<tracedecay::sessions::lcm::types::LcmSummaryPublicationReceipt, LcmError>;
+}
+
+impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
+    async fn upsert_session(&self, session: &tracedecay::sessions::SessionRecord) -> bool {
+        self.upsert_session_for_test(HostAdmissionScope::Profile, session)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn upsert_session_message(
+        &self,
+        message: &tracedecay::sessions::SessionMessageRecord,
+    ) -> bool {
+        self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn lcm_publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> Result<tracedecay::sessions::lcm::types::LcmSummaryPublicationReceipt, LcmError> {
+        self.lcm_publish_immutable_summary_for_test(HostAdmissionScope::Profile, publication)
+            .await
+    }
+}
+
 async fn insert_messages(
-    db: &GlobalDb,
+    db: &HostAdmissionTestRuntimeV1,
     provider: &str,
     session_id: &str,
     contents: &[&str],
@@ -38,7 +83,7 @@ async fn insert_messages(
             .await
         );
         store_ids.push(
-            db.lcm_load_raw_message(provider, &message_id)
+            db.lcm_load_raw_message_for_test(provider, &message_id)
                 .await
                 .unwrap()
                 .store_id,
@@ -82,18 +127,10 @@ fn publication(
     }
 }
 
-async fn scalar(db_path: &std::path::Path, sql: &str) -> i64 {
-    let database = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = database.connect().unwrap();
-    let mut rows = conn.query(sql, ()).await.unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
-}
-
 #[tokio::test]
 async fn exact_replay_uses_only_frozen_canonical_authority() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-replay", &["alpha", "beta"]).await;
     let requested = publication(
         "summary.replay.canonical",
@@ -113,25 +150,18 @@ async fn exact_replay_uses_only_frozen_canonical_authority() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute(
-        "UPDATE lcm_summary_nodes
-         SET summary_text = 'corrupt legacy projection'
-         WHERE node_id = 'summary.replay.canonical'",
-        (),
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::CorruptCompatibilitySummaryText {
+        node_id: "summary.replay.canonical".into(),
+        text: "corrupt legacy projection".into(),
+    })
     .await
     .unwrap();
-    conn.execute(
-        "UPDATE lcm_raw_messages SET timestamp = timestamp + 999999
-         WHERE store_id = ?1",
-        libsql::params![store_ids[0]],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ShiftRawMessageTimestamp {
+        store_id: store_ids[0],
+        delta: 999_999,
+    })
     .await
     .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     db.lcm_publish_immutable_summary(publication(
         "summary.replay.generation-evolution",
@@ -166,8 +196,7 @@ async fn exact_replay_uses_only_frozen_canonical_authority() {
 #[tokio::test]
 async fn exact_replay_rejects_missing_generation() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-missing-gen", &["alpha"]).await;
     let requested = publication(
         "summary.replay.missing-generation",
@@ -187,25 +216,12 @@ async fn exact_replay_rejects_missing_generation() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    // Generations are durable under product triggers; drop only for this
-    // fail-first corruption probe against exact-replay verification.
-    conn.execute_batch(
-        "DROP TRIGGER session_temporal_generations_delete_guard_v1;
-         PRAGMA foreign_keys = OFF;",
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::DeleteGeneration {
+        session_id: "session-missing-gen".into(),
+        generation: first.generation,
+    })
     .await
     .unwrap();
-    conn.execute(
-        "DELETE FROM session_temporal_generations
-         WHERE session_id = 'session-missing-gen' AND generation = ?1",
-        libsql::params![first.generation],
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(requested)
@@ -222,8 +238,7 @@ async fn exact_replay_rejects_missing_generation() {
 #[tokio::test]
 async fn exact_replay_rejects_changed_generation_watermarks() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-changed-wm", &["alpha"]).await;
     let requested = publication(
         "summary.replay.changed-watermarks",
@@ -243,27 +258,15 @@ async fn exact_replay_rejects_changed_generation_watermarks() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute(
-        "DROP TRIGGER session_temporal_generations_state_guard_v1",
-        (),
+    db.apply_lcm_lineage_fault_for_test(
+        LcmLineageFaultForTest::ReplaceGenerationWatermarks {
+            session_id: "session-changed-wm".into(),
+            generation: first.generation,
+            json: r#"{"active_generation":null,"source_frontier":0,"projection_frontier":0,"summary_frontier":"tampered","route":"tampered"}"#.into(),
+        },
     )
     .await
     .unwrap();
-    conn.execute(
-        "UPDATE session_temporal_generations
-         SET frozen_watermarks_json = ?1
-         WHERE session_id = 'session-changed-wm' AND generation = ?2",
-        libsql::params![
-            r#"{"active_generation":null,"source_frontier":0,"projection_frontier":0,"summary_frontier":"tampered","route":"tampered"}"#,
-            first.generation
-        ],
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(requested)
@@ -280,8 +283,7 @@ async fn exact_replay_rejects_changed_generation_watermarks() {
 #[tokio::test]
 async fn exact_replay_rejects_missing_availability() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-missing-avail", &["alpha"]).await;
     let requested = publication(
         "summary.replay.missing-availability",
@@ -301,19 +303,13 @@ async fn exact_replay_rejects_missing_availability() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute(
-        "DELETE FROM session_summary_availability
-         WHERE session_id = 'session-missing-avail'
-           AND generation = ?1
-           AND summary_id = 'summary.replay.missing-availability'",
-        libsql::params![first.generation],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::DeleteAvailability {
+        session_id: "session-missing-avail".into(),
+        generation: first.generation,
+        summary_id: "summary.replay.missing-availability".into(),
+    })
     .await
     .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(requested)
@@ -330,8 +326,7 @@ async fn exact_replay_rejects_missing_availability() {
 #[tokio::test]
 async fn exact_replay_rejects_mismatched_horizon_or_state() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-mismatch-horizon", &["alpha"]).await;
     let requested = publication(
         "summary.replay.mismatch-horizon",
@@ -351,23 +346,14 @@ async fn exact_replay_rejects_mismatched_horizon_or_state() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute(
-        "UPDATE session_summary_availability
-         SET source_horizon_json = ?1
-         WHERE session_id = 'session-mismatch-horizon'
-           AND generation = ?2
-           AND summary_id = 'summary.replay.mismatch-horizon'",
-        libsql::params![
-            r#"{"knowledge_through":0,"valid_through":0}"#,
-            first.generation
-        ],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplaceAvailabilityHorizon {
+        session_id: "session-mismatch-horizon".into(),
+        generation: first.generation,
+        summary_id: "summary.replay.mismatch-horizon".into(),
+        source_horizon_json: r#"{"knowledge_through":0,"valid_through":0}"#.into(),
+    })
     .await
     .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(requested.clone())
@@ -380,26 +366,15 @@ async fn exact_replay_rejects_mismatched_horizon_or_state() {
         } if summary_id == "summary.replay.mismatch-horizon"
     ));
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    // Restore a valid horizon JSON then mark availability non-available.
-    conn.execute(
-        "UPDATE session_summary_availability
-         SET source_horizon_json = (
-                SELECT source_horizon_json FROM session_summary_nodes
-                WHERE summary_id = 'summary.replay.mismatch-horizon'
-             ),
-             availability = 'stale',
-             reason = 'tampered'
-         WHERE session_id = 'session-mismatch-horizon'
-           AND generation = ?1
-           AND summary_id = 'summary.replay.mismatch-horizon'",
-        libsql::params![first.generation],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::SetAvailability {
+        session_id: "session-mismatch-horizon".into(),
+        generation: first.generation,
+        summary_id: "summary.replay.mismatch-horizon".into(),
+        availability: "stale".into(),
+        reason: Some("tampered".into()),
+    })
     .await
     .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(requested.clone())
@@ -412,35 +387,21 @@ async fn exact_replay_rejects_mismatched_horizon_or_state() {
         } if summary_id == "summary.replay.mismatch-horizon"
     ));
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute(
-        "UPDATE session_summary_availability
-         SET availability = 'available', reason = NULL
-         WHERE session_id = 'session-mismatch-horizon'
-           AND generation = ?1
-           AND summary_id = 'summary.replay.mismatch-horizon'",
-        libsql::params![first.generation],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::SetAvailability {
+        session_id: "session-mismatch-horizon".into(),
+        generation: first.generation,
+        summary_id: "summary.replay.mismatch-horizon".into(),
+        availability: "available".into(),
+        reason: None,
+    })
     .await
     .unwrap();
-    conn.execute(
-        "DROP TRIGGER session_temporal_generations_state_guard_v1",
-        (),
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::SetGenerationFailed {
+        session_id: "session-mismatch-horizon".into(),
+        generation: first.generation,
+    })
     .await
     .unwrap();
-    conn.execute(
-        "UPDATE session_temporal_generations
-         SET state = 'failed',
-             completed_at = COALESCE(completed_at, activated_at, ready_at, created_at)
-         WHERE session_id = 'session-mismatch-horizon' AND generation = ?1",
-        libsql::params![first.generation],
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(requested)
@@ -457,7 +418,7 @@ async fn exact_replay_rejects_mismatched_horizon_or_state() {
 #[tokio::test]
 async fn exact_replay_allows_valid_superseded_generation() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(
         &db,
         "cursor",
@@ -517,7 +478,7 @@ async fn exact_replay_allows_valid_superseded_generation() {
 #[tokio::test]
 async fn changed_logical_summary_requires_its_current_predecessor() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-predecessor", &["alpha"]).await;
     let sources = vec![LcmSourceRef::RawMessage {
         store_id: store_ids[0],
@@ -576,7 +537,7 @@ async fn changed_logical_summary_requires_its_current_predecessor() {
 #[tokio::test]
 async fn successor_rejects_an_incompatible_logical_identity() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-identity", &["alpha", "beta"]).await;
     let first = db
         .lcm_publish_immutable_summary(publication(
@@ -623,8 +584,7 @@ async fn successor_rejects_an_incompatible_logical_identity() {
 #[tokio::test]
 async fn summary_source_owner_must_match_its_frozen_publication_owner() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-owner", &["alpha"]).await;
     let leaf = db
         .lcm_publish_immutable_summary(publication(
@@ -643,32 +603,11 @@ async fn summary_source_owner_must_match_its_frozen_publication_owner() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute_batch(
-        "DROP TRIGGER IF EXISTS retrieval_anchors_immutable_update;
-         DROP TRIGGER IF EXISTS observation_retrieval_anchors_immutable_update;",
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::CorruptRetrievalAnchorOwner {
+        summary_id: "summary.owner.leaf".into(),
+    })
     .await
     .unwrap();
-    conn.execute(
-        "UPDATE retrieval_anchors
-         SET owner_json = '{\"kind\":\"session\",\"provider\":\"wrong\",\"session_id\":\"wrong\"}',
-             anchor_json = json_set(
-                 anchor_json,
-                 '$.owner',
-                 json('{\"kind\":\"session\",\"provider\":\"wrong\",\"session_id\":\"wrong\"}')
-             )
-         WHERE anchor_id = (
-             SELECT summary_anchor_id FROM session_summary_nodes
-             WHERE summary_id = 'summary.owner.leaf'
-         )",
-        (),
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(publication(
@@ -692,8 +631,7 @@ async fn summary_source_owner_must_match_its_frozen_publication_owner() {
 #[tokio::test]
 async fn generation_stale_closure_rejects_corrupt_cycles() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-cycle", &["alpha"]).await;
     let raw_sources = vec![LcmSourceRef::RawMessage {
         store_id: store_ids[0],
@@ -723,24 +661,13 @@ async fn generation_stale_closure_rejects_corrupt_cycles() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute_batch("DROP TRIGGER session_summary_sources_immutable_update_v1;")
-        .await
-        .unwrap();
-    conn.execute(
-        "UPDATE session_summary_sources
-         SET source_kind = 'summary', source_anchor_id = NULL, source_summary_id = ?2
-         WHERE summary_id = ?1 AND source_ordinal = 0",
-        libsql::params![
-            leaf.summary.node_id.as_str(),
-            parent.summary.node_id.as_str()
-        ],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplaceSummarySourceWithSummary {
+        summary_id: leaf.summary.node_id.clone(),
+        ordinal: 0,
+        source_summary_id: parent.summary.node_id,
+    })
     .await
     .unwrap();
-    drop(conn);
-    drop(raw_db);
 
     let error = db
         .lcm_publish_immutable_summary(publication(
@@ -756,7 +683,7 @@ async fn generation_stale_closure_rejects_corrupt_cycles() {
 #[tokio::test]
 async fn generation_stale_closure_rejects_excessive_depth() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-depth", &["alpha"]).await;
     let raw_sources = vec![LcmSourceRef::RawMessage {
         store_id: store_ids[0],
@@ -807,13 +734,8 @@ async fn generation_stale_closure_rejects_excessive_depth() {
 #[tokio::test]
 async fn concurrent_publications_leave_one_active_generation() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let setup = open_lcm_db(&tmp).await;
-    let store_ids =
-        insert_messages(&setup, "cursor", "session-concurrent", &["alpha", "beta"]).await;
-    drop(setup);
-    let left = GlobalDb::open_at(&db_path).await.unwrap();
-    let right = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = registered_lcm_runtime(&tmp).await;
+    let store_ids = insert_messages(&db, "cursor", "session-concurrent", &["alpha", "beta"]).await;
     let left_publication = publication(
         "summary.concurrent.alpha",
         None,
@@ -842,34 +764,24 @@ async fn concurrent_publications_leave_one_active_generation() {
     );
 
     let (left_result, right_result) = tokio::join!(
-        left.lcm_publish_immutable_summary(left_publication),
-        right.lcm_publish_immutable_summary(right_publication),
+        db.lcm_publish_immutable_summary(left_publication),
+        db.lcm_publish_immutable_summary(right_publication),
     );
     left_result.unwrap();
     right_result.unwrap();
-    assert_eq!(
-        scalar(
-            &db_path,
-            "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'active'",
-        )
-        .await,
-        1
-    );
-    assert_eq!(
-        scalar(
-            &db_path,
-            "SELECT COUNT(DISTINCT generation) FROM session_temporal_generations",
-        )
-        .await,
-        2
-    );
+    let counts = db
+        .lcm_lineage_counts_for_test(Some("session-concurrent"))
+        .await
+        .unwrap();
+    assert_eq!(counts.active_generations, 1);
+    assert_eq!(counts.total_generations, 2);
 }
 
 #[tokio::test]
 async fn immutable_summary_exact_replay_keeps_frozen_lineage_after_close() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let profile_root = tmp.path().join(".tracedecay");
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(&db, "cursor", "session-reopen", &["alpha", "beta"]).await;
     let requested = publication(
         "summary.reopen.primary",
@@ -904,7 +816,7 @@ async fn immutable_summary_exact_replay_keeps_frozen_lineage_after_close() {
     .await
     .unwrap();
     let replay = db
-        .lcm_publish_immutable_summary(requested)
+        .lcm_publish_immutable_summary(requested.clone())
         .await
         .expect("exact replay must ignore unrelated generation evolution");
     assert_eq!(
@@ -917,47 +829,38 @@ async fn immutable_summary_exact_replay_keeps_frozen_lineage_after_close() {
     assert_eq!(replay.published_at, first.published_at);
     drop(db);
 
-    // SQL-layer durability after closing the writer. Production-open authority
-    // validation is exercised separately by the ignored blocker regression.
+    let reopened = HostAdmissionTestRuntimeV1::profile(profile_root)
+        .await
+        .expect("registered runtime should reopen");
+    let expansion = reopened
+        .lcm_expand_summary_node_for_test("cursor", "session-reopen", "summary.reopen.primary")
+        .await
+        .expect("frozen summary should survive close and reopen");
+    assert_eq!(expansion.summary.summary_text, "frozen reopen summary");
+    let replay = reopened
+        .lcm_publish_immutable_summary(requested)
+        .await
+        .expect("frozen publication should exact-replay after close and reopen");
     assert_eq!(
-        scalar(
-            &db_path,
-            "SELECT COUNT(*) FROM session_summary_nodes
-             WHERE summary_id = 'summary.reopen.primary'
-               AND summary_text = 'frozen reopen summary'",
-        )
-        .await,
-        1
+        replay.disposition,
+        LcmSummaryPublicationDisposition::ExactReplay
     );
-    assert_eq!(
-        scalar(
-            &db_path,
-            "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'active'",
-        )
-        .await,
-        1
-    );
-    assert_eq!(
-        scalar(
-            &db_path,
-            &format!(
-                "SELECT COUNT(*) FROM session_temporal_generations
-                 WHERE generation = {} AND frozen_watermarks_json = '{}'",
-                first.generation,
-                first.frozen_watermarks_json.replace('\'', "''")
-            ),
-        )
-        .await,
-        1
-    );
+    assert_eq!(replay.generation, first.generation);
+    assert_eq!(replay.frozen_watermarks_json, first.frozen_watermarks_json);
+    let counts = reopened
+        .lcm_lineage_counts_for_test(Some("session-reopen"))
+        .await
+        .unwrap();
+    assert_eq!(counts.active_generations, 1);
+    assert_eq!(counts.total_generations, 2);
 }
 
 #[tokio::test]
 async fn immutable_summary_exact_replay_survives_production_open() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
+    let profile_root = tmp.path().join(".tracedecay");
     let requested = {
-        let db = open_lcm_db(&tmp).await;
+        let db = registered_lcm_runtime(&tmp).await;
         let store_ids = insert_messages(&db, "cursor", "session-production-open", &["alpha"]).await;
         let requested = publication(
             "summary.production-open.primary",
@@ -978,9 +881,9 @@ async fn immutable_summary_exact_replay_survives_production_open() {
         requested
     };
 
-    let reopened = GlobalDb::open_at(&db_path)
+    let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
-        .expect("production GlobalDb::open_at must accept immutable-summary receipt authority");
+        .expect("registered runtime must accept immutable-summary receipt authority");
     let replay = reopened
         .lcm_publish_immutable_summary(requested)
         .await
@@ -994,8 +897,7 @@ async fn immutable_summary_exact_replay_survives_production_open() {
 #[tokio::test]
 async fn immutable_summary_lineage_rejects_foreign_session_canary_sources_without_disclosure() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let victim_ids = insert_messages(&db, "cursor", "session-victim", &["victim safe"]).await;
     let foreign_ids = insert_messages(&db, "cursor", "session-foreign", &[FOREIGN_CANARY]).await;
     let foreign_summary = db
@@ -1015,14 +917,11 @@ async fn immutable_summary_lineage_rejects_foreign_session_canary_sources_withou
         .await
         .unwrap();
 
-    let before_victim_summaries = scalar(
-        &db_path,
-        "SELECT COUNT(*) FROM session_summary_nodes WHERE session_id = 'session-victim'",
-    )
-    .await;
-    let before_sources = scalar(&db_path, "SELECT COUNT(*) FROM session_summary_sources").await;
-    let before_successors =
-        scalar(&db_path, "SELECT COUNT(*) FROM session_summary_successors").await;
+    let before_victim = db
+        .lcm_lineage_counts_for_test(Some("session-victim"))
+        .await
+        .unwrap();
+    let before_global = db.lcm_lineage_counts_for_test(None).await.unwrap();
 
     for (label, source_refs) in [
         (
@@ -1064,43 +963,41 @@ async fn immutable_summary_lineage_rejects_foreign_session_canary_sources_withou
     }
 
     let _ = victim_ids;
+    let after_victim = db
+        .lcm_lineage_counts_for_test(Some("session-victim"))
+        .await
+        .unwrap();
+    let after_global = db.lcm_lineage_counts_for_test(None).await.unwrap();
+    assert_eq!(after_victim.summary_nodes, before_victim.summary_nodes);
+    assert_eq!(after_global.summary_sources, before_global.summary_sources);
     assert_eq!(
-        scalar(
-            &db_path,
-            "SELECT COUNT(*) FROM session_summary_nodes WHERE session_id = 'session-victim'",
-        )
-        .await,
-        before_victim_summaries
+        after_global.summary_successors,
+        before_global.summary_successors
     );
-    assert_eq!(
-        scalar(&db_path, "SELECT COUNT(*) FROM session_summary_sources").await,
-        before_sources
-    );
-    assert_eq!(
-        scalar(&db_path, "SELECT COUNT(*) FROM session_summary_successors").await,
-        before_successors
-    );
-    assert_eq!(
-        scalar(
-            &db_path,
-            &format!(
-                "SELECT COUNT(*) FROM session_summary_nodes
-                 WHERE session_id = 'session-victim'
-                   AND (
-                       instr(summary_text, '{FOREIGN_CANARY}') > 0
-                       OR instr(index_text, '{FOREIGN_CANARY}') > 0
-                   )"
-            ),
-        )
-        .await,
-        0
-    );
+    let canary = db
+        .lcm_grep_for_test(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: FOREIGN_CANARY.into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-victim".into()),
+            include_summaries: true,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+            git_filter: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert!(canary.hits.is_empty());
 }
 
 #[tokio::test]
 async fn summary_source_pages_remain_gap_free_across_exact_replay_and_unrelated_publication() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let contents = [
         "source body 1",
         "source body 2",
@@ -1141,7 +1038,7 @@ async fn summary_source_pages_remain_gap_free_across_exact_replay_and_unrelated_
         source_limit,
     };
 
-    let page_one = db.lcm_expand(expand(0, Some(2))).await.unwrap();
+    let page_one = db.lcm_expand_for_test(expand(0, Some(2))).await.unwrap();
     let page_one_ids: Vec<i64> = page_one
         .summary_sources
         .iter()
@@ -1173,14 +1070,14 @@ async fn summary_source_pages_remain_gap_free_across_exact_replay_and_unrelated_
     .await
     .unwrap();
 
-    let page_two = db.lcm_expand(expand(2, Some(2))).await.unwrap();
+    let page_two = db.lcm_expand_for_test(expand(2, Some(2))).await.unwrap();
     let page_two_ids: Vec<i64> = page_two
         .summary_sources
         .iter()
         .filter_map(|source| source.raw_message.as_ref().map(|raw| raw.store_id))
         .collect();
     assert_eq!(page_two_ids, store_ids[2..4]);
-    let page_three = db.lcm_expand(expand(4, Some(2))).await.unwrap();
+    let page_three = db.lcm_expand_for_test(expand(4, Some(2))).await.unwrap();
     let page_three_ids: Vec<i64> = page_three
         .summary_sources
         .iter()
@@ -1201,8 +1098,7 @@ async fn summary_source_pages_remain_gap_free_across_exact_replay_and_unrelated_
 #[tokio::test]
 async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publication_state() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(
         &db,
         "cursor",
@@ -1230,18 +1126,10 @@ async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publicati
         .await
         .unwrap();
 
-    let before_hash = sha2::Sha256::digest(fs::read(&db_path).unwrap());
-    let before_active = scalar(
-        &db_path,
-        "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'active'",
-    )
-    .await;
-    let before_summaries = scalar(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await;
-    let before_sources = scalar(&db_path, "SELECT COUNT(*) FROM session_summary_sources").await;
-    let before_keys = scalar(&db_path, "SELECT COUNT(*) FROM session_query_cursor_keys").await;
+    let before = db.lcm_lineage_counts_for_test(None).await.unwrap();
 
     let grep = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "readonly lineage".into(),
             scope: LcmScope::Session,
@@ -1259,7 +1147,7 @@ async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publicati
         .expect("grep must succeed");
     assert!(!grep.hits.is_empty());
 
-    db.lcm_describe(LcmDescribeRequest {
+    db.lcm_describe_for_test(LcmDescribeRequest {
         provider: "cursor".into(),
         session_id: "session-readonly".into(),
         target: LcmDescribeTarget::SummaryNode {
@@ -1270,7 +1158,7 @@ async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publicati
     .expect("describe must succeed");
 
     let page = db
-        .lcm_expand(LcmExpandRequest {
+        .lcm_expand_for_test(LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-readonly".into(),
             target: LcmExpandTarget::SummaryNode {
@@ -1283,7 +1171,7 @@ async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publicati
         .await
         .expect("expand must succeed");
     assert_eq!(page.summary_sources.len(), 2);
-    db.lcm_expand(LcmExpandRequest {
+    db.lcm_expand_for_test(LcmExpandRequest {
         provider: "cursor".into(),
         session_id: "session-readonly".into(),
         target: LcmExpandTarget::SummaryNode {
@@ -1296,28 +1184,6 @@ async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publicati
     .await
     .expect("expand resume must succeed");
 
-    assert_eq!(
-        sha2::Sha256::digest(fs::read(&db_path).unwrap()),
-        before_hash
-    );
-    assert_eq!(
-        scalar(
-            &db_path,
-            "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'active'",
-        )
-        .await,
-        before_active
-    );
-    assert_eq!(
-        scalar(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await,
-        before_summaries
-    );
-    assert_eq!(
-        scalar(&db_path, "SELECT COUNT(*) FROM session_summary_sources").await,
-        before_sources
-    );
-    assert_eq!(
-        scalar(&db_path, "SELECT COUNT(*) FROM session_query_cursor_keys").await,
-        before_keys
-    );
+    let after = db.lcm_lineage_counts_for_test(None).await.unwrap();
+    assert_eq!(after, before);
 }

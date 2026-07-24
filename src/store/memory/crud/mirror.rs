@@ -12,10 +12,11 @@ use super::super::projection::{
 };
 use super::{COMPATIBILITY_RETENTION_CLASS, DEFAULT_TRUST, commit_fact_tx, query_fact_lineage_tx};
 use crate::db::Database;
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::entities::normalize_entity;
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use libsql::{Transaction, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -32,7 +33,7 @@ use tracedecay_store::{
     FactCompatibilityResult, FactLineageQuery, FactStoreError, FactStoreResult, FactWriteBatch,
 };
 pub(in crate::store::memory) async fn list_compatibility_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactListQueryV1,
 ) -> FactCompatibilityResult<CompatibilityFactPageV1> {
     let key = OwnerKey::new(query.owner())?;
@@ -185,7 +186,7 @@ pub(in crate::store::memory) async fn list_compatibility_facts_tx(
 }
 
 pub(in crate::store::memory) async fn get_compatibility_fact_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     target: &CompatibilityFactTargetV1,
 ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
     let Some(fact_id) = resolve_compatibility_target_tx(transaction, target).await? else {
@@ -205,7 +206,7 @@ fn compatibility_content_digest(content: &str) -> FactStoreResult<LocatorDigest>
 }
 
 pub(in crate::store::memory) async fn find_compatibility_fact_by_content_digest_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactContentDigestQueryV1,
 ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
     let key = OwnerKey::new(query.owner())?;
@@ -260,7 +261,7 @@ pub(in crate::store::memory) async fn find_compatibility_fact_by_content_digest_
 }
 
 pub(in crate::store::memory) async fn compatibility_fact_history_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactHistoryQueryV1,
 ) -> FactCompatibilityResult<CompatibilityFactHistoryV1> {
     let fact_id = resolve_compatibility_target_tx(transaction, query.target())
@@ -397,7 +398,7 @@ pub(in crate::store::memory) fn compatibility_mirror_vector(
 }
 
 pub(super) async fn compatibility_last_insert_rowid_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
 ) -> FactStoreResult<i64> {
     let mut rows = transaction
         .query("SELECT last_insert_rowid()", ())
@@ -418,7 +419,7 @@ pub(super) async fn compatibility_last_insert_rowid_tx(
 
 pub(in crate::store::memory) async fn compatibility_mark_owner_banks_dirty_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     category: FactCategoryV1,
     updated_at: UtcMicros,
@@ -439,7 +440,7 @@ pub(in crate::store::memory) async fn compatibility_mark_owner_banks_dirty_tx(
 }
 
 async fn compatibility_mirror_replace_entities_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     legacy_fact_id: i64,
     entities: &[String],
     timestamp: i64,
@@ -532,7 +533,7 @@ pub(super) enum CompatibilityMirrorInsertV1 {
 
 pub(super) async fn compatibility_mirror_insert_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     payload: &FactPayloadV1,
     source: &str,
@@ -604,7 +605,7 @@ pub(super) async fn compatibility_mirror_insert_tx(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::store::memory) async fn compatibility_mirror_update_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     legacy_fact_id: i64,
     payload: &FactPayloadV1,
@@ -759,7 +760,7 @@ pub(super) fn compatibility_initial_batch(
 }
 
 pub(in crate::store::memory) async fn compatibility_commit_batch_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<(FactCommitReceipt, bool)> {
     let attempt = commit_fact_tx(transaction, batch).await?;
@@ -779,7 +780,7 @@ pub(in crate::store::memory) async fn compatibility_commit_batch_tx(
 }
 
 pub(super) async fn compatibility_active_fact_count_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactStoreResult<u64> {
     let key = OwnerKey::new(owner)?;
@@ -814,7 +815,7 @@ pub(super) async fn compatibility_active_fact_count_tx(
 
 pub(in crate::store::memory) async fn compatibility_mirror_delete_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     legacy_fact_id: i64,
     category: FactCategoryV1,

@@ -18,7 +18,7 @@ use tracedecay_store::{
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::DaemonDatabaseScope;
-use crate::db::engine::{Executor, QueryExecutor, params};
+use crate::db::engine::params;
 use crate::global_db::RegisteredGlobalDb;
 
 pub(super) const PROJECT_ID: &str = "project.tracedecay";

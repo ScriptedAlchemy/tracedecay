@@ -55,11 +55,14 @@
 
 use std::path::Path;
 
-use libsql::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
+use crate::db::engine::{
+    Connection, Executor, Params, QueryExecutor, Transaction, TransactionBehavior, params,
+};
+
 use super::payload::{ExternalPayloadWrite, PayloadFileRollback};
-use super::{LcmError, payload, schema, util};
+use super::{LcmError, payload, util};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
@@ -160,6 +163,9 @@ pub struct LcmRetentionPhaseReport {
     pub acted: u64,
     /// Bytes of message content reclaimed from the database by this pass.
     pub bytes_reclaimed: u64,
+    /// Oldest timestamp among the bounded eligible rows, when any.
+    #[serde(default)]
+    pub oldest_eligible_at: Option<i64>,
 }
 
 impl LcmRetentionPhaseReport {
@@ -210,7 +216,7 @@ fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
     now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
 }
 
-async fn pragma_u64(conn: &Connection, pragma: &str) -> u64 {
+async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> u64 {
     let sql = format!("PRAGMA {pragma}");
     let Ok(mut rows) = conn.query(&sql, ()).await else {
         return 0;
@@ -222,7 +228,7 @@ async fn pragma_u64(conn: &Connection, pragma: &str) -> u64 {
 }
 
 async fn scoped_row_count(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     table: &str,
     provider: &str,
     session_id: Option<&str>,
@@ -256,6 +262,34 @@ pub async fn run_session_retention(
     config: &LcmRetentionConfig,
     mode: RetentionMode,
     now: i64,
+) -> Result<LcmRetentionReport, LcmError> {
+    if mode.is_apply() {
+        return Err(LcmError::Db(
+            "apply requires the authority-bound session retention entry point".to_string(),
+        ));
+    }
+    run_session_retention_authorized(
+        conn,
+        storage_root,
+        provider,
+        session_id,
+        config,
+        mode,
+        now,
+        &|_| Ok(()),
+    )
+    .await
+}
+
+pub(crate) async fn run_session_retention_authorized(
+    conn: &Connection,
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    config: &LcmRetentionConfig,
+    mode: RetentionMode,
+    now: i64,
+    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
 ) -> Result<LcmRetentionReport, LcmError> {
     let raw_rows_before = scoped_row_count(conn, "lcm_raw_messages", provider, session_id).await;
     let projected_rows_before =
@@ -300,6 +334,7 @@ pub async fn run_session_retention(
         mode,
         now,
         &mut report.errors,
+        authorize,
     )
     .await?;
     report.offloaded = run_offload_pass(
@@ -311,6 +346,7 @@ pub async fn run_session_retention(
         mode,
         now,
         &mut report.errors,
+        authorize,
     )
     .await?;
     report.projected_deduped = run_dedupe_pass(
@@ -321,25 +357,24 @@ pub async fn run_session_retention(
         mode,
         now,
         &mut report.errors,
+        authorize,
     )
     .await?;
 
     if mode.is_apply() {
         // Consume the staged GC/reporting meta cards: record the last run so a
         // scheduler and Doctor can report retention backlog without a rescan.
-        let _ = schema::set_gc_meta(conn, "last_retention_at", &now.to_string()).await;
         let acted = report
             .dropped
             .acted
             .saturating_add(report.offloaded.acted)
             .saturating_add(report.projected_deduped.acted);
-        let _ = schema::set_gc_meta(conn, "last_retention_rows", &acted.to_string()).await;
-        let _ = schema::set_gc_meta(
-            conn,
-            "last_retention_bytes",
-            &report.bytes_reclaimed().to_string(),
-        )
-        .await;
+        authorize("begin session retention metadata")?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+        write_retention_metadata(&transaction, now, acted, report.bytes_reclaimed()).await?;
+        commit_authorized(transaction, authorize, "commit session retention metadata").await?;
     }
 
     report.ended_at = now;
@@ -351,10 +386,66 @@ pub async fn run_session_retention(
     Ok(report)
 }
 
+async fn write_retention_metadata(
+    executor: &(impl Executor + ?Sized),
+    now: i64,
+    acted: u64,
+    bytes_reclaimed: u64,
+) -> Result<(), LcmError> {
+    for (key, value) in [
+        ("last_retention_at", now.to_string()),
+        ("last_retention_rows", acted.to_string()),
+        ("last_retention_bytes", bytes_reclaimed.to_string()),
+    ] {
+        executor
+            .execute(
+                "INSERT OR REPLACE INTO lcm_gc_meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn commit_authorized(
+    transaction: Transaction,
+    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
+    intent: &str,
+) -> Result<(), LcmError> {
+    if let Err(error) = authorize(intent) {
+        return match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(LcmError::Db(format!(
+                "{error}; rollback after authority loss failed: {rollback_error}"
+            ))),
+        };
+    }
+    transaction.commit().await.map_err(Into::into)
+}
+
+enum RetentionQueryExecutor<'a> {
+    Connection(&'a Connection),
+    Transaction(&'a Transaction),
+}
+
+impl RetentionQueryExecutor<'_> {
+    async fn query(
+        &self,
+        sql: &str,
+        params: Params,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows> {
+        match self {
+            Self::Connection(connection) => connection.query(sql, params).await,
+            Self::Transaction(transaction) => transaction.query(sql, params).await,
+        }
+    }
+}
+
 struct DropRow {
     store_id: i64,
     provider: String,
     message_id: String,
+    timestamp: i64,
     content_len: u64,
 }
 
@@ -366,6 +457,7 @@ async fn run_drop_pass(
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
+    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
 ) -> Result<LcmRetentionPhaseReport, LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.drop_after_days,
@@ -376,7 +468,7 @@ async fn run_drop_pass(
     };
     let cutoff = cutoff_secs(window, now);
     let sql = format!(
-        "SELECT r.store_id, r.provider, r.message_id,
+        "SELECT r.store_id, r.provider, r.message_id, r.timestamp,
                 LENGTH(COALESCE(r.content, '')) AS content_len
          FROM lcm_raw_messages r
          WHERE (?1 = 'all' OR r.provider = ?1)
@@ -386,7 +478,20 @@ async fn run_drop_pass(
          ORDER BY r.timestamp ASC, r.store_id ASC
          LIMIT ?4"
     );
-    let mut rows = conn
+    let transaction = if mode.is_apply() {
+        authorize("begin session retention drop pass")?;
+        Some(
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let query_executor = transaction.as_ref().map_or(
+        RetentionQueryExecutor::Connection(conn),
+        RetentionQueryExecutor::Transaction,
+    );
+    let mut rows = query_executor
         .query(
             &sql,
             params![
@@ -403,19 +508,20 @@ async fn run_drop_pass(
             store_id: row.get(0)?,
             provider: row.get(1)?,
             message_id: row.get(2)?,
-            content_len: row.get::<i64>(3)?.max(0) as u64,
+            timestamp: row.get(3)?,
+            content_len: row.get::<i64>(4)?.max(0) as u64,
         });
     }
     report.eligible = targets.len() as u64;
+    report.oldest_eligible_at = targets.iter().map(|target| target.timestamp).min();
     if !mode.is_apply() {
         report.bytes_reclaimed = targets.iter().map(|t| t.content_len).sum();
         return Ok(report);
     }
 
-    let txn = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await?;
+    let txn = transaction.expect("apply mode starts a session retention drop transaction");
     for target in &targets {
+        authorize("drop session retention row")?;
         // Drop the projected twin first (its FTS delete trigger fires), then
         // the raw row (its FTS delete trigger fires). Any external payload the
         // raw row referenced becomes unreferenced and is reaped by payload GC.
@@ -436,14 +542,18 @@ async fn run_drop_pass(
             )
             .await
         {
-            Ok(_) => {
+            Ok(1) => {
                 report.acted += 1;
                 report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(target.content_len);
             }
+            Ok(changed) => errors.push(format!(
+                "drop raw row {} changed {changed} rows",
+                target.store_id
+            )),
             Err(err) => errors.push(format!("drop raw row {}: {err}", target.store_id)),
         }
     }
-    txn.commit().await?;
+    commit_authorized(txn, authorize, "commit session retention drop pass").await?;
     Ok(report)
 }
 
@@ -452,6 +562,7 @@ struct OffloadRow {
     provider: String,
     session_id: String,
     message_id: String,
+    timestamp: i64,
     content: String,
 }
 
@@ -465,6 +576,7 @@ async fn run_offload_pass(
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
+    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
 ) -> Result<LcmRetentionPhaseReport, LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.offload_after_days,
@@ -475,7 +587,7 @@ async fn run_offload_pass(
     };
     let cutoff = cutoff_secs(window, now);
     let sql = format!(
-        "SELECT r.store_id, r.provider, r.session_id, r.message_id, r.content
+        "SELECT r.store_id, r.provider, r.session_id, r.message_id, r.timestamp, r.content
          FROM lcm_raw_messages r
          WHERE (?1 = 'all' OR r.provider = ?1)
            AND (?2 IS NULL OR r.session_id = ?2)
@@ -499,17 +611,19 @@ async fn run_offload_pass(
         .await?;
     let mut targets = Vec::new();
     while let Some(row) = rows.next().await? {
-        let content: Option<String> = row.get(4)?;
+        let content: Option<String> = row.get(5)?;
         let Some(content) = content else { continue };
         targets.push(OffloadRow {
             store_id: row.get(0)?,
             provider: row.get(1)?,
             session_id: row.get(2)?,
             message_id: row.get(3)?,
+            timestamp: row.get(4)?,
             content,
         });
     }
     report.eligible = targets.len() as u64;
+    report.oldest_eligible_at = targets.iter().map(|target| target.timestamp).min();
     if !mode.is_apply() {
         report.bytes_reclaimed = targets.iter().map(|t| t.content.len() as u64).sum();
         return Ok(report);
@@ -519,7 +633,7 @@ async fn run_offload_pass(
     // flip the row to external + placeholder in its own transaction. A crash
     // between file write and commit is cleaned up by the rollback guard.
     for target in targets {
-        match offload_one(conn, storage_root, &target).await {
+        match offload_one(conn, storage_root, &target, authorize).await {
             Ok(bytes) => {
                 report.acted += 1;
                 report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(bytes);
@@ -534,8 +648,10 @@ async fn offload_one(
     conn: &Connection,
     storage_root: &Path,
     target: &OffloadRow,
+    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
 ) -> Result<u64, LcmError> {
     let byte_len = target.content.len() as u64;
+    authorize("begin session retention offload payload write")?;
     let mut rollback = PayloadFileRollback::begin_cancellation_safe(storage_root);
     let payload_ref = payload::write_external_payload_tracked(
         storage_root,
@@ -558,28 +674,55 @@ async fn offload_one(
         payload_ref.kind, payload_ref.char_count, payload_ref.byte_count, payload_ref.payload_ref
     );
 
+    authorize("begin session retention offload pass")?;
     let txn = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
+    authorize("upsert session retention offload metadata")?;
     payload::upsert_payload_metadata(&txn, &payload_ref).await?;
-    txn.execute(
-        "UPDATE lcm_raw_messages
+    authorize("compare and swap session retention offload row")?;
+    let update_sql = format!(
+        "UPDATE lcm_raw_messages AS r
          SET content = NULL,
              content_hash = ?2,
              storage_kind = 'external',
              payload_ref = ?3,
              snippet_text = ?4,
              index_text = ?4
-         WHERE store_id = ?1",
-        params![
-            target.store_id,
-            payload_ref.content_hash.as_str(),
-            payload_ref.payload_ref.as_str(),
-            placeholder.as_str()
-        ],
-    )
-    .await?;
-    txn.commit().await?;
+         WHERE r.store_id = ?1
+           AND r.provider = ?5
+           AND r.session_id = ?6
+           AND r.message_id = ?7
+           AND r.timestamp = ?8
+           AND r.content = ?9
+           AND r.storage_kind = 'inline'
+           AND r.payload_ref IS NULL
+           AND {PROJECTION_DURABLE}"
+    );
+    let changed = txn
+        .execute(
+            &update_sql,
+            params![
+                target.store_id,
+                payload_ref.content_hash.as_str(),
+                payload_ref.payload_ref.as_str(),
+                placeholder.as_str(),
+                target.provider.as_str(),
+                target.session_id.as_str(),
+                target.message_id.as_str(),
+                target.timestamp,
+                target.content.as_str()
+            ],
+        )
+        .await?;
+    if changed != 1 {
+        txn.rollback().await?;
+        return Err(LcmError::Db(format!(
+            "offload compare-and-swap rejected changed row {}",
+            target.store_id
+        )));
+    }
+    commit_authorized(txn, authorize, "commit session retention offload pass").await?;
     rollback.disarm();
     Ok(byte_len)
 }
@@ -592,6 +735,7 @@ async fn run_dedupe_pass(
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
+    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
 ) -> Result<LcmRetentionPhaseReport, LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.dedupe_projected_after_days,
@@ -605,7 +749,8 @@ async fn run_dedupe_pass(
     // is the single retained content copy the projected form is reconstructable
     // from. A projected row with no raw twin is the sole copy and is never
     // touched here.
-    let sql = "SELECT sm.provider, sm.message_id, LENGTH(COALESCE(sm.text, '')) AS text_len
+    let sql = "SELECT sm.provider, sm.message_id, sm.timestamp,
+                      LENGTH(COALESCE(sm.text, '')) AS text_len
          FROM session_messages sm
          WHERE (?1 = 'all' OR sm.provider = ?1)
            AND (?2 IS NULL OR sm.session_id = ?2)
@@ -616,7 +761,20 @@ async fn run_dedupe_pass(
            )
          ORDER BY sm.timestamp ASC, sm.message_id ASC
          LIMIT ?4";
-    let mut rows = conn
+    let transaction = if mode.is_apply() {
+        authorize("begin session retention dedupe pass")?;
+        Some(
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let query_executor = transaction.as_ref().map_or(
+        RetentionQueryExecutor::Connection(conn),
+        RetentionQueryExecutor::Transaction,
+    );
+    let mut rows = query_executor
         .query(
             sql,
             params![
@@ -627,20 +785,25 @@ async fn run_dedupe_pass(
             ],
         )
         .await?;
-    let mut targets: Vec<(String, String, u64)> = Vec::new();
+    let mut targets: Vec<(String, String, i64, u64)> = Vec::new();
     while let Some(row) = rows.next().await? {
-        targets.push((row.get(0)?, row.get(1)?, row.get::<i64>(2)?.max(0) as u64));
+        targets.push((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get::<i64>(3)?.max(0) as u64,
+        ));
     }
     report.eligible = targets.len() as u64;
+    report.oldest_eligible_at = targets.iter().map(|(_, _, timestamp, _)| *timestamp).min();
     if !mode.is_apply() {
-        report.bytes_reclaimed = targets.iter().map(|(_, _, len)| *len).sum();
+        report.bytes_reclaimed = targets.iter().map(|(_, _, _, len)| *len).sum();
         return Ok(report);
     }
 
-    let txn = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await?;
-    for (provider_val, message_id, text_len) in &targets {
+    let txn = transaction.expect("apply mode starts a session retention dedupe transaction");
+    for (provider_val, message_id, _, text_len) in &targets {
+        authorize("dedupe session retention projected row")?;
         match txn
             .execute(
                 "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
@@ -648,14 +811,17 @@ async fn run_dedupe_pass(
             )
             .await
         {
-            Ok(_) => {
+            Ok(1) => {
                 report.acted += 1;
                 report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(*text_len);
             }
+            Ok(changed) => errors.push(format!(
+                "dedupe projected {message_id} changed {changed} rows"
+            )),
             Err(err) => errors.push(format!("dedupe projected {message_id}: {err}")),
         }
     }
-    txn.commit().await?;
+    commit_authorized(txn, authorize, "commit session retention dedupe pass").await?;
     Ok(report)
 }
 

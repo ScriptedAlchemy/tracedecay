@@ -50,10 +50,9 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
     let worktree_cg = TraceDecay::open(&worktree).await.unwrap();
     assert_eq!(worktree_cg.project_root(), worktree.as_path());
     assert_eq!(worktree_cg.store_layout().data_root, main_store);
-    assert_eq!(
-        resolved_project_session_db_path(&worktree).await.unwrap(),
-        worktree_cg.store_layout().sessions_db_path,
-        "session storage should follow the shared git-common-dir store too"
+    assert_path_eq(
+        &worktree_cg.store_layout().sessions_db_path,
+        main_store.join("sessions.db"),
     );
     assert!(
         !worktree_cg
@@ -274,12 +273,14 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     }
 
     let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
-    let global_db = GlobalDb::open().await.unwrap();
+    let global_db = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
     let registered = global_db
         .resolve_project_store_by_identity(&project, Some(&git_common_dir))
         .await
         .expect("resolve exact main checkout")
-        .expect("the exact main checkout must resolve through GlobalDb");
+        .expect("the exact main checkout must resolve through registered storage");
     assert_eq!(registered.project.project_id, main_project_id);
 
     fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
@@ -327,16 +328,21 @@ async fn same_remote_clone_is_not_considered_initialized_without_local_identity(
         &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
     );
 
-    TraceDecay::init(&project).await.unwrap();
+    let registered_session_db = TraceDecay::init(&project)
+        .await
+        .unwrap()
+        .store_layout()
+        .sessions_db_path
+        .clone();
 
     assert!(
         !TraceDecay::has_initialized_store(&clone).await,
         "a separate clone with the same origin is not a linked worktree and must not borrow the initialized store"
     );
-    assert_eq!(
-        resolved_project_session_db_path(&clone).await.unwrap(),
-        project_session_db_path(&clone),
-        "session storage must not use a same-remote clone as repository identity"
+    assert_ne!(
+        resolve_project_session_db_path(&clone).unwrap(),
+        registered_session_db,
+        "session storage must not use a same-remote clone as repository identity",
     );
 
     let original_identity = tracedecay::worktree::git_common_dir(&project)
@@ -392,13 +398,16 @@ async fn renamed_checkout_session_db_follows_registered_store() {
     fs::rename(&original, &renamed).unwrap();
     git(&renamed, &["remote", "remove", "origin"]);
 
-    let resolved = resolved_project_session_db_path(&renamed)
+    let resolved = TraceDecay::open(&renamed)
         .await
-        .expect("renamed checkout should resolve a session DB path");
+        .expect("renamed checkout should resolve a registered store")
+        .store_layout()
+        .sessions_db_path
+        .clone();
     assert_path_eq(&resolved, &registered_session_db);
     assert_ne!(
         normalize_test_path(&resolved),
-        normalize_test_path(&project_session_db_path(&renamed)),
+        normalize_test_path(&resolve_project_session_db_path(&renamed).unwrap()),
         "renamed checkout must not fork a fresh default-path session DB",
     );
 
@@ -406,9 +415,12 @@ async fn renamed_checkout_session_db_follows_registered_store() {
     {
         let alias = dir.path().join("repo-alias");
         symlink(&renamed, &alias).unwrap();
-        let via_alias = resolved_project_session_db_path(&alias)
+        let via_alias = TraceDecay::open(&alias)
             .await
-            .expect("symlink alias should retain repository identity");
+            .expect("symlink alias should retain repository identity")
+            .store_layout()
+            .sessions_db_path
+            .clone();
         assert_path_eq(via_alias, registered_session_db);
     }
 }
@@ -493,15 +505,13 @@ async fn same_remote_clone_session_db_does_not_borrow_registered_store() {
     // The original checkout still exists on disk, so the same-remote clone must
     // not inherit its registered session store even though the remote is unique
     // in the registry.
-    let resolved = resolved_project_session_db_path(&clone)
-        .await
+    let resolved = resolve_project_session_db_path(&clone)
         .expect("clone should still resolve a default session DB path");
     assert_ne!(
         normalize_test_path(&resolved),
         normalize_test_path(&registered_session_db),
         "a separate same-remote clone must not borrow another checkout's session store",
     );
-    assert_path_eq(&resolved, project_session_db_path(&clone));
 }
 
 #[tokio::test]
@@ -542,13 +552,16 @@ async fn same_remote_repositories_keep_distinct_persistent_identities() {
 
     fs::rename(&one, &renamed_one).unwrap();
 
-    let resolved = resolved_project_session_db_path(&renamed_one)
+    let resolved = TraceDecay::open(&renamed_one)
         .await
-        .expect("moved checkout should resolve its persistent repository identity");
+        .expect("moved checkout should resolve its persistent repository identity")
+        .store_layout()
+        .sessions_db_path
+        .clone();
     assert_path_eq(&resolved, one_session_db);
     assert_ne!(
         normalize_test_path(&resolved),
-        normalize_test_path(&project_session_db_path(&renamed_one)),
+        normalize_test_path(&resolve_project_session_db_path(&renamed_one).unwrap()),
         "remote ambiguity must not fork the moved repository into a new path-hash store"
     );
 }

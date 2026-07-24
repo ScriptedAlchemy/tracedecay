@@ -1,19 +1,15 @@
-use libsql::{Connection, params};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, NativeAliasV2, ObservationCollisionOutcomeV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId,
+    CanonicalObservationIdV1, NativeAliasV2, ObservationSourceCursorV1, ProjectionGenerationId,
     RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorTargetV2, SanitizationReceiptV1,
-    classify_observation_collision,
 };
-use tracedecay_store::observation::{
-    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
-};
+use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationCommitReceipt, ObservationPersistOutcome,
-    ObservationStoreError, ObservationStoreResult, RepositoryProvenanceAttachmentV1,
+    ObservationCommitReceipt, ObservationStoreError, ObservationStoreResult,
+    RepositoryProvenanceAttachmentV1,
 };
 
-use super::super::GlobalDb;
+use crate::db::engine::{Executor, QueryExecutor, params};
+
 use super::codec::{
     decode, decode_repository_provenance_attachment, decode_sequence, encode, encode_json_string,
     storage, storage_message,
@@ -127,7 +123,7 @@ fn fail_closed_on_alias_collision(
 }
 
 async fn persist_retrieval_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     candidate: &RetrievalAnchorRecordV2,
 ) -> ObservationStoreResult<(
     RetrievalAnchorRecordV2,
@@ -246,7 +242,7 @@ async fn persist_retrieval_anchor(
 }
 
 pub(super) async fn persist_observation_retrieval_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
     candidate: &RetrievalAnchorRecordV2,
 ) -> ObservationStoreResult<(
@@ -295,7 +291,7 @@ pub(super) async fn persist_observation_retrieval_anchor(
 }
 
 async fn persist_repository_provenance_attachment(
-    conn: &Connection,
+    conn: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
     candidate: &RepositoryProvenanceAttachmentV1,
 ) -> ObservationStoreResult<RepositoryProvenanceAttachmentV1> {
@@ -343,7 +339,7 @@ async fn persist_repository_provenance_attachment(
 }
 
 async fn read_observation_row(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     sql: &'static str,
     value: &str,
     operation: &'static str,
@@ -406,7 +402,7 @@ async fn read_observation_row(
 }
 
 pub(super) async fn read_by_observation_id(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<ObservationCommitReceipt>> {
     read_observation_row(
@@ -431,7 +427,7 @@ pub(super) async fn read_by_observation_id(
 }
 
 async fn read_cursor(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     source_json: &str,
     scope_json: &str,
 ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
@@ -457,7 +453,7 @@ async fn read_cursor(
 }
 
 async fn cursor_advance_receipt_matches(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     source_json: &str,
     scope_json: &str,
     advance: &ObservationCursorAdvance,
@@ -492,7 +488,7 @@ async fn cursor_advance_receipt_matches(
 }
 
 async fn persist_sanitization_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     receipt: &SanitizationReceiptV1,
 ) -> ObservationStoreResult<()> {
     let receipt_json = encode(receipt, "encode sanitization receipt")?;
@@ -538,7 +534,7 @@ async fn persist_sanitization_receipt(
 }
 
 async fn write_cursor(
-    conn: &Connection,
+    conn: &impl Executor,
     source_json: &str,
     scope_json: &str,
     cursor_json: &str,
@@ -556,7 +552,7 @@ async fn write_cursor(
 }
 
 async fn apply_cursor_advance(
-    conn: &Connection,
+    conn: &impl Executor,
     advance: &ObservationCursorAdvance,
 ) -> ObservationStoreResult<CursorAdvanceOutcome> {
     let source_json = encode(advance.next_cursor().source(), "encode observation source")?;
@@ -605,220 +601,4 @@ async fn apply_cursor_advance(
     let cursor_json = encode(advance.next_cursor(), "encode committed observation cursor")?;
     write_cursor(conn, &source_json, &scope_json, &cursor_json).await?;
     Ok(CursorAdvanceOutcome::Committed)
-}
-
-impl GlobalDb {
-    pub(crate) async fn persist_observation_result(
-        &self,
-        write: AnchoredObservationWrite,
-    ) -> ObservationStoreResult<ObservationPersistOutcome> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage("begin observation transaction", error))?;
-        let candidate = write.observation();
-        if let Some(existing) =
-            read_by_observation_id(&transaction, candidate.observation_id()).await?
-        {
-            let existing_observation = existing.observation();
-            let outcome = classify_observation_collision(existing_observation, candidate);
-            return match outcome {
-                ObservationCollisionOutcomeV1::ExactDuplicate
-                    if existing_observation.identity() == candidate.identity()
-                        && existing_observation.receipt() == candidate.receipt() =>
-                {
-                    Ok(ObservationPersistOutcome::ExactDuplicate(existing))
-                }
-                ObservationCollisionOutcomeV1::ExactDuplicate
-                    if existing_observation.identity() == candidate.identity() =>
-                {
-                    Err(ObservationStoreError::SanitizationReceiptCollision)
-                }
-                ObservationCollisionOutcomeV1::ExactDuplicate => {
-                    let identity = candidate.identity();
-                    let mut advance =
-                        ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
-                            identity.source().clone(),
-                            identity.scope().clone(),
-                            identity.generation(),
-                            identity.ordering_domain(),
-                            write.expected_cursor().cloned(),
-                            identity.position(),
-                            ObservationCoverageReason::DuplicateObservation,
-                            candidate.receipt().clone(),
-                        )?;
-                    match (
-                        write.next_cursor().file_identity(),
-                        write.next_cursor().resume_fingerprint(),
-                    ) {
-                        (Some(file_identity), Some(resume_fingerprint)) => {
-                            advance =
-                                advance.with_resume_checkpoint(file_identity, resume_fingerprint);
-                        }
-                        (None, None) => {}
-                        _ => {
-                            return Err(storage_message(
-                                "cover duplicate observation",
-                                "cursor resume checkpoint is incomplete",
-                            ));
-                        }
-                    }
-                    let advance_outcome = apply_cursor_advance(&transaction, &advance).await?;
-                    if advance_outcome == CursorAdvanceOutcome::Committed {
-                        transaction.commit().await.map_err(|error| {
-                            storage("commit duplicate observation coverage", error)
-                        })?;
-                    }
-                    Ok(ObservationPersistOutcome::CoveredDuplicate(
-                        ObservationCommitReceipt::new(
-                            existing.sequence(),
-                            existing.observation().clone(),
-                            write.next_cursor().clone(),
-                            existing.retrieval_anchor().clone(),
-                            existing.projection_generation().clone(),
-                        )?
-                        .with_repository_provenance_attachment(
-                            existing.repository_provenance_attachment().clone(),
-                        )?,
-                    ))
-                }
-                ObservationCollisionOutcomeV1::IdentityCollision => {
-                    Err(ObservationStoreError::ObservationCollision {
-                        observation_id: Box::new(candidate.observation_id().clone()),
-                        existing_digest: Box::new(
-                            existing_observation.payload_reference().digest().clone(),
-                        ),
-                        candidate_digest: Box::new(candidate.payload_reference().digest().clone()),
-                        outcome,
-                    })
-                }
-                ObservationCollisionOutcomeV1::Distinct => Err(storage_message(
-                    "classify observation collision",
-                    "matching observation identifier classified as distinct",
-                )),
-            };
-        }
-        let source_json = encode(candidate.source(), "encode observation source")?;
-        let scope_json = encode(candidate.scope(), "encode observation scope")?;
-        let actual_cursor = read_cursor(&transaction, &source_json, &scope_json).await?;
-        if actual_cursor.as_ref() != write.expected_cursor() {
-            return Err(ObservationStoreError::CursorConflict {
-                expected: Box::new(write.expected_cursor().cloned()),
-                actual: Box::new(actual_cursor),
-            });
-        }
-
-        let observation_json = encode(candidate, "encode observation")?;
-        let cursor_json = encode(write.next_cursor(), "encode committed observation cursor")?;
-        let receipt = candidate.receipt();
-        let receipt_id = receipt.receipt().receipt_id().as_str();
-        let payload_digest = candidate.payload_reference().digest().as_str();
-        persist_sanitization_receipt(&transaction, receipt).await?;
-
-        transaction
-            .execute(
-                "INSERT INTO observations
-                        (observation_id, payload_digest, receipt_id,
-                         observation_json, committed_cursor_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    candidate.observation_id().as_str(),
-                    payload_digest,
-                    receipt_id,
-                    observation_json.as_str(),
-                    cursor_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| storage("insert immutable observation", error))?;
-        let sequence = decode_sequence(
-            transaction.last_insert_rowid(),
-            "insert immutable observation",
-        )?;
-        let (retrieval_anchor, projection_generation, alias_collisions) =
-            persist_observation_retrieval_anchor(
-                &transaction,
-                candidate.observation_id(),
-                write.retrieval_anchor(),
-            )
-            .await?;
-        fail_closed_on_alias_collision(alias_collisions)?;
-        let repository_provenance = persist_repository_provenance_attachment(
-            &transaction,
-            candidate.observation_id(),
-            write.repository_provenance_attachment(),
-        )
-        .await?;
-        let committed = ObservationCommitReceipt::new(
-            sequence,
-            candidate.clone(),
-            write.next_cursor().clone(),
-            retrieval_anchor,
-            projection_generation,
-        )?
-        .with_repository_provenance_attachment(repository_provenance)?;
-
-        write_cursor(&transaction, &source_json, &scope_json, &cursor_json).await?;
-        transaction
-            .execute(
-                "INSERT INTO projection_queue (observation_id, observation_sequence)
-                 VALUES (?1, ?2)",
-                params![
-                    candidate.observation_id().as_str(),
-                    i64::try_from(committed.sequence()).map_err(|_| storage_message(
-                        "enqueue observation projection",
-                        "observation sequence exceeds SQLite integer range"
-                    ))?
-                ],
-            )
-            .await
-            .map_err(|error| storage("enqueue observation projection", error))?;
-
-        #[cfg(tracedecay_observation_fault_harness)]
-        wait_at_observation_persist_test_barrier(
-            ObservationPersistTestBarrierStage::PostWritePreCommit,
-            candidate.source().session_id().as_str(),
-        )
-        .await?;
-
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage("commit observation transaction", error))?;
-        #[cfg(tracedecay_observation_fault_harness)]
-        wait_at_observation_persist_test_barrier(
-            ObservationPersistTestBarrierStage::PostCommitPreAck,
-            candidate.source().session_id().as_str(),
-        )
-        .await?;
-        Ok(ObservationPersistOutcome::Committed(committed))
-    }
-
-    pub(crate) async fn get_observation_source_cursor_result(
-        &self,
-        source: &ObservationSourceIdentityV1,
-        scope: &ObservationScopeV1,
-    ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
-        let source_json = encode(source, "encode observation source")?;
-        let scope_json = encode(scope, "encode observation scope")?;
-        read_cursor(&self.conn, &source_json, &scope_json).await
-    }
-
-    pub(crate) async fn advance_observation_source_cursor_result(
-        &self,
-        advance: ObservationCursorAdvance,
-    ) -> ObservationStoreResult<CursorAdvanceOutcome> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage("begin observation cursor transaction", error))?;
-        let outcome = apply_cursor_advance(&transaction, &advance).await?;
-        if outcome == CursorAdvanceOutcome::Committed {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage("commit observation cursor transaction", error))?;
-        }
-        Ok(outcome)
-    }
 }

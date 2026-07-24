@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -16,7 +15,6 @@ use crate::global_db::ProjectRegistryContext;
 use crate::project_registry::{
     PublicCodeProject, PublicProjectRegistryContext, build_project_registry_view,
 };
-use crate::tracedecay::TraceDecay;
 
 #[derive(Clone)]
 pub(crate) struct DashboardRuntime {
@@ -74,6 +72,11 @@ impl DashboardRuntime {
         let context = db
             .project_registry_context_by_id(project_id)
             .await
+            .map_err(|error| {
+                config_error(format!(
+                    "registered project registry is unavailable: {error}"
+                ))
+            })?
             .ok_or_else(|| config_error(format!("registered project not found: {project_id}")))?;
         if let Some(cached) = self.project_states.read().await.get(project_id).cloned()
             && cached.registry_context == context
@@ -82,15 +85,24 @@ impl DashboardRuntime {
                 state: cached.state,
             });
         }
-        let project_root = PathBuf::from(&context.project.canonical_root);
-        let cg = TraceDecay::open_read_only(&project_root).await?;
+        let project_root = std::path::PathBuf::from(&context.project.canonical_root);
+        let resolver = self.active.project_graph_resolver.as_ref().ok_or_else(|| {
+            config_error(format!(
+                "registered project graph is not mounted: {project_id}"
+            ))
+        })?;
+        let cg = resolver(project_root.clone()).await.ok_or_else(|| {
+            config_error(format!(
+                "registered project graph is not mounted: {project_id}"
+            ))
+        })?;
         if cg.store_layout().identity.project_id.as_deref() != Some(project_id) {
             return Err(config_error(format!(
                 "registered project id mismatch for {project_id}: {}",
                 project_root.display()
             )));
         }
-        let state = build_selected_project_state(&cg, &self.active).await?;
+        let state = build_selected_project_state(cg, &self.active).await?;
         let mut project_states = self.project_states.write().await;
         if let Some(cached) = project_states.get(project_id).cloned()
             && cached.registry_context == context
@@ -141,11 +153,41 @@ pub(crate) async fn list(
         }));
     };
 
-    let mut projects = db.list_code_projects(limit + 1).await;
+    let Ok(mut projects) = db.list_code_projects(limit + 1).await else {
+        return Json(json!({
+            "status": "registry_unavailable",
+            "limit": limit,
+            "truncated": false,
+            "projects": [],
+            "active_project_id": runtime.active_project_id(),
+            "active_project_root": runtime.active_project_root(),
+            "summary": {
+                "project_count": 0,
+                "repo_count": 0,
+                "truncated": false,
+            },
+            "project_tree": [],
+        }));
+    };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let active_project_id = runtime.active_project_id().map(str::to_string);
-    let contexts = db.project_registry_contexts_for_projects(&projects).await;
+    let Ok(contexts) = db.project_registry_contexts_for_projects(&projects).await else {
+        return Json(json!({
+            "status": "registry_unavailable",
+            "limit": limit,
+            "truncated": truncated,
+            "projects": [],
+            "active_project_id": active_project_id,
+            "active_project_root": runtime.active_project_root(),
+            "summary": {
+                "project_count": 0,
+                "repo_count": 0,
+                "truncated": truncated,
+            },
+            "project_tree": [],
+        }));
+    };
     let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
     let rows = projects
         .iter()
@@ -179,7 +221,22 @@ pub(crate) async fn context(
             })),
         );
     };
-    let Some(context) = db.project_registry_context_by_id(&project_id).await else {
+    let context = match db.project_registry_context_by_id(&project_id).await {
+        Ok(context) => context,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "registry_unavailable",
+                    "error": error.to_string(),
+                    "project": null,
+                    "aliases": [],
+                    "stores": [],
+                })),
+            );
+        }
+    };
+    let Some(context) = context else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({

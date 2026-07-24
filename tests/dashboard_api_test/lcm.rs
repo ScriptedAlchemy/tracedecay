@@ -7,30 +7,41 @@
 use std::path::Path;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
-    pick_free_port, response_to_json, wait_for_dashboard, write_empty_global_db_schema,
+    GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent, pick_free_port,
+    response_to_json, wait_for_dashboard,
 };
 use crate::dashboard_api_support::{MessageDetails, message};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::dashboard;
-use tracedecay::global_db::GlobalDb;
-use tracedecay::sessions::SessionRecord;
-use tracedecay::sessions::cursor::project_session_db_path;
-use tracedecay::sessions::lcm::{LcmCleanConfig, LcmGcConfig, LcmSourceRef, LcmSummaryNodeDraft};
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::sessions::lcm::{
+    LcmCleanConfig, LcmError, LcmGcConfig, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft,
+};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_domain::ProjectId;
 
 struct Fixture {
     _tmp: TempDir,
-    _env_guards: Vec<EnvVarGuard>,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
-    session_db_path: std::path::PathBuf,
     _project_root: std::path::PathBuf,
     session_id: String,
     child_node_id: String,
     parent_node_id: String,
+    orphan_path: Option<std::path::PathBuf>,
+    seeded_status: Option<LcmStatus>,
+    seeded_doctor: Option<Value>,
+}
+
+struct PayloadFixtureSeed {
+    message_id: &'static str,
+    body: String,
+    orphan_ref: &'static str,
+    orphan_body: &'static str,
+    modified: Option<std::time::SystemTime>,
 }
 
 impl Drop for Fixture {
@@ -57,130 +68,141 @@ fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> Se
     }
 }
 
-async fn lookup_store_id(db_path: &Path, message_id: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path)
-        .build()
-        .await
-        .expect("open raw libsql db");
-    let conn = db.connect().expect("connect raw libsql db");
-    let mut rows = conn
-        .query(
-            "SELECT store_id FROM lcm_raw_messages WHERE message_id = ?1",
-            libsql::params![message_id],
-        )
-        .await
-        .expect("query store id");
-    let row = rows
-        .next()
-        .await
-        .expect("read store id row")
-        .expect("store id row present");
-    row.get(0).expect("store id")
-}
-
-async fn seed_lcm_store(db_path: &Path, project: &Path) -> (String, String, String) {
-    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
+async fn seed_lcm_store(
+    runtime: &HostAdmissionTestRuntimeV1,
+    project: &Path,
+    external_message: Option<SessionMessageRecord>,
+) -> Result<(String, String, String), LcmError> {
     let session_id = "sess-alpha".to_string();
     let started_at = 1_720_000_000;
     let msg1_at = started_at + 10;
     let msg2_at = started_at + 20;
 
     assert!(
-        gdb.upsert_session(&session(
-            &session_id,
-            project,
-            started_at,
-            "Launch planning session"
-        ))
-        .await
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &session(&session_id, project, started_at, "Launch planning session",),
+            )
+            .await
+            .expect("seed session")
     );
     assert!(
-        gdb.upsert_session_message(&message(
-            "m-alpha-1",
-            &session_id,
-            "user",
-            1,
-            "Let's plan the launch checklist and rollout.",
-            MessageDetails {
-                timestamp: msg1_at,
-                model: Some("gpt-5.5-high"),
-                metadata_json: Some(r#"{"usage":{"input_tokens":42}}"#),
-            },
-        ))
-        .await
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &message(
+                    "m-alpha-1",
+                    &session_id,
+                    "user",
+                    1,
+                    "Let's plan the launch checklist and rollout.",
+                    MessageDetails {
+                        timestamp: msg1_at,
+                        model: Some("gpt-5.5-high"),
+                        metadata_json: Some(r#"{"usage":{"input_tokens":42}}"#),
+                    },
+                ),
+            )
+            .await
+            .expect("seed first message")
     );
     assert!(
-        gdb.upsert_session_message(&message(
-            "m-alpha-2",
-            &session_id,
-            "assistant",
-            2,
-            "Launch summary: ship the rollout plan and verify dashboards.",
-            MessageDetails {
-                timestamp: msg2_at,
-                model: Some("gpt-5.5-high"),
-                metadata_json: Some(r#"{"usage":{"output_tokens":24}}"#),
-            },
-        ))
-        .await
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &message(
+                    "m-alpha-2",
+                    &session_id,
+                    "assistant",
+                    2,
+                    "Launch summary: ship the rollout plan and verify dashboards.",
+                    MessageDetails {
+                        timestamp: msg2_at,
+                        model: Some("gpt-5.5-high"),
+                        metadata_json: Some(r#"{"usage":{"output_tokens":24}}"#),
+                    },
+                ),
+            )
+            .await
+            .expect("seed second message")
     );
 
-    let msg1_store_id = lookup_store_id(db_path, "m-alpha-1").await;
-    let msg2_store_id = lookup_store_id(db_path, "m-alpha-2").await;
-
-    let child = gdb
-        .lcm_insert_summary_node(LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "conv-alpha".to_string(),
-            session_id: session_id.clone(),
-            depth: 0,
-            summary_text: "Launch planning discussion and rollout prep.".to_string(),
-            source_refs: vec![
-                LcmSourceRef::RawMessage {
-                    store_id: msg1_store_id,
-                },
-                LcmSourceRef::RawMessage {
-                    store_id: msg2_store_id,
-                },
-            ],
-            source_token_count: 120,
-            summary_token_count: 30,
-            source_time_start: Some(msg1_at),
-            source_time_end: Some(msg2_at),
-            expand_hint: Some("launch prep".to_string()),
-            metadata_json: Some(
-                r#"{"category":"planning","tags":["launch"],"entities":["alpha"]}"#.to_string(),
-            ),
-        })
+    let msg1_store_id = runtime
+        .lcm_load_raw_message_for_test("cursor", "m-alpha-1")
         .await
-        .expect("insert child summary node");
-
-    let parent = gdb
-        .lcm_insert_summary_node(LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "conv-alpha".to_string(),
-            session_id: session_id.clone(),
-            depth: 1,
-            summary_text: "Launch condensed summary node.".to_string(),
-            source_refs: vec![LcmSourceRef::SummaryNode {
-                node_id: child.node_id.clone(),
-            }],
-            source_token_count: 30,
-            summary_token_count: 10,
-            source_time_start: Some(msg1_at),
-            source_time_end: Some(msg2_at),
-            expand_hint: Some("launch condensed".to_string()),
-            metadata_json: Some(r#"{"category":"rollup"}"#.to_string()),
-        })
+        .expect("first raw message")
+        .store_id;
+    let msg2_store_id = runtime
+        .lcm_load_raw_message_for_test("cursor", "m-alpha-2")
         .await
-        .expect("insert parent summary node");
+        .expect("second raw message")
+        .store_id;
 
-    (session_id, child.node_id, parent.node_id)
+    let child = runtime
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "conv-alpha".to_string(),
+                session_id: session_id.clone(),
+                depth: 0,
+                summary_text: "Launch planning discussion and rollout prep.".to_string(),
+                source_refs: vec![
+                    LcmSourceRef::RawMessage {
+                        store_id: msg1_store_id,
+                    },
+                    LcmSourceRef::RawMessage {
+                        store_id: msg2_store_id,
+                    },
+                ],
+                source_token_count: 120,
+                summary_token_count: 30,
+                source_time_start: Some(msg1_at),
+                source_time_end: Some(msg2_at),
+                expand_hint: Some("launch prep".to_string()),
+                metadata_json: Some(
+                    r#"{"category":"planning","tags":["launch"],"entities":["alpha"]}"#.to_string(),
+                ),
+            },
+        )
+        .await?;
+
+    let parent = runtime
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "conv-alpha".to_string(),
+                session_id: session_id.clone(),
+                depth: 1,
+                summary_text: "Launch condensed summary node.".to_string(),
+                source_refs: vec![LcmSourceRef::SummaryNode {
+                    node_id: child.node_id.clone(),
+                }],
+                source_token_count: 30,
+                summary_token_count: 10,
+                source_time_start: Some(msg1_at),
+                source_time_end: Some(msg2_at),
+                expand_hint: Some("launch condensed".to_string()),
+                metadata_json: Some(r#"{"category":"rollup"}"#.to_string()),
+            },
+        )
+        .await?;
+
+    if let Some(external_message) = external_message {
+        runtime
+            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Project, &external_message)
+            .await?;
+    }
+
+    Ok((session_id, child.node_id, parent.node_id))
 }
 
-async fn start_fixture() -> Fixture {
+async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
     let tmp = TempDir::new().expect("temp dir");
     let project_root = tmp.path().join("project");
+    let profile_root = tmp.path().join(".tracedecay");
     std::fs::create_dir_all(&project_root).expect("project dir");
     std::fs::write(
         project_root.join("lib.rs"),
@@ -188,19 +210,91 @@ async fn start_fixture() -> Fixture {
     )
     .expect("seed source file");
 
-    let global_db_path = tmp.path().join("global").join("global.db");
-    let env_guards = vec![EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path)];
-    // Pre-create both GlobalDb-schema stores from the cached empty template
-    // so seeding and dashboard startup open existing DBs instead of paying a
-    // full schema creation each (slow on Windows).
-    write_empty_global_db_schema(&global_db_path).await;
-    let cg = TraceDecay::init(&project_root)
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: None,
+    };
+    let initialized = TraceDecay::init_with_options(&project_root, open_options.clone())
         .await
         .expect("tracedecay init");
-    let session_db_path = project_session_db_path(&project_root);
-    write_empty_global_db_schema(&session_db_path).await;
+    drop(initialized);
+    let marker = tracedecay::storage::read_repository_identity_marker(&project_root)
+        .expect("read project identity")
+        .expect("project identity marker");
+    let project_id = ProjectId::new(marker.project_id).expect("valid project identity");
+    let runtime = HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        .await
+        .expect("registered project session runtime");
+    let external_message = payload_seed.as_ref().map(|seed| {
+        let mut external = message(
+            seed.message_id,
+            "sess-alpha",
+            "tool",
+            3,
+            &seed.body,
+            MessageDetails {
+                timestamp: 1_720_000_030,
+                model: Some("gpt-5.5-high"),
+                metadata_json: None,
+            },
+        );
+        external.kind = Some("tool_result".to_string());
+        external
+    });
     let (session_id, child_node_id, parent_node_id) =
-        seed_lcm_store(&session_db_path, &project_root).await;
+        seed_lcm_store(&runtime, &project_root, external_message)
+            .await
+            .expect("seed registered LCM store");
+    let payload_dir = runtime
+        .database_path(HostAdmissionScope::Project)
+        .expect("project session database path")
+        .parent()
+        .expect("project session storage root")
+        .join("lcm-payloads");
+    let orphan_path = payload_seed.as_ref().map(|seed| {
+        std::fs::create_dir_all(&payload_dir).expect("payload dir");
+        let path = payload_dir.join(seed.orphan_ref);
+        std::fs::write(&path, seed.orphan_body).expect("orphan payload write");
+        if let Some(modified) = seed.modified {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(modified))
+                .expect("set orphan payload modification time");
+        }
+        path
+    });
+    let seeded_status = if payload_seed.is_some() {
+        Some(
+            runtime
+                .lcm_status_for_test("cursor", Some(&session_id))
+                .await
+                .expect("seeded status"),
+        )
+    } else {
+        None
+    };
+    let seeded_doctor = if payload_seed.is_some() {
+        Some(
+            runtime
+                .lcm_doctor_for_test(
+                    "cursor",
+                    Some(&session_id),
+                    "diagnose",
+                    false,
+                    LcmCleanConfig::default(),
+                    LcmGcConfig::default(),
+                )
+                .await
+                .expect("seeded doctor"),
+        )
+    } else {
+        None
+    };
+    drop(runtime);
+    let cg = TraceDecay::open_with_options(&project_root, open_options)
+        .await
+        .expect("reopen tracedecay");
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {
@@ -212,14 +306,15 @@ async fn start_fixture() -> Fixture {
 
     Fixture {
         _tmp: tmp,
-        _env_guards: env_guards,
         base_url,
         server,
-        session_db_path,
         _project_root: project_root,
         session_id,
         child_node_id,
         parent_node_id,
+        orphan_path,
+        seeded_status,
+        seeded_doctor,
     }
 }
 
@@ -230,7 +325,7 @@ fn lcm_overview_and_search_preserve_shapes() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
+        let fixture = start_fixture(None).await;
         let agent = http_agent();
 
         let (status, caps) = get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
@@ -290,7 +385,7 @@ fn lcm_session_and_node_routes_expand_sources() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
+        let fixture = start_fixture(None).await;
         let agent = http_agent();
 
         let (status, session) = get_json(
@@ -360,47 +455,18 @@ fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
-        let db = GlobalDb::open_at(&fixture.session_db_path)
-            .await
-            .expect("session db should reopen");
-        let mut external = message(
-            "payload-tool-1",
-            &fixture.session_id,
-            "tool",
-            3,
-            &format!("dashboard payload secret {}", "X".repeat(300_000)),
-            MessageDetails {
-                timestamp: 1_720_000_030,
-                model: Some("gpt-5.5-high"),
-                metadata_json: None,
-            },
-        );
-        external.kind = Some("tool_result".to_string());
-        db.lcm_store(fixture.session_db_path.parent().expect("session db parent"))
-            .ingest_raw_message(&external)
-            .await
-            .expect("payload-backed message should ingest");
-        let payload_dir = fixture
-            .session_db_path
-            .parent()
-            .unwrap()
-            .join("lcm-payloads");
-        std::fs::create_dir_all(&payload_dir).expect("payload dir");
-        let orphan_ref =
-            "payload_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.payload";
-        let orphan_path = payload_dir.join(orphan_ref);
-        std::fs::write(&orphan_path, "dashboard orphan body that must not leak")
-            .expect("orphan payload write");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&orphan_path)
-            .and_then(|file| {
-                file.set_modified(
-                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_719_000_000),
-                )
-            })
-            .expect("backdate orphan payload");
+        let fixture = start_fixture(Some(PayloadFixtureSeed {
+            message_id: "payload-tool-1",
+            body: format!("dashboard payload secret {}", "X".repeat(300_000)),
+            orphan_ref:
+                "payload_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.payload",
+            orphan_body: "dashboard orphan body that must not leak",
+            modified: Some(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_719_000_000),
+            ),
+        }))
+        .await;
+        let orphan_path = fixture.orphan_path.as_ref().expect("orphan payload path");
 
         let agent = http_agent();
         let (status, health) = get_json(
@@ -469,56 +535,20 @@ fn lcm_payload_health_numbers_agree_across_status_doctor_and_dashboard() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_fixture().await;
-        let db = GlobalDb::open_at(&fixture.session_db_path)
-            .await
-            .expect("session db should reopen");
         let body = format!("cross surface payload secret {}", "Y".repeat(300_000));
-        let mut external = message(
-            "payload-tool-agreement",
-            &fixture.session_id,
-            "tool",
-            3,
-            &body,
-            MessageDetails {
-                timestamp: 1_720_000_030,
-                model: Some("gpt-5.5-high"),
-                metadata_json: None,
-            },
-        );
-        external.kind = Some("tool_result".to_string());
-        db.lcm_store(fixture.session_db_path.parent().expect("session db parent"))
-            .ingest_raw_message(&external)
-            .await
-            .expect("payload-backed message should ingest");
+        let fixture = start_fixture(Some(PayloadFixtureSeed {
+            message_id: "payload-tool-agreement",
+            body: body.clone(),
+            orphan_ref:
+                "payload_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.payload",
+            orphan_body: "cross surface orphan body that must not leak",
+            modified: None,
+        }))
+        .await;
+        let orphan_path = fixture.orphan_path.as_ref().expect("orphan payload path");
 
-        let payload_dir = fixture
-            .session_db_path
-            .parent()
-            .unwrap()
-            .join("lcm-payloads");
-        std::fs::create_dir_all(&payload_dir).expect("payload dir");
-        let orphan_ref =
-            "payload_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.payload";
-        let orphan_path = payload_dir.join(orphan_ref);
-        std::fs::write(&orphan_path, "cross surface orphan body that must not leak")
-            .expect("orphan payload write");
-
-        let status = db
-            .lcm_status("cursor", Some(&fixture.session_id))
-            .await
-            .expect("status should load");
-        let doctor = db
-            .lcm_doctor(
-                "cursor",
-                Some(&fixture.session_id),
-                "diagnose",
-                false,
-                LcmCleanConfig::default(),
-                LcmGcConfig::default(),
-            )
-            .await
-            .expect("doctor should load");
+        let status = fixture.seeded_status.as_ref().expect("seeded status");
+        let doctor = fixture.seeded_doctor.as_ref().expect("seeded doctor");
         let (dashboard_status, dashboard) = get_json(
             &http_agent(),
             &format!(

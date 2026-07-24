@@ -1,11 +1,11 @@
 use tempfile::TempDir;
 
-use crate::global_db::GlobalDb;
+use crate::db::engine::{TestConnection, TransactionBehavior};
 use crate::sessions::SessionMessageRecord;
+use crate::sessions::lcm::{raw, schema};
 
 use super::{
-    ExternalPayloadWrite, LcmStore, PayloadFileRollback, payload_dir,
-    write_external_payload_tracked,
+    ExternalPayloadWrite, PayloadFileRollback, payload_dir, write_external_payload_tracked,
 };
 
 #[tokio::test]
@@ -64,12 +64,33 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     std::fs::create_dir(&storage_root).unwrap();
-    let db = GlobalDb::open_at(&tmp.path().join("global.db"))
-        .await
-        .unwrap();
-    let conn = db.conn();
+    let conn = TestConnection::open(&tmp.path().join("global.db"));
     conn.execute_batch(
-        "CREATE TRIGGER reject_raw_message
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+        );
+        CREATE TABLE session_messages (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            timestamp INTEGER,
+            ordinal INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            PRIMARY KEY(provider, message_id)
+        );",
+    )
+    .await
+    .unwrap();
+    schema::ensure_lcm_schema(&*conn).await.unwrap();
+    conn.execute_batch(
+        "INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES ('cursor', 'rollback-session', '/tmp/project', '/tmp/project');
+        CREATE TRIGGER reject_raw_message
         BEFORE INSERT ON lcm_raw_messages
         BEGIN
             SELECT RAISE(ABORT, 'late raw failure');
@@ -92,12 +113,23 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
         source_offset: None,
         metadata_json: None,
     };
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let mut rollback = PayloadFileRollback::begin_cancellation_safe(&storage_root);
     assert!(
-        LcmStore::new(&db, storage_root.clone())
-            .ingest_raw_message(&message)
-            .await
-            .is_err()
+        raw::upsert_raw_message_with_payload_tracked(
+            &transaction,
+            &storage_root,
+            &message,
+            &mut rollback,
+        )
+        .await
+        .is_err()
     );
+    transaction.rollback().await.unwrap();
+    drop(rollback);
     let count: i64 = conn
         .query("SELECT COUNT(*) FROM lcm_external_payloads", ())
         .await

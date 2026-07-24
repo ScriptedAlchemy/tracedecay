@@ -1,4 +1,4 @@
-use libsql::params;
+use crate::db::engine::{TestConnection, TransactionBehavior, params};
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
     GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1,
@@ -17,7 +17,7 @@ use tracedecay_store::{
 };
 
 use super::read::GitIndexReadExecutor;
-use crate::global_db::GlobalDb;
+use super::store::GlobalDbGitIndexTransactionStore;
 
 fn key(value: &str) -> GitIndexIdempotencyKey {
     GitIndexIdempotencyKey::new(value.to_owned()).expect("idempotency key")
@@ -205,19 +205,29 @@ fn terminal_write(
     }
 }
 
-async fn open_database() -> (tempfile::TempDir, std::path::PathBuf, GlobalDb) {
+async fn open_database() -> (tempfile::TempDir, std::path::PathBuf, TestConnection) {
     let directory = tempfile::tempdir().expect("temporary database directory");
     let path = directory.path().join("project-sessions.db");
-    let database = GlobalDb::open_at_without_structured_backfill(&path)
+    let database = TestConnection::open(&path);
+    let transaction = database
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
-        .expect("open canonical database");
+        .expect("begin schema transaction");
+    super::ensure_git_index_transaction_schema(&transaction)
+        .await
+        .expect("ensure Git index schema");
+    transaction.commit().await.expect("commit Git index schema");
     (directory, path, database)
+}
+
+fn test_store(database: &TestConnection) -> GlobalDbGitIndexTransactionStore<'_> {
+    GlobalDbGitIndexTransactionStore::for_engine_test(database)
 }
 
 #[tokio::test]
 async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
     let (_directory, _path, database) = open_database().await;
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     let original = preview();
     store
         .save_preview(original.clone())
@@ -256,7 +266,7 @@ async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
 #[tokio::test]
 async fn journal_compare_and_swap_rejects_stale_phase_epochs() {
     let (_directory, _path, database) = open_database().await;
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     let request = begin_request(&preview(), "idempotency.journal-cas.fixture");
     store
         .begin_or_replay(request.clone())
@@ -293,7 +303,7 @@ async fn journal_compare_and_swap_rejects_stale_phase_epochs() {
 async fn canonical_schema_persists_only_commit_intent_digest() {
     let (_directory, _path, database) = open_database().await;
     let preview = preview();
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     store
         .save_preview(preview.clone())
         .await
@@ -365,7 +375,7 @@ async fn restart_replays_terminal_receipt_and_rejects_conflicting_input() {
     let preview = preview();
     let request = begin_request(&preview, "idempotency.restart.fixture");
     let receipt = {
-        let store = database.git_index_transaction_store();
+        let store = test_store(&database);
         assert!(matches!(
             store.begin_or_replay(request.clone()).await,
             Ok(GitIndexTransactionBeginResultV1::Started(_))
@@ -381,10 +391,8 @@ async fn restart_replays_terminal_receipt_and_rejects_conflicting_input() {
     };
     drop(database);
 
-    let reopened = GlobalDb::open_at_without_structured_backfill(&path)
-        .await
-        .expect("reopen canonical database");
-    let store = reopened.git_index_transaction_store();
+    let reopened = TestConnection::open(&path);
+    let store = test_store(&reopened);
     assert!(matches!(
         store.begin_or_replay(request.clone()).await,
         Ok(GitIndexTransactionBeginResultV1::Replay(stored)) if *stored == receipt
@@ -408,7 +416,7 @@ async fn terminal_failure_receipts_persist_and_only_inspection_requires_recovery
     let aborted = begin_request(&preview, "idempotency.failure.aborted");
     let inspection = begin_request(&preview, "idempotency.failure.inspection");
     let (aborted_receipt, inspection_receipt) = {
-        let store = database.git_index_transaction_store();
+        let store = test_store(&database);
         store
             .begin_or_replay(aborted.clone())
             .await
@@ -438,10 +446,8 @@ async fn terminal_failure_receipts_persist_and_only_inspection_requires_recovery
     };
     drop(database);
 
-    let reopened = GlobalDb::open_at_without_structured_backfill(&path)
-        .await
-        .expect("reopen canonical database");
-    let store = reopened.git_index_transaction_store();
+    let reopened = TestConnection::open(&path);
+    let store = test_store(&reopened);
     assert!(matches!(
         store.begin_or_replay(aborted).await,
         Ok(GitIndexTransactionBeginResultV1::Replay(stored))
@@ -469,7 +475,7 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
     let preview = preview();
     let request = begin_request(&preview, "idempotency.quarantine.fixture");
     {
-        let store = database.git_index_transaction_store();
+        let store = test_store(&database);
         store
             .begin_or_replay(request.clone())
             .await
@@ -492,10 +498,8 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
     }
     drop(database);
 
-    let reopened = GlobalDb::open_at_without_structured_backfill(&path)
-        .await
-        .expect("reopen canonical database");
-    let store = reopened.git_index_transaction_store();
+    let reopened = TestConnection::open(&path);
+    let store = test_store(&reopened);
     let mut blocked = begin_request(&preview, "idempotency.quarantine.blocked");
     blocked.journal.transaction_id =
         GitIndexTransactionId::new("transaction.idempotency.quarantine.blocked")
@@ -572,10 +576,8 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
     );
     drop(reopened);
 
-    let reopened = GlobalDb::open_at_without_structured_backfill(&path)
-        .await
-        .expect("reopen after quarantine clear");
-    let store = reopened.git_index_transaction_store();
+    let reopened = TestConnection::open(&path);
+    let store = test_store(&reopened);
     assert!(
         store
             .recovery_repositories()
@@ -594,7 +596,7 @@ async fn proven_terminal_receipt_atomically_resolves_an_admission_quarantine() {
     let (_directory, _path, database) = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.quarantine.terminal-proof");
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     store
         .begin_or_replay(request.clone())
         .await
@@ -656,7 +658,7 @@ async fn recovery_indexes_include_only_repositories_with_recoverable_records() {
     );
     let first = begin_request(&first_preview, "idempotency.recovery.first");
     let second = begin_request(&second_preview, "idempotency.recovery.second");
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     store
         .begin_or_replay(first.clone())
         .await
@@ -709,13 +711,12 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
     let (_directory, _path, database) = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.atomic.fixture");
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     store
         .begin_or_replay(request.clone())
         .await
         .expect("start transaction");
-    let writer = database.writer_connection().await.expect("schema writer");
-    writer
+    database
         .execute_batch(
             "CREATE TRIGGER fail_git_index_terminal_receipt
              BEFORE INSERT ON git_index_transaction_receipts
@@ -725,8 +726,6 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
         )
         .await
         .expect("install fault trigger");
-    drop(writer);
-
     assert_eq!(
         store
             .write_terminal(terminal_write(
@@ -755,7 +754,7 @@ async fn read_executor_round_trips_preview_and_transaction_record() {
     let (_directory, _path, database) = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.read-executor.round-trip");
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     store
         .save_preview(preview.clone())
         .await
@@ -814,7 +813,7 @@ async fn read_executor_keyset_walks_recovery_candidates() {
     let (_directory, _path, database) = open_database().await;
     let preview = preview();
     let repository_id = preview.repository_snapshot.repository_id.clone();
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     // Three non-terminal (Prepared) transactions on one repository are all
     // recovery candidates; keys are ordered so the keyset walk is deterministic.
     let keys = [
@@ -876,7 +875,7 @@ async fn read_executor_keyset_walks_recovery_repositories() {
     );
     let first_repository = first_preview.repository_snapshot.repository_id.clone();
     let second_repository = second_preview.repository_snapshot.repository_id.clone();
-    let store = database.git_index_transaction_store();
+    let store = test_store(&database);
     store
         .begin_or_replay(begin_request(&first_preview, "idempotency.repo-walk.first"))
         .await

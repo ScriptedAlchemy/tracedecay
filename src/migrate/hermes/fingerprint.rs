@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use libsql::{Connection, Value};
 use sha2::{Digest, Sha256};
 
 use super::copy::{quote_identifier, table_columns};
 use super::{COPIED_MEMORY_TABLES, COPIED_TABLES};
+use crate::db::engine::{QueryExecutor, Value};
 
 pub(crate) fn hash_sqlite_value(hash: &mut Sha256, value: Value) {
     match value {
@@ -32,11 +32,14 @@ pub(crate) fn hash_sqlite_value(hash: &mut Sha256, value: Value) {
     }
 }
 
-pub(crate) async fn hash_connection_tables(
+pub(crate) async fn hash_connection_tables<Q>(
     hash: &mut Sha256,
-    source: &Connection,
+    source: &Q,
     tables: &[&str],
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    Q: QueryExecutor + ?Sized,
+{
     for table in tables {
         let columns = table_columns(source, table).await?;
         if columns.is_empty() {
@@ -78,11 +81,15 @@ pub(crate) async fn hash_connection_tables(
     Ok(())
 }
 
-pub(crate) async fn logical_source_fingerprint(
-    source: Option<&Connection>,
+pub(crate) async fn logical_source_fingerprint<S, M>(
+    source: Option<&S>,
     source_path: &Path,
-    memory_source: Option<(&Connection, &Path)>,
-) -> Result<String, String> {
+    memory_source: Option<(&M, &Path)>,
+) -> Result<String, String>
+where
+    S: QueryExecutor + ?Sized,
+    M: QueryExecutor + ?Sized,
+{
     let mut hash = Sha256::new();
     hash.update(b"tracedecay-hermes-legacy-session-store-v1\0");
     hash.update(

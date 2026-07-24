@@ -3,7 +3,8 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::{CodeProjectRecord, GlobalDb, StoreInstanceRecord};
+use super::project_registry::LegacyPathAliasKind;
+use super::{CodeProjectRecord, RegisteredGlobalDb, StoreInstanceRecord};
 
 /// The already-existing project store authorized to persist sanitized observations.
 ///
@@ -135,7 +136,7 @@ impl fmt::Display for ProjectObservationStoreError {
 
 impl Error for ProjectObservationStoreError {}
 
-impl GlobalDb {
+impl RegisteredGlobalDb {
     /// Resolve the sole existing store authorized for project observations.
     ///
     /// Repository markers, the canonical checkout path, and Git's common
@@ -160,12 +161,19 @@ impl GlobalDb {
                 });
             }
         };
-        let project = self.get_code_project(&project_id).await.ok_or_else(|| {
-            ProjectObservationStoreError::ProjectNotRegistered {
+        let context = self
+            .project_registry_context_by_id(&project_id)
+            .await
+            .map_err(|error| ProjectObservationStoreError::NonCanonicalStore {
+                project_id: project_id.clone(),
+                store_id: "<unresolved>".to_string(),
+                reason: format!("project registry context is unavailable: {error}"),
+            })?
+            .ok_or_else(|| ProjectObservationStoreError::ProjectNotRegistered {
                 project_root: project_root.clone(),
-            }
-        })?;
-        let mut stores = self.list_store_contexts_for_project(&project_id).await;
+            })?;
+        let project = context.project;
+        let mut stores = context.stores;
         let store = match stores.len() {
             0 => {
                 return Err(ProjectObservationStoreError::StoreNotRegistered { project_id });
@@ -209,13 +217,26 @@ impl GlobalDb {
                 });
             }
         }
-        if let Some(project_id) = self.project_id_by_path_alias(project_root).await {
+        if let Some(project_id) = self
+            .project_id_by_native_path_alias(project_root, LegacyPathAliasKind::ProjectRoot)
+            .await
+            .map_err(|error| ProjectObservationStoreError::NonCanonicalStore {
+                project_id: "<unresolved>".to_string(),
+                store_id: "<unresolved>".to_string(),
+                reason: format!("project path alias lookup failed: {error}"),
+            })?
+        {
             project_ids.insert(project_id);
         }
         if let Some(git_common_dir) = crate::worktree::git_common_dir(project_root)
             && let Some(project_id) = self
-                .project_id_by_git_common_dir_alias(&git_common_dir)
+                .project_id_by_native_path_alias(&git_common_dir, LegacyPathAliasKind::GitCommonDir)
                 .await
+                .map_err(|error| ProjectObservationStoreError::NonCanonicalStore {
+                    project_id: "<unresolved>".to_string(),
+                    store_id: "<unresolved>".to_string(),
+                    reason: format!("Git common-directory alias lookup failed: {error}"),
+                })?
         {
             project_ids.insert(project_id);
         }

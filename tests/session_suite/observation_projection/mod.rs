@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
@@ -23,9 +23,15 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::common::{isolated_lcm_db_path, open_lcm_db};
+use crate::common::isolated_lcm_db_path;
 
 const GENERATION: u64 = 11;
+
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
 
 fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
     ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
@@ -253,17 +259,100 @@ fn conversational_payload(message_id: &str, text: &str) -> Value {
 }
 
 async fn table_count(tmp: &TempDir, table: &str) -> i64 {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let quoted = table.replace('"', "\"\"");
-    let mut rows = conn
-        .query(&format!("SELECT COUNT(*) FROM \"{quoted}\""), ())
-        .await
+    conn.query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), (), |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+async fn checkpoint_database(tmp: &TempDir) {
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let checkpoint = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
         .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+    assert_eq!(checkpoint.0, 0);
+    assert_eq!(checkpoint.1, checkpoint.2);
+}
+
+struct TestSessionMessageSearchHit {
+    message: TestSessionMessage,
+}
+
+struct TestSessionMessage {
+    message_id: String,
+    role: String,
+    timestamp: Option<i64>,
+    ordinal: i64,
+    text: String,
+    kind: Option<String>,
+    model: Option<String>,
+    tool_names: Option<String>,
+    source_path: Option<String>,
+    source_offset: Option<i64>,
+}
+
+async fn search_session_messages(
+    tmp: &TempDir,
+    query: &str,
+    limit: usize,
+) -> Vec<TestSessionMessageSearchHit> {
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let fts_query = query
+        .split_whitespace()
+        .filter_map(|word| {
+            let sanitized: String = word.chars().filter(|character| *character != '"').collect();
+            (!sanitized.is_empty()).then(|| format!("\"{sanitized}\"*"))
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut statement = conn
+        .prepare(
+            "SELECT message.message_id, message.role, message.timestamp, message.ordinal,
+                    message.text, message.kind, message.model, message.tool_names,
+                    message.source_path, message.source_offset
+             FROM session_messages_fts
+             JOIN session_messages AS message ON message.rowid = session_messages_fts.rowid
+             JOIN sessions AS session
+               ON session.provider = message.provider
+              AND session.session_id = message.session_id
+             WHERE session_messages_fts MATCH ?1
+               AND message.provider = 'claude'
+               AND session.project_key = 'user'
+             ORDER BY bm25(session_messages_fts)
+             LIMIT ?2",
+        )
+        .unwrap();
+    statement
+        .query_map(
+            rusqlite::params![fts_query, i64::try_from(limit).unwrap()],
+            |row| {
+                Ok(TestSessionMessageSearchHit {
+                    message: TestSessionMessage {
+                        message_id: row.get(0)?,
+                        role: row.get(1)?,
+                        timestamp: row.get(2)?,
+                        ordinal: row.get(3)?,
+                        text: row.get(4)?,
+                        kind: row.get(5)?,
+                        model: row.get(6)?,
+                        tool_names: row.get(7)?,
+                        source_path: row.get(8)?,
+                        source_offset: row.get(9)?,
+                    },
+                })
+            },
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 async fn reinstall_projection_provenance_schema(tmp: &TempDir, extra_column: &str) {
@@ -275,11 +364,7 @@ async fn reinstall_projection_provenance_schema_with_options(
     extra_column: &str,
     table_options: &str,
 ) {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     conn.execute_batch(&format!(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS projection_output_audit_invalidate_update_v1;
@@ -309,7 +394,6 @@ async fn reinstall_projection_provenance_schema_with_options(
             RENAME TO observation_projection_provenance;
          COMMIT;"
     ))
-    .await
     .unwrap();
 }
 
@@ -318,11 +402,7 @@ async fn reinstall_legacy_projection_provenance_schema(tmp: &TempDir) {
 }
 
 async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObservationIdV1) {
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_projection_provenance (
@@ -332,19 +412,20 @@ async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObse
                       output_message_id, output_digest, 0
                FROM observation_projection_provenance
                WHERE projector_version = ?1 AND observation_id = ?2",
-            libsql::params![
+            rusqlite::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation_id.as_str(),
             ],
         )
-        .await
         .unwrap();
 }
 
 async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempDir {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(
         session_id,
         0,
@@ -354,9 +435,10 @@ async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempD
     );
     persist(&store, candidate, None).await;
     drain_projection_queue(&store).await;
-    drop(db);
+    drop(store);
+    drop(runtime);
 
-    let audited = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+    let audited = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
         .await
         .expect("projected authority must pass its exhaustive audit");
     drop(audited);
@@ -377,34 +459,30 @@ async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
 async fn projection_provenance_rows(
     tmp: &TempDir,
 ) -> Vec<(String, String, String, String, String, String, String)> {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT projector_version, observation_id, retrieval_anchor_id, receipt_id,
                     output_provider, output_message_id, output_digest
              FROM observation_projection_provenance
              ORDER BY observation_id",
-            (),
         )
-        .await
         .unwrap();
-    let mut provenance = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        provenance.push((
-            row.get(0).unwrap(),
-            row.get(1).unwrap(),
-            row.get(2).unwrap(),
-            row.get(3).unwrap(),
-            row.get(4).unwrap(),
-            row.get(5).unwrap(),
-            row.get(6).unwrap(),
-        ));
-    }
-    provenance
+    statement
+        .query_map((), |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
@@ -412,24 +490,18 @@ async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
 }
 
 async fn projected_raw_store_ids(tmp: &TempDir) -> Vec<(String, i64)> {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT message_id, store_id FROM lcm_raw_messages
              WHERE provider = 'claude' ORDER BY message_id",
-            (),
         )
-        .await
         .unwrap();
-    let mut ids = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        ids.push((row.get(0).unwrap(), row.get(1).unwrap()));
-    }
-    ids
+    statement
+        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
@@ -437,39 +509,29 @@ async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
 }
 
 async fn projected_message_texts_where(tmp: &TempDir, predicate: &str) -> Vec<String> {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let sql = format!("SELECT text FROM session_messages {predicate} ORDER BY message_id");
-    let mut rows = conn.query(&sql, ()).await.unwrap();
-    let mut texts = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        texts.push(row.get(0).unwrap());
-    }
-    texts
+    let mut statement = conn.prepare(&sql).unwrap();
+    statement
+        .query_map((), |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 async fn projection_ownership_rows(tmp: &TempDir) -> Vec<i64> {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT message_created
              FROM observation_projection_provenance ORDER BY observation_id",
-            (),
         )
-        .await
         .unwrap();
-    let mut ownership = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        ownership.push(row.get(0).unwrap());
-    }
-    ownership
+    statement
+        .query_map((), |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 fn projection_output_ids(

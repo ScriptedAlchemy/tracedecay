@@ -100,7 +100,7 @@ impl<P> GenerationBoundFeedbackDiagnosticsAdapter<P> {
     ) -> Option<&AnalyzerAdmittedDiagnosticProviderV1> {
         self.providers
             .iter()
-            .find(|provider| provider.identity() == identity)
+            .find(|provider| provider.admits_identity(identity))
     }
 }
 
@@ -361,7 +361,7 @@ where
                 &GraphImpactRequest {
                     file: request.input.target.file.clone(),
                     symbol: symbol.clone(),
-                    generation,
+                    generation: generation.clone(),
                     meta: meta.clone(),
                 },
             );
@@ -383,7 +383,11 @@ where
                     request: context,
                     operation: &self.tests_operation,
                 },
-                &AffectedTestsRequest { symbol, meta },
+                &AffectedTestsRequest {
+                    symbol,
+                    generation,
+                    meta,
+                },
             );
             let (tests, tests_state) = match tests_outcome(tests) {
                 FeedbackRetrievalOutcome::Evidence { payload, state } => (payload, state),

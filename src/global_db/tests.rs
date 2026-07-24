@@ -1,3058 +1,161 @@
-use super::*;
-use std::path::Path;
+use std::sync::Arc;
 
-use crate::db::libsql_local;
-use serde_json::json;
-use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadReferenceV1, ProjectId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
-};
-use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
-};
-use tracedecay_store::{
-    ObservationStoreError, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
-};
+use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
-#[tokio::test]
-async fn offline_session_repair_does_not_initialize_unopened_store() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let db = libsql_local::open_local_database(&temp.path().join("sessions.db"), false)
-        .await
-        .expect("local database");
-    let conn = db.connect().expect("database connection");
+pub(super) mod harness;
 
-    repair_session_temporal_connection(&conn)
-        .await
-        .expect("initialize unopened temporal store");
+use harness::RegisteredGlobalDbHarness;
 
-    assert!(
-        !connection_table_exists(&conn, "session_temporal_generations")
-            .await
-            .expect("inspect temporal schema")
-    );
-    assert!(
-        !connection_table_exists(&conn, "session_messages")
-            .await
-            .expect("inspect transcript schema")
-    );
-    assert!(
-        !connection_table_exists(&conn, "observations")
-            .await
-            .expect("inspect observation schema")
-    );
-}
-
-#[tokio::test]
-async fn offline_session_repair_does_not_initialize_transcript_only_store() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let db = libsql_local::open_local_database(&temp.path().join("sessions.db"), false)
-        .await
-        .expect("local database");
-    let conn = db.connect().expect("database connection");
-    conn.execute(
-        "CREATE TABLE session_messages (message_id TEXT PRIMARY KEY)",
-        (),
-    )
-    .await
-    .expect("initialize transcript-only fixture");
-
-    repair_session_temporal_connection(&conn)
-        .await
-        .expect("transcript-only store needs no temporal repair");
-
-    assert!(
-        !connection_table_exists(&conn, "session_temporal_generations")
-            .await
-            .expect("inspect temporal schema")
-    );
-    assert!(
-        !connection_table_exists(&conn, "observations")
-            .await
-            .expect("inspect observation schema")
-    );
-}
-
-#[tokio::test]
-async fn offline_session_repair_rolls_back_trigger_suspension_on_failure() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let db = libsql_local::open_local_database(&temp.path().join("sessions.db"), false)
-        .await
-        .expect("local database");
-    let conn = db.connect().expect("database connection");
-    session_temporal::ensure_session_temporal_schema(&conn)
-        .await
-        .expect("initialize temporal schema");
-    conn.execute_batch(
-        "CREATE TABLE session_messages (message_id TEXT PRIMARY KEY);
-         CREATE TABLE observations (sequence INTEGER PRIMARY KEY);
-         CREATE TRIGGER session_refresh_operations_delete_guard_v1
-         BEFORE DELETE ON session_refresh_operations BEGIN
-             SELECT RAISE(ABORT, 'session refresh operations are immutable');
-         END;
-         DROP TABLE session_refresh_progress;",
-    )
-    .await
-    .expect("corrupt repair fixture");
-    let mut before = conn
+async fn table_exists(db: &RegisteredGlobalDb, table: &str) -> bool {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'trigger'
-               AND name = 'session_refresh_operations_delete_guard_v1'",
-            (),
-        )
-        .await
-        .expect("inspect repair precondition");
-    assert!(
-        before
-            .next()
-            .await
-            .expect("read repair precondition")
-            .is_some(),
-        "repair fixture must begin with its immutability trigger"
-    );
-    drop(before);
-
-    repair_session_temporal_connection(&conn)
-        .await
-        .expect_err("missing temporal table must reject repair");
-
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'trigger'
-               AND name = 'session_refresh_operations_delete_guard_v1'",
-            (),
-        )
-        .await
-        .expect("inspect temporal trigger");
-    assert!(
-        rows.next().await.expect("read temporal trigger").is_some(),
-        "failed maintenance must roll back suspended immutability triggers"
-    );
-}
-
-#[cfg(unix)]
-fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt as _;
-
-    (
-        root.join(OsString::from_vec(vec![b'p', 0x80])),
-        root.join(OsString::from_vec(vec![b'p', 0x81])),
-    )
-}
-
-#[cfg(any(unix, windows))]
-#[test]
-fn native_project_path_alias_uses_canonical_native_decoder() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let (path, _) = colliding_non_unicode_project_paths(dir.path());
-    let native_bytes = encode_native_project_path(&path);
-    let alias = encode_native_project_path_alias(native_project_path_platform(), &native_bytes);
-
-    assert_eq!(
-        decode_native_project_path(native_project_path_platform(), native_bytes).unwrap(),
-        path
-    );
-    assert_eq!(
-        decode_native_project_path_alias(&alias).unwrap(),
-        Some(path)
-    );
-    assert_eq!(
-        decode_native_project_path_alias("ordinary-path").unwrap(),
-        None
-    );
-
-    let other_platform = if cfg!(unix) {
-        "windows-utf16le"
-    } else {
-        "unix-bytes"
-    };
-    let other_alias = encode_native_project_path_alias(other_platform, b"path");
-    assert_eq!(
-        decode_native_project_path_alias(&other_alias).unwrap_err(),
-        "native project path alias belongs to another platform"
-    );
-}
-
-#[cfg(any(unix, windows))]
-#[test]
-fn native_project_path_alias_preserves_hex_decode_errors() {
-    let alias = format!(
-        "{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-{}-zz",
-        native_project_path_platform()
-    );
-    assert_eq!(
-        decode_native_project_path_alias(&alias).unwrap_err(),
-        hex::decode("zz").unwrap_err().to_string()
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn native_project_path_alias_preserves_windows_odd_length_error() {
-    let alias = encode_native_project_path_alias(native_project_path_platform(), &[0]);
-    assert_eq!(
-        decode_native_project_path_alias(&alias).unwrap_err(),
-        "native Windows project path alias has odd byte length"
-    );
-    assert_eq!(
-        decode_native_project_path(native_project_path_platform(), vec![0]).unwrap_err(),
-        "native Windows project path has odd byte length"
-    );
-}
-
-#[cfg(windows)]
-fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt as _;
-
-    (
-        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd800])),
-        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd801])),
-    )
-}
-
-#[cfg(any(unix, windows))]
-async fn replace_native_alias_with_legacy(db: &GlobalDb, project_path: &Path, project_id: &str) {
-    let native_alias = project_path_alias_key(project_path);
-    let legacy_alias = GlobalDb::canonical_project_key(project_path);
-    assert_ne!(native_alias, legacy_alias);
-    db.conn
-        .execute(
-            "DELETE FROM project_aliases WHERE alias_path = ?1",
-            params![native_alias],
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            crate::db::engine::params![table],
         )
         .await
         .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
-             VALUES (?1, ?2, 1)
-             ON CONFLICT(alias_path) DO UPDATE SET project_id = excluded.project_id",
-            params![legacy_alias, project_id],
-        )
+    rows.next().await.unwrap().is_some()
+}
+
+async fn row_count(db: &RegisteredGlobalDb, table: &str) -> i64 {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
         .await
         .unwrap();
-}
-
-async fn create_conflicting_schema_view(db_path: &Path, view_name: &str) {
-    let raw_db = libsql_local::open_local_database(db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(&format!(
-            "CREATE VIEW {view_name} AS SELECT 1 AS incompatible"
-        ))
-        .await
-        .unwrap();
-}
-
-async fn require_schema_reensure(db: &GlobalDb) {
-    let slot = GLOBAL_DB_SLOTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(db.db_path())
-        .and_then(Weak::upgrade)
-        .expect("authoritative open has schema slot");
-    slot.schema.lock().await.ensured = false;
-}
-
-fn schema_authority_fixture(
-    sequence: i64,
-    label: &str,
-) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
-    schema_authority_fixture_with_scope(sequence, label, ObservationScopeV1::Profile)
-}
-
-fn schema_authority_fixture_with_scope(
-    sequence: i64,
-    label: &str,
-    scope: ObservationScopeV1,
-) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
-    assert!(sequence > 0);
-    let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.schema-contract").unwrap()).unwrap();
-    let generation = ClaudeFileGenerationV1::new(7).unwrap();
-    let start = u64::try_from(sequence - 1).unwrap() * 100;
-    let end = start + 100;
-    let identity = ClaudeObservationIdentityMaterialV1::new(
-        source.clone(),
-        scope.clone(),
-        generation,
-        ClaudeByteRangeV1::new(start, end).unwrap(),
-    )
-    .unwrap();
-    let payload = json!({"kind": "schema_contract_fixture", "label": label});
-    let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
-    let receipt = SanitizationReceiptV1::new(
-        SanitizationReceiptRefV1::new(
-            SanitizationReceiptId::new(format!("receipt.schema-contract.{sequence}")).unwrap(),
-            ComponentVersion::new("sanitizer.schema-contract.v1").unwrap(),
-        )
-        .unwrap(),
-        SanitizerDispositionV1::Accepted,
-        SensitivityV1::NonSensitive,
-        Some(payload_reference),
-    )
-    .unwrap();
-    let observation = DurableClaudeObservationV1::new(
-        identity,
-        receipt,
-        RetentionClass::new("retention.schema-contract").unwrap(),
-        payload,
-    )
-    .unwrap();
-    let cursor = ClaudeSourceCursorV1::new(source, scope, generation, end).unwrap();
-    (observation, cursor)
-}
-
-async fn seed_observation(
-    conn: &Connection,
-    sequence: i64,
-    label: &str,
-) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
-    seed_observation_with_scope(conn, sequence, label, ObservationScopeV1::Profile).await
-}
-
-async fn seed_observation_with_scope(
-    conn: &Connection,
-    sequence: i64,
-    label: &str,
-    scope: ObservationScopeV1,
-) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
-    let (observation, cursor) = schema_authority_fixture_with_scope(sequence, label, scope);
-    let receipt = observation.receipt();
-    let receipt_id = receipt.receipt().receipt_id().as_str();
-    let payload_digest = observation.payload_reference().digest().as_str();
-    let receipt_json = serde_json::to_string(receipt).unwrap();
-    let observation_json = serde_json::to_string(&observation).unwrap();
-    let cursor_json = serde_json::to_string(&cursor).unwrap();
-    conn.execute(
-        "INSERT INTO sanitization_receipts
-         (receipt_id, sanitizer_version, payload_digest, receipt_json)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![
-            receipt_id,
-            receipt.receipt().sanitizer_version().as_str(),
-            payload_digest,
-            receipt_json
-        ],
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO observations
-         (sequence, observation_id, payload_digest, receipt_id,
-          observation_json, committed_cursor_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            sequence,
-            observation.observation_id().as_str(),
-            payload_digest,
-            receipt_id,
-            observation_json,
-            cursor_json
-        ],
-    )
-    .await
-    .unwrap();
-    (observation, cursor)
-}
-
-/// Binds the deterministic retrieval anchor for an already-seeded observation,
-/// mirroring the anchor-backfill the authoritative open performs. Every
-/// committed observation carries a retrieval anchor under the PR7 anchored-write
-/// contract, so seed it explicitly whenever a later insert must reference the
-/// anchor or when a reopen must reach the row invariants without the migration
-/// re-deriving anchors from a deliberately corrupted receipt. Returns the bound
-/// anchor id.
-async fn seed_observation_retrieval_anchor(
-    conn: &Connection,
-    observation: &DurableClaudeObservationV1,
-) -> String {
-    super::observation::backfill_observation_retrieval_anchors(conn)
-        .await
-        .unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
-            params![observation.observation_id().as_str()],
-        )
-        .await
-        .unwrap();
-    rows.next()
-        .await
-        .unwrap()
-        .expect("anchor backfill binds the seeded observation")
-        .get::<String>(0)
-        .unwrap()
-}
-
-async fn seed_skip_projection(conn: &Connection, observation: &DurableClaudeObservationV1) {
-    conn.execute(
-        "INSERT INTO observation_projection_dispositions
-         (projector_version, observation_id, receipt_id, reason)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            observation.observation_id().as_str(),
-            observation.receipt().receipt().receipt_id().as_str(),
-            ProjectionSkipReason::NonConversationalRecord.as_str()
-        ],
-    )
-    .await
-    .unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
 #[tokio::test]
-async fn try_open_at_reports_observation_schema_failure() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    create_conflicting_schema_view(&db_path, "observations").await;
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("observation schema conflict unexpectedly opened");
-    };
-    let TraceDecayError::Database { operation, message } = error else {
-        panic!("unexpected error: {error}");
-    };
-    assert_eq!(operation, "migrate observation authority schema");
-    assert!(message.contains("observations"), "{message}");
-    assert!(GlobalDb::open_at(&db_path).await.is_none());
-}
-
-#[tokio::test]
-async fn try_open_at_reports_observation_projection_schema_failure() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    create_conflicting_schema_view(&db_path, "observation_projection_provenance").await;
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("observation projection schema conflict unexpectedly opened");
-    };
-    let TraceDecayError::Database { operation, message } = error else {
-        panic!("unexpected error: {error}");
-    };
-    assert_eq!(operation, "initialize observation projection schema");
-    assert!(message.contains("view"), "{message}");
-    assert!(GlobalDb::open_at(&db_path).await.is_none());
-}
-
-#[tokio::test]
-async fn try_open_at_rejects_observation_table_without_authority_constraints() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE observations (
-                sequence INTEGER,
-                observation_id TEXT NOT NULL,
-                payload_digest TEXT NOT NULL,
-                receipt_id TEXT NOT NULL,
-                observation_json TEXT NOT NULL,
-                committed_cursor_json TEXT NOT NULL
-            )",
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("constraintless observation table unexpectedly opened");
-    };
-    let TraceDecayError::Database { message, operation } = error else {
-        panic!("unexpected error: {error}");
-    };
-    assert_eq!(operation, "validate global database authority schema");
-    assert!(message.contains("observations"), "{message}");
-
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    let mut rows = raw_conn
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE name IN (
-                'sanitization_receipts', 'source_cursors', 'projection_queue',
-                'observation_projection_provenance',
-                'observation_projection_checkpoints',
-                'observation_projection_aliases',
-                'observation_projection_dispositions',
-                'authority_audit_checkpoints',
-                'observations_immutable_update', 'observations_immutable_delete'
-             )",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0,
-        "rejected authority schema changes must roll back atomically"
-    );
-}
-
-#[tokio::test]
-async fn legacy_idempotency_and_non_autoincrement_observations_migrate_canonically() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let (legacy_observation, legacy_cursor) = schema_authority_fixture(41, "legacy");
-    let legacy_receipt = legacy_observation.receipt();
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE sanitization_receipts (
-                receipt_id TEXT PRIMARY KEY,
-                sanitizer_version TEXT NOT NULL,
-                payload_digest TEXT NOT NULL,
-                receipt_json TEXT NOT NULL
-            );
-             CREATE TABLE observations (
-                sequence INTEGER PRIMARY KEY,
-                observation_id TEXT NOT NULL UNIQUE,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                payload_digest TEXT NOT NULL,
-                receipt_id TEXT NOT NULL,
-                observation_json TEXT NOT NULL,
-                committed_cursor_json TEXT NOT NULL,
-                FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-             );",
-        )
-        .await
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO sanitization_receipts VALUES (?1, ?2, ?3, ?4)",
-            params![
-                legacy_receipt.receipt().receipt_id().as_str(),
-                legacy_receipt.receipt().sanitizer_version().as_str(),
-                legacy_observation.payload_reference().digest().as_str(),
-                serde_json::to_string(legacy_receipt).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO observations VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                41_i64,
-                legacy_observation.observation_id().as_str(),
-                legacy_observation.idempotency_key().as_str(),
-                legacy_observation.payload_reference().digest().as_str(),
-                legacy_receipt.receipt().receipt_id().as_str(),
-                serde_json::to_string(&legacy_observation).unwrap(),
-                serde_json::to_string(&legacy_cursor).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut columns = db
-        .conn
-        .query("SELECT name FROM pragma_table_xinfo('observations')", ())
-        .await
-        .unwrap();
-    let mut names = Vec::new();
-    while let Some(row) = columns.next().await.unwrap() {
-        names.push(row.get::<String>(0).unwrap());
-    }
-    assert!(!names.iter().any(|name| name == "idempotency_key"));
-
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT seq FROM sqlite_sequence WHERE name = 'observations'",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        41
-    );
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT observation_id, observation_sequence FROM projection_queue",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(
-        row.get::<String>(0).unwrap(),
-        legacy_observation.observation_id().as_str()
-    );
-    assert_eq!(row.get::<i64>(1).unwrap(), 41);
-
-    let (next_observation, next_cursor) = schema_authority_fixture(42, "next");
-    let next_receipt = next_observation.receipt();
-    db.conn
-        .execute(
-            "INSERT INTO sanitization_receipts VALUES (?1, ?2, ?3, ?4)",
-            params![
-                next_receipt.receipt().receipt_id().as_str(),
-                next_receipt.receipt().sanitizer_version().as_str(),
-                next_observation.payload_reference().digest().as_str(),
-                serde_json::to_string(next_receipt).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO observations
-                (observation_id, payload_digest, receipt_id, observation_json,
-                 committed_cursor_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                next_observation.observation_id().as_str(),
-                next_observation.payload_reference().digest().as_str(),
-                next_receipt.receipt().receipt_id().as_str(),
-                serde_json::to_string(&next_observation).unwrap(),
-                serde_json::to_string(&next_cursor).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT sequence FROM observations WHERE observation_id = ?1",
-            params![next_observation.observation_id().as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        42
-    );
-}
-
-#[tokio::test]
-async fn schema_validation_accepts_equivalent_table_level_primary_key() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE projects (
-                path TEXT,
-                tokens_saved INTEGER NOT NULL DEFAULT (0),
-                PRIMARY KEY (path)
-            )",
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    GlobalDb::try_open_at(&db_path)
-        .await
-        .expect("structurally equivalent schema should open")
-        .expect("global database");
-}
-
-#[tokio::test]
-async fn legacy_code_projects_columns_migrate_without_losing_registry_data() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let project_root = dir.path().join("project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let canonical_root = project_root
-        .canonicalize()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE code_projects (
-                project_id TEXT PRIMARY KEY,
-                canonical_root TEXT NOT NULL,
-                display_root TEXT NOT NULL,
-                git_common_dir TEXT,
-                git_remote_url TEXT,
-                default_branch TEXT,
-                created_at INTEGER NOT NULL,
-                last_seen_at INTEGER NOT NULL
-             );
-             CREATE TABLE project_aliases (
-                alias_path TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                last_seen_at INTEGER NOT NULL,
-                FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE
-             );
-             CREATE INDEX idx_project_aliases_project_id ON project_aliases(project_id);
-             CREATE INDEX idx_legacy_code_projects_seen ON code_projects(last_seen_at);",
-        )
-        .await
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO code_projects
-             (project_id, canonical_root, display_root, git_common_dir,
-              git_remote_url, default_branch, created_at, last_seen_at)
-             VALUES ('legacy-project', ?1, ?1, NULL, NULL, 'main', 10, 20)",
-            params![canonical_root.clone()],
-        )
-        .await
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO project_aliases(alias_path, project_id, last_seen_at)
-             VALUES ('legacy-alias', 'legacy-project', 20)",
-            (),
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    let db = GlobalDb::try_open_at(&db_path)
-        .await
-        .expect("legacy registry should migrate")
-        .expect("global database");
-    assert_eq!(
-        db.get_code_project("legacy-project")
-            .await
-            .expect("legacy project row")
-            .default_branch
-            .as_deref(),
-        Some("main")
-    );
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT
-                EXISTS(SELECT 1 FROM project_aliases
-                       WHERE alias_path = 'legacy-alias' AND project_id = 'legacy-project'),
-                EXISTS(SELECT 1 FROM sqlite_schema
-                       WHERE type = 'index' AND name = 'idx_legacy_code_projects_seen'),
-                (SELECT COUNT(*) FROM pragma_foreign_key_check)",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<i64>(0).unwrap(), 1);
-    assert_eq!(row.get::<i64>(1).unwrap(), 1);
-    assert_eq!(row.get::<i64>(2).unwrap(), 0);
-    drop(row);
-    drop(rows);
-    drop(db);
-
-    GlobalDb::try_open_at(&db_path)
-        .await
-        .expect("migrated registry should reopen")
-        .expect("global database");
-}
-
-#[tokio::test]
-async fn schema_validation_rejects_incomplete_registry_table() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE code_projects (
-                project_id TEXT PRIMARY KEY,
-                canonical_root TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                last_seen_at INTEGER NOT NULL
-            )",
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("incomplete registry schema unexpectedly opened");
-    };
-    assert!(
-        error.to_string().contains("incompatible number of columns"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn schema_validation_rejects_partial_required_index() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.conn
-        .execute_batch(
-            "DROP INDEX idx_project_aliases_project_id;
-             CREATE INDEX idx_project_aliases_project_id
-             ON project_aliases(project_id) WHERE last_seen_at > 0;",
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("partial authority index unexpectedly opened");
-    };
-    assert!(
-        error.to_string().contains("missing required index"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn schema_validation_rejects_hidden_generated_registry_column() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE projects (
-                path TEXT PRIMARY KEY,
-                tokens_saved INTEGER NOT NULL DEFAULT 0,
-                derived INTEGER GENERATED ALWAYS AS (tokens_saved + 1) VIRTUAL
-            )",
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("hidden generated registry column unexpectedly opened");
-    };
-    assert!(error.to_string().contains("incompatible number of columns"));
-}
-
-#[tokio::test]
-async fn cross_table_identity_constraints_reject_mismatched_rows() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let first_root = dir.path().join("first");
-    let second_root = dir.path().join("second");
-    db.upsert_code_project("project_one", &first_root, None, None, None)
-        .await
-        .unwrap();
-    db.upsert_code_project("project_two", &second_root, None, None, None)
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO store_instances
-             (store_id, project_id, store_kind, storage_mode, store_relpath, created_at)
-             VALUES ('store_one', 'project_one', 'sessions', 'central', 'sessions', 1)",
-            (),
-        )
-        .await
-        .unwrap();
-    let graph_error = db
-        .conn
-        .execute(
-            "INSERT INTO graph_scopes
-             (graph_scope_id, project_id, store_id, branch_name, db_relpath)
-             VALUES ('scope_bad', 'project_two', 'store_one', 'main', 'graph.db')",
-            (),
-        )
-        .await
-        .unwrap_err();
-    assert!(graph_error.to_string().contains("store/project mismatch"));
-
-    db.conn
-        .execute_batch(
-            "INSERT INTO sanitization_receipts
-             (receipt_id, sanitizer_version, payload_digest, receipt_json)
-             VALUES ('receipt_one', 'v1', 'digest_one', '{}');
-             INSERT INTO sanitization_receipts
-             (receipt_id, sanitizer_version, payload_digest, receipt_json)
-             VALUES ('receipt_two', 'v1', 'digest_two', '{}');
-             INSERT INTO observations
-             (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
-             VALUES ('observation_one', 'digest_one', 'receipt_one', '{}', '{}');",
-        )
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT sequence FROM observations WHERE observation_id = 'observation_one'",
-            (),
-        )
-        .await
-        .unwrap();
-    let sequence = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
-    drop(rows);
-
-    let queue_error = db
-        .conn
-        .execute(
-            "INSERT INTO projection_queue(observation_id, observation_sequence)
-             VALUES ('observation_one', ?1)",
-            params![sequence + 1],
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        queue_error
-            .to_string()
-            .contains("observation identity mismatch")
-    );
-
-    let provenance_error = db
-        .conn
-        .execute(
-            "INSERT INTO observation_projection_provenance
-             (projector_version, observation_id, receipt_id, output_provider,
-              output_message_id, output_digest, message_created)
-             VALUES ('v1', 'observation_one', 'receipt_two', 'claude', 'message', 'digest', 1)",
-            (),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        provenance_error
-            .to_string()
-            .contains("provenance receipt mismatch")
-    );
-
-    let disposition_error = db
-        .conn
-        .execute(
-            "INSERT INTO observation_projection_dispositions
-             (projector_version, observation_id, receipt_id, reason)
-             VALUES ('v1', 'observation_one', 'receipt_two', 'invalid')",
-            (),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        disposition_error
-            .to_string()
-            .contains("disposition receipt mismatch")
-    );
-}
-
-#[tokio::test]
-async fn malformed_same_name_invariant_trigger_is_replaced() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER projection_queue_identity_insert_v1;
-             CREATE TRIGGER projection_queue_identity_insert_v1
-             BEFORE INSERT ON projection_queue BEGIN SELECT 1; END;",
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&reopened.conn, 1, "observation_trigger").await;
-    let error = reopened
-        .conn
-        .execute(
-            "INSERT INTO projection_queue(observation_id, observation_sequence)
-             VALUES (?1, 2)",
-            params![observation.observation_id().as_str()],
-        )
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("observation identity mismatch"));
-}
-
-#[tokio::test]
-async fn store_project_identity_cannot_be_reparented() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    db.upsert_code_project("project_one", &dir.path().join("one"), None, None, None)
-        .await
-        .unwrap();
-    db.upsert_code_project("project_two", &dir.path().join("two"), None, None, None)
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO store_instances
-             (store_id, project_id, store_kind, storage_mode, store_relpath, created_at)
-             VALUES ('store_one', 'project_one', 'sessions', 'central', 'sessions', 1)",
-            (),
-        )
-        .await
-        .unwrap();
-    let error = db
-        .conn
-        .execute(
-            "UPDATE store_instances SET project_id = 'project_two'
-             WHERE store_id = 'store_one'",
-            (),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("store project identity is immutable")
-    );
-}
-
-#[tokio::test]
-async fn anchor_backfill_preserves_colliding_alias_binding_and_still_completes() {
-    use tracedecay_domain::{
-        DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
-        ObservationOrderingDomainV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-        ObservationSourceRangeV1, ProviderId,
-    };
-
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-
-    // Native-record observations derive a ProviderRecord alias; byte-range
-    // fixtures do not, and this scenario is about alias bindings.
-    let seed_native = |sequence: i64, record: &str| {
-        let conn = &db.conn;
-        let record = record.to_owned();
-        async move {
-            let source = ObservationSourceIdentityV1::for_provider(
-                ProviderId::new("codex").unwrap(),
-                SessionId::new("session.alias-collision").unwrap(),
-            )
-            .unwrap();
-            let start = u64::try_from(sequence - 1).unwrap();
-            let payload = json!({"kind": "alias_collision_fixture", "record": record});
-            let receipt = SanitizationReceiptV1::new(
-                SanitizationReceiptRefV1::new(
-                    SanitizationReceiptId::new(format!("receipt.alias-collision.{sequence}"))
-                        .unwrap(),
-                    ComponentVersion::new("sanitizer.alias-collision.v1").unwrap(),
-                )
-                .unwrap(),
-                SanitizerDispositionV1::Accepted,
-                SensitivityV1::NonSensitive,
-                Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
-            )
-            .unwrap();
-            let observation = DurableObservationV1::new(
-                ObservationIdentityMaterialV1::for_native_record(
-                    source,
-                    ObservationScopeV1::Profile,
-                    ObservationSourceGenerationV1::new(1).unwrap(),
-                    ObservationSourceRangeV1::new(start, start + 1).unwrap(),
-                    ObservationOrderingDomainV1::SqliteRowId,
-                    ObservationId::new(record).unwrap(),
-                )
-                .unwrap(),
-                receipt,
-                RetentionClass::new("retention.alias-collision").unwrap(),
-                payload,
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO sanitization_receipts
-                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    observation.receipt().receipt().receipt_id().as_str(),
-                    observation.receipt().receipt().sanitizer_version().as_str(),
-                    observation.payload_reference().digest().as_str(),
-                    serde_json::to_string(observation.receipt()).unwrap(),
-                ],
-            )
-            .await
-            .unwrap();
-            conn.execute(
-                "INSERT INTO observations
-                 (sequence, observation_id, payload_digest, receipt_id,
-                  observation_json, committed_cursor_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    sequence,
-                    observation.observation_id().as_str(),
-                    observation.payload_reference().digest().as_str(),
-                    observation.receipt().receipt().receipt_id().as_str(),
-                    serde_json::to_string(&observation).unwrap(),
-                    serde_json::to_string(&json!({
-                        "source": observation.source(),
-                        "scope": observation.scope(),
-                        "coverage": {
-                            "generation": 1,
-                            "ordering_domain": "sqlite_rowid",
-                            "range": {"start": start, "end": start + 1}
-                        },
-                    }))
-                    .unwrap(),
-                ],
-            )
-            .await
-            .unwrap();
-            observation
-        }
-    };
-    let first = seed_native(1, "record.alias-collision.first").await;
-    let second = seed_native(2, "record.alias-collision.second").await;
-    super::observation::backfill_observation_retrieval_anchors(&db.conn)
-        .await
-        .unwrap();
-
-    let bound_anchor = |observation_id: String| {
-        let conn = &db.conn;
-        async move {
-            let mut rows = conn
-                .query(
-                    "SELECT anchor_id FROM observation_retrieval_anchors
-                     WHERE observation_id = ?1",
-                    params![observation_id],
-                )
-                .await
-                .unwrap();
-            rows.next()
-                .await
-                .unwrap()
-                .map(|row| row.get::<String>(0).unwrap())
-        }
-    };
-    let first_anchor = bound_anchor(first.observation_id().as_str().to_owned())
-        .await
-        .expect("first observation anchored");
-    let second_anchor = bound_anchor(second.observation_id().as_str().to_owned())
-        .await
-        .expect("second observation anchored");
-    assert_ne!(first_anchor, second_anchor);
-
-    // Simulate a store whose alias was bound by an anchor from an abandoned
-    // in-development derivation: the first observation\'s alias points at a
-    // different surviving anchor and its own anchor rows are gone, so the
-    // next open re-derives an anchor whose alias collides. The immutability
-    // triggers guard the live write path; drop them for this out-of-band
-    // state surgery exactly as an older schema (which lacked these rows)
-    // would present.
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER observation_retrieval_anchors_immutable_update;
-             DROP TRIGGER observation_retrieval_anchors_immutable_delete;
-             DROP TRIGGER retrieval_anchor_aliases_immutable_update;
-             DROP TRIGGER retrieval_anchor_aliases_immutable_delete;
-             DROP TRIGGER retrieval_anchors_immutable_update;
-             DROP TRIGGER retrieval_anchors_immutable_delete;",
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE retrieval_anchor_aliases SET anchor_id = ?1 WHERE anchor_id = ?2",
-            params![second_anchor.as_str(), first_anchor.as_str()],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "DELETE FROM observation_retrieval_anchors WHERE anchor_id = ?1",
-            params![first_anchor.as_str()],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "DELETE FROM retrieval_anchors WHERE anchor_id = ?1",
-            params![first_anchor.as_str()],
-        )
-        .await
-        .unwrap();
-
-    super::observation::backfill_observation_retrieval_anchors(&db.conn)
-        .await
-        .expect("a colliding alias must not brick the anchor backfill");
-
-    // The migration converged: the observation is anchored again by id, and
-    // the previously bound alias is preserved rather than overwritten.
-    let rebound_anchor = bound_anchor(first.observation_id().as_str().to_owned())
-        .await
-        .expect("first observation re-anchored after collision");
-    assert_eq!(rebound_anchor, first_anchor);
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT anchor_id FROM retrieval_anchor_aliases ORDER BY anchor_id",
-            (),
-        )
-        .await
-        .unwrap();
-    let mut alias_owners = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        alias_owners.push(row.get::<String>(0).unwrap());
-    }
-    assert_eq!(
-        alias_owners,
-        vec![second_anchor.clone(), second_anchor.clone()],
-        "existing alias bindings must survive the colliding backfill un-overwritten"
-    );
-}
-
-#[tokio::test]
-async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (first, _) = seed_observation(&db.conn, 1, "observation_one").await;
-    let (second, _) = seed_observation(&db.conn, 2, "observation_two").await;
-    db.conn
-        .execute(
-            "INSERT INTO observation_projection_dispositions
-             (projector_version, observation_id, receipt_id, reason)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                first.observation_id().as_str(),
-                first.receipt().receipt().receipt_id().as_str(),
-                ProjectionSkipReason::NonConversationalRecord.as_str()
-            ],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
-             VALUES (?1, 1)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO projection_queue(observation_id, observation_sequence)
-             VALUES (?1, 1)",
-            params![first.observation_id().as_str()],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT observation_id, observation_sequence FROM projection_queue",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(
-        row.get::<String>(0).unwrap(),
-        second.observation_id().as_str()
-    );
-    assert_eq!(row.get::<i64>(1).unwrap(), 2);
-    assert!(rows.next().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn schema_reensure_lowers_checkpoint_without_contiguous_projection_evidence() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "observation_one").await;
-    db.conn
-        .execute(
-            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
-             VALUES (?1, 2)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::try_open_at(&db_path)
-        .await
-        .expect("invalid checkpoint should be repairable")
-        .expect("global database");
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT last_sequence FROM observation_projection_checkpoints
-             WHERE projector_version = ?1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-    drop(rows);
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT observation_id FROM projection_queue WHERE observation_sequence = 1",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
-        observation.observation_id().as_str()
-    );
-}
-
-#[tokio::test]
-async fn schema_reensure_migrates_legacy_cursor_advance_coverage() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at_without_structured_backfill(&db_path)
-        .await
-        .unwrap();
-    db.conn
-        .execute_batch(
-            "DROP TABLE source_cursor_advances;
-             CREATE TABLE source_cursor_advances (
-                 source_json TEXT NOT NULL,
-                 scope_json TEXT NOT NULL,
-                 file_generation TEXT NOT NULL,
-                 start_offset TEXT NOT NULL,
-                 end_offset TEXT NOT NULL,
-                 reason TEXT NOT NULL,
-                 receipt_id TEXT,
-                 PRIMARY KEY(
-                     source_json, scope_json, file_generation, start_offset, end_offset
-                 )
-             );",
-        )
-        .await
-        .unwrap();
-    let source = ClaudeSourceIdentityV1::new(SessionId::new("session.migration").unwrap()).unwrap();
-    let scope = ObservationScopeV1::Profile;
-    db.conn
-        .execute(
-            "INSERT INTO source_cursor_advances(
-                 source_json, scope_json, file_generation,
-                 start_offset, end_offset, reason, receipt_id
-             ) VALUES (?1, ?2, '7', '10', '20', 'blank_frame', NULL)",
-            params![
-                serde_json::to_string(&source).unwrap(),
-                serde_json::to_string(&scope).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    db.close();
-
-    let reopened = GlobalDb::open_at_without_structured_backfill(&db_path)
-        .await
-        .unwrap();
-    assert!(
-        table_column_exists(reopened.conn(), "source_cursor_advances", "coverage_json")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_column_exists(reopened.conn(), "source_cursor_advances", "file_generation")
-            .await
-            .unwrap()
-    );
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT coverage_json, reason, receipt_id FROM source_cursor_advances",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().expect("migrated cursor advance");
-    let coverage: ObservationCoverageV1 =
-        serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
-    assert_eq!(coverage.generation().generation_id(), 7);
-    assert_eq!(coverage.ordering_domain().as_str(), "file_bytes");
-    assert_eq!(coverage.range(), ClaudeByteRangeV1::new(10, 20).unwrap());
-    assert_eq!(row.get::<String>(1).unwrap(), "blank_frame");
-    assert_eq!(row.get::<Option<String>>(2).unwrap(), None);
-    assert!(rows.next().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn schema_reensure_preserves_valid_nondurable_cursor_progress() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (_, committed_cursor) = seed_observation(&db.conn, 1, "durable").await;
-    let advanced_cursor = ClaudeSourceCursorV1::new(
-        committed_cursor.source().clone(),
-        committed_cursor.scope().clone(),
-        committed_cursor.generation(),
-        committed_cursor.byte_offset() + 50,
-    )
-    .unwrap();
-    let source_json = serde_json::to_string(advanced_cursor.source()).unwrap();
-    let scope_json = serde_json::to_string(advanced_cursor.scope()).unwrap();
-    let advanced_json = serde_json::to_string(&advanced_cursor).unwrap();
-    let coverage_json = serde_json::to_string(&ObservationCoverageV1::new(
-        advanced_cursor.generation(),
-        advanced_cursor.ordering_domain(),
-        ClaudeByteRangeV1::new(
-            committed_cursor.byte_offset(),
-            advanced_cursor.byte_offset(),
-        )
-        .unwrap(),
-    ))
-    .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, ?3)",
-            params![source_json.as_str(), scope_json.as_str(), advanced_json],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO source_cursor_advances(
-                source_json, scope_json, coverage_json, reason
-             ) VALUES (?1, ?2, ?3, 'blank_frame')",
-            params![source_json.as_str(), scope_json.as_str(), coverage_json],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT cursor_json FROM source_cursors
-             WHERE source_json = ?1 AND scope_json = ?2",
-            params![source_json, scope_json],
-        )
-        .await
-        .unwrap();
-    let cursor_json = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
-        .unwrap();
-    assert_eq!(
-        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
-        advanced_cursor
-    );
-}
-
-#[tokio::test]
-async fn schema_reensure_rewinds_unreceipted_cursor_progress() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (_, committed_cursor) = seed_observation(&db.conn, 1, "unreceipted-progress").await;
-    let advanced_cursor = ClaudeSourceCursorV1::new(
-        committed_cursor.source().clone(),
-        committed_cursor.scope().clone(),
-        committed_cursor.generation(),
-        committed_cursor.byte_offset() + 50,
-    )
-    .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, ?3)",
-            params![
-                serde_json::to_string(advanced_cursor.source()).unwrap(),
-                serde_json::to_string(advanced_cursor.scope()).unwrap(),
-                serde_json::to_string(&advanced_cursor).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query("SELECT cursor_json FROM source_cursors", ())
-        .await
-        .unwrap();
-    let cursor_json = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
-        .unwrap();
-    assert_eq!(
-        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
-        committed_cursor
-    );
-}
-
-#[tokio::test]
-async fn schema_reensure_repairs_a_stale_present_committed_source_cursor() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (_, committed_cursor) = seed_observation(&db.conn, 1, "stale-present-cursor").await;
-    let stale_cursor = ClaudeSourceCursorV1::new(
-        committed_cursor.source().clone(),
-        committed_cursor.scope().clone(),
-        committed_cursor.generation(),
-        committed_cursor.byte_offset() - 1,
-    )
-    .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, ?3)",
-            params![
-                serde_json::to_string(stale_cursor.source()).unwrap(),
-                serde_json::to_string(stale_cursor.scope()).unwrap(),
-                serde_json::to_string(&stale_cursor).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query("SELECT cursor_json FROM source_cursors", ())
-        .await
-        .unwrap();
-    let cursor_json = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
-        .unwrap();
-    assert_eq!(
-        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
-        committed_cursor
-    );
-}
-
-#[tokio::test]
-async fn schema_reensure_reconstructs_a_missing_committed_source_cursor() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (_, committed_cursor) = seed_observation(&db.conn, 1, "missing-cursor").await;
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query("SELECT cursor_json FROM source_cursors", ())
-        .await
-        .unwrap();
-    let cursor_json = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
-        .unwrap();
-    assert_eq!(
-        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
-        committed_cursor
-    );
-    assert!(rows.next().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn source_cursor_repair_canonicalizes_reordered_project_scope_json() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let scope = ObservationScopeV1::Project {
-        project_id: ProjectId::new("project.schema-contract").unwrap(),
-    };
-    let (observation, cursor) =
-        seed_observation_with_scope(&db.conn, 1, "reordered-scope", scope.clone()).await;
-    let canonical_observation_json = serde_json::to_string(&observation).unwrap();
-    let reordered_observation_json = canonical_observation_json.replace(
-        "\"scope\":{\"kind\":\"project\",\"project_id\":\"project.schema-contract\"}",
-        "\"scope\":{\"project_id\":\"project.schema-contract\",\"kind\":\"project\"}",
-    );
-    assert_ne!(reordered_observation_json, canonical_observation_json);
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER observations_immutable_update;
-             DROP TRIGGER observations_immutable_delete;",
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE observations SET observation_json = ?2 WHERE observation_id = ?1",
-            params![
-                observation.observation_id().as_str(),
-                reordered_observation_json
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT source_json, scope_json, cursor_json FROM source_cursors",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(
-        row.get::<String>(0).unwrap(),
-        serde_json::to_string(observation.source()).unwrap()
-    );
-    assert_eq!(
-        row.get::<String>(1).unwrap(),
-        serde_json::to_string(&scope).unwrap()
-    );
-    assert_eq!(
-        row.get::<String>(2).unwrap(),
-        serde_json::to_string(&cursor).unwrap()
-    );
-}
-
-#[tokio::test]
-async fn malformed_source_cursor_fails_before_missing_authority_is_repaired() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (_, cursor) = seed_observation(&db.conn, 1, "malformed-cursor").await;
-    db.conn
-        .execute(
-            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, '{}')",
-            params![
-                serde_json::to_string(cursor.source()).unwrap(),
-                serde_json::to_string(cursor.scope()).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("malformed source cursor unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("invalid source cursor authority JSON"),
-        "{error}"
-    );
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    let mut rows = raw_conn
-        .query(
-            "SELECT (SELECT COUNT(*) FROM source_cursors),
-                    (SELECT COUNT(*) FROM projection_queue)",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<i64>(0).unwrap(), 1);
-    assert_eq!(row.get::<i64>(1).unwrap(), 0);
-}
-
-#[tokio::test]
-async fn source_cursor_authority_keys_are_cross_checked() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (_, cursor) = seed_observation(&db.conn, 1, "cursor-key-mismatch").await;
-    let other_source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.other").unwrap()).unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, ?3)",
-            params![
-                serde_json::to_string(&other_source).unwrap(),
-                serde_json::to_string(cursor.scope()).unwrap(),
-                serde_json::to_string(&cursor).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("mismatched source cursor authority unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("source cursor authority keys disagree with cursor JSON"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn source_cursor_advance_authority_is_cross_checked() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (_, cursor) = seed_observation(&db.conn, 1, "invalid-advance").await;
-    let coverage_json = serde_json::to_string(&ObservationCoverageV1::new(
-        cursor.generation(),
-        cursor.ordering_domain(),
-        ClaudeByteRangeV1::new(0, 10).unwrap(),
-    ))
-    .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO source_cursor_advances(
-                 source_json, scope_json, coverage_json, reason
-             ) VALUES (?1, ?2, ?3, 'unknown_reason')",
-            params![
-                serde_json::to_string(cursor.source()).unwrap(),
-                serde_json::to_string(cursor.scope()).unwrap(),
-                coverage_json
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("invalid source cursor advance unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("source cursor advance contains invalid authority evidence"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn source_cursor_advance_duplicate_requires_the_same_reason() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.advance-retry").unwrap()).unwrap();
-    let scope = ObservationScopeV1::Profile;
-    let generation = ClaudeFileGenerationV1::new(11).unwrap();
-    let covered = ClaudeByteRangeV1::new(0, 10).unwrap();
-    let advance = |reason| {
-        ObservationCursorAdvance::new(
-            source.clone(),
-            scope.clone(),
-            generation,
-            None,
-            covered,
-            reason,
-        )
-        .unwrap()
-    };
-
-    assert_eq!(
-        db.advance_observation_source_cursor_result(advance(NonDurableFrameReason::BlankFrame))
-            .await
-            .unwrap(),
-        CursorAdvanceOutcome::Committed
-    );
-    assert_eq!(
-        db.advance_observation_source_cursor_result(advance(NonDurableFrameReason::BlankFrame))
-            .await
-            .unwrap(),
-        CursorAdvanceOutcome::ExactDuplicate
-    );
-    assert!(matches!(
-        db.advance_observation_source_cursor_result(advance(NonDurableFrameReason::OutOfScope))
-            .await,
-        Err(ObservationStoreError::CursorAdvanceCollision)
-    ));
-    let update = db
-        .conn
-        .execute(
-            "UPDATE source_cursor_advances SET reason = 'out_of_scope'",
-            (),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        update
-            .to_string()
-            .contains("source cursor advances are immutable")
-    );
-    let delete = db
-        .conn
-        .execute("DELETE FROM source_cursor_advances", ())
-        .await
-        .unwrap_err();
-    assert!(
-        delete
-            .to_string()
-            .contains("source cursor advances are immutable")
-    );
-}
-
-#[tokio::test]
-async fn malformed_receipt_authority_json_is_rejected_before_repair() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "malformed-receipt").await;
-    // Bind the anchor while the receipt is still valid so the reopen's
-    // anchor-backfill migration is a no-op and the corrupt receipt is caught by
-    // the receipt-authority row invariant rather than by anchor re-derivation.
-    seed_observation_retrieval_anchor(&db.conn, &observation).await;
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER sanitization_receipts_immutable_update_v1;
-             DROP TRIGGER sanitization_receipts_immutable_delete_v1;",
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE sanitization_receipts SET receipt_json = '{}'
-             WHERE receipt_id = ?1",
-            params![observation.receipt().receipt().receipt_id().as_str()],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("malformed receipt unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("invalid sanitization receipt authority JSON"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn redundant_receipt_authority_columns_are_cross_checked() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "receipt-column-mismatch").await;
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER sanitization_receipts_immutable_update_v1;
-             DROP TRIGGER sanitization_receipts_immutable_delete_v1;",
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE sanitization_receipts SET sanitizer_version = 'sanitizer.other.v1'
-             WHERE receipt_id = ?1",
-            params![observation.receipt().receipt().receipt_id().as_str()],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("mismatched receipt authority unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("receipt authority columns disagree with receipt JSON"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn sanitization_receipts_are_immutable_after_commit() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "immutable-receipt").await;
-    let receipt_id = observation.receipt().receipt().receipt_id().as_str();
-    for statement in [
-        "UPDATE sanitization_receipts SET payload_digest = payload_digest WHERE receipt_id = ?1",
-        "DELETE FROM sanitization_receipts WHERE receipt_id = ?1",
+async fn registered_mount_publishes_complete_migrated_schema() {
+    let harness = RegisteredGlobalDbHarness::open("complete-migrated-schema").await;
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+
+    super::schema_contract::validate_authority_schema_contract(&snapshot)
+        .await
+        .expect("registered runtime must publish the complete authority schema");
+
+    for (table, column) in [
+        ("code_projects", "primary_root_platform"),
+        ("code_projects", "primary_root_bytes"),
+        ("code_projects", "primary_root_last_seen_at"),
+        ("parse_offsets", "file_id"),
+        ("sessions", "parent_session_id"),
+        ("sessions", "is_subagent"),
+        ("sessions", "agent_id"),
+        ("sessions", "parent_tool_use_id"),
     ] {
-        let error = db
-            .conn
-            .execute(statement, params![receipt_id])
+        let mut rows = snapshot
+            .query(
+                "SELECT 1 FROM pragma_table_xinfo(?1) WHERE name = ?2",
+                crate::db::engine::params![table, column],
+            )
             .await
-            .unwrap_err();
+            .unwrap();
         assert!(
-            error
-                .to_string()
-                .contains("sanitization receipts are immutable"),
-            "{error}"
+            rows.next().await.unwrap().is_some(),
+            "registered migration omitted {table}.{column}"
         );
     }
 }
 
 #[tokio::test]
-async fn redundant_observation_authority_columns_are_cross_checked() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "column-mismatch").await;
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER observations_immutable_update;
-             DROP TRIGGER observations_immutable_delete;",
-        )
+async fn registered_schema_validation_rejects_incomplete_authority_schema() {
+    let harness = RegisteredGlobalDbHarness::open("reject-incomplete-authority-schema").await;
+    harness
+        .registered
+        .writer_connection()
+        .unwrap()
+        .execute_batch("DROP INDEX idx_project_aliases_project_id")
         .await
         .unwrap();
-    db.conn
-        .execute(
-            "UPDATE observations SET payload_digest = ?2 WHERE observation_id = ?1",
-            params![
-                observation.observation_id().as_str(),
-                format!("sha256:{}", "0".repeat(64))
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
 
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("mismatched observation authority unexpectedly opened");
-    };
+    let error = super::schema_contract::validate_authority_schema_contract(&snapshot)
+        .await
+        .expect_err("incomplete registered authority schema unexpectedly validated");
     assert!(
-        error
-            .to_string()
-            .contains("authority columns disagree with observation JSON"),
+        error.to_string().contains("idx_project_aliases_project_id"),
         "{error}"
     );
 }
 
 #[tokio::test]
-async fn committed_cursor_is_cross_checked_against_observation_evidence() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, cursor) = seed_observation(&db.conn, 1, "cursor-mismatch").await;
-    let mismatched = ClaudeSourceCursorV1::new(
-        cursor.source().clone(),
-        cursor.scope().clone(),
-        ClaudeFileGenerationV1::new(cursor.generation().file_id() + 1).unwrap(),
-        cursor.byte_offset(),
-    )
-    .unwrap();
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER observations_immutable_update;
-             DROP TRIGGER observations_immutable_delete;",
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE observations SET committed_cursor_json = ?2 WHERE observation_id = ?1",
-            params![
-                observation.observation_id().as_str(),
-                serde_json::to_string(&mismatched).unwrap()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("mismatched committed cursor unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("committed source cursor disagrees"),
-        "{error}"
+async fn concurrent_registered_mounts_singleflight_to_one_runtime() {
+    let harness = RegisteredGlobalDbHarness::open("concurrent-registered-mounts").await;
+    let (first, second, third, fourth) = tokio::join!(
+        harness.mount(),
+        harness.mount(),
+        harness.mount(),
+        harness.mount(),
     );
-}
-
-#[tokio::test]
-async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (first, _) = seed_observation(&db.conn, 1, "first").await;
-    let (second, _) = seed_observation(&db.conn, 2, "second").await;
-    let (third, _) = seed_observation(&db.conn, 3, "third").await;
-    for observation in [&first, &third] {
-        db.conn
-            .execute(
-                "INSERT INTO observation_projection_dispositions
-                 (projector_version, observation_id, receipt_id, reason)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    SESSION_MESSAGE_PROJECTOR_VERSION,
-                    observation.observation_id().as_str(),
-                    observation.receipt().receipt().receipt_id().as_str(),
-                    ProjectionSkipReason::NonConversationalRecord.as_str()
-                ],
-            )
-            .await
-            .unwrap();
+    for mounted in [&second, &third, &fourth] {
+        assert!(Arc::ptr_eq(&first, mounted));
+        assert_eq!(first.binding(), mounted.binding());
     }
-    db.conn
-        .execute(
-            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
-             VALUES (?1, 3)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT last_sequence FROM observation_projection_checkpoints
-             WHERE projector_version = ?1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        1
-    );
-    drop(rows);
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT observation_id FROM projection_queue ORDER BY observation_sequence",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
-        second.observation_id().as_str()
-    );
-    assert_eq!(
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
-        third.observation_id().as_str()
-    );
-    assert!(rows.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
-async fn conflicting_projection_outcomes_are_rejected_atomically() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "conflicting-effects").await;
-    // The v4 projector binds every provenance row to the observation's retrieval
-    // anchor, so seed the anchor and reference it in the conflicting output.
-    let anchor_id = seed_observation_retrieval_anchor(&db.conn, &observation).await;
-    seed_skip_projection(&db.conn, &observation).await;
-    db.conn
-        .execute(
-            "INSERT INTO observation_projection_provenance
-             (projector_version, observation_id, receipt_id, output_provider,
-              output_message_id, output_digest, message_created, retrieval_anchor_id)
-             VALUES (?1, ?2, ?3, 'claude', 'invalid', 'sha256:invalid', 0, ?4)",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                observation.observation_id().as_str(),
-                observation.receipt().receipt().receipt_id().as_str(),
-                anchor_id.as_str()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("conflicting projection outcomes unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("exactly one skip outcome without an alias"),
-        "{error}"
-    );
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    let mut rows = raw_conn
-        .query("SELECT COUNT(*) FROM projection_queue", ())
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-}
-
-#[tokio::test]
-async fn invalid_projection_skip_reason_is_rejected() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "invalid-skip-reason").await;
-    db.conn
-        .execute(
-            "INSERT INTO observation_projection_dispositions
-             (projector_version, observation_id, receipt_id, reason)
-             VALUES (?1, ?2, ?3, 'invented_reason')",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                observation.observation_id().as_str(),
-                observation.receipt().receipt().receipt_id().as_str()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("invalid projection skip reason unexpectedly opened");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("disposition disagrees with deterministic skip reason"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn projection_alias_on_skipped_observation_is_rejected() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "alias-on-skip").await;
-    seed_skip_projection(&db.conn, &observation).await;
-    db.conn
-        .execute(
-            "INSERT INTO observation_projection_aliases
-             (projector_version, observation_id, output_provider, output_message_id)
-             VALUES (?1, ?2, 'claude', 'consolidated/source/invalid')",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                observation.observation_id().as_str()
-            ],
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("projection alias on skipped observation unexpectedly opened");
-    };
-    assert!(
-        error.to_string().contains("invalid projection authority"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn authority_reensure_audits_only_new_append_suffixes() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    for sequence in 1..=64 {
-        let (observation, _) =
-            seed_observation(&db.conn, sequence, &format!("bounded-{sequence}")).await;
-        seed_skip_projection(&db.conn, &observation).await;
-    }
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT last_receipts_audited, last_observations_audited,
-                    last_dispositions_audited
-             FROM authority_audit_checkpoints
-             WHERE audit_name = 'observation-authority'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<i64>(0).unwrap(), 64);
-    assert_eq!(row.get::<i64>(1).unwrap(), 64);
-    assert_eq!(row.get::<i64>(2).unwrap(), 64);
-    drop(row);
-    drop(rows);
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT last_receipts_audited, last_observations_audited,
-                    last_dispositions_audited
-             FROM authority_audit_checkpoints
-             WHERE audit_name = 'observation-authority'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<i64>(0).unwrap(), 0);
-    assert_eq!(row.get::<i64>(1).unwrap(), 0);
-    assert_eq!(row.get::<i64>(2).unwrap(), 0);
-}
-
-#[tokio::test]
-async fn authority_reensure_rejects_checkpoint_beyond_current_frontiers() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "inflated-checkpoint").await;
-    seed_skip_projection(&db.conn, &observation).await;
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.conn
-        .execute(
-            "UPDATE authority_audit_checkpoints SET
-                receipt_rowid = 1000000,
-                observation_sequence = 1000000,
-                provenance_rowid = 1000000,
-                disposition_rowid = 1000000,
-                alias_rowid = 1000000,
-                projection_checkpoint = 1000000
-             WHERE audit_name = 'observation-authority'",
-            (),
-        )
-        .await
-        .unwrap();
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = db
-        .conn
-        .query(
-            "SELECT last_receipts_audited, last_observations_audited,
-                    last_dispositions_audited
-             FROM authority_audit_checkpoints
-             WHERE audit_name = 'observation-authority'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<i64>(0).unwrap(), 1);
-    assert_eq!(row.get::<i64>(1).unwrap(), 1);
-    assert_eq!(row.get::<i64>(2).unwrap(), 1);
-}
-
-#[tokio::test]
-async fn periodic_exhaustive_audit_rejects_old_row_corruption_at_equal_frontier() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let (observation, _) = seed_observation(&db.conn, 1, "periodic-exhaustive").await;
-    seed_skip_projection(&db.conn, &observation).await;
-    require_schema_reensure(&db).await;
-    drop(db);
-
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER sanitization_receipts_immutable_update_v1;
-             UPDATE sanitization_receipts SET receipt_json = '{}';
-             CREATE TRIGGER sanitization_receipts_immutable_update_v1
-             BEFORE UPDATE ON sanitization_receipts BEGIN
-                SELECT RAISE(ABORT, 'sanitization receipts are immutable');
-             END;
-             UPDATE authority_audit_checkpoints
-             SET bounded_passes_since_exhaustive = 64
-             WHERE audit_name = 'observation-authority';",
-        )
-        .await
-        .unwrap();
-    drop(db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("old receipt corruption unexpectedly bypassed periodic exhaustive audit");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("sanitization receipt authority JSON"),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn try_open_at_prevalidates_projects_before_canonical_migration() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let project = dir.path().join("project");
-    std::fs::create_dir(&project).unwrap();
-    let legacy = format!("{}/.", project.display());
-    let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE projects (
-                path TEXT PRIMARY KEY,
-                tokens_saved INTEGER NOT NULL DEFAULT 0,
-                unexpected TEXT
-             )",
-        )
-        .await
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO projects(path, tokens_saved) VALUES (?1, 7)",
-            params![legacy.as_str()],
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("invalid projects table unexpectedly opened");
-    };
-    let TraceDecayError::Database { message, operation } = error else {
-        panic!("unexpected error: {error}");
-    };
-    assert_eq!(operation, "validate global database authority schema");
-    assert!(
-        message.contains("incompatible number of columns"),
-        "{message}"
-    );
-
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    let mut rows = raw_conn
-        .query("SELECT path FROM projects", ())
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
-        legacy
-    );
-    assert!(rows.next().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn canonical_project_migration_rolls_back_insert_when_delete_fails() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let project = dir.path().join("project");
-    std::fs::create_dir(&project).unwrap();
-    let legacy = format!("{}/.", project.display());
-    let canonical = project.display().to_string();
-    let db_path = dir.path().join("global.db");
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE projects (
-                path TEXT PRIMARY KEY,
-                tokens_saved INTEGER NOT NULL DEFAULT 0
-            );
-             CREATE TRIGGER reject_project_delete
-             BEFORE DELETE ON projects
-             BEGIN SELECT RAISE(ABORT, 'delete rejected'); END;",
-        )
-        .await
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO projects(path, tokens_saved) VALUES (?1, 7)",
-            params![legacy.as_str()],
-        )
-        .await
-        .unwrap();
-    drop(raw_conn);
-    drop(raw_db);
-
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("failing canonical migration unexpectedly opened");
-    };
-    assert!(error.to_string().contains("delete rejected"), "{error}");
-
-    let raw_db = libsql_local::open_local_database(&db_path, false)
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    let mut rows = raw_conn
-        .query(
-            "SELECT path FROM projects WHERE path IN (?1, ?2) ORDER BY path",
-            params![legacy.as_str(), canonical.as_str()],
-        )
-        .await
-        .unwrap();
-    let mut paths = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        paths.push(row.get::<String>(0).unwrap());
-    }
-    assert_eq!(paths, vec![legacy]);
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn unique_legacy_non_unicode_alias_migrates_to_native_key() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let (project_path, _) = colliding_non_unicode_project_paths(dir.path());
-    db.upsert_code_project("proj_legacy", &project_path, None, None, None)
-        .await
-        .expect("register legacy project");
-    replace_native_alias_with_legacy(&db, &project_path, "proj_legacy").await;
-
-    let context = db
-        .project_registry_context_by_alias(&project_path)
-        .await
-        .expect("unique legacy owner should migrate");
-    assert_eq!(context.project.project_id, "proj_legacy");
-    assert_eq!(
-        db.project_id_by_alias_key(&project_path_alias_key(&project_path))
-            .await
-            .as_deref(),
-        Some("proj_legacy")
-    );
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn colliding_legacy_non_unicode_alias_fails_closed() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let (first, second) = colliding_non_unicode_project_paths(dir.path());
-    db.upsert_code_project("proj_first", &first, None, None, None)
-        .await
-        .expect("register first project");
-    db.upsert_code_project("proj_second", &second, None, None, None)
-        .await
-        .expect("register second project");
-    replace_native_alias_with_legacy(&db, &first, "proj_first").await;
-    db.conn
-        .execute(
-            "DELETE FROM project_aliases WHERE alias_path = ?1",
-            params![project_path_alias_key(&second)],
-        )
-        .await
-        .unwrap();
-
-    assert!(db.project_registry_context_by_alias(&first).await.is_none());
-    assert!(
-        db.project_id_by_alias_key(&project_path_alias_key(&first))
-            .await
-            .is_none()
-    );
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn bulk_project_deletion_preserves_native_non_unicode_aliases() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let (first, second) = colliding_non_unicode_project_paths(dir.path());
-    assert_ne!(
-        project_path_alias_key(&first),
-        project_path_alias_key(&second)
-    );
-    assert_eq!(
-        GlobalDb::canonical_project_key(&first),
-        GlobalDb::canonical_project_key(&second)
-    );
-    db.upsert(&first, 11).await;
-    db.upsert(&second, 22).await;
-
-    assert_eq!(
-        db.delete_project_paths(std::slice::from_ref(&first)).await,
-        1
-    );
-    assert_eq!(db.get_project_tokens(&first).await, 0);
-    assert_eq!(db.get_project_tokens(&second).await, 22);
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn lossless_project_path_listing_decodes_native_aliases() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let (project, _) = colliding_non_unicode_project_paths(dir.path());
-    db.upsert(&project, 11).await;
-    db.upsert_code_project("proj_lossless_listing", &project, None, None, None)
-        .await
-        .expect("register project");
-
-    assert_eq!(
-        db.try_list_project_paths().await.unwrap(),
-        vec![project.clone()]
-    );
-    assert!(
-        db.try_list_project_alias_paths()
-            .await
-            .unwrap()
-            .contains(&project)
-    );
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn code_project_listing_uses_latest_lossless_primary_root() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let (first, second) = colliding_non_unicode_project_paths(dir.path());
-    db.upsert_code_project("proj_moved", &first, None, None, None)
-        .await
-        .expect("register first root");
-    db.upsert_code_project("proj_moved", &second, None, None, None)
-        .await
-        .expect("move primary root");
-
-    assert_eq!(
-        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
-        vec![second]
-    );
-    assert_eq!(
-        db.project_id_by_alias_key(&project_path_alias_key(&first))
-            .await
-            .as_deref(),
-        Some("proj_moved")
-    );
-}
-
-#[tokio::test]
-async fn code_project_listing_preserves_literal_unicode_replacement_character() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let project = dir.path().join("literal-\u{fffd}-project");
-    db.upsert_code_project("proj_unicode", &project, None, None, None)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
-        vec![project]
-    );
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn code_project_listing_prefers_explicit_unicode_root_after_non_unicode_move() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let (old_non_unicode, _) = colliding_non_unicode_project_paths(dir.path());
-    let current_unicode = dir.path().join("current-unicode");
-    db.upsert_code_project("proj_moved_unicode", &old_non_unicode, None, None, None)
-        .await
-        .unwrap();
-    db.upsert_code_project("proj_moved_unicode", &current_unicode, None, None, None)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
-        vec![current_unicode]
-    );
-    assert_eq!(
-        db.project_id_by_alias_key(&project_path_alias_key(&old_non_unicode))
-            .await
-            .as_deref(),
-        Some("proj_moved_unicode")
-    );
-}
-
-#[tokio::test]
-async fn legacy_code_project_listing_rejects_display_without_lossless_alias_evidence() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let project = dir.path().join("literal-\u{fffd}-legacy");
-    db.upsert_code_project("proj_no_evidence", &project, None, None, None)
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "DELETE FROM project_aliases WHERE project_id = 'proj_no_evidence'",
-            (),
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE code_projects SET primary_root_platform = NULL,
-             primary_root_bytes = NULL, primary_root_last_seen_at = NULL
-             WHERE project_id = 'proj_no_evidence'",
-            (),
-        )
-        .await
-        .unwrap();
-
-    // One project's unresolvable evidence must not make every registered
-    // root unlistable; the row is skipped, never guessed.
-    assert_eq!(
-        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
-        Vec::<PathBuf>::new()
-    );
-}
-
-#[tokio::test]
-async fn code_project_listing_rejects_incomplete_primary_root_tuple() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let project = dir.path().join("project");
-    db.upsert_code_project("proj_incomplete", &project, None, None, None)
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE code_projects SET primary_root_bytes = NULL
-             WHERE project_id = 'proj_incomplete'",
-            (),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(
-        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
-        Vec::<PathBuf>::new(),
-        "an incomplete primary root tuple is skipped, never resolved"
-    );
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn legacy_code_project_listing_fails_closed_on_ambiguous_native_roots() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let (first, second) = colliding_non_unicode_project_paths(dir.path());
-    db.upsert_code_project("proj_legacy", &first, None, None, None)
-        .await
-        .expect("register project");
-    db.upsert_project_alias(&second, "proj_legacy")
-        .await
-        .expect("register historical alias");
-    let current_evidence_at = 42;
-    db.conn
-        .execute(
-            "UPDATE code_projects SET last_seen_at = ?2 WHERE project_id = ?1",
-            params!["proj_legacy", current_evidence_at],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE project_aliases SET last_seen_at = ?2
-             WHERE project_id = ?1 AND alias_path IN (?3, ?4)",
-            params![
-                "proj_legacy",
-                current_evidence_at,
-                project_path_alias_key(&first),
-                project_path_alias_key(&second)
-            ],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE code_projects SET primary_root_platform = NULL,
-             primary_root_bytes = NULL, primary_root_last_seen_at = NULL
-             WHERE project_id = 'proj_legacy'",
-            (),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(
-        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
-        Vec::<PathBuf>::new(),
-        "ambiguous legacy evidence is skipped, never resolved to a guess"
-    );
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn legacy_code_project_listing_uses_unique_current_plain_alias_evidence() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let (old_non_unicode, _) = colliding_non_unicode_project_paths(dir.path());
-    let current_unicode = dir.path().join("current-unicode");
-    db.upsert_code_project("proj_legacy_move", &old_non_unicode, None, None, None)
-        .await
-        .unwrap();
-    db.upsert_code_project("proj_legacy_move", &current_unicode, None, None, None)
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE project_aliases SET last_seen_at = 10
-             WHERE alias_path = ?1",
-            params![project_path_alias_key(&old_non_unicode)],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE project_aliases SET last_seen_at = 20
-             WHERE alias_path = ?1",
-            params![project_path_alias_key(&current_unicode)],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "UPDATE code_projects SET last_seen_at = 20,
-             primary_root_platform = NULL, primary_root_bytes = NULL,
-             primary_root_last_seen_at = NULL
-             WHERE project_id = 'proj_legacy_move'",
-            (),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(
-        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
-        vec![current_unicode]
-    );
-}
-
-#[tokio::test]
-async fn bulk_project_deletion_accepts_string_paths() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let project = dir.path().join("project");
-    let project_text = project.to_string_lossy().into_owned();
-    db.upsert(&project, 11).await;
-
-    assert_eq!(db.delete_projects(&[]).await, 0);
-    assert_eq!(db.delete_projects(&[project_text]).await, 1);
-    assert_eq!(db.get_project_tokens(&project).await, 0);
-}
-
-#[tokio::test]
-async fn registry_gc_deletes_both_registry_generations_in_one_commit() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let project = dir.path().join("project");
-    db.upsert(&project, 11).await;
-    db.upsert_code_project("proj_gc", &project, None, None, None)
-        .await
-        .expect("register code project");
-
-    let deleted = db
-        .delete_registry_gc_candidates(&["proj_gc".to_string()], std::slice::from_ref(&project))
-        .await
-        .expect("delete registry cleanup plan");
-
-    assert_eq!(deleted, (1, 1));
-    assert!(db.get_code_project("proj_gc").await.is_none());
-    assert_eq!(db.get_project_tokens(&project).await, 0);
-}
-
-#[tokio::test]
-async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let project = dir.path().join("project");
-    db.upsert(&project, 11).await;
-    db.upsert_code_project("proj_gc", &project, None, None, None)
-        .await
-        .expect("register code project");
-    db.conn
-        .execute(
-            "CREATE TRIGGER reject_registry_gc
-             BEFORE DELETE ON projects
-             BEGIN SELECT RAISE(ABORT, 'forced registry cleanup failure'); END",
-            (),
-        )
-        .await
-        .expect("install failure trigger");
-
-    let result = db
-        .delete_registry_gc_candidates(&["proj_gc".to_string()], std::slice::from_ref(&project))
-        .await;
-
-    assert!(result.is_err());
-    assert!(db.get_code_project("proj_gc").await.is_some());
-    assert_eq!(db.get_project_tokens(&project).await, 11);
-}
-
-#[tokio::test]
-async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.expect("open global db");
-    let project = dir.path().join("project");
-    db.upsert(&project, 11).await;
-    db.upsert_code_project("proj_gc", &project, None, None, None)
-        .await
-        .expect("register code project");
-
-    let concurrent_db = GlobalDb::open_at(&db_path)
-        .await
-        .expect("open concurrent global db");
+async fn queued_registered_write_rechecks_authority_when_dequeued() {
+    let mut harness = RegisteredGlobalDbHarness::open("queued-authority-loss").await;
+    let db = Arc::clone(&harness.registered);
     let transaction = db.begin_write_transaction().await.unwrap();
-    let concurrent_project = project.clone();
+
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let refresh = tokio::spawn(async move {
-        let _ = started_tx.send(());
-        concurrent_db.upsert(&concurrent_project, 22).await;
-        concurrent_db
-            .upsert_code_project("proj_gc", &concurrent_project, None, None, None)
+    let queued_db = Arc::clone(&db);
+    let queued = tokio::spawn(async move {
+        started_tx.send(()).unwrap();
+        queued_db
+            .writer_connection()
+            .unwrap()
+            .execute(
+                "CREATE TABLE stale_queued_writer_must_not_persist (value INTEGER)",
+                (),
+            )
             .await
     });
     started_rx.await.unwrap();
     tokio::task::yield_now().await;
-    assert!(!refresh.is_finished());
-
-    let deleted = GlobalDb::delete_registry_gc_candidates_in_transaction(
-        &transaction,
-        &["proj_gc".to_string()],
-        std::slice::from_ref(&project),
-    )
-    .await
-    .unwrap();
-    transaction.commit().await.unwrap();
-    assert_eq!(deleted, (1, 1));
-
-    let refreshed = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
-        .await
-        .expect("concurrent refresh should resume")
-        .expect("concurrent refresh task should complete");
-    assert!(refreshed.is_some());
-    assert!(db.get_code_project("proj_gc").await.is_some());
-    assert_eq!(db.get_project_tokens(&project).await, 22);
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn unique_legacy_non_unicode_git_common_alias_migrates_to_native_key() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-    let project_root = dir.path().join("project");
-    let (git_common_dir, _) = colliding_non_unicode_project_paths(dir.path());
-    db.upsert_code_project(
-        "proj_common",
-        &project_root,
-        Some(&git_common_dir),
-        None,
-        None,
-    )
-    .await
-    .expect("register project");
-    let native_alias = format!("git-common-dir:{}", project_path_alias_key(&git_common_dir));
-    let legacy_alias = format!(
-        "git-common-dir:{}",
-        GlobalDb::canonical_project_key(&git_common_dir)
+    assert!(
+        !queued.is_finished(),
+        "write was not queued behind transaction"
     );
-    db.conn
-        .execute(
-            "DELETE FROM project_aliases WHERE alias_path = ?1",
-            params![native_alias.as_str()],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
-             VALUES (?1, 'proj_common', 1)",
-            params![legacy_alias],
-        )
-        .await
-        .unwrap();
 
-    assert_eq!(
-        db.project_id_by_git_common_dir_alias(&git_common_dir)
-            .await
-            .as_deref(),
-        Some("proj_common")
-    );
-    assert_eq!(
-        db.project_id_by_alias_key(&native_alias).await.as_deref(),
-        Some("proj_common")
-    );
-}
-
-#[test]
-fn global_db_disables_mmap_on_every_platform() {
-    assert_eq!(global_db_mmap_size_guard(), 0);
+    harness.revoke();
+    transaction.rollback().await.unwrap();
+    let error = queued
+        .await
+        .unwrap()
+        .expect_err("queued write did not recheck authority");
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert!(!table_exists(&db, "stale_queued_writer_must_not_persist").await);
 }
 
 #[tokio::test]
-async fn concurrent_full_opens_singleflight_schema_but_use_independent_connections() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("global.db");
-    let (first, second, third, fourth) = tokio::join!(
-        GlobalDb::open_at(&path),
-        GlobalDb::open_at(&path),
-        GlobalDb::open_at(&path),
-        GlobalDb::open_at(&path),
-    );
-    let first = first.expect("first open");
-    let opened = [
-        second.expect("second open"),
-        third.expect("third open"),
-        fourth.expect("fourth open"),
-    ];
-    for db in &opened {
-        assert!(!Arc::ptr_eq(&first.inner, &db.inner));
-    }
-
-    first.conn().execute("BEGIN", ()).await.unwrap();
-    for db in &opened {
-        db.conn().execute("BEGIN", ()).await.unwrap();
-    }
-    first.conn().execute("ROLLBACK", ()).await.unwrap();
-    for db in &opened {
-        db.conn().execute("ROLLBACK", ()).await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn cancelled_authoritative_transaction_isolated_from_retained_connection_and_cleans_payload()
-{
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("global.db");
-    let db = Arc::new(GlobalDb::open_at(&path).await.expect("global DB open"));
-    let session = SessionRecord {
-        provider: "codex".to_string(),
-        session_id: "cancelled-transaction".to_string(),
-        project_key: "project".to_string(),
-        project_path: dir.path().display().to_string(),
-        title: None,
-        started_at: None,
-        ended_at: None,
-        transcript_path: Some(dir.path().join("session.jsonl").display().to_string()),
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
+async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payload() {
+    let harness = RegisteredGlobalDbHarness::open("cancelled-authoritative-transaction").await;
+    let db = Arc::clone(&harness.registered);
+    let storage_root = harness.storage_root().to_path_buf();
     let (created_tx, created_rx) = tokio::sync::oneshot::channel();
     let task_db = Arc::clone(&db);
-    let task_session = session.clone();
+    let task_storage_root = storage_root.clone();
     let task = tokio::spawn(async move {
         let transaction = task_db.begin_write_transaction().await.unwrap();
-        assert!(GlobalDb::upsert_session_in_existing_tx(&transaction, &task_session).await);
+        transaction
+            .execute(
+                "INSERT INTO sessions (provider, session_id, project_key, project_path)
+                 VALUES ('codex', 'cancelled-transaction', 'project', '/project')",
+                (),
+            )
+            .await
+            .unwrap();
         let mut payload_rollback =
             crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
-                &task_db.storage_root,
+                &task_storage_root,
             );
         let payload = crate::sessions::lcm::payload::write_external_payload_tracked(
-            &task_db.storage_root,
+            &task_storage_root,
             crate::sessions::lcm::payload::ExternalPayloadWrite {
                 provider: "codex",
                 session_id: "cancelled-transaction",
@@ -3069,39 +172,39 @@ async fn cancelled_authoritative_transaction_isolated_from_retained_connection_a
     });
 
     let payload_ref = created_rx.await.expect("payload creation signal");
-    let payload_path =
-        crate::sessions::lcm::payload::payload_dir(&db.storage_root).join(&payload_ref);
+    let payload_path = crate::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.is_file());
 
-    let mut rows = db
-        .conn()
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT 1 FROM sessions WHERE provider = ?1 AND session_id = ?2",
-            params!["codex", "cancelled-transaction"],
+            crate::db::engine::params!["codex", "cancelled-transaction"],
         )
         .await
-        .expect("retained read must not join the fresh transaction");
+        .expect("retained read must not join the uncommitted transaction");
     assert!(rows.next().await.unwrap().is_none());
     drop(rows);
+    drop(snapshot);
 
-    db.conn()
-        .execute_batch("PRAGMA busy_timeout = 0;")
-        .await
-        .unwrap();
-    assert!(!GlobalDb::upsert_session_in_existing_tx(&db.conn, &session).await);
-
-    let queued_session = SessionRecord {
-        session_id: "queued-after-cancellation".to_string(),
-        ..session.clone()
-    };
     let queued_db = Arc::clone(&db);
-    let queued_write = tokio::spawn(async move { queued_db.upsert_session(&queued_session).await });
+    let queued_write = tokio::spawn(async move {
+        queued_db
+            .writer_connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions (provider, session_id, project_key, project_path)
+                 VALUES ('codex', 'queued-after-cancellation', 'project', '/project')",
+                (),
+            )
+            .await
+    });
     tokio::pin!(queued_write);
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(25), &mut queued_write)
             .await
             .is_err(),
-        "queued writer bypassed the transaction's shared writer guard"
+        "queued writer bypassed the active transaction"
     );
 
     task.abort();
@@ -3110,35 +213,35 @@ async fn cancelled_authoritative_transaction_isolated_from_retained_connection_a
         tokio::time::timeout(std::time::Duration::from_secs(1), &mut queued_write)
             .await
             .expect("queued writer remained blocked after cancellation")
-            .expect("queued writer task failed"),
-        "queued writer failed after the cancelled transaction rolled back"
+            .expect("queued writer task failed")
+            .is_ok()
     );
     assert!(!payload_path.exists());
-    db.conn()
-        .execute_batch("PRAGMA busy_timeout = 5000;")
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT session_id FROM sessions WHERE provider = 'codex' ORDER BY session_id",
+            (),
+        )
         .await
         .unwrap();
-    assert!(
-        db.get_session("codex", "cancelled-transaction")
+    assert_eq!(
+        rows.next()
             .await
-            .is_none()
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "queued-after-cancellation"
     );
-    assert!(db.upsert_session(&session).await);
-    assert!(
-        db.get_session("codex", "cancelled-transaction")
-            .await
-            .is_some()
-    );
+    assert!(rows.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = Arc::new(
-        GlobalDb::open_at(&dir.path().join("global.db"))
-            .await
-            .expect("global DB open"),
-    );
+    let harness = RegisteredGlobalDbHarness::open("cancelled-lcm-lifecycle").await;
+    let db = Arc::clone(&harness.registered);
     let update = crate::sessions::lcm::LcmLifecycleUpdate {
         provider: "cursor".to_string(),
         conversation_id: "cancelled-lifecycle".to_string(),
@@ -3164,26 +267,39 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     });
 
     written_rx.await.expect("lifecycle write signal");
+    let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        db.lcm_lifecycle_state("cursor", "cancelled-lifecycle")
-            .await
-            .is_err(),
-        "retained reader must not observe the uncommitted lifecycle state"
+        crate::sessions::lcm::compression::lifecycle_state(
+            &snapshot,
+            "cursor",
+            "cancelled-lifecycle",
+        )
+        .await
+        .is_err(),
+        "retained reader observed uncommitted lifecycle state"
     );
+    drop(snapshot);
 
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        db.lcm_lifecycle_state("cursor", "cancelled-lifecycle")
-            .await
-            .is_err(),
-        "cancellation must roll back lifecycle state and maintenance debt"
-    );
-
-    let state = db
-        .lcm_update_lifecycle(update.clone())
+        crate::sessions::lcm::compression::lifecycle_state(
+            &snapshot,
+            "cursor",
+            "cancelled-lifecycle",
+        )
         .await
-        .expect("writer must be reusable after cancellation");
+        .is_err(),
+        "cancellation persisted lifecycle state or maintenance debt"
+    );
+    drop(snapshot);
+
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let state = crate::sessions::lcm::compression::update_lifecycle(&transaction, update.clone())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
     assert_eq!(state.provider, update.provider);
     assert_eq!(state.conversation_id, update.conversation_id);
     assert_eq!(state.maintenance_debt, update.maintenance_debt);
@@ -3191,12 +307,9 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
 
 #[tokio::test]
 async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("global DB open");
+    let harness = RegisteredGlobalDbHarness::open("analytics-batch-rollback").await;
+    let db = &harness.registered;
     db.writer_connection()
-        .await
         .unwrap()
         .execute_batch(
             "CREATE TRIGGER fail_analytics_batch
@@ -3229,20 +342,9 @@ async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
             .await
             .is_err()
     );
-
-    let mut rows = db
-        .conn()
-        .query("SELECT COUNT(*) FROM analytics_events", ())
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-    drop(rows);
+    assert_eq!(row_count(db, "analytics_events").await, 0);
 
     db.writer_connection()
-        .await
         .unwrap()
         .execute("DROP TRIGGER fail_analytics_batch", ())
         .await
@@ -3257,162 +359,59 @@ async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
 }
 
 #[tokio::test]
-async fn same_path_handles_share_writer_for_accounting() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("global.db");
-    let first = GlobalDb::open_at(&path)
-        .await
-        .expect("first global DB open");
-    let second = std::sync::Arc::new(
-        GlobalDb::open_at(&path)
-            .await
-            .expect("second global DB open"),
-    );
-    let savings = std::sync::Arc::new(
-        GlobalDb::open_at(&path)
-            .await
-            .expect("savings global DB open"),
-    );
-    assert!(std::sync::Arc::ptr_eq(
-        &first.transaction,
-        &second.transaction
-    ));
-    assert!(std::sync::Arc::ptr_eq(
-        &first.transaction,
-        &savings.transaction
-    ));
-    second
-        .conn()
-        .execute_batch("PRAGMA busy_timeout = 1;")
+async fn analytics_import_cursor_failure_rolls_back_events() {
+    let harness = RegisteredGlobalDbHarness::open("analytics-cursor-rollback").await;
+    let db = &harness.registered;
+    db.writer_connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_analytics_cursor
+             BEFORE INSERT ON parse_offsets
+             WHEN NEW.file_path = 'hook_analytics:fixture'
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced cursor failure');
+             END;",
+        )
         .await
         .unwrap();
-    savings
-        .conn()
-        .execute_batch("PRAGMA busy_timeout = 1;")
-        .await
-        .unwrap();
-
-    let transaction = first.begin_write_transaction().await.unwrap();
     let event = AnalyticsEventInsert {
-        provider: "daemon_hook".to_string(),
+        provider: "codex".to_string(),
         project_id: "project".to_string(),
         session_id: Some("session".to_string()),
         timestamp: 1,
         event_kind: "hook_route".to_string(),
-        hook_name: Some("runtime".to_string()),
+        hook_name: None,
         tool_name: None,
         tool_category: None,
         skill_name: None,
         hint_category: None,
         hint_id: None,
-        outcome: Some("observed".to_string()),
+        outcome: None,
         metadata_json: None,
     };
-    let analytics = second.append_analytics_event(&event);
-    tokio::pin!(analytics);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut analytics)
-            .await
-            .is_err(),
-        "second handle bypassed the shared writer"
-    );
 
-    let savings_write = savings.record_savings("/project", "tracedecay_runtime", 100, 50, 1);
-    tokio::pin!(savings_write);
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut savings_write)
-            .await
-            .is_err(),
-        "savings handle bypassed the shared writer"
-    );
-
-    transaction.commit().await.unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut analytics)
-            .await
-            .expect("analytics append timed out")
-            .is_ok()
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), &mut savings_write)
+        db.append_analytics_events_with_cursor(
+            &[event],
+            "hook_analytics:fixture",
+            ParseOffset {
+                byte_offset: 42,
+                mtime: 7,
+                file_id: 0,
+            },
+        )
         .await
-        .expect("savings insert timed out");
-    assert_eq!(first.sum_savings(None, 0).await.calls, 1);
-}
-
-#[tokio::test]
-async fn twelve_same_path_handles_serialize_isolated_writes() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("global.db");
-    let mut handles = Vec::new();
-    for _ in 0..12 {
-        handles.push(Arc::new(
-            GlobalDb::open_at(&path)
-                .await
-                .expect("open shared global DB handle"),
-        ));
-    }
-
-    let mut writes = tokio::task::JoinSet::new();
-    for (index, db) in handles.iter().cloned().enumerate() {
-        writes.spawn(async move {
-            db.record_savings(
-                "/shared/project",
-                &format!("writer-{index}"),
-                10,
-                5,
-                index as i64,
-            )
-            .await;
-        });
-    }
-    while let Some(result) = writes.join_next().await {
-        result.unwrap();
-    }
-
-    assert_eq!(handles[0].sum_savings(None, 0).await.calls, 12);
-}
-
-#[tokio::test]
-async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
-    async fn read_tokens(connection: &Connection, project_key: &str) -> i64 {
-        let mut rows = connection
-            .query(
-                "SELECT tokens_saved FROM projects WHERE path = ?1",
-                params![project_key],
-            )
-            .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
-    }
-
-    if crate::db::platform_safe_journal_mode() != "WAL" {
-        return;
-    }
-
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&path).await.expect("open global DB");
-    let project = dir.path().join("snapshot-project");
-    let project_key = project_path_alias_key(&project);
-    db.upsert(&project, 1).await;
-
-    let snapshot = db.read_snapshot().await.unwrap();
-    assert_eq!(read_tokens(&snapshot, &project_key).await, 1);
-
-    db.upsert(&project, 2).await;
-
-    assert_eq!(read_tokens(&snapshot, &project_key).await, 1);
-    assert_eq!(db.get_project_tokens(&project).await, 2);
+        .is_err()
+    );
+    assert_eq!(row_count(db, "analytics_events").await, 0);
+    assert_eq!(db.get_parse_offset("hook_analytics:fixture").await, None);
 }
 
 #[tokio::test]
 async fn turn_batch_error_rolls_back_prior_rows_and_releases_writer() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("global DB open");
+    let harness = RegisteredGlobalDbHarness::open("turn-batch-rollback").await;
+    let db = &harness.registered;
     db.writer_connection()
-        .await
         .unwrap()
         .execute_batch(
             "CREATE TRIGGER fail_turn_batch
@@ -3444,20 +443,9 @@ async fn turn_batch_error_rolls_back_prior_rows_and_releases_writer() {
             .await,
         0
     );
-
-    let mut rows = db
-        .conn()
-        .query("SELECT COUNT(*) FROM turns", ())
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-    drop(rows);
+    assert_eq!(row_count(db, "turns").await, 0);
 
     db.writer_connection()
-        .await
         .unwrap()
         .execute("DROP TRIGGER fail_turn_batch", ())
         .await
@@ -3466,503 +454,360 @@ async fn turn_batch_error_rolls_back_prior_rows_and_releases_writer() {
 }
 
 #[tokio::test]
-async fn global_db_slot_uses_database_authority_canonical_identity() {
-    let dir = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir(dir.path().join("nested")).unwrap();
-    let direct_path = dir.path().join("global.db");
-    let alias_path = dir.path().join("nested").join("..").join("global.db");
-    let direct = DatabaseAuthority::for_runtime(&direct_path, "direct slot identity").unwrap();
-    let alias = DatabaseAuthority::for_runtime(&alias_path, "alias slot identity").unwrap();
+async fn accounting_import_cursor_failure_rolls_back_turns() {
+    let harness = RegisteredGlobalDbHarness::open("accounting-cursor-rollback").await;
+    let db = &harness.registered;
+    db.writer_connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_accounting_cursor
+             BEFORE INSERT ON parse_offsets
+             WHEN NEW.file_path = 'accounting:fixture'
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced cursor failure');
+             END;",
+        )
+        .await
+        .unwrap();
+    let turn = crate::types::CostTurn {
+        message_id: "accounting-cursor-turn".to_string(),
+        project_hash: "project".to_string(),
+        session_id: "session".to_string(),
+        model: "test-model".to_string(),
+        timestamp: 1,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_write_tokens: 0,
+        cache_read_tokens: 0,
+        cost_usd: 0.01,
+        category: "test".to_string(),
+        tool_names: String::new(),
+    };
 
-    assert_eq!(
-        direct.canonical_database_path(),
-        alias.canonical_database_path()
+    assert!(
+        db.insert_turns_with_cursor(
+            &[turn],
+            "accounting:fixture",
+            ParseOffset {
+                byte_offset: 42,
+                mtime: 7,
+                file_id: 0,
+            },
+        )
+        .await
+        .is_err()
     );
-    assert!(Arc::ptr_eq(
-        &global_db_slot(&direct),
-        &global_db_slot(&alias)
-    ));
+    assert_eq!(row_count(db, "turns").await, 0);
+    assert_eq!(db.get_parse_offset("accounting:fixture").await, None);
+}
+
+#[tokio::test]
+async fn registered_handles_share_one_serialized_writer() {
+    let harness = RegisteredGlobalDbHarness::open("shared-registered-writer").await;
+    let first = Arc::clone(&harness.registered);
+    let second = Arc::clone(&harness.registered);
+    let savings = Arc::clone(&harness.registered);
+
+    let transaction = first.begin_write_transaction().await.unwrap();
+    let event = AnalyticsEventInsert {
+        provider: "daemon_hook".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some("session".to_string()),
+        timestamp: 1,
+        event_kind: "hook_route".to_string(),
+        hook_name: Some("runtime".to_string()),
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: Some("observed".to_string()),
+        metadata_json: None,
+    };
+    let analytics = second.append_analytics_event(&event);
+    tokio::pin!(analytics);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut analytics)
+            .await
+            .is_err(),
+        "analytics bypassed the active transaction"
+    );
+
+    let savings_write = savings.record_savings("/project", "tracedecay_runtime", 100, 50, 1);
+    tokio::pin!(savings_write);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut savings_write)
+            .await
+            .is_err(),
+        "accounting bypassed the active transaction"
+    );
+
+    transaction.commit().await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut analytics)
+            .await
+            .expect("analytics append timed out")
+            .is_ok()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), &mut savings_write)
+        .await
+        .expect("savings insert timed out");
+    assert_eq!(first.sum_savings(None, 0).await.calls, 1);
+}
+
+#[tokio::test]
+async fn concurrent_registered_writes_remain_isolated() {
+    let harness = RegisteredGlobalDbHarness::open("concurrent-registered-writes").await;
+    let handles = (0..12)
+        .map(|_| Arc::clone(&harness.registered))
+        .collect::<Vec<_>>();
+
+    let mut writes = tokio::task::JoinSet::new();
+    for (index, db) in handles.iter().cloned().enumerate() {
+        writes.spawn(async move {
+            db.record_savings(
+                "/shared/project",
+                &format!("writer-{index}"),
+                10,
+                5,
+                index as i64,
+            )
+            .await;
+        });
+    }
+    while let Some(result) = writes.join_next().await {
+        result.unwrap();
+    }
+
+    assert_eq!(handles[0].sum_savings(None, 0).await.calls, 12);
+}
+
+#[tokio::test]
+async fn queued_registered_writes_preserve_fifo_fairness() {
+    let harness = RegisteredGlobalDbHarness::open("registered-writer-fairness").await;
+    let db = Arc::clone(&harness.registered);
+    db.writer_connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE writer_fairness (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL UNIQUE
+             )",
+        )
+        .await
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+
+    let mut queued = Vec::new();
+    for label in ["first", "second", "third"] {
+        let queued_db = Arc::clone(&db);
+        queued.push(tokio::spawn(async move {
+            queued_db
+                .writer_connection()
+                .unwrap()
+                .execute(
+                    "INSERT INTO writer_fairness(label) VALUES (?1)",
+                    crate::db::engine::params![label],
+                )
+                .await
+        }));
+        tokio::task::yield_now().await;
+    }
+    assert!(queued.iter().all(|write| !write.is_finished()));
+
+    transaction.commit().await.unwrap();
+    for write in queued {
+        write.await.unwrap().unwrap();
+    }
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query("SELECT label FROM writer_fairness ORDER BY sequence", ())
+        .await
+        .unwrap();
+    let mut labels = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        labels.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(labels, ["first", "second", "third"]);
+}
+
+#[tokio::test]
+async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
+    async fn read_tokens(
+        connection: &impl crate::db::engine::QueryExecutor,
+        project_key: &str,
+    ) -> i64 {
+        let mut rows = connection
+            .query(
+                "SELECT tokens_saved FROM projects WHERE path = ?1",
+                crate::db::engine::params![project_key],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    let harness = RegisteredGlobalDbHarness::open("deferred-read-snapshot").await;
+    let db = &harness.registered;
+    let project = harness.storage_root().join("snapshot-project");
+    let project_key = project.to_string_lossy().into_owned();
+    db.writer_connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(path, tokens_saved) VALUES (?1, 1)",
+            crate::db::engine::params![project_key.as_str()],
+        )
+        .await
+        .unwrap();
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    assert_eq!(read_tokens(&snapshot, &project_key).await, 1);
+
+    db.writer_connection()
+        .unwrap()
+        .execute(
+            "UPDATE projects SET tokens_saved = 2 WHERE path = ?1",
+            crate::db::engine::params![project_key.as_str()],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(read_tokens(&snapshot, &project_key).await, 1);
+    let fresh = db.read_snapshot().await.unwrap();
+    assert_eq!(read_tokens(&fresh, &project_key).await, 2);
+}
+
+#[tokio::test]
+async fn retained_registered_database_rejects_new_writer_after_scope_drop() {
+    let mut harness = RegisteredGlobalDbHarness::open("retained-registered-writer").await;
+    let db = Arc::clone(&harness.registered);
+    harness.revoke();
+
+    let error = match db.writer_connection() {
+        Ok(_) => panic!("retained database outlived daemon write authority"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert!(!table_exists(&db, "stale_retained_writer").await);
+}
+
+#[tokio::test]
+async fn issued_registered_writer_rejects_autocommit_after_scope_drop() {
+    let mut harness = RegisteredGlobalDbHarness::open("issued-registered-writer").await;
+    let db = Arc::clone(&harness.registered);
+    let writer = db.writer_connection().expect("acquire registered writer");
+    harness.revoke();
+
+    let error = writer
+        .execute(
+            "CREATE TABLE stale_daemon_writer_must_not_persist (value INTEGER)",
+            (),
+        )
+        .await
+        .expect_err("issued writer outlived daemon write authority");
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    drop(writer);
+    assert!(
+        !table_exists(&db, "stale_daemon_writer_must_not_persist").await,
+        "rejected autocommit write persisted"
+    );
+}
+
+#[tokio::test]
+async fn begun_registered_transaction_rolls_back_when_scope_drops_before_commit() {
+    let mut harness = RegisteredGlobalDbHarness::open("begun-registered-transaction").await;
+    let db = Arc::clone(&harness.registered);
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "CREATE TABLE stale_daemon_transaction_must_not_persist (value INTEGER)",
+            (),
+        )
+        .await
+        .unwrap();
+    harness.revoke();
+
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("transaction commit did not recheck authority");
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert!(
+        !table_exists(&db, "stale_daemon_transaction_must_not_persist").await,
+        "failed commit did not roll back staged writes"
+    );
+}
+
+#[tokio::test]
+async fn begun_registered_transaction_can_roll_back_after_scope_drop() {
+    let mut harness = RegisteredGlobalDbHarness::open("registered-rollback").await;
+    let db = Arc::clone(&harness.registered);
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "CREATE TABLE rolled_back_daemon_transaction (value INTEGER)",
+            (),
+        )
+        .await
+        .unwrap();
+    harness.revoke();
+
+    transaction
+        .rollback()
+        .await
+        .expect("rollback must remain allowed after authority loss");
+    assert!(!table_exists(&db, "rolled_back_daemon_transaction").await);
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn global_db_slot_uses_database_authority_file_identity_across_symlinks() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let direct_path = dir.path().join("global.db");
-    let direct = GlobalDb::open_at(&direct_path)
-        .await
-        .expect("direct global DB open");
-    let alias_path = dir.path().join("global-alias.db");
-    std::os::unix::fs::symlink(&direct_path, &alias_path).unwrap();
-    let alias = GlobalDb::open_at(&alias_path)
-        .await
-        .expect("symlink global DB open");
+async fn registered_runtime_rejects_database_file_replacement() {
+    let harness = RegisteredGlobalDbHarness::open("database-file-replacement").await;
+    let db_path = harness.registered.db_path().to_path_buf();
+    let replaced_path = db_path.with_extension("replaced");
+    std::fs::rename(&db_path, &replaced_path).unwrap();
+    std::fs::File::create(&db_path).unwrap();
 
-    assert_eq!(direct.db_path(), alias.db_path());
-    assert!(Arc::ptr_eq(&direct.transaction, &alias.transaction));
-}
-
-#[tokio::test]
-async fn assuming_schema_open_cannot_poison_full_schema_ensure() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("global.db");
-    std::fs::File::create(&path).unwrap();
-
-    let raw = GlobalDb::open_at_assuming_schema(&path)
-        .await
-        .expect("raw assuming-schema open");
-    let mut rows = raw
-        .conn()
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-    drop(rows);
-    let raw_inner = Arc::downgrade(&raw.inner);
-    raw.close();
-
-    let ensured = GlobalDb::open_at(&path).await.expect("full schema open");
-    let mut rows = ensured
-        .conn()
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        1
-    );
-    assert!(raw_inner.upgrade().is_none());
-}
-
-#[tokio::test]
-async fn distinct_global_db_paths_do_not_share_an_initialization_lock() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let first_path = dir.path().join("first.db");
-    let second_path = dir.path().join("second.db");
-    let first_authority =
-        DatabaseAuthority::for_runtime(&first_path, "hold first global DB slot").unwrap();
-    let first_slot = global_db_slot(&first_authority);
-    let _first_guard = first_slot.schema.lock().await;
-
-    let second = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        GlobalDb::open_at_without_structured_backfill(&second_path),
-    )
-    .await
-    .expect("unrelated global DB path waited on the first path's slot")
-    .expect("open unrelated global DB path");
-    let second_authority =
-        DatabaseAuthority::for_runtime(&second_path, "verify second global DB path").unwrap();
-    assert_eq!(second.db_path(), second_authority.canonical_database_path());
-}
-
-#[tokio::test]
-async fn read_only_open_is_independent_and_cannot_poison_writer() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("global.db");
-    let seed = GlobalDb::open_at(&path).await.expect("seed writable open");
-    drop(seed);
-    let reader = GlobalDb::open_read_only_at(&path)
-        .await
-        .expect("read-only open");
-    let writable = GlobalDb::open_at(&path).await.expect("writable open");
-    assert!(!Arc::ptr_eq(&writable.inner, &reader.inner));
-    assert!(
-        reader
-            .conn()
-            .execute("CREATE TABLE forbidden_reader_write (id INTEGER)", ())
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn runtime_open_without_authority_scope_fails_closed() {
-    let path = std::env::current_dir()
+    let error = harness
+        .registered
+        .writer_connection()
         .unwrap()
-        .join("target/global-db-no-authority/global.db");
-    if path.starts_with(std::env::temp_dir()) {
-        return;
-    }
-    assert!(GlobalDb::open_at(&path).await.is_none());
+        .execute("CREATE TABLE replacement_write (value INTEGER)", ())
+        .await
+        .expect_err("registered runtime followed a replaced database path");
+    assert!(
+        error.to_string().contains("identity changed")
+            || error.to_string().contains("file identity"),
+        "{error}"
+    );
+    assert_eq!(std::fs::metadata(&db_path).unwrap().len(), 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn try_open_at_preserves_authority_error() {
-    let path = std::env::current_dir()
+async fn registered_runtime_does_not_recreate_a_missing_database() {
+    let harness = RegisteredGlobalDbHarness::open("missing-database-no-create").await;
+    let db_path = harness.registered.db_path().to_path_buf();
+    let moved_path = db_path.with_extension("moved");
+    std::fs::rename(&db_path, &moved_path).unwrap();
+    assert!(!db_path.exists());
+
+    let error = harness
+        .registered
+        .writer_connection()
         .unwrap()
-        .join("target/global-db-authority-error/global.db");
-    if path.starts_with(std::env::temp_dir()) {
-        return;
-    }
-    let Err(error) = GlobalDb::try_open_at(&path).await else {
-        panic!("unauthorized global DB open unexpectedly succeeded");
-    };
-    let message = error.to_string();
+        .execute("CREATE TABLE forbidden_recreated_store (value INTEGER)", ())
+        .await
+        .expect_err("registered runtime recreated a missing database");
     assert!(
-        message
-            .contains("database access requires managed-daemon or exclusive-maintenance authority"),
-        "{message}"
+        error.to_string().contains("identity")
+            || error.to_string().contains("verify")
+            || error.to_string().contains("database file"),
+        "{error}"
     );
-    assert!(message.contains("open global database"), "{message}");
-    let displayed = path.display().to_string();
-    #[cfg(windows)]
     assert!(
-        message
-            .replace('\\', "/")
-            .contains(&displayed.replace('\\', "/")),
-        "{message}"
+        !db_path.exists(),
+        "failed write recreated the database path"
     );
-    #[cfg(not(windows))]
-    assert!(message.contains(&displayed), "{message}");
-}
-
-#[tokio::test]
-async fn isolated_temp_database_opens_without_ambient_daemon() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let _db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("temp test open");
-}
-
-#[test]
-fn explicit_project_path_selector_keeps_names_and_paths_separate() {
-    assert!(!GlobalDb::is_explicit_project_path_selector("target"));
-    assert!(!GlobalDb::is_explicit_project_path_selector(" proj_123 "));
-    assert!(GlobalDb::is_explicit_project_path_selector("."));
-    assert!(GlobalDb::is_explicit_project_path_selector(".."));
-    assert!(GlobalDb::is_explicit_project_path_selector("./target"));
-    assert!(GlobalDb::is_explicit_project_path_selector("../target"));
-    assert!(GlobalDb::is_explicit_project_path_selector("/tmp/target"));
-    assert!(GlobalDb::is_explicit_project_path_selector(r"..\target"));
-}
-
-#[tokio::test]
-async fn session_column_migration_tolerates_duplicate_column_race() {
-    // In-memory DB: the duplicate-column race only needs one connection,
-    // so the on-disk sqlite file adds nothing but I/O.
-    let db = libsql_local::open_local_database(Path::new(":memory:"), false)
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE sessions (
-                provider TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                PRIMARY KEY(provider, session_id)
-            );",
-    )
-    .await
-    .unwrap();
-
-    assert!(
-        !table_column_exists(&conn, "sessions", "parent_session_id")
-            .await
-            .unwrap()
-    );
-
-    conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", ())
-        .await
-        .unwrap();
-
-    assert!(
-        add_table_column_after_missing_check(
-            &conn,
-            "sessions",
-            "parent_session_id",
-            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
-        )
-        .await
-        .is_ok()
-    );
-}
-
-#[tokio::test]
-async fn code_projects_seen_within_applies_window_and_limit() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-
-    let now = crate::tracedecay::current_timestamp();
-    // (project_id, last_seen_at)
-    let rows = [
-        ("proj_recent", now - 60),       // 1 min ago  -> in window
-        ("proj_mid", now - 3 * 86_400),  // 3 days ago -> in window
-        ("proj_old", now - 30 * 86_400), // 30 days ago-> outside 14d window
-    ];
-    for (project_id, last_seen) in rows {
-        db.conn
-            .execute(
-                "INSERT INTO code_projects
-                     (project_id, canonical_root, display_root, git_common_dir,
-                      git_remote_url, default_branch, created_at, last_seen_at)
-                     VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?4)",
-                params![
-                    project_id,
-                    format!("/root/{project_id}"),
-                    project_id,
-                    last_seen
-                ],
-            )
-            .await
-            .unwrap();
-    }
-
-    // 14-day window keeps the two recent projects, most-recent first.
-    let within = db.code_projects_seen_within(14 * 86_400, 10).await;
-    let ids: Vec<&str> = within.iter().map(|p| p.project_id.as_str()).collect();
-    assert_eq!(ids, vec!["proj_recent", "proj_mid"]);
-
-    // Limit caps the result even when more projects are in-window.
-    let capped = db.code_projects_seen_within(14 * 86_400, 1).await;
-    let capped_ids: Vec<&str> = capped.iter().map(|p| p.project_id.as_str()).collect();
-    assert_eq!(capped_ids, vec!["proj_recent"]);
-}
-
-#[tokio::test]
-async fn search_code_projects_matches_any_whitespace_term() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .expect("open global db");
-
-    for (project_id, root) in [
-        ("proj_rsbuild", "/repos/rsbuild-plugin-react-router"),
-        ("proj_rspack", "/repos/rspack"),
-        ("proj_unrelated", "/repos/unrelated"),
-    ] {
-        db.upsert_code_project(project_id, Path::new(root), None, None, Some("main"))
-            .await
-            .expect("code project should upsert");
-    }
-    db.upsert_code_project(
-        "proj_remote_only",
-        Path::new("/repos/remote-only"),
-        None,
-        Some("https://token:secret@example.test/remote-only.git"),
-        Some("main"),
-    )
-    .await
-    .expect("code project with remote should upsert");
-
-    let matches = db.search_code_projects("rsbuild rspack", 10).await;
-    let ids: Vec<&str> = matches
-        .iter()
-        .map(|project| project.project_id.as_str())
-        .collect();
-
-    assert!(ids.contains(&"proj_rsbuild"), "ids: {ids:?}");
-    assert!(ids.contains(&"proj_rspack"), "ids: {ids:?}");
-    assert!(!ids.contains(&"proj_unrelated"), "ids: {ids:?}");
-
-    let remote_name_matches = db.search_code_projects("remote-only.git", 10).await;
-    let remote_name_ids: Vec<&str> = remote_name_matches
-        .iter()
-        .map(|project| project.project_id.as_str())
-        .collect();
-    assert!(
-        remote_name_ids.contains(&"proj_remote_only"),
-        "remote_name_ids: {remote_name_ids:?}"
-    );
-
-    let remote_matches = db.search_code_projects("secret", 10).await;
-    assert!(
-        remote_matches.is_empty(),
-        "remote credential text must not be searchable: {remote_matches:?}"
-    );
-}
-
-#[tokio::test]
-async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO session_refresh_operations (
-                session_id, operation_id, request_digest, target_frontier_json,
-                state, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, 'running', 100, 100)",
-            libsql::params![
-                "session.orphan",
-                "operation.orphan",
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-                "{\"observed_through\":1,\"committed_through\":0}"
-            ],
-        )
-        .await
-        .unwrap();
-    db.conn
-        .execute_batch(
-            "DROP TRIGGER IF EXISTS session_temporal_generations_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
-             DROP TRIGGER IF EXISTS session_temporal_projection_receipts_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_refresh_operations_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_refresh_bindings_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_refresh_progress_insert_guard_v1;
-             INSERT INTO session_temporal_generations (
-                 session_id, generation, state, frozen_watermarks_json,
-                 created_at, ready_at, activated_at, completed_at
-             ) VALUES (
-                 'session.active', 1, 'active',
-                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
-                 50, 51, 52, NULL
-             );
-             INSERT INTO session_temporal_generations (
-                 session_id, generation, state, frozen_watermarks_json,
-                 created_at, ready_at, activated_at, completed_at
-             ) VALUES (
-                 'session.receipted', 1, 'active',
-                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
-                 60, 61, 62, NULL
-             );
-             INSERT INTO session_temporal_projection_receipts (
-                 session_id, generation, batch_ordinal, batch_digest,
-                 frozen_watermarks_json, source_through, projection_through,
-                 occurrence_count, occurrence_digest, dimension_count, dimension_digest,
-                 copy_count, copy_digest, assertion_count, assertion_digest,
-                 supersession_count, supersession_digest, current_count, current_digest,
-                 fts_count, fts_digest, committed_at
-             ) VALUES (
-                 'session.receipted', 1, 0, 'batch.receipted',
-                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
-                 0, 0, 0, 'occurrences.empty', 0, 'dimensions.empty',
-                 0, 'copies.empty', 0, 'assertions.empty',
-                 0, 'supersession.empty', 0, 'current.empty',
-                 0, 'fts.empty', 63
-             );
-             INSERT INTO session_temporal_generations (
-                 session_id, generation, state, frozen_watermarks_json, created_at
-             ) VALUES (
-                 'session.stale', 1, 'building',
-                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
-                 100
-             );
-             INSERT INTO session_refresh_operations (
-                 session_id, operation_id, request_digest, target_frontier_json,
-                 state, created_at, updated_at
-             ) VALUES (
-                 'session.stale', 'operation.stale',
-                 'sha256:2222222222222222222222222222222222222222222222222222222222222222',
-                 '{\"observed_through\":1,\"committed_through\":0}',
-                 'running', 100, 100
-             );
-             INSERT INTO session_refresh_bindings (
-                 session_id, operation_id, scope_kind, source_frontier, target_frontier,
-                 projector_version, config_digest, generation, frozen_watermarks_json,
-                 binding_digest, created_at
-             ) VALUES (
-                 'session.stale', 'operation.stale', 'session_store', 0, 1,
-                 'session-temporal-projector.v1',
-                 'sha256:3333333333333333333333333333333333333333333333333333333333333333',
-                 1,
-                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
-                 'sha256:2222222222222222222222222222222222222222222222222222222222222222',
-                 100
-             );
-             INSERT INTO session_refresh_progress (
-                 session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
-                 committed_batches, committed_records, recorded_at
-             ) VALUES (
-                 'session.stale', 'operation.stale', 0,
-                 '{\"observed_through\":1,\"committed_through\":0}',
-                 '{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}',
-                 0, 0, 100
-             );",
-        )
-        .await
-        .unwrap();
-    repair_session_temporal_connection(&db.conn)
-        .await
-        .expect("maintenance repair must restore exhaustive authority");
-    drop(db);
-
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    let mut rows = reopened
-        .conn
-        .query(
-            "SELECT COUNT(*) FROM session_refresh_operations
-             WHERE session_id = 'session.orphan'",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-    drop(rows);
-    let mut stale = reopened
-        .conn
-        .query(
-            "SELECT operation.state, generation.state, receipt.terminal_state
-             FROM session_refresh_operations AS operation
-             JOIN session_refresh_bindings AS binding
-               ON binding.session_id = operation.session_id
-              AND binding.operation_id = operation.operation_id
-             JOIN session_temporal_generations AS generation
-               ON generation.session_id = binding.session_id
-              AND generation.generation = binding.generation
-             JOIN session_refresh_receipts AS receipt
-               ON receipt.session_id = operation.session_id
-              AND receipt.operation_id = operation.operation_id
-             WHERE operation.session_id = 'session.stale'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = stale.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "failed");
-    assert_eq!(row.get::<String>(1).unwrap(), "failed");
-    assert_eq!(row.get::<String>(2).unwrap(), "failed");
-    drop(stale);
-    let mut cursor = reopened
-        .conn
-        .query(
-            "SELECT json_type(frozen_watermarks_json, '$.cursor_key')
-             FROM session_temporal_generations
-             WHERE session_id = 'session.active' AND state = 'active'",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        cursor
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
-        "object"
-    );
-    drop(cursor);
-    let mut receipted = reopened
-        .conn
-        .query(
-            "SELECT json_type(generation.frozen_watermarks_json, '$.cursor_key'),
-                    generation.frozen_watermarks_json = receipt.frozen_watermarks_json
-             FROM session_temporal_generations AS generation
-             JOIN session_temporal_projection_receipts AS receipt
-               ON receipt.session_id = generation.session_id
-              AND receipt.generation = generation.generation
-             WHERE generation.session_id = 'session.receipted'
-               AND generation.state = 'active'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = receipted.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "null");
-    assert_eq!(row.get::<i64>(1).unwrap(), 1);
 }

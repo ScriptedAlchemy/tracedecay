@@ -5,14 +5,18 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use libsql::{Connection, Value, params};
 use sha2::{Digest, Sha256};
+
+use crate::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
 
 pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-pub(crate) async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
+pub(crate) async fn table_columns<Q>(conn: &Q, table: &str) -> Result<Vec<String>, String>
+where
+    Q: QueryExecutor + ?Sized,
+{
     let sql = format!("PRAGMA table_info({})", quote_identifier(table));
     let mut rows = conn
         .query(&sql, ())
@@ -32,12 +36,15 @@ pub(crate) async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<
     Ok(columns)
 }
 
-pub(crate) async fn count_exact_rows(
-    target: &Connection,
+pub(crate) async fn count_exact_rows<Q>(
+    target: &Q,
     table: &str,
     columns: &[String],
     values: &[Value],
-) -> Result<u64, String> {
+) -> Result<u64, String>
+where
+    Q: QueryExecutor + ?Sized,
+{
     let predicates = columns
         .iter()
         .enumerate()
@@ -49,7 +56,7 @@ pub(crate) async fn count_exact_rows(
         quote_identifier(table)
     );
     let mut rows = target
-        .query(&sql, libsql::params_from_iter(values.iter().cloned()))
+        .query(&sql, params_from_iter(values.iter().cloned()))
         .await
         .map_err(|error| format!("could not count target {table} rows: {error}"))?;
     rows.next()
@@ -63,12 +70,15 @@ pub(crate) async fn count_exact_rows(
 
 /// Exact duplicates are explicit idempotent skips. Any uniqueness collision
 /// with different data is an error, never an `INSERT OR IGNORE` data loss.
-pub(crate) async fn insert_row_or_skip_exact(
-    target: &Connection,
+pub(crate) async fn insert_row_or_skip_exact<E>(
+    target: &E,
     table: &str,
     columns: &[String],
     values: &[Value],
-) -> Result<u64, String> {
+) -> Result<u64, String>
+where
+    E: Executor + ?Sized,
+{
     let predicates = columns
         .iter()
         .enumerate()
@@ -80,7 +90,7 @@ pub(crate) async fn insert_row_or_skip_exact(
         quote_identifier(table)
     );
     let mut exact = target
-        .query(&exact_sql, libsql::params_from_iter(values.iter().cloned()))
+        .query(&exact_sql, params_from_iter(values.iter().cloned()))
         .await
         .map_err(|error| format!("could not check target {table} row: {error}"))?;
     if exact
@@ -108,7 +118,7 @@ pub(crate) async fn insert_row_or_skip_exact(
     target
         .execute(
             &insert_sql,
-            libsql::params_from_iter(values.iter().cloned()),
+            params_from_iter(values.iter().cloned()),
         )
         .await
         .map_err(|error| {
@@ -118,14 +128,16 @@ pub(crate) async fn insert_row_or_skip_exact(
         })
 }
 
-pub(crate) async fn copy_table<F>(
-    source: &Connection,
-    target: &Connection,
+pub(crate) async fn copy_table<S, T, F>(
+    source: &S,
+    target: &T,
     table: &str,
     excluded: &[&str],
     mut transform: F,
 ) -> Result<u64, String>
 where
+    S: QueryExecutor + ?Sized,
+    T: Executor + ?Sized,
     F: FnMut(&[String], &mut Vec<Value>) -> Result<(), String>,
 {
     let source_columns = table_columns(source, table).await?;
@@ -225,10 +237,14 @@ pub(crate) fn remap_summary_source(
     Ok(())
 }
 
-pub(crate) async fn copy_raw_messages(
-    source: &Connection,
-    target: &Connection,
-) -> Result<(u64, HashMap<i64, i64>), String> {
+pub(crate) async fn copy_raw_messages<S, T>(
+    source: &S,
+    target: &T,
+) -> Result<(u64, HashMap<i64, i64>), String>
+where
+    S: QueryExecutor + ?Sized,
+    T: Executor + ?Sized,
+{
     let source_columns = table_columns(source, "lcm_raw_messages").await?;
     if source_columns.is_empty() {
         return Ok((0, HashMap::new()));
@@ -302,12 +318,15 @@ pub(crate) async fn copy_raw_messages(
     Ok((inserted, id_map))
 }
 
-pub(crate) async fn copy_external_payload_files(
-    source: &Connection,
+pub(crate) async fn copy_external_payload_files<S>(
+    source: &S,
     source_db_path: &Path,
     target_db_path: &Path,
     created: &mut Vec<PathBuf>,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    S: QueryExecutor + ?Sized,
+{
     if table_columns(source, "lcm_external_payloads")
         .await?
         .is_empty()

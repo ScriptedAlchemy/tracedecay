@@ -17,9 +17,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::GlobalDb;
 use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
@@ -38,11 +37,6 @@ use crate::sessions::source::{
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     collect_files_with_ext_bounded, stream_new_jsonl,
 };
-use crate::storage::{
-    SESSIONS_DB_FILENAME, default_profile_project_id, default_profile_root,
-    profile_sharded_data_root, resolve_layout_for_current_profile,
-};
-const PROJECT_SESSION_DB_FILENAME: &str = SESSIONS_DB_FILENAME;
 const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
         "cursor_event_cwd",
@@ -94,103 +88,6 @@ fn cursor_observation_context(
             .map(str::to_string),
         location_provenance,
     }
-}
-
-pub fn project_session_db_path(project_root: &Path) -> PathBuf {
-    resolve_layout_for_current_profile(project_root).map_or_else(
-        |_| {
-            let profile_root = default_profile_root()
-                .unwrap_or_else(|_| PathBuf::from(crate::config::TRACEDECAY_DIR));
-            profile_sharded_data_root(&profile_root, &default_profile_project_id(project_root))
-                .join(PROJECT_SESSION_DB_FILENAME)
-        },
-        |layout| layout.sessions_db_path,
-    )
-}
-
-pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
-    let db_path = resolved_project_session_db_path(project_root).await?;
-    GlobalDb::open_at(&db_path).await
-}
-
-pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<PathBuf> {
-    match crate::storage::read_enrollment_marker(project_root) {
-        Ok(Some(_)) => {
-            return resolve_layout_for_current_profile(project_root)
-                .ok()
-                .map(|layout| layout.sessions_db_path);
-        }
-        Ok(None) => {}
-        Err(_) => return None,
-    }
-    if let Some(db_path) = registry_profile_session_db_path(project_root).await {
-        return Some(db_path);
-    }
-    resolve_layout_for_current_profile(project_root)
-        .ok()
-        .map(|layout| layout.sessions_db_path)
-}
-
-async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf> {
-    let profile_root = crate::storage::default_profile_root().ok()?;
-    let global = GlobalDb::open().await?;
-    let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
-        .then(|| crate::worktree::git_common_dir(project_root))
-        .flatten();
-    // Mirror the graph store's identity-then-unique-remote fallback
-    // (`resolve_store_layout_for_project` in tracedecay/lifecycle.rs) so a
-    // renamed/moved checkout keeps routing its session history to the store it
-    // was originally registered under, instead of silently forking a fresh
-    // session DB at a new default path.
-    let resolution = match global
-        .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
-        .await
-    {
-        Ok(Some(resolution)) => resolution,
-        // Repository identity conflict: fail closed and route to the default
-        // session DB rather than borrowing a possibly-wrong registered store.
-        Err(_) => return None,
-        Ok(None) => {
-            let remote = crate::tracedecay::git_remote_url(project_root)?;
-            let resolution = global
-                .resolve_unique_project_store_by_git_remote(&remote)
-                .await?;
-            // Remote uniqueness alone cannot tell a renamed checkout (whose
-            // original registered location no longer exists on disk) apart from
-            // a second, still-present clone of the same remote. Only borrow the
-            // registered store when the original checkout is gone, so a live
-            // clone never inherits another checkout's session history.
-            if registered_checkout_present(&resolution.project) {
-                return None;
-            }
-            resolution
-        }
-    };
-    if resolution.store.storage_mode != "profile_sharded" {
-        return None;
-    }
-    Some(
-        profile_root
-            .join(resolution.store.store_relpath)
-            .join(PROJECT_SESSION_DB_FILENAME),
-    )
-}
-
-/// Returns `true` when the checkout a registered project was recorded at still
-/// exists on disk. A renamed/moved checkout leaves neither its canonical root
-/// nor its git common dir behind, whereas a separate clone of the same remote
-/// leaves the original checkout in place.
-fn registered_checkout_present(project: &crate::global_db::CodeProjectRecord) -> bool {
-    let roots = [
-        Some(project.canonical_root.as_str()),
-        Some(project.display_root.as_str()),
-        project.git_common_dir.as_deref(),
-    ];
-    roots
-        .into_iter()
-        .flatten()
-        .filter(|root| !root.is_empty())
-        .any(|root| Path::new(root).exists())
 }
 
 /// A Cursor hook event scoped to one transcript file.
@@ -952,18 +849,20 @@ fn parse_cursor_jsonl(
 /// unchanged file are a no-op.
 pub async fn ingest_cursor_transcript_event(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     project_id: ProjectId,
 ) -> CursorTranscriptIngestStats {
-    cursor_ingest_or_default(&try_ingest_cursor_transcript_event(event_json, db, project_id).await)
+    cursor_ingest_or_default(
+        &try_ingest_cursor_transcript_event(event_json, admission, project_id).await,
+    )
 }
 
 pub async fn try_ingest_cursor_transcript_event(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     project_id: ProjectId,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_transcript_event_capped(event_json, db, project_id, None).await
+    try_ingest_cursor_transcript_event_capped(event_json, admission, project_id, None).await
 }
 
 /// Like [`ingest_cursor_transcript_event`], but bounds how many newly-appended
@@ -972,19 +871,40 @@ pub async fn try_ingest_cursor_transcript_event(
 /// transcript.
 pub async fn ingest_cursor_transcript_event_capped(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        &try_ingest_cursor_transcript_event_capped(event_json, db, project_id, max_new_bytes).await,
+        &try_ingest_cursor_transcript_event_capped(
+            event_json,
+            admission,
+            project_id,
+            max_new_bytes,
+        )
+        .await,
     )
 }
 
 pub async fn try_ingest_cursor_transcript_event_capped(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     project_id: ProjectId,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    try_ingest_cursor_transcript_event_capped_with_admission(
+        event_json,
+        project_id,
+        admission,
+        max_new_bytes,
+    )
+    .await
+}
+
+pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
+    event_json: &str,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Ok(event) = serde_json::from_str::<Value>(event_json) else {
@@ -1011,10 +931,6 @@ pub async fn try_ingest_cursor_transcript_event_capped(
         include_subagents: true,
         user_scope: false,
     };
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
-        project_id.clone(),
-    ));
     let scope = ObservationScopeV1::Project { project_id };
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
     let mut budget = match max_new_bytes {
@@ -1027,14 +943,14 @@ pub async fn try_ingest_cursor_transcript_event_capped(
             &parent_session_id,
             &path,
             &context,
-            &admission,
+            admission,
             &scope,
             budget.remaining(),
         )
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(&admission, &scope).await?;
+    let mut stats = drain_cursor_observation_projections(admission, &scope).await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred = budget.deferred();
     Ok(stats)
@@ -1042,22 +958,22 @@ pub async fn try_ingest_cursor_transcript_event_capped(
 
 pub async fn ingest_cursor_user_transcript_event_capped(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        &try_ingest_cursor_user_transcript_event_capped(event_json, db, max_new_bytes).await,
+        &try_ingest_cursor_user_transcript_event_capped(event_json, admission, max_new_bytes).await,
     )
 }
 
 pub async fn try_ingest_cursor_user_transcript_event_capped(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
         event_json,
-        db,
+        admission,
         max_new_bytes,
         &[],
     )
@@ -1068,14 +984,14 @@ pub async fn try_ingest_cursor_user_transcript_event_capped(
 /// wrapper remains useful for isolated parsing without a profile registry.
 pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
     registered_roots: &[PathBuf],
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
         &try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
             event_json,
-            db,
+            admission,
             max_new_bytes,
             registered_roots,
         )
@@ -1085,7 +1001,22 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
 
 pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
     event_json: &str,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    registered_roots: &[PathBuf],
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    try_ingest_cursor_user_transcript_event_capped_with_admission(
+        event_json,
+        admission,
+        max_new_bytes,
+        registered_roots,
+    )
+    .await
+}
+
+pub(crate) async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
+    event_json: &str,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
     registered_roots: &[PathBuf],
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
@@ -1135,7 +1066,6 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
         user_scope: true,
     };
     let scope = ObservationScopeV1::Profile;
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
     let mut budget = match max_new_bytes {
         Some(limit) => IngestByteBudget::bounded(limit),
@@ -1147,14 +1077,14 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
             &parent_session_id,
             &path,
             &context,
-            &admission,
+            admission,
             &scope,
             budget.remaining(),
         )
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(&admission, &scope).await?;
+    let mut stats = drain_cursor_observation_projections(admission, &scope).await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred = budget.deferred();
     Ok(stats)
@@ -1165,19 +1095,15 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
 /// observation admission.
 pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     project_root: &Path,
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
-        project_id.clone(),
-    ));
     try_ingest_cursor_project_sweep_capped_with_admission(
         project_root,
         project_id,
-        &admission,
+        admission,
         max_new_bytes,
         skip_session_ids,
     )
@@ -1217,45 +1143,37 @@ pub(crate) fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: Build
 /// sweep. Registered project slugs and composer-owned session ids are excluded
 /// before observation admission.
 pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
-    db: &GlobalDb,
     registered_roots: &[PathBuf],
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    skip_session_ids: std::collections::HashSet<String, S>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    try_ingest_cursor_user_sweep_capped_with_admission(
+        registered_roots,
+        admission,
+        max_new_bytes,
+        skip_session_ids,
+    )
+    .await
+}
+
+pub(crate) async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
+    registered_roots: &[PathBuf],
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Some(source) = CursorSweepSource::new() else {
         return Ok(CursorTranscriptIngestStats::default());
     };
-    admit_cursor_sweep_observations(
+    admit_cursor_sweep_observations_with_admission(
         &source
             .with_skip_session_ids(skip_session_ids.into_iter().collect())
             .for_user_scope(registered_roots),
         Path::new(""),
-        db,
+        admission,
         max_new_bytes,
         ObservationScopeV1::Profile,
-    )
-    .await
-}
-
-async fn admit_cursor_sweep_observations(
-    source: &CursorSweepSource,
-    project_root: &Path,
-    db: &GlobalDb,
-    max_new_bytes: Option<u64>,
-    scope: ObservationScopeV1,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    let admission = HostAdmissionFacade::new(match &scope {
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
-        ObservationScopeV1::Project { project_id } => {
-            HostAdmissionAuthorities::for_project(db, project_id.clone())
-        }
-    });
-    admit_cursor_sweep_observations_with_admission(
-        source,
-        project_root,
-        &admission,
-        max_new_bytes,
-        scope,
     )
     .await
 }

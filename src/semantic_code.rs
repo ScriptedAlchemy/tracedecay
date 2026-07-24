@@ -31,7 +31,6 @@ use self::runtime_service::{
 use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicClock};
 
 mod artifact_store;
-mod evaluation;
 mod fastembed_adapter;
 pub(crate) mod legacy_migration;
 mod manifest;
@@ -41,7 +40,6 @@ pub(crate) mod projector;
 mod runtime_query;
 mod runtime_service;
 pub(crate) mod session_pool;
-mod trust_roots;
 
 #[cfg(test)]
 pub(crate) use model_catalog::production_fastembed_catalog;

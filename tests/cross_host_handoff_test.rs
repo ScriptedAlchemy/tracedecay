@@ -3,11 +3,10 @@
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionStatus,
+    HostAdmissionScope, HostAdmissionStatus, HostAdmissionTestRuntimeV1,
 };
 use tracedecay::application::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay::privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
-use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -15,11 +14,7 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProjectId, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_store::{ObservationReplayRequest, ObservationStore, StoredObservation};
-
-mod common;
-
-use common::open_lcm_db;
+use tracedecay_store::{ObservationReplayRequest, StoredObservation};
 
 const PROJECT_ID: &str = "project.cross-host-handoff";
 const PROJECT_PATH: &str = "repo://cross-host-handoff";
@@ -30,12 +25,35 @@ const SECRET: &str = "sk-proj-cross-host-canary-1234567890";
 #[tokio::test]
 async fn codex_to_claude_handoff_preserves_identity_lineage_privacy_and_provenance() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let profile_root = tmp.path().join("profile");
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .unwrap()
+            .success()
+    );
     let project_id = ProjectId::new(PROJECT_ID).unwrap();
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        &db,
-        project_id.clone(),
-    ));
+    assert!(
+        tracedecay::storage::write_repository_identity_marker(&project_root, project_id.as_str())
+            .unwrap()
+    );
+    tracedecay::storage::write_enrollment_marker(
+        &project_root,
+        &tracedecay::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let runtime =
+        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
+            .await
+            .unwrap();
+    let facade = runtime.facade();
 
     let parent = facade
         .capture(handoff_request(
@@ -64,14 +82,26 @@ async fn codex_to_claude_handoff_preserves_identity_lineage_privacy_and_provenan
     assert_eq!(child.status, HostAdmissionStatus::Committed);
 
     drop(facade);
-    drop(db);
 
-    let db = open_lcm_db(&tmp).await;
-    let rows = GlobalDbObservationStore::new(&db)
-        .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+    let rows = runtime
+        .replay_observations(
+            HostAdmissionScope::Project,
+            ObservationReplayRequest::new(0, 10).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile_rows = runtime
+        .replay_observations(
+            HostAdmissionScope::Profile,
+            ObservationReplayRequest::new(0, 10).unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
+    assert!(
+        profile_rows.is_empty(),
+        "project handoff observations must not fall back to the profile store"
+    );
     assert!(
         !format!("{rows:?}").contains(SECRET),
         "private handoff input must not survive authoritative capture"

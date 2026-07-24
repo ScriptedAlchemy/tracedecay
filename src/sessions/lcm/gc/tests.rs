@@ -1,11 +1,12 @@
 use std::fs;
-use std::time::Duration;
 
-use libsql::Connection;
 use serde_json::json;
 
+use crate::db::engine::{
+    Connection, Executor, IntoParams, QueryExecutor, Rows, TestConnection, TransactionBehavior,
+};
 use crate::sessions::lcm::schema;
-use crate::sessions::lcm::util::file_mtime_seconds;
+use crate::sessions::lcm::util::{self, file_mtime_seconds};
 
 use super::pending_delete::{PENDING_PAYLOAD_DELETE_ERROR_PREFIX, pending_payload_delete_key};
 use super::*;
@@ -16,23 +17,65 @@ const PRIMARY_REF: &str =
 const SECONDARY_REF: &str =
     "payload_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.payload";
 
+impl QueryExecutor for TestConnection {
+    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        Connection::query(self, sql, params).await
+    }
+}
+
+impl Executor for TestConnection {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: IntoParams,
+    {
+        Connection::execute(self, sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        Connection::execute_batch(self, sql).await
+    }
+}
+
+async fn drain_pending_payload_deletes(
+    conn: &Connection,
+    storage_root: &Path,
+) -> Result<PayloadDeleteDrain, LcmError> {
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    let drain = drain_pending_payload_deletes_in_transaction(&transaction, storage_root).await?;
+    transaction.commit().await?;
+    Ok(drain)
+}
+
+async fn drain_pending_payload_delete(
+    conn: &Connection,
+    storage_root: &Path,
+    payload_ref: &str,
+) -> Result<Option<u64>, LcmError> {
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    let removed =
+        drain_pending_payload_delete_in_transaction(&transaction, storage_root, payload_ref)
+            .await?;
+    transaction.commit().await?;
+    Ok(removed)
+}
+
 struct TestStore {
     _temp: tempfile::TempDir,
     storage_root: PathBuf,
-    conn: Connection,
+    conn: TestConnection,
 }
 
 async fn test_store() -> Result<TestStore, String> {
     let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
     let storage_root = temp.path().to_path_buf();
-    // In-memory DB: every test here disables backup_before_reap, so
-    // nothing reads the sessions.db file itself — only the payload files
-    // under storage_root. Skipping the on-disk DB (and its FTS5-heavy
-    // schema I/O) keeps each test's setup cheap, which matters on the
-    // Windows CI runners where per-test sqlite file churn dominated.
-    let conn = in_memory_conn().await?;
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|err| format!("set test busy timeout: {err}"))?;
+    let conn = TestConnection::open(&storage_root.join("sessions.db"));
     ensure_gc_test_schema(&conn).await?;
     Ok(TestStore {
         _temp: temp,
@@ -72,17 +115,6 @@ async fn ensure_gc_test_schema(conn: &Connection) -> Result<(), String> {
         .await
         .map_err(|err| format!("ensure lcm schema: {err}"))?;
     Ok(())
-}
-
-async fn in_memory_conn() -> Result<Connection, String> {
-    let db = libsql::Builder::new_local(":memory:")
-        .build()
-        .await
-        .map_err(|err| format!("build in-memory test database: {err}"))?;
-    let conn = db
-        .connect()
-        .map_err(|err| format!("connect to in-memory test database: {err}"))?;
-    Ok(conn)
 }
 
 async fn insert_session(
@@ -753,8 +785,8 @@ async fn delete_external_payload_rejects_symlink_payload_at_hash_gate() -> Resul
 
 #[tokio::test]
 async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
-    let conn = in_memory_conn().await?;
     let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
     for invalid in [
         "",
         ".",

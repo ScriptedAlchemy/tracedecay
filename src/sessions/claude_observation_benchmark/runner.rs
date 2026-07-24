@@ -6,28 +6,26 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_store::{
-    ObservationReplayRequest, ObservationStore, SESSION_MESSAGE_PROJECTOR_VERSION,
-    StoredObservation,
+    ObservationReplayRequest, SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
 };
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::observation::ObservationCancellation;
 use crate::sessions::claude::ClaudeSource;
 use crate::sessions::claude_observation::{
-    ClaudeObservationIngestStats, ingest_source_with_observations,
+    ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,
 };
 use crate::sessions::cline_like::{ClineLikeSource, capture_cline_like_snapshot_observations};
 use crate::sessions::{codex, cursor, hermes, kiro};
 use crate::storage::{read_repository_identity_marker, write_repository_identity_marker};
-use crate::store::GlobalDbObservationStore;
 
 use super::artifact::{
     attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,
 };
 use super::metrics::{
-    aggregate_samples, cpu_identity, database_storage_bytes, elapsed_ns, memory_total_kib,
-    preflight_platform, process_cpu_ticks, process_peak_rss_kib, process_write_bytes,
-    reset_peak_rss, ticks_to_ms, validate_no_op_invariants,
+    aggregate_samples, cpu_identity, elapsed_ns, memory_total_kib, preflight_platform,
+    process_cpu_ticks, process_peak_rss_kib, process_write_bytes, reset_peak_rss, ticks_to_ms,
+    validate_no_op_invariants,
 };
 use super::model::{
     BenchmarkResult, Distribution, NoOpTotals, PROVIDER_COMMIT_SCOPE, PROVIDER_PARSE_SCOPE,
@@ -60,9 +58,7 @@ pub(super) struct Fixture {
     home: PathBuf,
     profile: PathBuf,
     pub(super) transcript: PathBuf,
-    db_path: PathBuf,
-    db: crate::global_db::GlobalDb,
-    _daemon_scope: crate::db::DaemonDatabaseScope,
+    runtime: HostAdmissionTestRuntimeV1,
     _temp: TempDir,
 }
 
@@ -79,23 +75,14 @@ impl Fixture {
             .expect("create Claude benchmark fixture tree");
         fs::create_dir_all(&profile).expect("create benchmark profile root");
         write_records(&transcript, &session_id);
-        let db_path = profile.join("sessions.db");
-        let daemon_scope = crate::db::enter_daemon_database_scope(
-            &profile,
-            u64::try_from(repetition).expect("benchmark repetition fits u64") + 1,
-            &session_id,
-        )
-        .expect("enter benchmark daemon database scope");
-        let db = crate::global_db::GlobalDb::open_at(&db_path)
+        let runtime = HostAdmissionTestRuntimeV1::profile(&profile)
             .await
-            .expect("open authoritative benchmark database");
+            .expect("open registered benchmark runtime");
         Self {
             home,
             profile,
             transcript,
-            db_path,
-            db,
-            _daemon_scope: daemon_scope,
+            runtime,
             _temp: temp,
         }
     }
@@ -110,11 +97,12 @@ impl Fixture {
     }
 
     pub(super) async fn ingest(&self, source: &ClaudeSource) -> ClaudeObservationIngestStats {
-        ingest_source_with_observations(
-            &self.db,
+        let admission = self.runtime.facade();
+        ingest_source_with_observations_with_admission(
             source,
             &self.profile,
             ObservationScopeV1::Profile,
+            &admission,
             None,
             ObservationCancellation::default(),
         )
@@ -126,9 +114,16 @@ impl Fixture {
         self.replay_after(0, RECORDS_PER_REPETITION + 1).await
     }
 
+    fn database_storage_bytes(&self) -> u64 {
+        self.runtime
+            .session_database_storage_bytes_for_test(HostAdmissionScope::Profile)
+            .expect("measure registered profile database storage")
+    }
+
     async fn replay_after(&self, after_sequence: u64, limit: usize) -> Vec<StoredObservation> {
-        GlobalDbObservationStore::new(&self.db)
+        self.runtime
             .replay_observations(
+                HostAdmissionScope::Profile,
                 ObservationReplayRequest::new(after_sequence, limit)
                     .expect("bounded replay request"),
             )
@@ -156,9 +151,10 @@ impl Fixture {
 
             let message_id = format!("benchmark-message-{index}");
             let message = self
-                .db
-                .get_session_message("claude", &message_id)
+                .runtime
+                .session_message_for_test(HostAdmissionScope::Profile, "claude", &message_id)
                 .await
+                .expect("read folded V1 message")
                 .unwrap_or_else(|| panic!("missing folded V1 message {message_id}"));
             assert_eq!(message.provider, "claude");
             assert_eq!(message.message_id, message_id);
@@ -183,9 +179,12 @@ impl Fixture {
     }
 
     async fn verify_projector_only_current_writes(&self) {
-        let mut rows = self
-            .db
-            .conn()
+        let snapshot = self
+            .runtime
+            .read_snapshot(HostAdmissionScope::Profile)
+            .await
+            .expect("open registered benchmark projection snapshot");
+        let mut rows = snapshot
             .query(
                 "SELECT
                     (SELECT COUNT(*) FROM session_messages WHERE provider = 'claude'),
@@ -193,7 +192,7 @@ impl Fixture {
                     COALESCE(SUM(message_created), 0)
                  FROM observation_projection_provenance
                  WHERE projector_version = ?1 AND output_provider = 'claude'",
-                libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION],
+                (SESSION_MESSAGE_PROJECTOR_VERSION,),
             )
             .await
             .expect("count benchmark projection ownership");
@@ -248,9 +247,8 @@ struct PhaseSnapshot {
 }
 
 impl PhaseSnapshot {
-    fn start(db_path: &Path) -> Self {
+    fn start(database_storage_bytes: u64) -> Self {
         reset_peak_rss();
-        let database_storage_bytes = database_storage_bytes(db_path);
         let cpu_ticks = process_cpu_ticks();
         let process_write_bytes = process_write_bytes();
         Self {
@@ -263,7 +261,7 @@ impl PhaseSnapshot {
 
     fn finish(
         self,
-        db_path: &Path,
+        database_storage_bytes: u64,
         repetition: usize,
         replayed_observations: usize,
     ) -> RawPhaseSample {
@@ -273,7 +271,7 @@ impl PhaseSnapshot {
             latency_ns,
             cpu_ticks: process_cpu_ticks().saturating_sub(self.cpu_ticks),
             process_write_bytes: process_write_bytes().saturating_sub(self.process_write_bytes),
-            database_storage_growth_bytes: database_storage_bytes(db_path)
+            database_storage_growth_bytes: database_storage_bytes
                 .saturating_sub(self.database_storage_bytes),
             peak_rss_kib: process_peak_rss_kib(),
             replayed_observations,
@@ -282,7 +280,7 @@ impl PhaseSnapshot {
 
     fn finish_provider(
         self,
-        db_path: &Path,
+        database_storage_bytes: u64,
         repetition: usize,
         record_count: usize,
     ) -> RawProviderPhaseSample {
@@ -292,7 +290,7 @@ impl PhaseSnapshot {
             latency_ns,
             cpu_ticks: process_cpu_ticks().saturating_sub(self.cpu_ticks),
             process_write_bytes: process_write_bytes().saturating_sub(self.process_write_bytes),
-            database_storage_growth_bytes: database_storage_bytes(db_path)
+            database_storage_growth_bytes: database_storage_bytes
                 .saturating_sub(self.database_storage_bytes),
             peak_rss_kib: process_peak_rss_kib(),
             record_count,
@@ -377,9 +375,7 @@ struct ProviderFixture {
     project: PathBuf,
     project_id: ProjectId,
     source_path: PathBuf,
-    db_path: PathBuf,
-    db: crate::global_db::GlobalDb,
-    _daemon_scope: crate::db::DaemonDatabaseScope,
+    runtime: HostAdmissionTestRuntimeV1,
     _temp: TempDir,
 }
 
@@ -395,16 +391,15 @@ impl ProviderFixture {
         let project_id = enroll_provider_benchmark_project(&project);
         let source_path =
             write_provider_fixture(kind, temp.path(), &home, &project, repetition).await;
-        let db_path = profile.join(format!("{}-{repetition}.db", kind.id()));
-        let daemon_scope = crate::db::enter_daemon_database_scope(
-            &profile,
-            u64::try_from(repetition).expect("provider repetition fits u64") + 10_000,
-            &format!("provider-benchmark-{}-{repetition}", kind.id()),
-        )
-        .expect("enter provider benchmark daemon database scope");
-        let db = crate::global_db::GlobalDb::open_at(&db_path)
-            .await
-            .expect("open provider benchmark database");
+        let runtime = if matches!(kind, ProviderKind::Claude) {
+            HostAdmissionTestRuntimeV1::profile(&profile)
+                .await
+                .expect("open registered profile benchmark runtime")
+        } else {
+            HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+                .await
+                .expect("open registered project benchmark runtime")
+        };
         Self {
             kind,
             home,
@@ -412,9 +407,7 @@ impl ProviderFixture {
             project,
             project_id,
             source_path,
-            db_path,
-            db,
-            _daemon_scope: daemon_scope,
+            runtime,
             _temp: temp,
         }
     }
@@ -433,6 +426,17 @@ impl ProviderFixture {
         self.project_id.clone()
     }
 
+    fn database_storage_bytes(&self) -> u64 {
+        let scope = if matches!(self.kind, ProviderKind::Claude) {
+            HostAdmissionScope::Profile
+        } else {
+            HostAdmissionScope::Project
+        };
+        self.runtime
+            .session_database_storage_bytes_for_test(scope)
+            .expect("measure registered provider database storage")
+    }
+
     async fn parse_native_fixture(&self) -> usize {
         match self.kind {
             ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Cursor => {
@@ -447,24 +451,20 @@ impl ProviderFixture {
             }
             ProviderKind::Hermes => {
                 let state_db = self.source_path.join("profiles/benchmark/state.db");
-                let database = libsql::Builder::new_local(&state_db)
-                    .build()
-                    .await
-                    .expect("open Hermes parse-phase fixture database");
-                let connection = database
-                    .connect()
-                    .expect("connect Hermes parse-phase fixture database");
-                let mut rows = connection
-                    .query("SELECT COUNT(*) FROM messages", ())
-                    .await
+                let uri = format!("file:{}?mode=ro&immutable=1", state_db.display());
+                let connection = rusqlite::Connection::open_with_flags(
+                    uri,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .expect("open immutable Hermes parse-phase fixture database");
+                let count = connection
+                    .query_row("SELECT COUNT(*) FROM messages", (), |row| {
+                        row.get::<_, i64>(0)
+                    })
                     .expect("count Hermes parse-phase records");
-                let row = rows
-                    .next()
-                    .await
-                    .expect("read Hermes parse-phase count")
-                    .expect("Hermes parse-phase count row");
-                usize::try_from(row.get::<i64>(0).expect("Hermes parse-phase count"))
-                    .expect("Hermes parse-phase count fits usize")
+                usize::try_from(count).expect("Hermes parse-phase count fits usize")
             }
             ProviderKind::Kiro => serde_json::from_slice::<serde_json::Value>(
                 &fs::read(&self.source_path).expect("read Kiro provider fixture"),
@@ -487,13 +487,7 @@ impl ProviderFixture {
     async fn ingest(&self) -> u64 {
         let scope = self.scope();
         let cancellation = ObservationCancellation::default();
-        let authorities = match &scope {
-            ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(&self.db),
-            ObservationScopeV1::Project { project_id } => {
-                HostAdmissionAuthorities::for_project(&self.db, project_id.clone())
-            }
-        };
-        let admission = HostAdmissionFacade::new(authorities);
+        let admission = self.runtime.facade();
         let adapter_work = match self.kind {
             ProviderKind::Claude => {
                 let session_id = self
@@ -503,11 +497,11 @@ impl ProviderFixture {
                     .expect("Claude provider benchmark session id");
                 let source = ClaudeSource::with_home(&self.home)
                     .for_user_scope(Some(session_id.to_string()), Vec::new());
-                let stats = ingest_source_with_observations(
-                    &self.db,
+                let stats = ingest_source_with_observations_with_admission(
                     &source,
                     &self.profile,
                     scope.clone(),
+                    &admission,
                     None,
                     cancellation.clone(),
                 )
@@ -516,11 +510,11 @@ impl ProviderFixture {
                 stats.observations_committed + stats.projections_completed
             }
             ProviderKind::Codex => {
-                codex::try_admit_codex_jsonl_observations_for_project(
+                codex::try_admit_codex_jsonl_observations_for_project_with_admission(
                     &self.source_path,
-                    &self.db,
                     &self.project,
                     self.project_id(),
+                    &admission,
                     None,
                 )
                 .await
@@ -536,24 +530,26 @@ impl ProviderFixture {
                     "workspace_roots": [self.project],
                     "model": "benchmark-model"
                 });
-                let stats = cursor::try_ingest_cursor_transcript_event(
+                let stats = cursor::try_ingest_cursor_transcript_event_capped_with_admission(
                     &event.to_string(),
-                    &self.db,
                     self.project_id(),
+                    &admission,
+                    None,
                 )
                 .await
                 .expect("run Cursor production provider path");
                 stats.messages_upserted
             }
             ProviderKind::Hermes => {
-                let stats = hermes::ingest_homes(
-                    &self.db,
+                let stats = hermes::ingest_homes_capped_with_admission(
                     std::slice::from_ref(&self.source_path),
                     &self.project,
                     self.project_id(),
+                    &admission,
+                    None,
                 )
                 .await;
-                stats.messages_upserted
+                stats.stats.messages_upserted
             }
             ProviderKind::Kiro => {
                 let source = kiro::KiroSource::with_home(&self.home);
@@ -603,8 +599,12 @@ impl ProviderFixture {
     }
 
     async fn replay_after(&self, sequence: u64, limit: usize) -> Vec<StoredObservation> {
-        GlobalDbObservationStore::new(&self.db)
+        self.runtime
             .replay_observations(
+                match self.scope() {
+                    ObservationScopeV1::Project { .. } => HostAdmissionScope::Project,
+                    ObservationScopeV1::Profile => HostAdmissionScope::Profile,
+                },
                 ObservationReplayRequest::new(sequence, limit)
                     .expect("bounded provider replay request"),
             )
@@ -696,32 +696,44 @@ impl ProviderSamples {
 
     async fn measure_turn(&mut self, repetition: usize, fixture_id: usize) {
         let fixture = ProviderFixture::new(self.kind, fixture_id).await;
-        let parse = PhaseSnapshot::start(&fixture.db_path);
+        let parse = PhaseSnapshot::start(fixture.database_storage_bytes());
         let parsed_records = fixture.parse_native_fixture().await;
-        self.parse
-            .push(parse.finish_provider(&fixture.db_path, repetition, parsed_records));
+        self.parse.push(parse.finish_provider(
+            fixture.database_storage_bytes(),
+            repetition,
+            parsed_records,
+        ));
         assert_eq!(
             parsed_records,
             baseline::PROVIDER_RECORDS_PER_REPETITION,
             "{} native parse phase did not decode the bounded fixture",
             self.kind.id()
         );
-        let pipeline = PhaseSnapshot::start(&fixture.db_path);
-        let commit = PhaseSnapshot::start(&fixture.db_path);
+        let pipeline = PhaseSnapshot::start(fixture.database_storage_bytes());
+        let commit = PhaseSnapshot::start(fixture.database_storage_bytes());
         assert!(
             fixture.ingest().await > 0,
             "{} production path reported no measured work",
             self.kind.id()
         );
-        self.commit
-            .push(commit.finish_provider(&fixture.db_path, repetition, parsed_records));
-        let replay = PhaseSnapshot::start(&fixture.db_path);
+        self.commit.push(commit.finish_provider(
+            fixture.database_storage_bytes(),
+            repetition,
+            parsed_records,
+        ));
+        let replay = PhaseSnapshot::start(fixture.database_storage_bytes());
         let observations = fixture.replay().await;
         let observation_count = observations.len();
-        self.replay
-            .push(replay.finish_provider(&fixture.db_path, repetition, observation_count));
-        self.pipeline
-            .push(pipeline.finish(&fixture.db_path, repetition, observation_count));
+        self.replay.push(replay.finish_provider(
+            fixture.database_storage_bytes(),
+            repetition,
+            observation_count,
+        ));
+        self.pipeline.push(pipeline.finish(
+            fixture.database_storage_bytes(),
+            repetition,
+            observation_count,
+        ));
         fixture.verify_redacted(&observations);
         assert_eq!(
             observation_count,
@@ -733,11 +745,14 @@ impl ProviderSamples {
             .last()
             .expect("provider replay has durable end")
             .sequence();
-        let no_op = PhaseSnapshot::start(&fixture.db_path);
+        let no_op = PhaseSnapshot::start(fixture.database_storage_bytes());
         let no_op_work = fixture.ingest().await;
         let after_end = fixture.replay_after(end, 1).await;
-        self.no_op
-            .push(no_op.finish(&fixture.db_path, repetition, after_end.len()));
+        self.no_op.push(no_op.finish(
+            fixture.database_storage_bytes(),
+            repetition,
+            after_end.len(),
+        ));
         assert_eq!(
             no_op_work,
             0,
@@ -1021,11 +1036,8 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
     )
     .expect("write Hermes provider config");
     let state_db = profile.join("state.db");
-    let database = libsql::Builder::new_local(&state_db)
-        .build()
-        .await
-        .expect("build Hermes provider fixture database");
-    let connection = database.connect().expect("connect Hermes provider fixture");
+    let connection =
+        rusqlite::Connection::open(&state_db).expect("open Hermes provider fixture database");
     connection
         .execute(
             "CREATE TABLE sessions (
@@ -1037,7 +1049,6 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
             )",
             (),
         )
-        .await
         .expect("create Hermes sessions table");
     connection
         .execute(
@@ -1048,7 +1059,6 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
             )",
             (),
         )
-        .await
         .expect("create Hermes messages table");
     let session_id = format!("benchmark-hermes-session-{repetition}");
     connection
@@ -1057,7 +1067,7 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
              (id, source, model, started_at, cwd, model_config,
               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)
              VALUES (?1, 'benchmark', ?2, ?3, ?4, '{}', ?5, ?6, ?7, ?8, ?9)",
-            libsql::params![
+            rusqlite::params![
                 session_id.clone(),
                 template["session_model"]
                     .as_str()
@@ -1083,7 +1093,6 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
                     .expect("Hermes reasoning tokens")
             ],
         )
-        .await
         .expect("insert Hermes session");
     for index in 0..baseline::PROVIDER_RECORDS_PER_REPETITION {
         let mut tool_calls = template["tool_calls"].clone();
@@ -1098,7 +1107,7 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
             .execute(
                 "INSERT INTO messages (session_id, role, content, tool_calls, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                libsql::params![
+                rusqlite::params![
                     session_id.clone(),
                     template["role"].as_str().expect("Hermes fixture role"),
                     template["content"]
@@ -1111,11 +1120,9 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
                         + index as f64
                 ],
             )
-            .await
             .expect("insert Hermes message");
     }
     drop(connection);
-    drop(database);
     hermes_home
 }
 
@@ -1261,11 +1268,12 @@ pub(super) async fn run() {
     for repetition in 0..MEASURED_REPETITIONS {
         let fixture = Fixture::new(WARMUP_REPETITIONS + repetition).await;
         let source = fixture.source();
-        let pipeline_phase = PhaseSnapshot::start(&fixture.db_path);
+        let pipeline_phase = PhaseSnapshot::start(fixture.database_storage_bytes());
         let stats = fixture.ingest(&source).await;
         let observations = fixture.replay().await;
         let replayed = observations.len();
-        let pipeline_sample = pipeline_phase.finish(&fixture.db_path, repetition, replayed);
+        let pipeline_sample =
+            pipeline_phase.finish(fixture.database_storage_bytes(), repetition, replayed);
         fixture.verify_committed_state(&observations).await;
         pipeline_raw_samples.push(pipeline_sample);
         assert_eq!(
@@ -1284,11 +1292,14 @@ pub(super) async fn run() {
             .expect("pipeline replay must establish a durable end cursor")
             .sequence();
 
-        let no_op_phase = PhaseSnapshot::start(&fixture.db_path);
+        let no_op_phase = PhaseSnapshot::start(fixture.database_storage_bytes());
         let no_op_stats = fixture.ingest(&source).await;
         let observations_after_end = fixture.replay_after(durable_end_sequence, 1).await;
-        let no_op_sample =
-            no_op_phase.finish(&fixture.db_path, repetition, observations_after_end.len());
+        let no_op_sample = no_op_phase.finish(
+            fixture.database_storage_bytes(),
+            repetition,
+            observations_after_end.len(),
+        );
         let observations_after_no_op = fixture.replay().await;
         fixture
             .verify_committed_state(&observations_after_no_op)

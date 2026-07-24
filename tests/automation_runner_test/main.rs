@@ -25,4 +25,3 @@ mod scheduler;
 mod session_reflector;
 mod skill_writer;
 mod skill_writer_consolidation;
-mod user_scope;

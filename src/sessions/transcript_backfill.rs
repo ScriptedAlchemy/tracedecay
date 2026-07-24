@@ -27,10 +27,14 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use libsql::{Connection, params};
 use serde_json::Value;
+use tracedecay_domain::ProjectId;
+use tracedecay_store::StoreShardScopeV1;
 
-use crate::global_db::GlobalDb;
+use crate::db::engine::{
+    Error as EngineError, Executor, QueryExecutor, Result as EngineResult, params,
+};
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::sessions::cursor::TimestampCarry;
 use crate::sessions::shared::usage_counters_from;
@@ -41,6 +45,7 @@ use crate::sessions::source::{
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
 const MARKER_VERSION: i64 = 1;
+const SAVEPOINT_NAME: &str = "transcript_facts_backfill_batch";
 /// Superseded by [`MARKER_NAME`]: the timestamps-only pass shipped briefly on
 /// this branch; its marker row is removed when the combined pass completes.
 const LEGACY_MARKER_NAME: &str = "cursor_timestamp_backfill";
@@ -65,12 +70,54 @@ pub(crate) struct BackfillStats {
     pub(crate) usage_added: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct BackfillError {
+    primary: EngineError,
+    rollback_cleanup: Option<EngineError>,
+}
+
+impl BackfillError {
+    pub(crate) const fn atomicity_preserved(&self) -> bool {
+        self.rollback_cleanup.is_none()
+    }
+}
+
+impl From<EngineError> for BackfillError {
+    fn from(primary: EngineError) -> Self {
+        Self {
+            primary,
+            rollback_cleanup: None,
+        }
+    }
+}
+
+impl std::fmt::Display for BackfillError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.primary)?;
+        if let Some(rollback_cleanup) = &self.rollback_cleanup {
+            write!(
+                formatter,
+                "; transcript backfill rollback cleanup failed: {rollback_cleanup}"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BackfillError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.primary)
+    }
+}
+
 /// Runs the backfill if this store has not completed it yet. Returns the
-/// number of rows that gained facts, or `None` on database errors (in which
-/// case the marker is not written and a later open retries).
-pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<BackfillStats> {
-    if marker_version(conn, MARKER_NAME).await >= MARKER_VERSION {
-        return Some(BackfillStats::default());
+/// number of rows that gained facts. Database errors roll back the complete
+/// update batch, leave the marker unwritten, and allow a later open to retry.
+pub(crate) async fn backfill_transcript_facts(
+    conn: &(impl Executor + ?Sized),
+) -> Result<BackfillStats, BackfillError> {
+    if required_marker_version(conn, MARKER_NAME).await? >= MARKER_VERSION {
+        return Ok(BackfillStats::default());
     }
 
     let candidates = load_candidates(conn).await?;
@@ -80,7 +127,7 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
     // rows simply stay as they are. The first run after an upgrade re-reads
     // every affected transcript from byte 0 — easily hundreds of MB of
     // JSONL — so the pure read+parse loop runs on the blocking pool instead
-    // of pinning the async runtime worker that called `open_at`.
+    // of pinning the async runtime worker that scheduled the repair.
     let mut by_file: HashMap<(String, String), Vec<(String, i64)>> = HashMap::new();
     for (provider, message_id, source_path, source_offset) in candidates {
         by_file
@@ -105,11 +152,11 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
         updates
     })
     .await
-    .ok()?;
+    .map_err(|error| {
+        EngineError::Runtime(format!("transcript backfill parser task failed: {error}"))
+    })?;
 
-    // The schema-stage caller owns the authoritative RAII transaction, so
-    // cancellation or an update failure rolls this whole batch back.
-    let stats = apply_updates(conn, &updates).await?;
+    let stats = apply_updates_atomically(conn, &updates).await?;
     if stats.dated > 0 || stats.usage_added > 0 {
         tracing::info!(
             timestamps = stats.dated,
@@ -117,30 +164,36 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
             "backfilled legacy transcript message facts"
         );
     }
-    Some(stats)
+    Ok(stats)
 }
 
-async fn marker_version(conn: &Connection, name: &str) -> i64 {
-    let Ok(mut rows) = conn
+async fn required_marker_version(
+    conn: &(impl QueryExecutor + ?Sized),
+    name: &str,
+) -> EngineResult<i64> {
+    let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
             params![name],
         )
-        .await
-    else {
-        return 0;
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(0);
     };
-    match rows.next().await {
-        Ok(Some(row)) => row.get(0).unwrap_or(0),
-        _ => 0,
-    }
+    row.get(0)
+}
+
+async fn marker_version(conn: &(impl QueryExecutor + ?Sized), name: &str) -> i64 {
+    required_marker_version(conn, name).await.unwrap_or(0)
 }
 
 /// Messages that still know where they came from and are missing a fact this
 /// pass can derive: `(provider, message_id, source_path, source_offset)`.
 /// A row qualifies when either projection is undated or its metadata lacks a
 /// `usage` object.
-async fn load_candidates(conn: &Connection) -> Option<Vec<(String, String, String, i64)>> {
+async fn load_candidates(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> EngineResult<Vec<(String, String, String, i64)>> {
     let providers = JSONL_PROVIDERS
         .map(|provider| format!("'{provider}'"))
         .join(", ");
@@ -163,26 +216,67 @@ async fn load_candidates(conn: &Connection) -> Option<Vec<(String, String, Strin
                            OR NOT json_valid(r.metadata_json)
                            OR json_extract(r.metadata_json, '$.usage') IS NULL)))"
     );
-    let mut rows = conn.query(&sql, ()).await.ok()?;
+    let mut rows = conn.query(&sql, ()).await?;
     let mut candidates = Vec::new();
-    while let Ok(Some(row)) = rows.next().await {
-        let (Ok(provider), Ok(message_id), Ok(source_path), Ok(source_offset)) = (
-            row.get::<String>(0),
-            row.get::<String>(1),
-            row.get::<String>(2),
-            row.get::<i64>(3),
-        ) else {
-            continue;
-        };
+    while let Some(row) = rows.next().await? {
+        let (provider, message_id, source_path, source_offset) = (
+            row.get::<String>(0)?,
+            row.get::<String>(1)?,
+            row.get::<String>(2)?,
+            row.get::<i64>(3)?,
+        );
         candidates.push((provider, message_id, source_path, source_offset));
     }
-    Some(candidates)
+    Ok(candidates)
+}
+
+async fn apply_updates_atomically(
+    conn: &(impl Executor + ?Sized),
+    updates: &[(String, String, LineFacts)],
+) -> Result<BackfillStats, BackfillError> {
+    conn.execute_batch(&format!("SAVEPOINT {SAVEPOINT_NAME}"))
+        .await?;
+    match apply_updates(conn, updates).await {
+        Ok(stats) => match conn
+            .execute_batch(&format!("RELEASE SAVEPOINT {SAVEPOINT_NAME}"))
+            .await
+        {
+            Ok(()) => Ok(stats),
+            Err(error) => rollback_updates(conn, error).await,
+        },
+        Err(error) => rollback_updates(conn, error).await,
+    }
+}
+
+async fn rollback_updates(
+    conn: &(impl Executor + ?Sized),
+    primary: EngineError,
+) -> Result<BackfillStats, BackfillError> {
+    if let Err(rollback) = conn
+        .execute_batch(&format!("ROLLBACK TO SAVEPOINT {SAVEPOINT_NAME}"))
+        .await
+    {
+        return Err(BackfillError {
+            primary,
+            rollback_cleanup: Some(rollback),
+        });
+    }
+    if let Err(rollback_cleanup) = conn
+        .execute_batch(&format!("RELEASE SAVEPOINT {SAVEPOINT_NAME}"))
+        .await
+    {
+        return Err(BackfillError {
+            primary,
+            rollback_cleanup: Some(rollback_cleanup),
+        });
+    }
+    Err(primary.into())
 }
 
 async fn apply_updates(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     updates: &[(String, String, LineFacts)],
-) -> Option<BackfillStats> {
+) -> EngineResult<BackfillStats> {
     let mut stats = BackfillStats::default();
     for (provider, message_id, facts) in updates {
         if let Some(timestamp) = facts.timestamp {
@@ -192,18 +286,18 @@ async fn apply_updates(
                      WHERE provider = ?2 AND message_id = ?3 AND timestamp IS NULL",
                     params![timestamp, provider.as_str(), message_id.as_str()],
                 )
-                .await
-                .ok()?;
+                .await?;
             conn.execute(
                 "UPDATE lcm_raw_messages SET timestamp = ?1
                  WHERE provider = ?2 AND message_id = ?3 AND timestamp IS NULL",
                 params![timestamp, provider.as_str(), message_id.as_str()],
             )
-            .await
-            .ok()?;
+            .await?;
         }
         if let Some(usage) = &facts.usage {
-            let usage_json = serde_json::to_string(usage).ok()?;
+            let usage_json = serde_json::to_string(usage).map_err(|error| {
+                EngineError::Runtime(format!("serialize transcript usage facts: {error}"))
+            })?;
             // `json_set` preserves the other metadata keys; invalid or
             // missing metadata degrades to a fresh `{"usage": …}` object.
             for table in ["session_messages", "lcm_raw_messages"] {
@@ -221,8 +315,7 @@ async fn apply_updates(
                         ),
                         params![usage_json.as_str(), provider.as_str(), message_id.as_str()],
                     )
-                    .await
-                    .ok()?;
+                    .await?;
                 if table == "session_messages" {
                     stats.usage_added += updated;
                 }
@@ -248,8 +341,7 @@ async fn apply_updates(
         ),
         (),
     )
-    .await
-    .ok()?;
+    .await?;
 
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
@@ -259,15 +351,13 @@ async fn apply_updates(
             applied_at = unixepoch()",
         params![MARKER_NAME, MARKER_VERSION],
     )
-    .await
-    .ok()?;
+    .await?;
     conn.execute(
         "DELETE FROM session_schema_migrations WHERE name = ?1",
         params![LEGACY_MARKER_NAME],
     )
-    .await
-    .ok()?;
-    Some(stats)
+    .await?;
+    Ok(stats)
 }
 
 /// Re-reads a transcript from byte 0 and derives per-line facts keyed by the
@@ -467,10 +557,10 @@ struct StructuredCandidate {
 
 /// Sibling `<store>.structured-backfill.lock` used to serialize the sweep
 /// across processes. The in-process in-flight guard in
-/// [`GlobalDb::spawn_structured_backfill`] only excludes stacked opens within
-/// one process; production runs many short-lived hook processes, so without a
-/// filesystem lock two of them could sweep the same store at once and race the
-/// watermark backwards.
+/// The daemon scheduler only excludes stacked passes within one process;
+/// production runs many short-lived hook processes, so without a filesystem
+/// lock two of them could sweep the same store at once and race the watermark
+/// backwards.
 fn structured_backfill_lock_path(db_path: &Path) -> PathBuf {
     let mut lock_name = db_path.file_name().map_or_else(
         || std::ffi::OsString::from("session"),
@@ -496,14 +586,23 @@ pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::F
 
 /// Re-parses the next bounded transcript batch and inserts rows missing from
 /// legacy stores.
-pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<StructuredBackfillStats> {
-    let conn = db.read_connection();
+pub(crate) async fn backfill_structured_rows(
+    db: &RegisteredGlobalDb,
+) -> Option<StructuredBackfillStats> {
+    if !matches!(
+        &db.binding().shard_id.scope,
+        StoreShardScopeV1::ProjectSessions { .. } | StoreShardScopeV1::ProfileSessions
+    ) {
+        return None;
+    }
+    let snapshot = db.read_snapshot().await.ok()?;
     // Cheap pre-check before the lock: skip entirely when every provider is
     // already at (or past) its target version and no legacy global marker
     // remains to migrate.
-    if !structured_backfill_pending(conn).await {
+    if !structured_backfill_pending(&snapshot).await {
         return Some(StructuredBackfillStats::default());
     }
+    drop(snapshot);
     // Claim the store cross-process before doing any parse or watermark work.
     // A process that loses the race skips its sweep entirely rather than
     // duplicating the whole-file re-parse and interleaving watermark writes
@@ -523,7 +622,7 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
     // watermark or re-parsing, so bumping one provider never disturbs another.
     let mut stats = StructuredBackfillStats::default();
     for &(provider, target_version) in STRUCTURED_BACKFILL_VERSIONS {
-        sweep_provider(db, conn, provider, target_version, &mut stats).await?;
+        sweep_provider(db, provider, target_version, &mut stats).await?;
     }
 
     if stats.inserted > 0 {
@@ -538,7 +637,7 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
 
 /// Whether any structured-backfill work is outstanding: a leftover global
 /// marker still needs migrating, or some provider is behind its target version.
-async fn structured_backfill_pending(conn: &Connection) -> bool {
+async fn structured_backfill_pending(conn: &(impl QueryExecutor + ?Sized)) -> bool {
     if legacy_global_marker_version(conn).await.is_some() {
         return true;
     }
@@ -553,7 +652,7 @@ async fn structured_backfill_pending(conn: &Connection) -> bool {
 /// Reads the retired global marker's version if its row still exists, else
 /// `None`. Distinct from [`marker_version`] (which maps a missing row to 0) so
 /// the migration seeds only when a genuine legacy marker is present.
-async fn legacy_global_marker_version(conn: &Connection) -> Option<i64> {
+async fn legacy_global_marker_version(conn: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
     let Ok(mut rows) = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
@@ -575,7 +674,7 @@ async fn legacy_global_marker_version(conn: &Connection) -> Option<i64> {
 /// provider), seed every provider's marker to N so no provider spuriously
 /// re-sweeps, then retire the global marker and its global/un-versioned cursor
 /// rows. Providers whose target now exceeds N still re-sweep on their own.
-async fn migrate_legacy_global_marker(conn: &Connection) -> Option<()> {
+async fn migrate_legacy_global_marker(conn: &(impl Executor + ?Sized)) -> Option<()> {
     let Some(legacy_version) = legacy_global_marker_version(conn).await else {
         return Some(());
     };
@@ -617,20 +716,21 @@ async fn migrate_legacy_global_marker(conn: &Connection) -> Option<()> {
 /// provider's own version-namespaced cursor and marking it complete when it
 /// drains. A provider already at its target version returns immediately.
 async fn sweep_provider(
-    db: &GlobalDb,
-    conn: &Connection,
+    db: &RegisteredGlobalDb,
     provider: &str,
     target_version: i64,
     stats: &mut StructuredBackfillStats,
 ) -> Option<()> {
-    if marker_version(conn, &structured_marker_name(provider)).await >= target_version {
+    let snapshot = db.read_snapshot().await.ok()?;
+    if marker_version(&snapshot, &structured_marker_name(provider)).await >= target_version {
         return Some(());
     }
     let cursor_key = structured_cursor_key(provider, target_version);
-    let cursor = read_backfill_cursor(conn, &cursor_key).await;
+    let cursor = read_backfill_cursor(&snapshot, &cursor_key).await;
     let candidates =
-        load_structured_candidates(conn, provider, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
+        load_structured_candidates(&snapshot, provider, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
     if candidates.is_empty() {
+        drop(snapshot);
         let transaction = db.begin_write_transaction().await.ok()?;
         mark_structured_backfill_complete(&transaction, provider, target_version).await?;
         transaction.commit().await.ok()?;
@@ -640,7 +740,7 @@ async fn sweep_provider(
     for candidate in &candidates {
         let target_size = std::fs::metadata(&candidate.source_path).ok()?.len();
         let project_paths =
-            load_project_paths_for_source(conn, &candidate.provider, &candidate.source_path)
+            load_project_paths_for_source(&snapshot, &candidate.provider, &candidate.source_path)
                 .await?;
         for project_path in project_paths {
             let project_root = PathBuf::from(&project_path);
@@ -670,33 +770,73 @@ async fn sweep_provider(
                 );
                 let span_observations =
                     crate::sessions::git_correlation::ingest_span_observations(&messages);
-                let inserted = db.insert_absent_session_messages(&messages).await?;
-                stats.inserted += inserted;
+                let transaction = db.begin_write_transaction().await.ok()?;
+                stats.inserted += insert_absent_session_messages(&transaction, &messages).await?;
                 for record in &commit_records {
-                    db.git_upsert_commit_session(record).await.ok()?;
+                    crate::sessions::git_correlation::upsert_commit_session(&transaction, record)
+                        .await
+                        .ok()?;
                 }
                 for observation in &span_observations {
-                    db.git_record_span_observation(
+                    crate::sessions::git_correlation::record_span_observation_in_transaction(
+                        &transaction,
                         observation,
                         crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
                     )
                     .await
                     .ok()?;
                 }
+                transaction.commit().await.ok()?;
             }
         }
         stats.files_scanned += 1;
-        let writer = db.writer_connection().await.ok()?;
-        writer
+        let transaction = db.begin_write_transaction().await.ok()?;
+        transaction
             .execute(
                 WRITE_BACKFILL_CURSOR_SQL,
                 params![cursor_key.as_str(), candidate.source_path.as_str()],
             )
             .await
             .ok()?;
+        transaction.commit().await.ok()?;
     }
 
     Some(())
+}
+
+async fn insert_absent_session_messages(
+    conn: &(impl Executor + ?Sized),
+    messages: &[crate::sessions::SessionMessageRecord],
+) -> Option<u64> {
+    let mut inserted = 0u64;
+    for message in messages {
+        inserted = inserted.saturating_add(
+            conn.execute(
+                "INSERT OR IGNORE INTO session_messages
+                     (provider, message_id, session_id, role, timestamp, ordinal, text, kind,
+                      model, tool_names, source_path, source_offset, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    message.provider.as_str(),
+                    message.message_id.as_str(),
+                    message.session_id.as_str(),
+                    message.role.as_str(),
+                    message.timestamp,
+                    message.ordinal,
+                    message.text.as_str(),
+                    message.kind.as_deref(),
+                    message.model.as_deref(),
+                    message.tool_names.as_deref(),
+                    message.source_path.as_deref(),
+                    message.source_offset,
+                    message.metadata_json.as_deref(),
+                ],
+            )
+            .await
+            .ok()?,
+        );
+    }
+    Some(inserted)
 }
 
 fn parse_structured_messages(
@@ -727,7 +867,7 @@ fn provider_source(provider: &str) -> Option<Box<dyn TranscriptSource>> {
 }
 
 async fn load_structured_candidates(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     after_path: &str,
     limit: usize,
@@ -770,7 +910,7 @@ async fn load_structured_candidates(
 }
 
 async fn load_project_paths_for_source(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     source_path: &str,
 ) -> Option<Vec<String>> {
@@ -806,7 +946,7 @@ async fn load_project_paths_for_source(
     Some(out)
 }
 
-async fn ensure_backfill_meta_table(conn: &Connection) -> Option<()> {
+async fn ensure_backfill_meta_table(conn: &(impl Executor + ?Sized)) -> Option<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS session_backfill_meta (
             key TEXT PRIMARY KEY,
@@ -820,7 +960,7 @@ async fn ensure_backfill_meta_table(conn: &Connection) -> Option<()> {
     Some(())
 }
 
-async fn read_backfill_cursor(conn: &Connection, key: &str) -> String {
+async fn read_backfill_cursor(conn: &(impl QueryExecutor + ?Sized), key: &str) -> String {
     let Ok(mut rows) = conn
         .query(
             "SELECT value FROM session_backfill_meta WHERE key = ?1",
@@ -836,7 +976,11 @@ async fn read_backfill_cursor(conn: &Connection, key: &str) -> String {
     }
 }
 
-async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Option<()> {
+async fn write_backfill_cursor(
+    conn: &(impl Executor + ?Sized),
+    key: &str,
+    value: &str,
+) -> Option<()> {
     // Compare-and-set: only ever move the watermark forward. Candidates are
     // selected with `source_path > cursor` and ordered ascending, so a greater
     // stored value means more files covered. The `WHERE excluded.value > …`
@@ -853,7 +997,10 @@ async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Opt
 /// exactly as the sweep does, so tests can assert the compare-and-set
 /// monotonicity guard rejects backwards moves.
 #[doc(hidden)]
-pub async fn write_structured_backfill_cursor_for_test(db: &GlobalDb, value: &str) -> Option<()> {
+pub(crate) async fn write_structured_backfill_cursor_for_test(
+    db: &RegisteredGlobalDb,
+    value: &str,
+) -> Option<()> {
     let transaction = db.begin_write_transaction().await.ok()?;
     ensure_backfill_meta_table(&transaction).await?;
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
@@ -864,16 +1011,19 @@ pub async fn write_structured_backfill_cursor_for_test(db: &GlobalDb, value: &st
 
 /// Test-only accessor: reads the Codex structured-backfill watermark for `db`.
 #[doc(hidden)]
-pub async fn read_structured_backfill_cursor_for_test(db: &GlobalDb) -> String {
+pub(crate) async fn read_structured_backfill_cursor_for_test(db: &RegisteredGlobalDb) -> String {
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
-    read_backfill_cursor(db.read_connection(), &key).await
+    let Ok(snapshot) = db.read_snapshot().await else {
+        return String::new();
+    };
+    read_backfill_cursor(&snapshot, &key).await
 }
 
 /// Marks one provider's sweep complete at `target_version` and drops that
 /// provider's watermark rows (this version's key and any stale prior-version
 /// per-provider keys). Other providers' in-flight cursors are left intact.
 async fn mark_structured_backfill_complete(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     target_version: i64,
 ) -> Option<()> {
@@ -894,6 +1044,423 @@ async fn mark_structured_backfill_complete(
     .await
     .ok()?;
     Some(())
+}
+
+/// Opaque registered ProjectSessions fixture for structured-backfill integration tests.
+#[doc(hidden)]
+pub struct StructuredBackfillTestRuntimeV1 {
+    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+}
+
+impl StructuredBackfillTestRuntimeV1 {
+    pub async fn project(
+        profile_root: impl AsRef<Path>,
+        project_root: impl AsRef<Path>,
+        project_id: ProjectId,
+    ) -> crate::errors::Result<Self> {
+        Ok(Self {
+            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile_root,
+                project_root,
+                project_id,
+            )
+            .await?,
+        })
+    }
+
+    fn database(&self) -> &RegisteredGlobalDb {
+        self.authority
+            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
+            .expect("structured backfill test runtime has ProjectSessions authority")
+    }
+
+    pub fn database_path(&self) -> &Path {
+        self.database().db_path()
+    }
+
+    pub async fn seed_source(
+        &self,
+        source: &dyn TranscriptSource,
+        project_root: &Path,
+    ) -> Result<crate::sessions::shared::TranscriptIngestStats, String> {
+        let discovery = source.discover_transcript_paths(
+            project_root,
+            crate::sessions::source::TranscriptDiscoveryBounds::default_walk(),
+        );
+        let mut stats = crate::sessions::shared::TranscriptIngestStats::default();
+        for path in discovery.paths {
+            let Some(parsed) = source
+                .try_parse_new(&path, StoredCursor::default(), project_root, None)
+                .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            let started_at = parsed
+                .messages
+                .iter()
+                .filter_map(|message| message.timestamp)
+                .min();
+            let ended_at = parsed
+                .messages
+                .iter()
+                .filter_map(|message| message.timestamp)
+                .max();
+            let transaction = self
+                .database()
+                .begin_write_transaction()
+                .await
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT INTO sessions
+                         (provider, session_id, project_key, project_path, title, started_at,
+                          ended_at, transcript_path, metadata_json, parent_session_id,
+                          is_subagent, agent_id, parent_tool_use_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ON CONFLICT(provider, session_id) DO UPDATE SET
+                        project_key = excluded.project_key,
+                        project_path = excluded.project_path,
+                        title = excluded.title,
+                        started_at = excluded.started_at,
+                        ended_at = excluded.ended_at,
+                        transcript_path = excluded.transcript_path,
+                        metadata_json = excluded.metadata_json,
+                        parent_session_id = excluded.parent_session_id,
+                        is_subagent = excluded.is_subagent,
+                        agent_id = excluded.agent_id,
+                        parent_tool_use_id = excluded.parent_tool_use_id",
+                    params![
+                        source.provider(),
+                        parsed.draft.session_id.as_str(),
+                        parsed.draft.project_key.as_str(),
+                        parsed.draft.project_path.as_str(),
+                        parsed.draft.title.as_deref(),
+                        started_at,
+                        ended_at,
+                        path.to_string_lossy().as_ref(),
+                        parsed.draft.metadata_json.as_deref(),
+                        parsed.draft.parent_session_id.as_deref(),
+                        i64::from(parsed.draft.is_subagent),
+                        parsed.draft.agent_id.as_deref(),
+                        parsed.draft.parent_tool_use_id.as_deref(),
+                    ],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let inserted = insert_absent_session_messages(&transaction, &parsed.messages)
+                .await
+                .ok_or_else(|| "seed structured transcript messages".to_string())?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| error.to_string())?;
+            stats.sessions_upserted = stats.sessions_upserted.saturating_add(1);
+            stats.messages_upserted = stats.messages_upserted.saturating_add(inserted);
+        }
+        Ok(stats)
+    }
+
+    pub async fn run(&self) -> Option<u64> {
+        backfill_structured_rows(self.database())
+            .await
+            .map(|stats| stats.inserted)
+    }
+
+    pub async fn count_kind(&self, provider: &str, kind: &str) -> Result<i64, String> {
+        let snapshot = self
+            .database()
+            .read_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM session_messages WHERE provider = ?1 AND kind = ?2",
+                params![provider, kind],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        rows.next()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing structured kind count".to_string())?
+            .get(0)
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn remove_kind_and_reset(&self, provider: &str, kind: &str) -> Result<(), String> {
+        let transaction = self
+            .database()
+            .begin_write_transaction()
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM lcm_raw_messages
+                 WHERE provider = ?1
+                   AND message_id IN (
+                       SELECT message_id FROM session_messages
+                       WHERE provider = ?1 AND kind = ?2)",
+                params![provider, kind],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM session_messages WHERE provider = ?1 AND kind = ?2",
+                params![provider, kind],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM session_schema_migrations
+                 WHERE name LIKE 'structured_rows_backfill%'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM session_backfill_meta
+                 WHERE key LIKE 'structured_backfill_cursor%'",
+                (),
+            )
+            .await
+            .ok();
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn goal_row(&self) -> Result<(String, Option<String>, Option<String>), String> {
+        let snapshot = self
+            .database()
+            .read_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut rows = snapshot
+            .query(
+                "SELECT text, kind, metadata_json FROM session_messages
+                 WHERE provider = 'codex' AND kind = 'goal'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing Codex goal row".to_string())?;
+        Ok((
+            row.get(0).map_err(|error| error.to_string())?,
+            row.get(1).map_err(|error| error.to_string())?,
+            row.get(2).map_err(|error| error.to_string())?,
+        ))
+    }
+
+    pub async fn marker_version(&self, provider: Option<&str>) -> Result<Option<i64>, String> {
+        let name = provider.map_or_else(
+            || STRUCTURED_MARKER_NAME.to_string(),
+            structured_marker_name,
+        );
+        let snapshot = self
+            .database()
+            .read_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut rows = snapshot
+            .query(
+                "SELECT version FROM session_schema_migrations WHERE name = ?1",
+                params![name],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        rows.next()
+            .await
+            .map_err(|error| error.to_string())
+            .map(|row| row.and_then(|row| row.get(0).ok()))
+    }
+
+    pub async fn session(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<Option<crate::sessions::SessionRecord>, String> {
+        let snapshot = self
+            .database()
+            .read_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut rows = snapshot
+            .query(
+                "SELECT provider, session_id, project_key, project_path, title, started_at,
+                        ended_at, transcript_path, metadata_json, parent_session_id,
+                        is_subagent, agent_id, parent_tool_use_id
+                 FROM sessions WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(row) = rows.next().await.map_err(|error| error.to_string())? else {
+            return Ok(None);
+        };
+        Ok(Some(crate::sessions::SessionRecord {
+            provider: row.get(0).map_err(|error| error.to_string())?,
+            session_id: row.get(1).map_err(|error| error.to_string())?,
+            project_key: row.get(2).map_err(|error| error.to_string())?,
+            project_path: row.get(3).map_err(|error| error.to_string())?,
+            title: row.get(4).map_err(|error| error.to_string())?,
+            started_at: row.get(5).map_err(|error| error.to_string())?,
+            ended_at: row.get(6).map_err(|error| error.to_string())?,
+            transcript_path: row.get(7).map_err(|error| error.to_string())?,
+            metadata_json: row.get(8).map_err(|error| error.to_string())?,
+            parent_session_id: row.get(9).map_err(|error| error.to_string())?,
+            is_subagent: row.get::<i64>(10).map_err(|error| error.to_string())? != 0,
+            agent_id: row.get(11).map_err(|error| error.to_string())?,
+            parent_tool_use_id: row.get(12).map_err(|error| error.to_string())?,
+        }))
+    }
+
+    pub async fn seed_stale_unversioned_cursor(&self) -> Result<(), String> {
+        let transaction = self
+            .database()
+            .begin_write_transaction()
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM lcm_raw_messages
+                 WHERE provider = 'codex'
+                   AND message_id IN (
+                       SELECT message_id FROM session_messages
+                       WHERE provider = 'codex' AND kind = 'goal')",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM session_messages WHERE provider = 'codex' AND kind = 'goal'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM session_schema_migrations
+                 WHERE name LIKE 'structured_rows_backfill%'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut rows = transaction
+            .query(
+                "SELECT MAX(source_path) FROM session_messages WHERE provider = 'codex'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let last_path: String = rows
+            .next()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing Codex source path".to_string())?
+            .get(0)
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO session_backfill_meta(key, value)
+                 VALUES ('structured_backfill_cursor', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![last_path],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn seed_legacy_global_marker(&self, version: i64) -> Result<(), String> {
+        let transaction = self
+            .database()
+            .begin_write_transaction()
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM session_schema_migrations
+                 WHERE name LIKE 'structured_rows_backfill%'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO session_schema_migrations(name, version)
+                 VALUES (?1, ?2)",
+                params![STRUCTURED_MARKER_NAME, version],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM session_backfill_meta
+                 WHERE key LIKE 'structured_backfill_cursor%'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        for key in [
+            STRUCTURED_CURSOR_KEY_PREFIX.to_string(),
+            format!("{STRUCTURED_CURSOR_KEY_PREFIX}:v{version}"),
+        ] {
+            transaction
+                .execute(
+                    "INSERT INTO session_backfill_meta(key, value)
+                     VALUES (?1, 'legacy/path.jsonl')",
+                    params![key],
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn cursor_count(&self) -> Result<i64, String> {
+        let snapshot = self
+            .database()
+            .read_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM session_backfill_meta
+                 WHERE key LIKE 'structured_backfill_cursor%'",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        rows.next()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing structured cursor count".to_string())?
+            .get(0)
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn write_cursor(&self, value: &str) -> Option<()> {
+        write_structured_backfill_cursor_for_test(self.database(), value).await
+    }
+
+    pub async fn read_cursor(&self) -> String {
+        read_structured_backfill_cursor_for_test(self.database()).await
+    }
 }
 
 #[cfg(test)]
@@ -969,5 +1536,96 @@ mod tests {
         assert!(batches > 1);
         assert_eq!(cursor.position, contents.len() as u64);
         assert_eq!(messages, MESSAGE_COUNT);
+    }
+
+    #[tokio::test]
+    async fn transcript_fact_update_failure_rolls_back_the_entire_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection =
+            crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+        let transaction = connection.transaction().await.unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    provider TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    started_at INTEGER,
+                    ended_at INTEGER,
+                    PRIMARY KEY(provider, session_id)
+                );
+                CREATE TABLE session_messages (
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    timestamp INTEGER,
+                    metadata_json TEXT,
+                    PRIMARY KEY(provider, message_id)
+                );
+                CREATE TABLE lcm_raw_messages (
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    timestamp INTEGER,
+                    metadata_json TEXT,
+                    PRIMARY KEY(provider, message_id)
+                );
+                CREATE TABLE session_schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+                );
+                INSERT INTO sessions(provider, session_id)
+                VALUES ('codex', 'session');
+                INSERT INTO session_messages(provider, message_id)
+                VALUES ('codex', 'message');
+                INSERT INTO lcm_raw_messages(provider, message_id, session_id)
+                VALUES ('codex', 'message', 'session');
+                CREATE TRIGGER fail_transcript_fact_update
+                BEFORE UPDATE OF timestamp ON lcm_raw_messages
+                WHEN NEW.message_id = 'message'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced transcript backfill failure');
+                END;",
+            )
+            .await
+            .unwrap();
+
+        let updates = vec![(
+            "codex".to_owned(),
+            "message".to_owned(),
+            LineFacts {
+                timestamp: Some(123),
+                usage: None,
+            },
+        )];
+        let error = match apply_updates_atomically(&transaction, &updates).await {
+            Ok(_) => panic!("forced update failure must abort the backfill batch"),
+            Err(error) => error,
+        };
+        assert!(error.atomicity_preserved());
+
+        // Startup deliberately ignores a failed self-heal. Committing its
+        // outer schema transaction must not preserve an earlier batch write.
+        transaction.commit().await.unwrap();
+        let mut rows = connection
+            .query(
+                "SELECT timestamp FROM session_messages
+                 WHERE provider = 'codex' AND message_id = 'message'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<Option<i64>>(0).unwrap(), None);
+
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM session_schema_migrations
+                 WHERE name = 'transcript_facts_backfill'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0);
     }
 }

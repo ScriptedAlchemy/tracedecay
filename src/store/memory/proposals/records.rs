@@ -8,7 +8,8 @@ use super::super::primitives::{
     to_json,
 };
 use super::super::projection::compatibility_legacy_mapping_tx;
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, FactOwnerV1, ProvenanceId,
@@ -242,7 +243,7 @@ pub(super) fn compatibility_proposal_transition_json(
 }
 
 pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
 ) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>> {
@@ -378,7 +379,7 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
 }
 
 pub(in crate::store::memory) async fn get_compatibility_fact_proposal_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
 ) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>> {
@@ -386,7 +387,7 @@ pub(in crate::store::memory) async fn get_compatibility_fact_proposal_tx(
 }
 
 pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     state: Option<CompatibilityFactProposalStateV1>,
     after_proposal_id: Option<&ProvenanceId>,
@@ -534,7 +535,7 @@ pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
 }
 
 pub(in crate::store::memory) async fn count_pending_compatibility_fact_proposals_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactCompatibilityResult<u64> {
     let key = OwnerKey::new(owner)?;

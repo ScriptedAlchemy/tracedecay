@@ -3,16 +3,17 @@
 
 use tempfile::TempDir;
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::source::try_ingest_source;
 
 use crate::codex::write_codex_rollout_with_structured_events;
+use crate::restart_atomicity::{
+    ProjectSessionTestRuntime, open_project_session_db, try_ingest_source,
+};
 use crate::support::setup;
 
 /// Search this project's Codex messages, then keep only rows of the requested
 /// kind (row text is not always unique to one kind, so filter after the query).
 async fn search_session_kind(
-    db: &tracedecay::global_db::GlobalDb,
+    db: &ProjectSessionTestRuntime,
     scope: &str,
     query: &str,
     kind: &str,

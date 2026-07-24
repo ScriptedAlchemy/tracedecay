@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::FactCompatibilityStore;
@@ -23,10 +24,11 @@ use crate::automation::lifecycle::{
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::automation::session_reflector::validate_fact_proposals;
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDb;
 use crate::memory::user::open_user_memory_db;
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
-use crate::sessions::user_sessions_db_path;
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
@@ -433,7 +435,7 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
     dashboard_root: PathBuf,
-    sessions_db_path: PathBuf,
+    sessions_db: Arc<RegisteredGlobalDb>,
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
@@ -443,7 +445,7 @@ pub(super) async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
 ) -> Result<SessionReflectorAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
-        sessions_db_path.clone(),
+        sessions_db,
         options.run_id.clone(),
         "session_reflector",
         options.trigger,
@@ -555,6 +557,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
     retrieval: &dyn AutomationSessionRetrieval,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
+    let sessions_db = super::project_automation_sessions(cg).await?;
     let memory =
         MemoryApplication::new(cg.project_memory_owner()?, DatabaseFactStore::new(cg.db()))
             .map_err(|error| TraceDecayError::Config {
@@ -564,7 +567,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
             })?;
     run_session_reflector_for_store(
         cg.store_layout().dashboard_root.clone(),
-        cg.store_layout().sessions_db_path.clone(),
+        sessions_db,
         retrieval,
         &memory,
         Some(cg.store_layout().project_root.as_path()),
@@ -592,13 +595,15 @@ pub async fn run_session_reflector_with_backend(
     .await
 }
 
-pub async fn run_user_session_reflector_with_backend_and_retrieval(
+pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
     profile_root: &std::path::Path,
+    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
+    let sessions_db = session_registry.profile_sessions().await?;
     if let SessionReflectorEvidenceOutcome::Skipped {
         reason,
         evidence_hash,
@@ -606,7 +611,7 @@ pub async fn run_user_session_reflector_with_backend_and_retrieval(
     {
         let run = AgentTaskRunContext::new(
             user_automation_root(profile_root),
-            user_sessions_db_path(profile_root),
+            Arc::clone(&sessions_db),
             options.run_id.clone(),
             "session_reflector",
             options.trigger,
@@ -620,7 +625,7 @@ pub async fn run_user_session_reflector_with_backend_and_retrieval(
             evidence_hash,
         ));
     }
-    let memory_db = open_user_memory_db(profile_root).await?;
+    let memory_db = open_user_memory_db(session_registry.as_ref()).await?;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&memory_db))
         .map_err(|error| TraceDecayError::Config {
         message: format!(
@@ -629,7 +634,7 @@ pub async fn run_user_session_reflector_with_backend_and_retrieval(
     })?;
     run_session_reflector_for_store(
         user_automation_root(profile_root),
-        user_sessions_db_path(profile_root),
+        sessions_db,
         retrieval,
         &memory,
         None,
@@ -641,8 +646,9 @@ pub async fn run_user_session_reflector_with_backend_and_retrieval(
 }
 
 /// Runs session reflection for projectless evidence and profile-level memory.
-pub async fn run_user_session_reflector_with_backend(
+pub(crate) async fn run_user_session_reflector_with_backend(
     profile_root: &std::path::Path,
+    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
@@ -650,6 +656,7 @@ pub async fn run_user_session_reflector_with_backend(
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_session_reflector_with_backend_and_retrieval(
         profile_root,
+        session_registry,
         config,
         backend,
         retrieval.as_ref(),

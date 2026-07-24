@@ -28,6 +28,7 @@ pub mod diagnostics;
 pub mod extract;
 pub mod generations;
 pub mod git_join;
+pub mod historical_query;
 pub mod impact_join;
 pub mod incremental;
 pub mod intake;

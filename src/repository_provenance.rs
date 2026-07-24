@@ -118,6 +118,25 @@ impl RepositoryProvenanceAdmissionContext {
         ))
     }
 
+    pub(crate) fn matches_admitted_identity(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &RepositoryId,
+        worktree_id: &WorktreeId,
+    ) -> bool {
+        &self.project_id == project_id
+            && &self.repository_id == repository_id
+            && self.worktree_id.as_ref() == Some(worktree_id)
+    }
+
+    pub(crate) fn admitted_identity(&self) -> Option<(ProjectId, RepositoryId, WorktreeId)> {
+        Some((
+            self.project_id.clone(),
+            self.repository_id.clone(),
+            self.worktree_id.clone()?,
+        ))
+    }
+
     /// Capture only after the observation has crossed the privacy boundary.
     pub(crate) fn capture_after_sanitization(
         &self,

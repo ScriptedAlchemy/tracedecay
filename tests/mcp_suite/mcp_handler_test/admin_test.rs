@@ -4,7 +4,8 @@ use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
-use tracedecay::global_db::GlobalDb;
+use std::path::Path;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::get_tool_definitions;
 
 #[tokio::test]
@@ -237,6 +238,56 @@ async fn project_registry_tools_missing_registry_carries_stable_shape() {
 }
 
 #[tokio::test]
+async fn project_context_surfaces_registry_read_failure_as_tool_error() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let registry_dir = test_temp_dir();
+    let registry_path = registry_dir.path().join("global.db");
+    let runtime = HostAdmissionTestRuntimeV1::profile(registry_dir.path())
+        .await
+        .unwrap();
+    runtime
+        .upsert_code_project(
+            "proj_broken_registry",
+            cg.project_root(),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    runtime
+        .upsert_project_alias(Path::new("registered-alias"), "proj_broken_registry")
+        .await
+        .unwrap();
+    rusqlite::Connection::open(&registry_path)
+        .unwrap()
+        .execute_batch("DROP TABLE project_aliases")
+        .unwrap();
+    let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+        tracedecay::tracedecay::TraceDecay::open(cg.project_root())
+            .await
+            .unwrap(),
+        None,
+        runtime,
+    )
+    .await;
+
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_project_context",
+        json!({"path": "registered-alias", "format": "json"}),
+    )
+    .await;
+
+    assert_eq!(result["isError"], true, "{result}");
+    let message = extract_real_server_text(&result);
+    assert!(
+        message.contains("resolve project identity alias") || message.contains("project_aliases"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
 async fn project_registry_tools_prefer_injected_registry_over_process_default() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let process_registry_dir = test_temp_dir();
@@ -245,7 +296,9 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     let client_registry_path = client_registry_dir.path().join("global.db");
     let _env_guard = GlobalDbEnvGuard::set(&process_registry_path);
 
-    let process_db = GlobalDb::open_at(&process_registry_path).await.unwrap();
+    let process_db = HostAdmissionTestRuntimeV1::profile(process_registry_dir.path())
+        .await
+        .unwrap();
     process_db
         .upsert_code_project(
             "proj_process_default",
@@ -256,21 +309,38 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
         )
         .await
         .unwrap();
+    drop(process_db);
     seed_project_registry(&client_registry_path, cg.project_root()).await;
-    let client_db = GlobalDb::open_at(&client_registry_path).await.unwrap();
-
-    let list = tracedecay::mcp::tools::handle_tool_call_with_registry(
-        &cg,
-        "tracedecay_project_list",
-        json!({"limit": 10, "format": "json"}),
-        None,
-        None,
-        Some(&client_db),
-        false,
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .expect("test project identity");
+    let client_runtime = HostAdmissionTestRuntimeV1::project(
+        client_registry_dir.path(),
+        cg.project_root(),
+        project_id,
     )
     .await
     .unwrap();
-    let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
+    let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+        tracedecay::tracedecay::TraceDecay::open(cg.project_root())
+            .await
+            .unwrap(),
+        None,
+        client_runtime,
+    )
+    .await;
+
+    let list = handle_real_server_tool_call(
+        &server,
+        "tracedecay_project_list",
+        json!({"limit": 10, "format": "json"}),
+    )
+    .await;
+    let list_payload: Value = serde_json::from_str(extract_real_server_text(&list)).unwrap();
     assert_eq!(
         list_payload["registry_path"],
         client_registry_path
@@ -279,43 +349,33 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
             .display()
             .to_string()
     );
-    let list_text = extract_text(&list.value);
+    let list_text = extract_real_server_text(&list);
     assert!(list_text.contains("proj_alpha"));
     assert!(
         !list_text.contains("proj_process_default"),
         "project list should not read process-default registry: {list_text}"
     );
 
-    let search = tracedecay::mcp::tools::handle_tool_call_with_registry(
-        &cg,
+    let search = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_search",
         json!({"query": "alpha", "limit": 10, "format": "json"}),
-        None,
-        None,
-        Some(&client_db),
-        false,
     )
-    .await
-    .unwrap();
-    let search_text = extract_text(&search.value);
+    .await;
+    let search_text = extract_real_server_text(&search);
     assert!(search_text.contains("proj_alpha"));
     assert!(
         !search_text.contains("proj_process_default"),
         "project search should not read process-default registry: {search_text}"
     );
 
-    let context = tracedecay::mcp::tools::handle_tool_call_with_registry(
-        &cg,
+    let context = handle_real_server_tool_call(
+        &server,
         "tracedecay_project_context",
         json!({"project_id": "proj_alpha", "format": "json"}),
-        None,
-        None,
-        Some(&client_db),
-        false,
     )
-    .await
-    .unwrap();
-    let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
+    .await;
+    let context_payload: Value = serde_json::from_str(extract_real_server_text(&context)).unwrap();
     assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
     assert_eq!(
         context_payload["registry_path"],
@@ -344,7 +404,17 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
     )
     .unwrap();
 
-    let registry = GlobalDb::open_at(&registry_path).await.unwrap();
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .expect("test project identity");
+    let registry =
+        HostAdmissionTestRuntimeV1::project(registry_dir.path(), cg.project_root(), project_id)
+            .await
+            .unwrap();
     registry
         .upsert_code_project("proj_read", target_project, None, None, Some("main"))
         .await
@@ -354,6 +424,14 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
             .await
             .unwrap(),
     );
+    let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+        tracedecay::tracedecay::TraceDecay::open(cg.project_root())
+            .await
+            .unwrap(),
+        None,
+        registry,
+    )
+    .await;
 
     let read_args = json!({
         "project_id": "proj_read",
@@ -362,10 +440,10 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         "format": "json"
     });
     for attempt in 1..=2 {
-        let selected_read = handle_tool_call(&cg, "tracedecay_read", read_args.clone(), None, None)
-            .await
-            .unwrap();
-        let read_payload = extract_json(&selected_read.value);
+        let selected_read =
+            handle_real_server_tool_call(&server, "tracedecay_read", read_args.clone()).await;
+        let read_payload: Value =
+            serde_json::from_str(extract_real_server_text(&selected_read)).unwrap();
         assert_eq!(read_payload["file"], "src/main.rs");
         assert!(
             read_payload["body"]

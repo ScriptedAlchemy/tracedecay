@@ -233,9 +233,13 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
     let dst = dir.path().join("dst.db");
     let authority =
         crate::db::DatabaseAuthority::acquire_test(&src, "branch snapshot test").unwrap();
-    let (writer, _) = crate::db::Database::initialize(&src, &authority)
-        .await
-        .unwrap();
+    let (writer, _) = crate::db::Database::publish_test_runtime(
+        &src,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap();
     writer
         .execute_write_batch(
             "seed branch snapshot fixture",
@@ -246,9 +250,13 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
         .unwrap();
     writer.close();
 
-    let (source, _) = crate::db::Database::open_read_only(&src, &authority)
-        .await
-        .unwrap();
+    let (source, _) = crate::db::Database::publish_test_runtime(
+        &src,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::ReadOnly,
+    )
+    .await
+    .unwrap();
     source.snapshot_to(&dst).await.unwrap();
     assert!(
         source
@@ -260,9 +268,13 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
 
     let snapshot_authority =
         crate::db::DatabaseAuthority::acquire_test(&dst, "branch snapshot verification").unwrap();
-    let (snapshot, _) = crate::db::Database::open_read_only(&dst, &snapshot_authority)
-        .await
-        .unwrap();
+    let (snapshot, _) = crate::db::Database::publish_test_runtime(
+        &dst,
+        &snapshot_authority,
+        crate::db::TestDatabaseRuntimeMode::ReadOnly,
+    )
+    .await
+    .unwrap();
     let mut rows = snapshot
         .conn()
         .query("SELECT value FROM snapshot_probe", ())

@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
+pub(crate) use tracedecay::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1,
+};
 pub(crate) use tracedecay::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
@@ -33,12 +36,11 @@ pub(crate) use tracedecay::automation::runner::{
     run_skill_writer_with_backend_and_retrieval,
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
-pub(crate) use tracedecay::global_db::GlobalDb;
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::sessions::lcm::{LcmGrepSort, LcmScope};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
-use tracedecay_domain::{SessionId, TemporalCoverageCountsV1};
+use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -594,14 +596,8 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Pins `TRACEDECAY_GLOBAL_DB` at the test project's already-created session
-/// store for the guard's lifetime. Skill-writer evidence building calls
-/// `GlobalDb::open()`, which would otherwise create (or contend on) the
-/// shared per-user global DB — a full schema creation that dominates these
-/// fixtures on Windows CI, where many test processes share one home. The
-/// session store uses the same schema and these tests never rely on
-/// pre-existing global-DB contents, so reusing it keeps the open cheap and
-/// fully isolated. Callers must hold [`ENV_LOCK`] while the guard is alive.
+/// Pins the profile database override at the test project's isolated session
+/// store. Callers must hold [`ENV_LOCK`] while the guard is alive.
 pub(crate) fn isolate_global_db(cg: &TraceDecay) -> EnvVarGuard {
     EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &cg.store_layout().sessions_db_path)
 }
@@ -1041,10 +1037,25 @@ pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
     TraceDecay::init(project_root).await.unwrap()
 }
 
+pub(crate) async fn project_session_runtime(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|project_id| ProjectId::new(project_id.to_string()).ok())
+        .expect("active project identity should be available");
+    HostAdmissionTestRuntimeV1::project(
+        tracedecay::storage::default_profile_root().expect("active test profile root"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .expect("registered project session runtime should open")
+}
+
 pub(crate) async fn seed_session_evidence(cg: &TraceDecay) {
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(cg).await;
     seed_session_message_in_db(
         &db,
         cg.project_root(),
@@ -1062,9 +1073,7 @@ pub(crate) async fn seed_session_evidence(cg: &TraceDecay) {
 }
 
 pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(cg).await;
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "skill-writer-underuse".to_string(),
@@ -1080,7 +1089,11 @@ pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
         agent_id: None,
         parent_tool_use_id: None,
     };
-    assert!(db.upsert_session(&session).await);
+    assert!(
+        db.upsert_session_for_test(HostAdmissionScope::Project, &session)
+            .await
+            .unwrap()
+    );
     let message = SessionMessageRecord {
         provider: "cursor".to_string(),
         message_id: "skill-writer-underuse-message-001".to_string(),
@@ -1096,15 +1109,17 @@ pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
         source_offset: None,
         metadata_json: Some(json!({ "cmd": "rg automation src" }).to_string()),
     };
-    assert!(db.upsert_session_message(&message).await);
+    assert!(
+        db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+            .await
+            .unwrap()
+    );
 }
 
 /// Seeds one session message at `timestamp` so the scheduler observes LCM
 /// session activity at that instant.
 pub(crate) async fn seed_session_activity(cg: &TraceDecay, timestamp: i64) {
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(cg).await;
     seed_session_message_in_db(
         &db,
         cg.project_root(),
@@ -1134,7 +1149,7 @@ pub(crate) struct SeedSessionMessage<'a> {
 }
 
 pub(crate) async fn seed_session_message_in_db(
-    db: &GlobalDb,
+    db: &HostAdmissionTestRuntimeV1,
     project_root: &Path,
     seed: SeedSessionMessage<'_>,
 ) {
@@ -1153,7 +1168,11 @@ pub(crate) async fn seed_session_message_in_db(
         agent_id: None,
         parent_tool_use_id: None,
     };
-    assert!(db.upsert_session(&session).await);
+    assert!(
+        db.upsert_session_for_test(HostAdmissionScope::Project, &session)
+            .await
+            .unwrap()
+    );
     let message = SessionMessageRecord {
         provider: seed.provider.to_string(),
         message_id: seed.message_id.to_string(),
@@ -1171,7 +1190,11 @@ pub(crate) async fn seed_session_message_in_db(
             .source
             .map(|source| json!({ "source": source }).to_string()),
     };
-    assert!(db.upsert_session_message(&message).await);
+    assert!(
+        db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+            .await
+            .unwrap()
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1220,15 +1243,7 @@ pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFact
 }
 
 pub(crate) async fn fact_exists(cg: &TraceDecay, fact_id: i64) -> bool {
-    let conn = cg.db().conn();
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM memory_facts WHERE fact_id = ?1 LIMIT 1",
-            libsql::params![fact_id],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().is_some()
+    cg.get_fact(fact_id).await.unwrap().is_some()
 }
 
 pub(crate) async fn read_artifact(

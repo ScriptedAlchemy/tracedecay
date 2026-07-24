@@ -3,6 +3,133 @@ use serde_json::json;
 use super::{def, def_always_load, def_rw, required_object_schema, string_property};
 use crate::mcp::tools::ToolDefinition;
 
+fn git_read_bounds() -> serde_json::Value {
+    json!({
+        "max_entries": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 1000,
+            "description": "Maximum retained status paths, files, commits, blame lines, or hunk references."
+        },
+        "max_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4194304,
+            "default": 4194304,
+            "description": "Maximum serialized typed result bytes."
+        }
+    })
+}
+
+fn git_read_definition(
+    operation: &str,
+    title: &str,
+    description: &str,
+    mut properties: serde_json::Value,
+    required: &[&str],
+) -> ToolDefinition {
+    if let (Some(properties), Some(bounds)) =
+        (properties.as_object_mut(), git_read_bounds().as_object())
+    {
+        properties.extend(bounds.clone());
+    }
+    def(
+        &format!("tracedecay_git_{operation}"),
+        title,
+        description,
+        required_object_schema(properties, required),
+    )
+}
+
+pub(super) fn def_git_status() -> ToolDefinition {
+    git_read_definition(
+        "status",
+        "Read typed Git status",
+        "Read the PR9 typed status summary through the exact registered project/worktree authority.",
+        json!({}),
+        &[],
+    )
+}
+
+pub(super) fn def_git_diff() -> ToolDefinition {
+    git_read_definition(
+        "diff",
+        "Read typed Git diff",
+        "Read a bounded PR9 structured diff through the exact registered project/worktree authority.",
+        json!({
+            "scope": {
+                "type": "string",
+                "enum": ["working_tree", "staged", "commit_range"],
+                "default": "working_tree"
+            },
+            "base": {
+                "type": "string",
+                "description": "Exact base commit object id; required for commit_range."
+            },
+            "head": {
+                "type": "string",
+                "description": "Exact head commit object id; required for commit_range."
+            }
+        }),
+        &[],
+    )
+}
+
+pub(super) fn def_git_history() -> ToolDefinition {
+    git_read_definition(
+        "history",
+        "Read typed Git history",
+        "Read bounded PR9 commit history through the exact registered project/worktree authority.",
+        json!({
+            "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "default": 100
+            },
+            "path": {
+                "type": "string",
+                "description": "Optional admitted-root-relative path filter."
+            },
+            "follow": {"type": "boolean", "default": false},
+            "first_parent": {"type": "boolean", "default": false}
+        }),
+        &[],
+    )
+}
+
+pub(super) fn def_git_blame() -> ToolDefinition {
+    git_read_definition(
+        "blame",
+        "Read typed Git blame",
+        "Read bounded PR9 line provenance through the exact registered project/worktree authority.",
+        json!({
+            "path": string_property("Admitted-root-relative file path."),
+            "follow_renames": {"type": "boolean", "default": false}
+        }),
+        &["path"],
+    )
+}
+
+pub(super) fn def_git_hunks() -> ToolDefinition {
+    git_read_definition(
+        "hunks",
+        "Read typed Git hunks",
+        "Mint bounded PR9 HunkRef evidence for a working-tree or staged diff; commit-range hunks are not applicable.",
+        json!({
+            "scope": {
+                "type": "string",
+                "enum": ["working_tree", "staged"],
+                "default": "working_tree"
+            },
+            "preview_id": string_property("Opaque preview identity bound into every HunkRef."),
+            "snapshot_digest": string_property("Exact sha256 repository snapshot digest.")
+        }),
+        &["preview_id", "snapshot_digest"],
+    )
+}
+
 fn feedback_surface_definition(
     name: &str,
     title: &str,
@@ -329,4 +456,178 @@ pub(super) fn def_diagnostics_read() -> ToolDefinition {
         }),
         &["scope", "maximum_diagnostics"],
     )
+}
+
+fn configuration_definition(
+    operation: &str,
+    title: &str,
+    description: &str,
+    properties: serde_json::Value,
+    required: &[&str],
+    writes: bool,
+) -> ToolDefinition {
+    let name = format!("tracedecay_configuration_{operation}");
+    let schema = required_object_schema(properties, required);
+    if writes {
+        def_rw(&name, title, description, schema)
+    } else {
+        def(&name, title, description, schema)
+    }
+}
+
+pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
+    let key = || string_property("Canonical typed configuration setting key.");
+    let revision = || string_property("Exact expected configuration revision for CAS.");
+    vec![
+        configuration_definition(
+            "list",
+            "List configuration settings",
+            "Invoke the daemon-retained configuration authority.",
+            json!({}),
+            &[],
+            false,
+        ),
+        configuration_definition(
+            "explain",
+            "Explain configuration setting",
+            "Resolve one effective value and its provenance through the configuration authority.",
+            json!({"key": key()}),
+            &["key"],
+            false,
+        ),
+        configuration_definition(
+            "get",
+            "Get configuration setting",
+            "Read one effective typed value through the configuration authority.",
+            json!({"key": key()}),
+            &["key"],
+            false,
+        ),
+        configuration_definition(
+            "set",
+            "Set configuration value",
+            "Apply one authorized typed value with exact revision CAS.",
+            json!({
+                "layer": {"description": "Canonical configuration layer identity."},
+                "key": key(),
+                "value": {"description": "Typed configuration value."},
+                "expected_revision": revision()
+            }),
+            &["layer", "key", "value", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "unset",
+            "Unset configuration value",
+            "Remove one authorized typed value with exact revision CAS.",
+            json!({
+                "layer": {"description": "Canonical configuration layer identity."},
+                "key": key(),
+                "expected_revision": revision()
+            }),
+            &["layer", "key", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "batch",
+            "Apply configuration batch",
+            "Apply one authorized atomic batch with exact revision CAS.",
+            json!({
+                "mutations": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                "expected_revision": revision()
+            }),
+            &["mutations", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "write_credential",
+            "Write configuration credential",
+            "Resolve one opaque write handle into redacted credential-reference metadata.",
+            json!({
+                "expected_reference_id": {"type": ["string", "null"]},
+                "kind": {"description": "Typed credential kind."},
+                "write_handle": string_property("Opaque credential write handle; never plaintext credential material."),
+                "expected_revision": revision()
+            }),
+            &["kind", "write_handle", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "observed_state",
+            "Read configuration activation state",
+            "Read desired-versus-observed component activation through the configuration authority.",
+            json!({}),
+            &[],
+            false,
+        ),
+        configuration_definition(
+            "protected_preview",
+            "Preview protected configuration change",
+            "Create a revalidated redacted protected-change preview.",
+            json!({
+                "change": {"type": "object"},
+                "expected_revision": revision()
+            }),
+            &["change", "expected_revision"],
+            false,
+        ),
+        configuration_definition(
+            "protected_apply",
+            "Apply protected configuration change",
+            "Apply an actor-bound protected preview with exact CAS evidence.",
+            json!({
+                "plan_id": {"type": "string"},
+                "expected_base_revision_id": revision(),
+                "operation_digest": {"type": "string"},
+                "idempotency_key": {"type": "string"}
+            }),
+            &[
+                "plan_id",
+                "expected_base_revision_id",
+                "operation_digest",
+                "idempotency_key",
+            ],
+            true,
+        ),
+        configuration_definition(
+            "rollback_preview",
+            "Preview configuration rollback",
+            "Create a forward rollback preview against one historical revision.",
+            json!({
+                "target_revision_id": {"type": "string"},
+                "mode": {"description": "Typed forward rollback mode."}
+            }),
+            &["target_revision_id", "mode"],
+            false,
+        ),
+        configuration_definition(
+            "rollback_apply",
+            "Apply configuration rollback",
+            "Apply an actor-bound forward rollback preview with exact CAS evidence.",
+            json!({
+                "plan_id": {"type": "string"},
+                "expected_base_revision_id": revision(),
+                "operation_digest": {"type": "string"},
+                "idempotency_key": {"type": "string"}
+            }),
+            &[
+                "plan_id",
+                "expected_base_revision_id",
+                "operation_digest",
+                "idempotency_key",
+            ],
+            true,
+        ),
+        configuration_definition(
+            "audit",
+            "Read configuration audit",
+            "Read reauthorized append-only redacted configuration audit events.",
+            json!({
+                "after_event_id": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000}
+            }),
+            &["limit"],
+            false,
+        ),
+    ]
 }

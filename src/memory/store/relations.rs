@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use libsql::params;
+use crate::db::engine::{Value, params};
 
 use crate::errors::Result;
 use crate::memory::types::{FactRelationKind, FactRelationRecord};
@@ -22,17 +22,21 @@ impl MemoryStore<'_> {
         source: &str,
         metadata: serde_json::Value,
     ) -> Result<FactRelationRecord> {
-        self.with_immediate_tx(
-            "upsert_fact_relation",
-            self.upsert_fact_relation_inner(
-                source_fact_id,
-                target_fact_id,
-                relation,
-                confidence,
-                source,
-                metadata,
-            ),
-        )
+        let source = source.to_owned();
+        self.with_immediate_tx("upsert_fact_relation", move |store| {
+            Box::pin(async move {
+                store
+                    .upsert_fact_relation_inner(
+                        source_fact_id,
+                        target_fact_id,
+                        relation,
+                        confidence,
+                        &source,
+                        metadata,
+                    )
+                    .await
+            })
+        })
         .await
     }
 
@@ -134,31 +138,93 @@ impl MemoryStore<'_> {
         &self,
         fact_id: Option<i64>,
     ) -> Result<Vec<FactRelationRecord>> {
-        let sql = if fact_id.is_some() {
-            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
-                    metadata, created_at, updated_at
-             FROM memory_fact_relations
-             WHERE source_fact_id = ?1 OR target_fact_id = ?1
-             ORDER BY source_fact_id, target_fact_id, relation"
-        } else {
-            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
-                    metadata, created_at, updated_at
-             FROM memory_fact_relations
-             ORDER BY source_fact_id, target_fact_id, relation"
-        };
-        let mut rows = if let Some(fact_id) = fact_id {
-            self.conn.query(sql, params![fact_id]).await
-        } else {
-            self.conn.query(sql, ()).await
-        }
-        .map_err(|e| db_error("list_fact_relations", e))?;
+        const PAGE_SIZE: i64 = 512;
         let mut relations = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| db_error("list_fact_relations", e))?
-        {
-            relations.push(relation_from_row(&row, "list_fact_relations")?);
+        let mut cursor: Option<(i64, i64, String)> = None;
+        loop {
+            let mut rows =
+                match (fact_id, cursor.as_ref()) {
+                    (Some(fact_id), Some((source_id, target_id, relation))) => self
+                        .conn
+                        .query(
+                            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                                    metadata, created_at, updated_at
+                             FROM memory_fact_relations
+                             WHERE (source_fact_id = ?1 OR target_fact_id = ?1)
+                               AND (
+                                   source_fact_id > ?2
+                                   OR (source_fact_id = ?2 AND target_fact_id > ?3)
+                                   OR (
+                                       source_fact_id = ?2
+                                       AND target_fact_id = ?3
+                                       AND relation > ?4
+                                   )
+                               )
+                             ORDER BY source_fact_id, target_fact_id, relation
+                             LIMIT ?5",
+                            params![fact_id, *source_id, *target_id, relation, PAGE_SIZE],
+                        )
+                        .await,
+                    (Some(fact_id), None) => self
+                        .conn
+                        .query(
+                            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                                    metadata, created_at, updated_at
+                             FROM memory_fact_relations
+                             WHERE source_fact_id = ?1 OR target_fact_id = ?1
+                             ORDER BY source_fact_id, target_fact_id, relation
+                             LIMIT ?2",
+                            params![fact_id, PAGE_SIZE],
+                        )
+                        .await,
+                    (None, Some((source_id, target_id, relation))) => self
+                        .conn
+                        .query(
+                            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                                    metadata, created_at, updated_at
+                             FROM memory_fact_relations
+                             WHERE source_fact_id > ?1
+                                OR (source_fact_id = ?1 AND target_fact_id > ?2)
+                                OR (
+                                    source_fact_id = ?1
+                                    AND target_fact_id = ?2
+                                    AND relation > ?3
+                                )
+                             ORDER BY source_fact_id, target_fact_id, relation
+                             LIMIT ?4",
+                            params![*source_id, *target_id, relation, PAGE_SIZE],
+                        )
+                        .await,
+                    (None, None) => self
+                        .conn
+                        .query(
+                            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                                    metadata, created_at, updated_at
+                             FROM memory_fact_relations
+                             ORDER BY source_fact_id, target_fact_id, relation
+                             LIMIT ?1",
+                            params![PAGE_SIZE],
+                        )
+                        .await,
+                }
+                .map_err(|e| db_error("list_fact_relations", e))?;
+            let mut page_count = 0;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| db_error("list_fact_relations", e))?
+            {
+                cursor = Some((
+                    row.get(0).map_err(|e| db_error("list_fact_relations", e))?,
+                    row.get(1).map_err(|e| db_error("list_fact_relations", e))?,
+                    row.get(2).map_err(|e| db_error("list_fact_relations", e))?,
+                ));
+                relations.push(relation_from_row(&row, "list_fact_relations")?);
+                page_count += 1;
+            }
+            if page_count < PAGE_SIZE {
+                break;
+            }
         }
         Ok(relations)
     }
@@ -173,9 +239,9 @@ impl MemoryStore<'_> {
             .join(",");
         let mut values = Vec::with_capacity(fact_ids.len() * 3 + 1);
         for _ in 0..3 {
-            values.extend(fact_ids.iter().copied().map(libsql::Value::Integer));
+            values.extend(fact_ids.iter().copied().map(Value::Integer));
         }
-        values.push(libsql::Value::Integer(limit.min(256) as i64));
+        values.push(Value::Integer(limit.min(256) as i64));
         let mut rows = self
             .conn
             .query(

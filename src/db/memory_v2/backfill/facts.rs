@@ -8,7 +8,7 @@ use tracedecay_domain::{
     SanitizerDispositionV1, SourceStoreId, UtcMicros,
 };
 
-use crate::db::engine::{Executor, params};
+use crate::db::engine::params;
 use crate::errors::Result;
 use crate::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
@@ -24,8 +24,8 @@ use super::super::writers::{
 };
 use super::super::{
     MemoryV2Executor, OPERATION, RETENTION_CLASS, category_label, current_fact_state, db_error,
-    db_message, json_text, load_legacy_entities, optional_i64, optional_string, parse_category,
-    seconds_to_micros, update_cursor, update_phase, value_strings,
+    db_message, json_text, load_legacy_entities, load_legacy_entity_ids, optional_i64,
+    optional_string, parse_category, seconds_to_micros, update_cursor, update_phase, value_strings,
 };
 
 pub(in crate::db) async fn backfill_fact_batch(
@@ -465,24 +465,7 @@ async fn rewrite_legacy_entity_links(
     legacy_fact_id: i64,
     entities: &[String],
 ) -> Result<()> {
-    let mut rows = conn
-        .query(
-            "SELECT entity_id FROM memory_fact_entities WHERE fact_id = ?1",
-            params![legacy_fact_id],
-        )
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
-    let mut old_ids = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error(OPERATION, error))?
-    {
-        old_ids.push(
-            row.get::<i64>(0)
-                .map_err(|error| db_error(OPERATION, error))?,
-        );
-    }
+    let old_ids = load_legacy_entity_ids(conn, legacy_fact_id, OPERATION).await?;
     conn.execute(
         "DELETE FROM memory_fact_entities WHERE fact_id = ?1",
         params![legacy_fact_id],

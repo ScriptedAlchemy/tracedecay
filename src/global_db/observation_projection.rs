@@ -7,11 +7,10 @@ mod schema;
 mod state;
 mod transition;
 
-use super::{opt_i64, opt_text};
-
-pub(super) use apply::{
-    canonical_fact_text, derive_projection, derive_projection_with_alias, verify_workflow_effects,
-};
-pub(super) use migration::prepare_projection_version_migration;
+#[cfg(test)]
+pub(super) use apply::canonical_fact_text;
+pub(super) use apply::{derive_projection, derive_projection_with_alias, verify_workflow_effects};
+pub(crate) use migration::prepare_projection_version_migration_with_engine;
+pub(crate) use rebuild::{project_observation_with_engine, rebuild_projection_with_engine};
 pub(super) use schema::ensure_observation_projection_schema;
 pub(super) use state::verify_output_authority;

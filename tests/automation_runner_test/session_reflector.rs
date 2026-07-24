@@ -918,9 +918,7 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    let project_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("project session db open");
+    let project_db = project_session_runtime(&cg).await;
     seed_session_message_in_db(
         &project_db,
         cg.project_root(),
@@ -1015,10 +1013,9 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
     let cg = init_project(temp.path()).await;
     // Deliberately avoids every keyword in the default reflection query so
     // the grep channel returns nothing and only session replay surfaces it.
+    let db = project_session_runtime(&cg).await;
     seed_session_message_in_db(
-        &GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .expect("session db open"),
+        &db,
         cg.project_root(),
         SeedSessionMessage {
             provider: "cursor",
@@ -1094,10 +1091,9 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
 async fn session_reflector_suppresses_replay_for_filtered_runs() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
+    let db = project_session_runtime(&cg).await;
     seed_session_message_in_db(
-        &GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .expect("session db open"),
+        &db,
         cg.project_root(),
         SeedSessionMessage {
             provider: "cursor",
@@ -1227,14 +1223,13 @@ async fn session_reflector_replay_respects_include_summaries_false() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(&cg).await;
     let source = db
-        .lcm_load_raw_message("cursor", "session-reflect-1-message-001")
+        .lcm_load_raw_message_for_test("cursor", "session-reflect-1-message-001")
         .await
         .expect("seeded raw message provides summary ownership");
-    db.lcm_publish_immutable_summary(
+    db.lcm_publish_immutable_summary_for_test(
+        HostAdmissionScope::Project,
         tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication {
             summary_id: "summary.session-reflect-1.no-replay".to_string(),
             predecessor_summary_id: None,

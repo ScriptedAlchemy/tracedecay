@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::errors::TraceDecayError;
-use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{McpServer, McpTransport, ToolResult};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::{
-    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_response_handle_root,
+    default_profile_root, resolve_layout_for_current_profile, resolve_lcm_payload_root,
+    resolve_response_handle_root,
 };
-use tracedecay::store::{GlobalDbObservationStore, GlobalDbSessionTemporalStore};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -32,8 +32,7 @@ use tracedecay_domain::{
     ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId, RetentionClass,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
-    SignedCursorKeyRefV1, UtcMicros, derive_exact_observation_anchor_id,
+    SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
@@ -102,54 +101,13 @@ pub(crate) fn extract_real_server_text(result: &Value) -> &str {
         .expect("MCP text result")
 }
 
-pub(crate) struct TestDbConnection {
-    pub(crate) _db: libsql::Database,
-    pub(crate) conn: libsql::Connection,
-}
-
-impl Deref for TestDbConnection {
-    type Target = libsql::Connection;
-
-    fn deref(&self) -> &Self::Target {
-        &self.conn
-    }
-}
-
-pub(crate) async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    // Mirror the pragma choices of src/db/connection.rs, including the
-    // CI-only TRACEDECAY_SQLITE_UNSAFE_FAST=1 escape hatch, so this helper
-    // never fights the journal mode the product code selected.
-    let unsafe_fast = std::env::var(tracedecay::db::SQLITE_UNSAFE_FAST_ENV).as_deref() == Ok("1");
-    let (journal_mode, synchronous) = if unsafe_fast {
-        ("MEMORY", "OFF")
-    } else if cfg!(windows) {
-        ("DELETE", "FULL")
-    } else {
-        ("WAL", "NORMAL")
-    };
-    if cfg!(windows) {
-        conn.execute_batch("PRAGMA mmap_size = 0;").await.unwrap();
-    }
-    conn.execute_batch(&format!(
-        "PRAGMA journal_mode = {journal_mode};
-         PRAGMA busy_timeout = 5000;
-         PRAGMA synchronous = {synchronous};
-         PRAGMA foreign_keys = ON;"
-    ))
-    .await
-    .unwrap();
-    TestDbConnection { _db: db, conn }
-}
-
 pub(crate) struct TemporalLcmProjectionInput {
     pub(crate) occurrence: MessageOccurrenceRecordV1,
     pub(crate) source_frontier: u64,
 }
 
 pub(crate) async fn activate_test_temporal_generation(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
     session_id: &str,
     inputs: Vec<TemporalLcmProjectionInput>,
 ) -> u64 {
@@ -168,25 +126,8 @@ pub(crate) async fn activate_test_temporal_generation(
         .saturating_add(1);
     let active_generation = SessionProjectionGenerationV1::new(1).unwrap();
     let candidate_generation = SessionProjectionGenerationV1::new(2).unwrap();
-    let cursor_key = SignedCursorKeyRefV1 {
-        key_id: SessionCursorKeyIdV1::new("cursor.test").unwrap(),
-        version: SessionCursorVersionV1::new(1).unwrap(),
-    };
-    let temporal = open_test_db_connection(db.db_path()).await;
-    temporal
-        .execute(
-            "INSERT INTO session_query_cursor_keys (
-                 key_id, key_version, key_material, created_at, retired_at
-             )
-             SELECT ?1, 1, ?2, 1, NULL
-             WHERE NOT EXISTS (SELECT 1 FROM session_query_cursor_keys)",
-            libsql::params![cursor_key.key_id.as_str(), vec![0x45_u8; 32]],
-        )
-        .await
-        .unwrap();
     let watermarks =
-        SessionFrozenWatermarksV1::new(active_generation, source_frontier, source_frontier, 0)
-            .with_cursor_key(cursor_key);
+        SessionFrozenWatermarksV1::new(active_generation, source_frontier, source_frontier, 0);
     let snapshot = SessionTemporalSnapshotV1::new(
         session_id.clone(),
         UtcMicros(snapshot_at),
@@ -196,7 +137,9 @@ pub(crate) async fn activate_test_temporal_generation(
             SessionTemporalCapabilityV1::GenerationRebuild,
         ]),
     );
-    let store = GlobalDbSessionTemporalStore::new(db);
+    let store = runtime
+        .session_temporal_store_for_test(HostAdmissionScope::Project)
+        .expect("registered project temporal store");
     store
         .begin_session_generation_rebuild(
             SessionGenerationRebuildRequestV1::new(
@@ -259,15 +202,11 @@ pub(crate) async fn handle_tool_call(
     ) {
         let session_db_path = project_session_db_path(cg);
         let server = if session_db_path.is_file() {
-            let session_db = GlobalDb::open_at(&session_db_path).await.ok_or_else(|| {
-                TraceDecayError::Config {
-                    message: format!("{tool_name} project session authority is unavailable"),
-                }
-            })?;
-            let server = McpServer::new_with_project_session_db_for_test(
+            let runtime = open_active_project_session_db(cg).await;
+            let server = McpServer::new_with_host_admission_test_runtime_for_test(
                 TraceDecay::open(cg.project_root()).await?,
                 None,
-                Arc::new(session_db),
+                runtime,
             )
             .await;
             if !server.has_project_session_retrieval_service_for_test() {
@@ -570,7 +509,7 @@ impl Drop for TestTraceDecay {
                 runtime.block_on(async {
                     let _ = cg.checkpoint().await;
                 });
-                // Windows CI aborts inside libsql/SQLite teardown for these
+                // Windows CI aborts inside native SQLite teardown for these
                 // short-lived test graphs. Each nextest case runs in its own
                 // process, so leaking the fixture after a checkpoint is safer
                 // than exercising the native destructor path at process exit.
@@ -589,12 +528,12 @@ pub(crate) async fn real_mcp_server(cg: TestTraceDecay) -> Arc<McpServer> {
         .clone()
         .expect("test project id");
     let project_root = cg.project_root().to_path_buf();
-    let registry = Arc::new(GlobalDb::open().await.expect("test registry"));
-    registry
+    let runtime = open_active_project_session_db(&cg).await;
+    runtime
         .upsert_code_project(&project_id, &project_root, None, None, None)
         .await
         .expect("register test project");
-    McpServer::new_with_dbs(cg.into_inner(), None, None, Some(registry), false).await
+    McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime).await
 }
 
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
@@ -734,10 +673,21 @@ pub(crate) fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
     cg.store_layout().sessions_db_path.clone()
 }
 
-pub(crate) async fn open_active_project_session_db(cg: &TraceDecay) -> GlobalDb {
-    GlobalDb::open_at(&project_session_db_path(cg))
-        .await
-        .expect("active project-local session db should open")
+pub(crate) async fn open_active_project_session_db(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|project_id| ProjectId::new(project_id.to_string()).ok())
+        .expect("active project identity should be available");
+    HostAdmissionTestRuntimeV1::project(
+        default_profile_root().expect("active test profile root"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .expect("active registered project-local session runtime should open")
 }
 
 /// Creates a small Rust library with an integration-style test that calls a
@@ -1041,8 +991,20 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> Str
 }
 
 pub(crate) async fn seed_project_registry(db_path: &Path, project_root: &Path) {
-    let db = GlobalDb::open_at(db_path).await.unwrap();
-    let project = db
+    let profile_root = db_path
+        .parent()
+        .expect("test registry path should have a profile root");
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root)
+        .await
+        .expect("registered profile test runtime");
+    assert_eq!(
+        runtime
+            .profile_relative_path_for_test(db_path)
+            .expect("test registry path must be inside the runtime profile"),
+        Path::new("global.db"),
+        "test registry path must be the runtime-owned profile database"
+    );
+    let project = runtime
         .upsert_code_project(
             "proj_alpha",
             project_root,
@@ -1052,10 +1014,11 @@ pub(crate) async fn seed_project_registry(db_path: &Path, project_root: &Path) {
         )
         .await
         .unwrap();
-    db.upsert_project_alias(Path::new("registered-alias"), &project.project_id)
+    runtime
+        .upsert_project_alias(Path::new("registered-alias"), &project.project_id)
         .await
         .unwrap();
-    let store = db
+    let store = runtime
         .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
             store_id: "store_alpha".to_string(),
             project_id: project.project_id.clone(),
@@ -1068,37 +1031,40 @@ pub(crate) async fn seed_project_registry(db_path: &Path, project_root: &Path) {
         })
         .await
         .unwrap();
-    db.upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
-        graph_scope_id: "scope_alpha_main".to_string(),
-        project_id: project.project_id.clone(),
-        store_id: store.store_id.clone(),
-        branch_name: "main".to_string(),
-        db_relpath: "projects/proj_alpha/tracedecay.db".to_string(),
-        parent_scope_id: None,
-        last_synced_at: Some(1_800_000_002),
-        writable: true,
-    })
-    .await
-    .unwrap();
-    db.upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
-        store_id: store.store_id,
-        artifact_kind: "graph_db".to_string(),
-        relpath: "projects/proj_alpha/tracedecay.db".to_string(),
-        size_bytes: Some(128),
-        schema_version: Some("1".to_string()),
-        updated_at: Some(1_800_000_003),
-    })
-    .await
-    .unwrap();
-    db.upsert_code_project(
-        "proj_beta",
-        &project_root.with_file_name("beta"),
-        None,
-        Some("https://example.test/beta.git"),
-        Some("main"),
-    )
-    .await
-    .unwrap();
+    runtime
+        .upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
+            graph_scope_id: "scope_alpha_main".to_string(),
+            project_id: project.project_id.clone(),
+            store_id: store.store_id.clone(),
+            branch_name: "main".to_string(),
+            db_relpath: "projects/proj_alpha/tracedecay.db".to_string(),
+            parent_scope_id: None,
+            last_synced_at: Some(1_800_000_002),
+            writable: true,
+        })
+        .await
+        .unwrap();
+    runtime
+        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
+            store_id: store.store_id,
+            artifact_kind: "graph_db".to_string(),
+            relpath: "projects/proj_alpha/tracedecay.db".to_string(),
+            size_bytes: Some(128),
+            schema_version: Some("1".to_string()),
+            updated_at: Some(1_800_000_003),
+        })
+        .await
+        .unwrap();
+    runtime
+        .upsert_code_project(
+            "proj_beta",
+            &project_root.with_file_name("beta"),
+            None,
+            Some("https://example.test/beta.git"),
+            Some("main"),
+        )
+        .await
+        .unwrap();
 }
 
 /// Searches for `name` via the search handler and returns the first matching
@@ -1152,42 +1118,52 @@ pub(crate) async fn seed_lcm_session_message_for_provider(
     text: impl Into<String>,
     ordinal: i64,
 ) {
-    let db = open_active_project_session_db(cg).await;
+    let runtime = open_active_project_session_db(cg).await;
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: provider.to_string(),
-            session_id: session_id.to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some(format!("LCM session {session_id}")),
-            started_at: Some(ordinal),
-            ended_at: None,
-            transcript_path: Some(format!("{session_id}.jsonl")),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: provider.to_string(),
+                    session_id: session_id.to_string(),
+                    project_key: cg.project_root().to_string_lossy().to_string(),
+                    project_path: cg.project_root().to_string_lossy().to_string(),
+                    title: Some(format!("LCM session {session_id}")),
+                    started_at: Some(ordinal),
+                    ended_at: None,
+                    transcript_path: Some(format!("{session_id}.jsonl")),
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                }
+            )
+            .await
+            .unwrap()
     );
     assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: provider.to_string(),
-            message_id: message_id.to_string(),
-            session_id: session_id.to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(ordinal + 1),
-            ordinal,
-            text: text.into(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some(format!("{session_id}.jsonl")),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &SessionMessageRecord {
+                    provider: provider.to_string(),
+                    message_id: message_id.to_string(),
+                    session_id: session_id.to_string(),
+                    role: "assistant".to_string(),
+                    timestamp: Some(ordinal + 1),
+                    ordinal,
+                    text: text.into(),
+                    kind: Some("message".to_string()),
+                    model: Some("test-model".to_string()),
+                    tool_names: None,
+                    source_path: Some(format!("{session_id}.jsonl")),
+                    source_offset: Some(0),
+                    metadata_json: None,
+                },
+            )
+            .await
+            .unwrap()
     );
 }
 
@@ -1210,42 +1186,52 @@ pub(crate) async fn seed_lcm_tool_result_message_for_provider(
     text: impl Into<String>,
     ordinal: i64,
 ) {
-    let db = open_active_project_session_db(cg).await;
+    let runtime = open_active_project_session_db(cg).await;
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: provider.to_string(),
-            session_id: session_id.to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some(format!("LCM session {session_id}")),
-            started_at: Some(ordinal),
-            ended_at: None,
-            transcript_path: Some(format!("{session_id}.jsonl")),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: provider.to_string(),
+                    session_id: session_id.to_string(),
+                    project_key: cg.project_root().to_string_lossy().to_string(),
+                    project_path: cg.project_root().to_string_lossy().to_string(),
+                    title: Some(format!("LCM session {session_id}")),
+                    started_at: Some(ordinal),
+                    ended_at: None,
+                    transcript_path: Some(format!("{session_id}.jsonl")),
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                }
+            )
+            .await
+            .unwrap()
     );
     assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: provider.to_string(),
-            message_id: message_id.to_string(),
-            session_id: session_id.to_string(),
-            role: "tool".to_string(),
-            timestamp: Some(ordinal + 1),
-            ordinal,
-            text: text.into(),
-            kind: Some("tool_result".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some(format!("{session_id}.jsonl")),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &SessionMessageRecord {
+                    provider: provider.to_string(),
+                    message_id: message_id.to_string(),
+                    session_id: session_id.to_string(),
+                    role: "tool".to_string(),
+                    timestamp: Some(ordinal + 1),
+                    ordinal,
+                    text: text.into(),
+                    kind: Some("tool_result".to_string()),
+                    model: Some("test-model".to_string()),
+                    tool_names: None,
+                    source_path: Some(format!("{session_id}.jsonl")),
+                    source_offset: Some(0),
+                    metadata_json: None,
+                },
+            )
+            .await
+            .unwrap()
     );
 }
 
@@ -1380,13 +1366,17 @@ pub(crate) async fn seed_temporal_lcm_tool_result_message(
         UtcMicros(ordinal + 1),
     )
     .await;
-    let db = open_active_project_session_db(cg).await;
-    let projected = db
-        .get_session_message("cursor", message_id)
+    let runtime = open_active_project_session_db(cg).await;
+    let projected = runtime
+        .session_message_for_test(HostAdmissionScope::Project, "cursor", message_id)
         .await
+        .unwrap()
         .expect("canonical tool result must project to the compatibility store");
     assert!(
-        db.upsert_session_message(&projected).await,
+        runtime
+            .upsert_session_message_for_test(HostAdmissionScope::Project, &projected)
+            .await
+            .unwrap(),
         "canonical compatibility output must apply the bounded payload policy"
     );
     projection
@@ -1501,8 +1491,10 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
         payload,
     )
     .unwrap();
-    let db = open_active_project_session_db(cg).await;
-    let observation_store = GlobalDbObservationStore::new(&db);
+    let runtime = open_active_project_session_db(cg).await;
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .expect("registered project observation store");
     let previous_cursor = observation_store
         .get_source_cursor(observation.source(), observation.scope())
         .await
@@ -1593,7 +1585,7 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
 }
 
 pub(crate) async fn seed_lcm_session_message_in_db(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
     project_path: &Path,
     session_id: &str,
     message_id: &str,
@@ -1601,57 +1593,63 @@ pub(crate) async fn seed_lcm_session_message_in_db(
     ordinal: i64,
 ) {
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
-            session_id: session_id.to_string(),
-            project_key: project_path.to_string_lossy().to_string(),
-            project_path: project_path.to_string_lossy().to_string(),
-            title: Some(format!("LCM session {session_id}")),
-            started_at: Some(ordinal),
-            ended_at: None,
-            transcript_path: Some(format!("{session_id}.jsonl")),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "cursor".to_string(),
+                    session_id: session_id.to_string(),
+                    project_key: project_path.to_string_lossy().to_string(),
+                    project_path: project_path.to_string_lossy().to_string(),
+                    title: Some(format!("LCM session {session_id}")),
+                    started_at: Some(ordinal),
+                    ended_at: None,
+                    transcript_path: Some(format!("{session_id}.jsonl")),
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                }
+            )
+            .await
+            .unwrap()
     );
     assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id: message_id.to_string(),
-            session_id: session_id.to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(ordinal + 1),
-            ordinal,
-            text: text.into(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some(format!("{session_id}.jsonl")),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &SessionMessageRecord {
+                    provider: "cursor".to_string(),
+                    message_id: message_id.to_string(),
+                    session_id: session_id.to_string(),
+                    role: "assistant".to_string(),
+                    timestamp: Some(ordinal + 1),
+                    ordinal,
+                    text: text.into(),
+                    kind: Some("message".to_string()),
+                    model: Some("test-model".to_string()),
+                    tool_names: None,
+                    source_path: Some(format!("{session_id}.jsonl")),
+                    source_offset: Some(0),
+                    metadata_json: None,
+                },
+            )
+            .await
+            .unwrap()
     );
 }
 
-pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> TestDbConnection {
-    open_test_db_connection(&project_session_db_path(cg)).await
+pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
+    open_active_project_session_db(cg).await
 }
 
 pub(crate) async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
-    let conn = project_lcm_conn(cg).await;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM lcm_raw_messages_fts WHERE lcm_raw_messages_fts MATCH ?1",
-            libsql::params![query],
-        )
+    project_lcm_conn(cg)
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+        .lcm_raw_message_fts_count_for_test(query)
+        .await
+        .unwrap()
 }
 
 pub(crate) async fn lcm_raw_store_id(cg: &TraceDecay, message_id: &str) -> i64 {
@@ -1663,81 +1661,63 @@ pub(crate) async fn lcm_raw_store_id_for_provider(
     provider: &str,
     message_id: &str,
 ) -> i64 {
-    let conn = project_lcm_conn(cg).await;
-    let mut rows = conn
-        .query(
-            "SELECT store_id FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
-            libsql::params![provider, message_id],
-        )
+    project_lcm_conn(cg)
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+        .lcm_load_raw_message_for_test(provider, message_id)
+        .await
+        .expect("LCM raw message fixture")
+        .store_id
 }
 
 pub(crate) async fn lcm_raw_message_count(cg: &TraceDecay, session_id: &str) -> i64 {
-    let conn = project_lcm_conn(cg).await;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
-            libsql::params![session_id],
-        )
+    project_lcm_conn(cg)
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+        .lcm_raw_message_count_for_test(HostAdmissionScope::Project, session_id)
+        .await
+        .unwrap()
 }
 
 pub(crate) async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 {
-    let conn = open_test_db_connection(db_path).await;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
-            libsql::params![session_id],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+    let conn = tracedecay_rusqlite_runtime::open_immutable_reader(db_path).unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 
 pub(crate) async fn lcm_summary_node_count(cg: &TraceDecay, session_id: &str) -> i64 {
-    let conn = project_lcm_conn(cg).await;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM lcm_summary_nodes WHERE session_id = ?1",
-            libsql::params![session_id],
-        )
+    project_lcm_conn(cg)
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+        .lcm_summary_node_count_for_test(HostAdmissionScope::Project, session_id)
+        .await
+        .unwrap()
 }
 
 pub(crate) async fn lcm_schema_migration_count(cg: &TraceDecay) -> i64 {
-    let conn = project_lcm_conn(cg).await;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM session_schema_migrations WHERE name = 'lcm'",
-            (),
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+    i64::from(
+        project_lcm_conn(cg)
+            .await
+            .lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap()
+            .is_some(),
+    )
 }
 
 pub(crate) async fn wipe_lcm_raw_fts(cg: &TraceDecay) {
     project_lcm_conn(cg)
         .await
-        .execute_batch("DELETE FROM lcm_raw_messages_fts;")
+        .wipe_lcm_raw_fts_for_test(HostAdmissionScope::Project, None)
         .await
         .unwrap();
 }
 
 pub(crate) async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &str) {
-    let store_id = lcm_raw_store_id(cg, message_id).await;
     project_lcm_conn(cg)
         .await
-        .execute(
-            "DELETE FROM lcm_raw_messages_fts WHERE rowid = ?1",
-            libsql::params![store_id],
-        )
+        .wipe_lcm_raw_fts_for_test(HostAdmissionScope::Project, Some(message_id))
         .await
         .unwrap();
 }

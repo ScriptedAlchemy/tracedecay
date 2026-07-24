@@ -6,9 +6,11 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, ManifestDigest, Pr9FallbackSubpayload, ProjectionKeyV1,
-    RetrieverBatch, RetrieverKind, RetrieverOutcome, VectorGenerationIdV1,
+    RetrieverBatch, RetrieverKind, RetrieverOutcome, VectorGenerationIdV1, canonical_sha256,
 };
 
 use super::{
@@ -79,7 +81,8 @@ impl CompleteSemanticGenerationV1 {
 }
 
 /// Accepted, versioned calibration bound to one immutable semantic cohort.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SemanticCalibrationProfileV1 {
     pub calibration_profile_id: CalibrationProfileId,
     pub cohort_digest: ManifestDigest,
@@ -88,6 +91,28 @@ pub struct SemanticCalibrationProfileV1 {
     pub capability_manifest_digest: ManifestDigest,
     pub maximum_distance_micros: i64,
     pub minimum_margin_micros: u64,
+}
+
+impl SemanticCalibrationProfileV1 {
+    pub fn validate(&self) -> Result<(), SemanticAbstentionV1> {
+        self.cohort_digest
+            .validate()
+            .map_err(|_| SemanticAbstentionV1::CalibrationInvalid)?;
+        self.vector_generation
+            .as_digest()
+            .validate()
+            .map_err(|_| SemanticAbstentionV1::CalibrationInvalid)?;
+        self.capability_manifest_digest
+            .validate()
+            .map_err(|_| SemanticAbstentionV1::CalibrationInvalid)?;
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<ManifestDigest, SemanticAbstentionV1> {
+        self.validate()?;
+        canonical_sha256(&("tracedecay.semantic-calibration-profile.v1", self))
+            .map_err(|_| SemanticAbstentionV1::CalibrationInvalid)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,9 +180,11 @@ impl SemanticQueryServiceOutcomeV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SemanticQueryServiceError {
+    #[error("strict semantic retrieval is unavailable: {0:?}")]
     StrictUnavailable(SemanticAbstentionV1),
+    #[error("the authorized PR9 fallback binding is invalid")]
     InvalidFallback,
 }
 
@@ -274,11 +301,7 @@ fn preflight_calibration(
     request: &SemanticRetrievalRequestV1<'_>,
     calibration: &SemanticCalibrationProfileV1,
 ) -> Result<(), SemanticAbstentionV1> {
-    if calibration.cohort_digest.validate().is_err()
-        || calibration.capability_manifest_digest.validate().is_err()
-    {
-        return Err(SemanticAbstentionV1::CalibrationInvalid);
-    }
+    calibration.validate()?;
     if calibration.projection_key != *request.projection.projection_key()
         || calibration.vector_generation != request.vector_generation
         || calibration.capability_manifest_digest != request.capability_manifest_digest

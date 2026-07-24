@@ -1,5 +1,6 @@
-use libsql::Connection;
 use serde_json::Value;
+
+use crate::db::engine::{QueryExecutor, Value as DbValue, params, params_from_iter};
 
 use super::util::{like_pattern, qmarks, query_i64, query_rows};
 
@@ -30,72 +31,22 @@ fn filtered_degree_union_sql(placeholders: &str) -> String {
     )
 }
 
-pub(crate) async fn overview_file_rows(conn: &Connection) -> Vec<Value> {
-    query_rows(
-        conn,
-        "SELECT path, node_count FROM files ORDER BY path ASC",
-        (),
-    )
-    .await
-    .unwrap_or_default()
-}
-
-pub(crate) async fn total_nodes(conn: &Connection) -> i64 {
+pub(crate) async fn total_nodes(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
     query_i64(conn, "SELECT COUNT(*) FROM nodes", ()).await
 }
 
-pub(crate) async fn total_edges(conn: &Connection) -> i64 {
+pub(crate) async fn total_edges(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
     query_i64(conn, "SELECT COUNT(*) FROM edges", ()).await
 }
 
-pub(crate) async fn total_files(conn: &Connection) -> i64 {
-    query_i64(conn, "SELECT COUNT(*) FROM files", ()).await
-}
-
-pub(crate) async fn max_edge_id(conn: &Connection) -> i64 {
+pub(crate) async fn max_edge_id(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
     query_i64(conn, "SELECT COALESCE(MAX(id), 0) FROM edges", ()).await
 }
 
-pub(crate) async fn node_counts_by_kind(conn: &Connection) -> Vec<Value> {
-    query_rows(
-        conn,
-        "SELECT kind, COUNT(*) AS count
-         FROM nodes
-         GROUP BY kind
-         ORDER BY count DESC, kind ASC",
-        (),
-    )
-    .await
-    .unwrap_or_default()
-}
-
-pub(crate) async fn edge_counts_by_kind(conn: &Connection) -> Vec<Value> {
-    query_rows(
-        conn,
-        "SELECT kind, COUNT(*) AS count
-         FROM edges
-         GROUP BY kind
-         ORDER BY count DESC, kind ASC",
-        (),
-    )
-    .await
-    .unwrap_or_default()
-}
-
-pub(crate) async fn largest_files(conn: &Connection) -> Vec<Value> {
-    query_rows(
-        conn,
-        "SELECT path, node_count, size
-         FROM files
-         ORDER BY node_count DESC, path ASC
-         LIMIT 12",
-        (),
-    )
-    .await
-    .unwrap_or_default()
-}
-
-pub(crate) async fn first_node_for_query(conn: &Connection, query: &str) -> Option<String> {
+pub(crate) async fn first_node_for_query(
+    conn: &(impl QueryExecutor + ?Sized),
+    query: &str,
+) -> Option<String> {
     let trimmed = query.trim();
     let like = like_pattern(trimmed);
     let rows = query_rows(
@@ -108,7 +59,7 @@ pub(crate) async fn first_node_for_query(conn: &Connection, query: &str) -> Opti
                   LENGTH(qualified_name) ASC,
                   qualified_name ASC
          LIMIT 1",
-        libsql::params![like, trimmed],
+        params![like, trimmed],
     )
     .await
     .ok()?;
@@ -118,7 +69,7 @@ pub(crate) async fn first_node_for_query(conn: &Connection, query: &str) -> Opti
         .map(ToOwned::to_owned)
 }
 
-pub(crate) async fn search_total(conn: &Connection, query: &str) -> i64 {
+pub(crate) async fn search_total(conn: &(impl QueryExecutor + ?Sized), query: &str) -> i64 {
     if query.is_empty() {
         total_nodes(conn).await
     } else {
@@ -131,14 +82,14 @@ pub(crate) async fn search_total(conn: &Connection, query: &str) -> i64 {
                 OR qualified_name LIKE ?1 ESCAPE '\\'
                 OR COALESCE(signature, '') LIKE ?1 ESCAPE '\\'
                 OR file_path LIKE ?1 ESCAPE '\\'",
-            libsql::params![like],
+            params![like],
         )
         .await
     }
 }
 
 pub(crate) async fn search_rows(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     query: &str,
     limit: i64,
     offset: i64,
@@ -152,7 +103,7 @@ pub(crate) async fn search_rows(
                  ORDER BY updated_at DESC, qualified_name ASC
                  LIMIT ?1 OFFSET ?2"
             ),
-            libsql::params![limit, offset],
+            params![limit, offset],
         )
         .await
         .unwrap_or_default()
@@ -177,14 +128,17 @@ pub(crate) async fn search_rows(
                  qualified_name ASC
                  LIMIT ?3 OFFSET ?4"
             ),
-            libsql::params![like, query, limit, offset],
+            params![like, query, limit, offset],
         )
         .await
         .unwrap_or_default()
     }
 }
 
-pub(crate) async fn node_rows_by_ids(conn: &Connection, ids: &[String]) -> Vec<Value> {
+pub(crate) async fn node_rows_by_ids(
+    conn: &(impl QueryExecutor + ?Sized),
+    ids: &[String],
+) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
@@ -194,13 +148,17 @@ pub(crate) async fn node_rows_by_ids(conn: &Connection, ids: &[String]) -> Vec<V
          FROM nodes
          WHERE id IN ({placeholders})"
     );
-    let params = ids.iter().cloned().map(libsql::Value::Text);
-    query_rows(conn, &sql, libsql::params_from_iter(params))
+    let params = ids.iter().cloned().map(DbValue::Text);
+    query_rows(conn, &sql, params_from_iter(params))
         .await
         .unwrap_or_default()
 }
 
-pub(crate) async fn edge_rows_for_ids(conn: &Connection, ids: &[String], limit: i64) -> Vec<Value> {
+pub(crate) async fn edge_rows_for_ids(
+    conn: &(impl QueryExecutor + ?Sized),
+    ids: &[String],
+    limit: i64,
+) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
@@ -216,15 +174,18 @@ pub(crate) async fn edge_rows_for_ids(conn: &Connection, ids: &[String], limit: 
          ORDER BY kind ASC, source ASC, target ASC
          LIMIT ?"
     );
-    let mut params: Vec<libsql::Value> = ids.iter().cloned().map(libsql::Value::Text).collect();
-    params.extend(ids.iter().cloned().map(libsql::Value::Text));
-    params.push(libsql::Value::Integer(limit));
-    query_rows(conn, &sql, libsql::params_from_iter(params))
+    let mut params: Vec<DbValue> = ids.iter().cloned().map(DbValue::Text).collect();
+    params.extend(ids.iter().cloned().map(DbValue::Text));
+    params.push(DbValue::Integer(limit));
+    query_rows(conn, &sql, params_from_iter(params))
         .await
         .unwrap_or_default()
 }
 
-pub(crate) async fn degree_rows_for_ids(conn: &Connection, ids: &[String]) -> Vec<Value> {
+pub(crate) async fn degree_rows_for_ids(
+    conn: &(impl QueryExecutor + ?Sized),
+    ids: &[String],
+) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
@@ -235,14 +196,17 @@ pub(crate) async fn degree_rows_for_ids(conn: &Connection, ids: &[String]) -> Ve
          FROM ({degree_union})
          GROUP BY node_id"
     );
-    let mut params: Vec<libsql::Value> = ids.iter().cloned().map(libsql::Value::Text).collect();
-    params.extend(ids.iter().cloned().map(libsql::Value::Text));
-    query_rows(conn, &sql, libsql::params_from_iter(params))
+    let mut params: Vec<DbValue> = ids.iter().cloned().map(DbValue::Text).collect();
+    params.extend(ids.iter().cloned().map(DbValue::Text));
+    query_rows(conn, &sql, params_from_iter(params))
         .await
         .unwrap_or_default()
 }
 
-pub(crate) async fn degree_pool_rows(conn: &Connection, limit: i64) -> Vec<Value> {
+pub(crate) async fn degree_pool_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    limit: i64,
+) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -256,13 +220,13 @@ pub(crate) async fn degree_pool_rows(conn: &Connection, limit: i64) -> Vec<Value
              ORDER BY degree DESC, n.qualified_name ASC
              LIMIT ?1"
         ),
-        libsql::params![limit],
+        params![limit],
     )
     .await
     .unwrap_or_default()
 }
 
-pub(crate) async fn top_connected_rows(conn: &Connection) -> Vec<Value> {
+pub(crate) async fn top_connected_rows(conn: &(impl QueryExecutor + ?Sized)) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -283,11 +247,11 @@ pub(crate) async fn top_connected_rows(conn: &Connection) -> Vec<Value> {
     .unwrap_or_default()
 }
 
-pub(crate) async fn node_row(conn: &Connection, node_id: &str) -> Option<Value> {
+pub(crate) async fn node_row(conn: &(impl QueryExecutor + ?Sized), node_id: &str) -> Option<Value> {
     query_rows(
         conn,
         &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1 LIMIT 1"),
-        libsql::params![node_id],
+        params![node_id],
     )
     .await
     .unwrap_or_default()
@@ -295,17 +259,21 @@ pub(crate) async fn node_row(conn: &Connection, node_id: &str) -> Option<Value> 
     .next()
 }
 
-pub(crate) async fn node_exists(conn: &Connection, node_id: &str) -> bool {
+pub(crate) async fn node_exists(conn: &(impl QueryExecutor + ?Sized), node_id: &str) -> bool {
     query_i64(
         conn,
         "SELECT COUNT(*) FROM nodes WHERE id = ?1",
-        libsql::params![node_id],
+        params![node_id],
     )
     .await
         > 0
 }
 
-pub(crate) async fn caller_rows(conn: &Connection, node_id: &str, limit: i64) -> Vec<Value> {
+pub(crate) async fn caller_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    node_id: &str,
+    limit: i64,
+) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -316,13 +284,17 @@ pub(crate) async fn caller_rows(conn: &Connection, node_id: &str, limit: i64) ->
              ORDER BY n.qualified_name ASC
              LIMIT ?2"
         ),
-        libsql::params![node_id, limit],
+        params![node_id, limit],
     )
     .await
     .unwrap_or_default()
 }
 
-pub(crate) async fn callee_rows(conn: &Connection, node_id: &str, limit: i64) -> Vec<Value> {
+pub(crate) async fn callee_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    node_id: &str,
+    limit: i64,
+) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -333,14 +305,14 @@ pub(crate) async fn callee_rows(conn: &Connection, node_id: &str, limit: i64) ->
              ORDER BY n.qualified_name ASC
              LIMIT ?2"
         ),
-        libsql::params![node_id, limit],
+        params![node_id, limit],
     )
     .await
     .unwrap_or_default()
 }
 
 pub(crate) async fn neighborhood_edge_rows(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
     limit: i64,
 ) -> Vec<Value> {
@@ -355,13 +327,16 @@ pub(crate) async fn neighborhood_edge_rows(
          WHERE e.source = ?1 OR e.target = ?1
          ORDER BY e.kind ASC, source_node.qualified_name ASC, target_node.qualified_name ASC
          LIMIT ?2",
-        libsql::params![node_id, limit],
+        params![node_id, limit],
     )
     .await
     .unwrap_or_default()
 }
 
-pub(crate) async fn neighborhood_edge_counts(conn: &Connection, node_id: &str) -> Vec<Value> {
+pub(crate) async fn neighborhood_edge_counts(
+    conn: &(impl QueryExecutor + ?Sized),
+    node_id: &str,
+) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT kind, COUNT(*) AS count
@@ -369,13 +344,16 @@ pub(crate) async fn neighborhood_edge_counts(conn: &Connection, node_id: &str) -
          WHERE source = ?1 OR target = ?1
          GROUP BY kind
          ORDER BY count DESC, kind ASC",
-        libsql::params![node_id],
+        params![node_id],
     )
     .await
     .unwrap_or_default()
 }
 
-pub(crate) async fn subgraph_candidate_rows(conn: &Connection, seed_id: &str) -> Vec<Value> {
+pub(crate) async fn subgraph_candidate_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    seed_id: &str,
+) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT id, MIN(rank) AS rank
@@ -386,13 +364,16 @@ pub(crate) async fn subgraph_candidate_rows(conn: &Connection, seed_id: &str) ->
          )
          GROUP BY id
          ORDER BY rank ASC, id ASC",
-        libsql::params![seed_id],
+        params![seed_id],
     )
     .await
     .unwrap_or_default()
 }
 
-pub(crate) async fn frontier_edge_rows(conn: &Connection, frontier: &[String]) -> Vec<Value> {
+pub(crate) async fn frontier_edge_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    frontier: &[String],
+) -> Vec<Value> {
     if frontier.is_empty() {
         return Vec::new();
     }
@@ -401,9 +382,9 @@ pub(crate) async fn frontier_edge_rows(conn: &Connection, frontier: &[String]) -
         "SELECT source, target, kind, line FROM edges
          WHERE source IN ({placeholders}) OR target IN ({placeholders})"
     );
-    let mut bind: Vec<libsql::Value> = frontier.iter().cloned().map(libsql::Value::Text).collect();
-    bind.extend(frontier.iter().cloned().map(libsql::Value::Text));
-    query_rows(conn, &sql, libsql::params_from_iter(bind))
+    let mut bind: Vec<DbValue> = frontier.iter().cloned().map(DbValue::Text).collect();
+    bind.extend(frontier.iter().cloned().map(DbValue::Text));
+    query_rows(conn, &sql, params_from_iter(bind))
         .await
         .unwrap_or_default()
 }

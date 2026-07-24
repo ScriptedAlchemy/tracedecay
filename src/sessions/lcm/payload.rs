@@ -1,8 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
-use libsql::{Connection, params};
-
-use crate::global_db::GlobalDb;
+use crate::db::engine::{Executor, QueryExecutor, params};
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::SessionMessageRecord;
 use crate::tracedecay::current_timestamp;
 
@@ -12,11 +11,13 @@ mod delete_recovery;
 mod filesystem_authority;
 mod rollback;
 
+#[cfg(test)]
+pub use delete_recovery::delete_external_payload;
 pub(crate) use delete_recovery::{
     CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
     remove_committed_payload_file,
 };
-pub use delete_recovery::{DeleteOpts, DeleteOutcome, delete_external_payload};
+pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 #[cfg(test)]
 pub(crate) use delete_recovery::{
     reconcile_committed_payload_drain, remove_committed_payload_file_with,
@@ -31,7 +32,7 @@ pub(crate) use filesystem_authority::{
 pub(crate) use rollback::PayloadFileRollback;
 
 pub(crate) async fn delete_external_payload_in_transaction(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
     opts: &DeleteOpts,
@@ -45,18 +46,18 @@ pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, Lcm
 }
 
 pub struct LcmStore<'db> {
-    db: &'db GlobalDb,
+    db: &'db RegisteredGlobalDb,
     storage_root: PathBuf,
 }
 
 impl<'db> LcmStore<'db> {
-    pub(crate) fn new(db: &'db GlobalDb, storage_root: PathBuf) -> Self {
+    pub(crate) fn new(db: &'db RegisteredGlobalDb, storage_root: PathBuf) -> Self {
         Self { db, storage_root }
     }
 
     pub async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
         self.db
-            .ingest_lcm_raw_message(&self.storage_root, message)
+            .lcm_ingest_raw_message(&self.storage_root, message)
             .await
     }
 
@@ -68,8 +69,9 @@ impl<'db> LcmStore<'db> {
         offset: usize,
         limit: usize,
     ) -> Result<LcmPayloadExpansion, LcmError> {
+        let snapshot = self.db.read_snapshot().await?;
         expand_payload(
-            self.db.read_connection(),
+            &snapshot,
             &self.storage_root,
             provider,
             session_id,
@@ -233,7 +235,7 @@ fn write_external_payload_inner(
 }
 
 pub(crate) async fn upsert_payload_metadata(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     payload: &LcmPayloadRef,
 ) -> Result<(), LcmError> {
     conn.execute(
@@ -253,7 +255,7 @@ pub(crate) async fn upsert_payload_metadata(
             payload.byte_count as i64,
             payload.char_count as i64,
             payload.created_at,
-            util::opt_text(payload.metadata_json.as_deref()),
+            payload.metadata_json.as_deref(),
         ],
     )
     .await?;
@@ -286,7 +288,7 @@ pub(crate) async fn upsert_payload_metadata(
 }
 
 pub(crate) async fn expand_payload(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: &str,
@@ -302,10 +304,7 @@ pub(crate) async fn expand_payload(
         }
         Err(err) => return Err(err),
     };
-    if payload.provider != provider || payload.session_id != session_id {
-        return Err(LcmError::PayloadNotOwnedBySession);
-    }
-    ensure_current_raw_payload_ref(conn, &payload).await?;
+    let payload = validate_expand_payload_owner(conn, provider, session_id, payload).await?;
 
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
@@ -337,7 +336,53 @@ pub(crate) async fn expand_payload(
     })
 }
 
-async fn tombstoned_raw_ref_exists(conn: &Connection, payload_ref: &str) -> Result<bool, LcmError> {
+pub(crate) fn read_verified_payload_content(
+    storage_root: &Path,
+    payload_ref: &str,
+    content_hash: &str,
+    byte_count: usize,
+    char_count: usize,
+) -> Result<String, LcmError> {
+    validate_payload_ref(payload_ref)?;
+    let dir = existing_payload_dir(storage_root)?;
+    let path = dir.join(payload_ref);
+    ensure_contained(&dir, &path)?;
+    let byte_count = u64::try_from(byte_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let char_count = u64::try_from(char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let (content, _authority) =
+        read_verified_payload_file(&path, content_hash, byte_count, char_count)?
+            .ok_or(LcmError::PayloadMissing)?;
+    String::from_utf8(content).map_err(|_| LcmError::PayloadIntegrityMismatch)
+}
+
+pub(crate) async fn load_expand_payload_metadata(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    payload_ref: &str,
+) -> Result<LcmPayloadRef, LcmError> {
+    validate_payload_ref(payload_ref)?;
+    let payload = load_payload_metadata(conn, payload_ref).await?;
+    validate_expand_payload_owner(conn, provider, session_id, payload).await
+}
+
+async fn validate_expand_payload_owner(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    payload: LcmPayloadRef,
+) -> Result<LcmPayloadRef, LcmError> {
+    if payload.provider != provider || payload.session_id != session_id {
+        return Err(LcmError::PayloadNotOwnedBySession);
+    }
+    ensure_current_raw_payload_ref(conn, &payload).await?;
+    Ok(payload)
+}
+
+async fn tombstoned_raw_ref_exists(
+    conn: &(impl QueryExecutor + ?Sized),
+    payload_ref: &str,
+) -> Result<bool, LcmError> {
     let mut rows = conn
         .query(
             "SELECT content, snippet_text, index_text, metadata_json
@@ -361,7 +406,7 @@ async fn tombstoned_raw_ref_exists(conn: &Connection, payload_ref: &str) -> Resu
 }
 
 async fn ensure_current_raw_payload_ref(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     payload: &LcmPayloadRef,
 ) -> Result<(), LcmError> {
     let mut rows = conn
@@ -420,7 +465,7 @@ async fn ensure_current_raw_payload_ref(
 }
 
 pub(crate) async fn load_payload_metadata(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
 ) -> Result<LcmPayloadRef, LcmError> {
     let mut rows = conn

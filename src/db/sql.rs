@@ -1,4 +1,5 @@
 // Rust guideline compliant 2025-10-17
+use crate::db::engine::{Error, Row, Rows, Value};
 use crate::errors::{Result, TraceDecayError};
 
 // ---------------------------------------------------------------------------
@@ -25,11 +26,11 @@ pub(super) fn build_qmark_placeholders(n: usize) -> String {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Converts `Option<String>` to a `libsql::Value` for use in params.
-pub(super) fn opt_str(opt: Option<&str>) -> libsql::Value {
+/// Converts `Option<String>` to an engine [`Value`] for use in parameters.
+pub(super) fn opt_str(opt: Option<&str>) -> Value {
     match opt {
-        Some(s) => libsql::Value::Text(s.to_string()),
-        None => libsql::Value::Null,
+        Some(s) => Value::Text(s.to_string()),
+        None => Value::Null,
     }
 }
 
@@ -37,9 +38,9 @@ pub(super) fn opt_str(opt: Option<&str>) -> libsql::Value {
 ///
 /// Keep caller-provided prefixes out of SQL text. The `%` suffix is the only
 /// wildcard added by query helpers; quotes, comments, and semicolons inside the
-/// prefix stay plain data when bound through libSQL parameters.
-pub(super) fn path_prefix_like_value(prefix: &str) -> libsql::Value {
-    libsql::Value::Text(format!("{prefix}%"))
+/// prefix stay plain data when bound through SQLite parameters.
+pub(super) fn path_prefix_like_value(prefix: &str) -> Value {
+    Value::Text(format!("{prefix}%"))
 }
 
 /// Appends a SQL-safe single-quoted string literal to `buf`, escaping `'` as `''`.
@@ -77,8 +78,8 @@ pub(super) fn push_int(buf: &mut String, val: i64) {
 /// row-mapping function. This helper never constructs SQL; callers must build
 /// and parameterize queries before invoking it.
 pub(super) async fn collect_rows<T>(
-    rows: &mut libsql::Rows,
-    map_fn: fn(&libsql::Row) -> std::result::Result<T, libsql::Error>,
+    rows: &mut Rows,
+    map_fn: fn(&Row) -> std::result::Result<T, Error>,
     operation: &str,
 ) -> Result<Vec<T>> {
     let mut items = Vec::new();

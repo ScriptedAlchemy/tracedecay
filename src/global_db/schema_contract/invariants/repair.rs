@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
-use libsql::{Connection, params};
 use tracedecay_domain::{
     DurableObservationV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
 };
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
+use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db::global_db_operation_error;
 
 use super::OPERATION;
@@ -27,7 +27,7 @@ struct CommittedCursorCandidate {
 /// `observation_projection::rebuild::read_observation_frontier` for why a
 /// caller doing further reads or writes on the same connection depends on
 /// that.
-async fn read_observation_frontier(conn: &Connection) -> crate::errors::Result<i64> {
+async fn read_observation_frontier(conn: &impl QueryExecutor) -> crate::errors::Result<i64> {
     let mut rows = conn
         .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
         .await
@@ -41,7 +41,7 @@ async fn read_observation_frontier(conn: &Connection) -> crate::errors::Result<i
 }
 
 pub(super) async fn repair_projection_frontier(
-    conn: &Connection,
+    conn: &impl Executor,
     trusted_checkpoint: i64,
 ) -> crate::errors::Result<i64> {
     let mut rows = conn
@@ -154,7 +154,7 @@ pub(super) async fn repair_projection_frontier(
 }
 
 pub(super) async fn repair_committed_source_cursors(
-    conn: &Connection,
+    conn: &impl Executor,
     after_sequence: i64,
 ) -> crate::errors::Result<()> {
     let candidates = latest_committed_source_cursors(conn, after_sequence).await?;
@@ -205,7 +205,7 @@ pub(super) async fn repair_committed_source_cursors(
 }
 
 async fn latest_committed_source_cursors(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     after_sequence: i64,
 ) -> crate::errors::Result<Vec<CommittedCursorCandidate>> {
     let mut rows = conn
@@ -259,7 +259,7 @@ fn is_new_generation_frontier(
 }
 
 async fn read_source_cursor(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     source_json: &str,
     scope_json: &str,
 ) -> crate::errors::Result<Option<ObservationSourceCursorV1>> {
@@ -284,7 +284,7 @@ async fn read_source_cursor(
 }
 
 async fn write_source_cursor(
-    conn: &Connection,
+    conn: &impl Executor,
     candidate: &CommittedCursorCandidate,
 ) -> crate::errors::Result<()> {
     conn.execute(
@@ -304,7 +304,7 @@ async fn write_source_cursor(
 }
 
 async fn cursor_has_exact_advance_receipt(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     source_json: &str,
     scope_json: &str,
     cursor: &ObservationSourceCursorV1,
@@ -334,7 +334,7 @@ async fn cursor_has_exact_advance_receipt(
 }
 
 pub(super) async fn validate_observation_cursor_coverage(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     after_sequence: i64,
 ) -> crate::errors::Result<()> {
     for candidate in latest_committed_source_cursors(conn, after_sequence).await? {

@@ -827,7 +827,9 @@ pub fn export_memory_digest_to_recorded_targets(
 // ---------------------------------------------------------------------------
 
 fn project_key_for_root(project_root: &Path) -> String {
-    crate::global_db::GlobalDb::canonical_project_key(project_root)
+    crate::lifecycle_lease::canonical_or_original(project_root)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn project_label_for_root(project_root: &Path) -> String {

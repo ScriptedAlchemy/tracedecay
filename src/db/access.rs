@@ -87,6 +87,38 @@ pub struct MaintenanceDatabaseScope<'lease> {
     _lifecycle: std::marker::PhantomData<&'lease crate::lifecycle_lease::LifecycleLease>,
 }
 
+impl MaintenanceDatabaseScope<'_> {
+    /// Issues database authority for one exact artifact beneath this retained
+    /// exclusive-maintenance profile scope.
+    pub(crate) fn database_authority(
+        &self,
+        db_path: &Path,
+        intent: &str,
+    ) -> Result<DatabaseAuthority> {
+        let identity = DatabaseIdentity::for_path(db_path)?;
+        if identity.profile_root != self.profile_root {
+            return Err(access_error(
+                intent,
+                db_path,
+                "database artifact belongs to a different maintenance profile",
+            ));
+        }
+        let active = MAINTENANCE_SCOPES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.profile_root)
+            .is_some_and(|scope| scope.token == self.token);
+        if !active {
+            return Err(access_error(
+                intent,
+                db_path,
+                "exclusive-maintenance database scope was revoked",
+            ));
+        }
+        DatabaseAuthority::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent)
+    }
+}
+
 #[derive(Debug)]
 struct DaemonScopeState {
     token: String,
@@ -321,6 +353,10 @@ impl DatabaseAuthority {
         publish_record_atomically(temporary, destination, payload, record_name)
     }
 
+    pub(crate) fn read_record_strict(path: &Path, record_name: &str) -> Result<Option<String>> {
+        read_record_strict(path, record_name)
+    }
+
     pub(crate) fn replace_file_atomically(
         temporary: &Path,
         destination: &Path,
@@ -457,7 +493,7 @@ fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> Trac
     access_error(operation, path, &error.to_string())
 }
 
-fn is_isolated_test_path(path: &Path) -> bool {
+pub(super) fn is_isolated_test_path(path: &Path) -> bool {
     let root = std::env::temp_dir();
     if path.starts_with(root.canonicalize().unwrap_or(root)) {
         return true;

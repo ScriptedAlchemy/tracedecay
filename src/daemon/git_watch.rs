@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::config::SyncConfig;
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::tracedecay::TraceDecay;
 
 use super::{branch_admin::StoreAdministration, log_daemon_event};
 
@@ -300,32 +300,18 @@ impl GitWatcher {
     ///
     /// Called once from `run_foreground_unix` after the engine is built. Safe to
     /// call on a disabled watcher (no-op).
-    pub async fn spawn(&self, global_db_path: Option<PathBuf>) {
+    pub(super) async fn spawn(&self, profile_database: Arc<crate::global_db::RegisteredGlobalDb>) {
         if !self.inner.enabled || self.inner.shutting_down.load(Ordering::Acquire) {
             return;
         }
-        // Enumerate recently-seen code projects (most-recent first, capped).
-        let window = 14 * 86_400;
-        let cap = self.inner.config.watch_max_projects;
-        let db = match global_db_path.as_deref() {
-            Some(path) => crate::global_db::GlobalDb::open_at(path).await,
-            None => crate::global_db::GlobalDb::open().await,
-        };
-        if let Some(db) = db {
-            let projects = db.code_projects_seen_within(window, cap).await;
-            for record in projects {
-                let root = PathBuf::from(&record.canonical_root);
-                if root.is_dir() {
-                    self.ensure_watching(&root).await;
-                }
-            }
-        }
+        // Startup does not manufacture project owners from registry paths.
+        // Active daemon handshakes call `ensure_watching` after publishing the
+        // retained project server and graph handle.
 
         // Start the single backstop timer.
         let watcher = self.clone();
-        let db_path = global_db_path.clone();
         let handle = tokio::spawn(async move {
-            backstop::run(watcher, db_path).await;
+            backstop::run(watcher, profile_database).await;
         });
         *self.inner.backstop_task.lock().await = Some(handle);
     }
@@ -418,21 +404,22 @@ fn current_profile_root() -> PathBuf {
     crate::storage::default_profile_root().unwrap_or_default()
 }
 
-/// Builds explicit open options for the daemon-owned profile. The global
-/// registry path follows that same profile rather than the ambient process
-/// environment used by ordinary CLI clients.
-fn daemon_open_options(inner: &GitWatcherInner) -> TraceDecayOpenOptions {
-    if inner.profile_root.as_os_str().is_empty() {
-        // Keep standalone construction's former behavior when no current
-        // profile can be resolved: the normal open path will report failure
-        // rather than treating an empty path as a writable profile directory.
-        return TraceDecayOpenOptions::default();
-    }
-    let profile_root = inner.profile_root.clone();
-    TraceDecayOpenOptions {
-        global_db_path: Some(profile_root.join("global.db")),
-        profile_root: Some(profile_root),
-    }
+async fn retained_project_graph(
+    inner: &GitWatcherInner,
+    project_root: &Path,
+) -> Option<Arc<TraceDecay>> {
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let active_branch = crate::branch::current_branch(&canonical);
+    inner
+        .administration
+        .mounted_project_graphs()
+        .await
+        .into_iter()
+        .find(|graph| {
+            graph.project_root() == canonical && graph.active_branch() == active_branch.as_deref()
+        })
 }
 
 /// Supervises one project's watch task: on panic, restart with capped
@@ -686,20 +673,24 @@ async fn execute_plan(
     plan: DirtyPlan,
 ) {
     let root = &state.project_root;
-    let opts = daemon_open_options(inner);
-
+    let retained_graph = retained_project_graph(inner, root).await;
     // 1. Proactively track newly-created linked worktrees.
     for name in &plan.new_worktrees {
         if let Some((wt_root, branch)) = store_maintenance::resolve_worktree(common, name) {
             let _permit = inner.sync_semaphore.acquire().await;
-            match store_maintenance::track_worktree_branch(
-                &inner.administration,
-                wt_root.clone(),
-                branch.clone(),
-                opts.clone(),
-            )
-            .await
-            {
+            let outcome = match retained_graph.as_deref() {
+                Some(cg) => {
+                    store_maintenance::track_worktree_branch(
+                        &inner.administration,
+                        cg,
+                        wt_root.clone(),
+                        branch.clone(),
+                    )
+                    .await
+                }
+                None => None,
+            };
+            match outcome {
                 Some(outcome) => {
                     log_daemon_event(
                         "git_watch_synced",
@@ -753,13 +744,13 @@ async fn execute_plan(
     // advanced without `plan.dirty` capturing the branch name.
     if current_branch.is_some() || !plan.branches.is_empty() {
         let _permit = inner.sync_semaphore.acquire().await;
-        if store_maintenance::sync_project(
-            root,
-            &opts,
-            inner.config.full_sync_escalation_files,
-            &inner.administration,
-        )
-        .await
+        if let Some(cg) = retained_graph.as_ref()
+            && store_maintenance::sync_project(
+                cg,
+                inner.config.full_sync_escalation_files,
+                &inner.administration,
+            )
+            .await
         {
             state.health.mark_synced();
             let mut fields = vec![
@@ -782,8 +773,10 @@ async fn execute_plan(
     }
 
     // 3. GC eligibility on ref/worktree deletion.
-    if plan.gc_eligible {
-        store_maintenance::run_gc(inner, root, &opts).await;
+    if plan.gc_eligible
+        && let Some(cg) = retained_graph.as_ref()
+    {
+        store_maintenance::run_gc(inner, cg).await;
     }
 }
 
@@ -795,7 +788,6 @@ async fn degraded_poll_loop(
     state: &Arc<WatchState>,
     common: Option<&Path>,
 ) {
-    let opts = daemon_open_options(inner);
     let mut last_sig: Option<(SystemTime, SystemTime)> = None;
     loop {
         state.health.beat();
@@ -803,13 +795,13 @@ async fn degraded_poll_loop(
             let sig = metadata_signature(common);
             if sig != last_sig && last_sig.is_some() {
                 let _permit = inner.sync_semaphore.acquire().await;
-                if store_maintenance::sync_project(
-                    &state.project_root,
-                    &opts,
-                    inner.config.full_sync_escalation_files,
-                    &inner.administration,
-                )
-                .await
+                if let Some(cg) = retained_project_graph(inner, &state.project_root).await
+                    && store_maintenance::sync_project(
+                        &cg,
+                        inner.config.full_sync_escalation_files,
+                        &inner.administration,
+                    )
+                    .await
                 {
                     state.health.mark_synced();
                 }
@@ -843,7 +835,10 @@ fn now_secs() -> u64 {
 mod backstop {
     use super::*;
 
-    pub(super) async fn run(watcher: GitWatcher, global_db_path: Option<PathBuf>) {
+    pub(super) async fn run(
+        watcher: GitWatcher,
+        profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
+    ) {
         let interval_mins = watcher.inner.config.backstop_interval_mins;
         if interval_mins == 0 {
             return; // disabled
@@ -855,12 +850,10 @@ mod backstop {
 
         let mut last_gc: Option<Instant> = None;
         let gc_period = Duration::from_hours(24);
-        // Retention/compaction and orphan-store sweeps share the daily-ish
-        // cadence family but carry an owner-configurable interval. Both are
-        // inert unless a window is opened in config, so a default daemon never
-        // opens the session store or registry here.
-        let mut last_retention: Option<Instant> = None;
-        let retention_period = Duration::from_secs(
+        // Retained-handle maintenance uses the owner-configurable interval and
+        // stays inert unless a registered retention/compaction pass is enabled.
+        let mut last_maintenance: Option<Instant> = None;
+        let maintenance_period = Duration::from_secs(
             watcher
                 .inner
                 .config
@@ -874,11 +867,11 @@ mod backstop {
             ticker.tick().await;
             tick(
                 &watcher,
-                global_db_path.as_deref(),
+                profile_database.as_ref(),
                 &mut last_gc,
                 gc_period,
-                &mut last_retention,
-                retention_period,
+                &mut last_maintenance,
+                maintenance_period,
             )
             .await;
         }
@@ -886,19 +879,17 @@ mod backstop {
 
     async fn tick(
         watcher: &GitWatcher,
-        global_db_path: Option<&Path>,
+        profile_database: &crate::global_db::RegisteredGlobalDb,
         last_gc: &mut Option<Instant>,
         gc_period: Duration,
-        last_retention: &mut Option<Instant>,
-        retention_period: Duration,
+        last_maintenance: &mut Option<Instant>,
+        maintenance_period: Duration,
     ) {
         let interval_secs = watcher
             .inner
             .config
             .backstop_interval_mins
             .saturating_mul(60);
-        let opts = daemon_open_options(&watcher.inner);
-
         // Snapshot registered projects; cover those the watcher isn't keeping
         // fresh (stale/absent heartbeat) AND whose store is older than one
         // interval.
@@ -913,17 +904,22 @@ mod backstop {
         let run_gc_now = last_gc.is_none_or(|t| t.elapsed() >= gc_period);
         let mut gc_retry_needed = false;
 
-        for (root, state) in entries {
+        for (root, state) in &entries {
             let snap = state.health.snapshot();
-            if snap.heartbeat_stale() && store_is_stale(&root, &opts, interval_secs).await {
+            let retained_graph = retained_project_graph(&watcher.inner, root).await;
+            let store_stale = match retained_graph.as_deref() {
+                Some(graph) => store_is_stale(graph, interval_secs).await,
+                None => false,
+            };
+            if snap.heartbeat_stale() && store_stale {
                 let _permit = watcher.inner.sync_semaphore.acquire().await;
-                if super::store_maintenance::sync_project(
-                    &root,
-                    &opts,
-                    watcher.inner.config.full_sync_escalation_files,
-                    &watcher.inner.administration,
-                )
-                .await
+                if let Some(cg) = retained_graph.as_ref()
+                    && super::store_maintenance::sync_project(
+                        cg,
+                        watcher.inner.config.full_sync_escalation_files,
+                        &watcher.inner.administration,
+                    )
+                    .await
                 {
                     state.health.mark_synced();
                     log_daemon_event(
@@ -936,7 +932,10 @@ mod backstop {
                 }
             }
 
-            if run_gc_now && !super::store_maintenance::run_gc(&watcher.inner, &root, &opts).await {
+            if run_gc_now
+                && let Some(cg) = retained_graph.as_ref()
+                && !super::store_maintenance::run_gc(&watcher.inner, cg).await
+            {
                 gc_retry_needed = true;
             }
         }
@@ -945,24 +944,67 @@ mod backstop {
             *last_gc = Some(Instant::now());
         }
 
-        // Profile-scoped retention/compaction and orphan-store collection run on
-        // their own owner-configurable cadence, independent of per-project GC.
-        // Every engine is config-gated and inert by default, so this is a cheap
-        // no-op unless the owner opened a window.
-        let run_retention_now = last_retention.is_none_or(|t| t.elapsed() >= retention_period);
-        if run_retention_now {
-            let retention = &watcher.inner.config.retention;
-            let profile_root = watcher.inner.profile_root.clone();
-            super::store_maintenance::run_session_retention(&profile_root, retention).await;
-            if let Some(days) = retention.orphan_store_gc_days {
-                super::store_maintenance::run_orphan_store_sweep(
-                    global_db_path,
-                    &profile_root,
-                    days,
-                )
+        // Maintenance runs independently of per-project GC. Only already-
+        // mounted profile/session/project handles participate; unopened stores
+        // are skipped rather than rediscovered.
+        let retention = &watcher.inner.config.retention;
+        let maintenance_enabled = retention.session_lcm.enabled
+            || retention.observation.enabled
+            || retention.orphan_store_gc_days.is_some()
+            || retention.compaction.is_some();
+        let run_maintenance_now =
+            last_maintenance.is_none_or(|t| t.elapsed() >= maintenance_period);
+        if run_maintenance_now && maintenance_enabled {
+            let session_databases = watcher
+                .inner
+                .administration
+                .mounted_registered_session_databases()
                 .await;
+            let project_graphs = watcher.inner.administration.mounted_project_graphs().await;
+            let profile_root = watcher.inner.profile_root.clone();
+            let succeeded = watcher
+                .inner
+                .administration
+                .with_writer(|| async {
+                    let mut session_succeeded = true;
+                    for database in &session_databases {
+                        session_succeeded &=
+                            super::store_maintenance::run_session_retention(database, retention)
+                                .await;
+                    }
+                    let orphan_succeeded =
+                        if let Some(orphan_store_gc_days) = retention.orphan_store_gc_days {
+                            super::store_maintenance::run_orphan_store_sweep(
+                                profile_database,
+                                &profile_root,
+                                orphan_store_gc_days,
+                            )
+                            .await
+                        } else {
+                            true
+                        };
+                    let mut compaction_succeeded = true;
+                    if let Some(compaction) = &retention.compaction {
+                        compaction_succeeded &= super::store_maintenance::run_global_compaction(
+                            profile_database,
+                            compaction,
+                        )
+                        .await;
+                        for graph in &project_graphs {
+                            compaction_succeeded &=
+                                super::store_maintenance::run_project_compaction(
+                                    graph.db(),
+                                    compaction,
+                                )
+                                .await;
+                        }
+                    }
+                    session_succeeded && orphan_succeeded && compaction_succeeded
+                })
+                .await;
+            if succeeded {
+                *last_maintenance = Some(Instant::now());
             }
-            *last_retention = Some(Instant::now());
         }
     }
 
@@ -970,10 +1012,7 @@ mod backstop {
     /// interval. Returns `false` when the project is not indexed (nothing to
     /// backstop). The read-only open/read futures are `Send`, so they are
     /// awaited directly (see [`super::sync_project`]).
-    async fn store_is_stale(root: &Path, opts: &TraceDecayOpenOptions, interval_secs: u64) -> bool {
-        let Ok(cg) = TraceDecay::open_read_only_with_options(root, opts.clone()).await else {
-            return false;
-        };
+    async fn store_is_stale(cg: &TraceDecay, interval_secs: u64) -> bool {
         let last = cg.last_sync_timestamp().await;
         let age = super::now_secs() as i64 - last;
         age > interval_secs as i64

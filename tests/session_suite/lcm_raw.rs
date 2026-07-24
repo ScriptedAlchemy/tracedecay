@@ -2,16 +2,23 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::SessionMessageRecord;
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 use tracedecay::sessions::source::{
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource, try_ingest_source,
+    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
 
 use crate::common::{
     lcm_raw_message as sample_message, lcm_raw_session as sample_session,
     open_lcm_db as open_isolated_db,
 };
+
+async fn open_registered_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("registered profile session runtime")
+}
 
 struct FakeTranscriptSource {
     path: PathBuf,
@@ -145,22 +152,24 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
     let transcript = project.join("fake-transcript.jsonl");
     std::fs::write(&transcript, "{}\n").unwrap();
 
-    let db = open_isolated_db(&tmp).await;
+    let db = open_registered_runtime(&tmp).await;
     let content = format!("{}{}", "a".repeat(300_000), "::lossless-tail");
     let source = FakeTranscriptSource {
         path: transcript,
         content: content.clone(),
     };
 
-    let stats = try_ingest_source(&db, &source, &project, None)
+    let stats = db
+        .ingest_profile_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
 
     let compatibility = db
-        .get_session_message("fake", "fake-message-1")
+        .session_message_for_test(HostAdmissionScope::Profile, "fake", "fake-message-1")
         .await
+        .unwrap()
         .expect("compatibility message should exist");
     assert!(
         compatibility.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
@@ -172,7 +181,7 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
     );
 
     let raw = db
-        .lcm_load_raw_message("fake", "fake-message-1")
+        .lcm_load_raw_message_for_test("fake", "fake-message-1")
         .await
         .expect("raw message should exist");
     assert_eq!(raw.content, content);
@@ -184,20 +193,35 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
 #[tokio::test]
 async fn search_uses_bounded_projection_but_load_recovers_raw() {
     let tmp = TempDir::new().unwrap();
-    let db = open_isolated_db(&tmp).await;
+    let db = open_registered_runtime(&tmp).await;
     let session = sample_session("cursor", "session-1", "project-a");
-    assert!(db.upsert_session(&session).await);
+    assert!(
+        db.upsert_session_for_test(HostAdmissionScope::Profile, &session)
+            .await
+            .unwrap()
+    );
 
     let oversized = format!(
         "unique-search-token\n{}::lossless-tail",
         "x".repeat(tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 5)
     );
     let message = sample_message("cursor", "message-1", "session-1", &oversized);
-    assert!(db.upsert_session_message(&message).await);
+    assert!(
+        db.upsert_session_message_for_test(HostAdmissionScope::Profile, &message)
+            .await
+            .unwrap()
+    );
 
     let results = db
-        .search_session_messages("cursor", Some("project-a"), "unique-search-token", 10)
-        .await;
+        .search_session_messages_for_test(
+            HostAdmissionScope::Profile,
+            "cursor",
+            Some("project-a"),
+            "unique-search-token",
+            10,
+        )
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].message.message_id, "message-1");
     assert!(
@@ -212,7 +236,7 @@ async fn search_uses_bounded_projection_but_load_recovers_raw() {
     );
 
     let raw = db
-        .lcm_load_raw_message("cursor", "message-1")
+        .lcm_load_raw_message_for_test("cursor", "message-1")
         .await
         .expect("raw message should exist");
     assert_eq!(raw.content, oversized);

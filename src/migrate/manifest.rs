@@ -609,6 +609,7 @@ async fn apply_migration_manifest_in_scope(
     let backup_root = profile_root
         .join("migration-backups")
         .join(&manifest.migration_id);
+    let sqlite_snapshot_scratch = MigrationSqliteSnapshotScratch::new(&backup_root);
     let original_backup_count = manifest.backup_artifacts.len();
     for index in 0..original_backup_count {
         apply_backup_artifact(
@@ -616,6 +617,7 @@ async fn apply_migration_manifest_in_scope(
             index,
             &source_data_dir,
             &backup_root,
+            sqlite_snapshot_scratch.path(),
             source_authorities,
             operation,
         )
@@ -1025,6 +1027,7 @@ fn reject_sqlite_sidecar_artifacts(artifacts: &[MigrationArtifact]) -> io::Resul
 async fn copy_sqlite_snapshot(
     source: &Path,
     target: &Path,
+    scratch_root: &Path,
     source_authority: &crate::db::DatabaseAuthority,
     operation: &str,
 ) -> io::Result<()> {
@@ -1033,15 +1036,18 @@ async fn copy_sqlite_snapshot(
     }
     let temporary = migration_snapshot_temp_path(target);
     remove_stale_snapshot_temp(&temporary)?;
-    let (source_db, _) = crate::db::Database::open_read_only(source, source_authority)
-        .await
+    let _source_authority = source_authority
+        .hold_for(source, operation)
         .map_err(io::Error::other)?;
-    let snapshot_result = source_db
-        .snapshot_to(&temporary)
-        .await
-        .map_err(io::Error::other);
-    source_db.close();
+    let source_snapshot = crate::sqlite_read_snapshot::open_in(source, scratch_root).await?;
+    let snapshot_result = source_snapshot.backup_to(&temporary).await;
+    let source_validation = source_snapshot.validate_source();
+    drop(source_snapshot);
     if let Err(error) = snapshot_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = source_validation {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
@@ -1051,7 +1057,7 @@ async fn copy_sqlite_snapshot(
         &format!("{operation} verify snapshot staging"),
     )
     .map_err(io::Error::other)?;
-    verify_sqlite_integrity(&temporary, &temporary_authority).await?;
+    verify_sqlite_integrity(&temporary, scratch_root, &temporary_authority).await?;
     drop(temporary_authority);
     let temporary_fingerprint = fingerprint_file(&temporary)?;
     sync_file(&temporary)?;
@@ -1077,6 +1083,35 @@ fn migration_snapshot_temp_path(target: &Path) -> PathBuf {
     let mut name = target.as_os_str().to_os_string();
     name.push(format!(".migration-{}.tmp", std::process::id()));
     PathBuf::from(name)
+}
+
+struct MigrationSqliteSnapshotScratch {
+    path: PathBuf,
+}
+
+impl MigrationSqliteSnapshotScratch {
+    fn new(backup_root: &Path) -> Self {
+        Self {
+            path: backup_root.join(".sqlite-snapshot-scratch"),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for MigrationSqliteSnapshotScratch {
+    fn drop(&mut self) {
+        let cleanup_lock = self.path.join(".cleanup.lock");
+        if cleanup_lock
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            let _ = fs::remove_file(cleanup_lock);
+        }
+        let _ = fs::remove_dir(&self.path);
+    }
 }
 
 fn remove_stale_snapshot_temp(path: &Path) -> io::Result<()> {
@@ -1140,13 +1175,17 @@ fn copy_file_atomically(source: &Path, target: &Path, label: &str) -> io::Result
     sync_parent_directory(target)
 }
 
-async fn verify_sqlite_snapshot(path: &Path, operation: &str) -> io::Result<()> {
+async fn verify_sqlite_snapshot(
+    path: &Path,
+    scratch_root: &Path,
+    operation: &str,
+) -> io::Result<()> {
     let authority = crate::db::DatabaseAuthority::for_runtime(
         path,
         &format!("{operation} verify SQLite snapshot"),
     )
     .map_err(io::Error::other)?;
-    verify_sqlite_integrity(path, &authority).await
+    verify_sqlite_integrity(path, scratch_root, &authority).await
 }
 
 fn apply_copy_artifact(
@@ -1297,6 +1336,7 @@ async fn apply_backup_artifact(
     index: usize,
     source_data_dir: &Path,
     backup_root: &Path,
+    sqlite_snapshot_scratch: &Path,
     source_authorities: &[(PathBuf, crate::db::DatabaseAuthority)],
     operation: &str,
 ) -> io::Result<()> {
@@ -1330,7 +1370,7 @@ async fn apply_backup_artifact(
         .transpose()?;
     if manifest.backup_artifacts[index].state == ArtifactState::Verified {
         if source_authority.is_some() {
-            verify_sqlite_snapshot(&target_path, operation).await?;
+            verify_sqlite_snapshot(&target_path, sqlite_snapshot_scratch, operation).await?;
         } else {
             verify_artifact_contents(&source_path, &target_path)?;
         }
@@ -1342,7 +1382,7 @@ async fn apply_backup_artifact(
             ArtifactState::Locked | ArtifactState::Copied
         ) {
             if source_authority.is_some() {
-                verify_sqlite_snapshot(&target_path, operation).await?;
+                verify_sqlite_snapshot(&target_path, sqlite_snapshot_scratch, operation).await?;
             } else {
                 verify_artifact_contents(&source_path, &target_path)?;
             }
@@ -1364,7 +1404,14 @@ async fn apply_backup_artifact(
         ));
     }
     let copy_result = if let Some(authority) = source_authority {
-        copy_sqlite_snapshot(&source_path, &target_path, authority, operation).await
+        copy_sqlite_snapshot(
+            &source_path,
+            &target_path,
+            sqlite_snapshot_scratch,
+            authority,
+            operation,
+        )
+        .await
     } else {
         PrivateStoreIo::copy_artifact(&source_path, &target_path).map(|_| ())
     };
@@ -1478,7 +1525,12 @@ fn verify_sqlite_snapshot_file(path: &Path) -> io::Result<()> {
             path.display()
         )));
     }
-    Ok(())
+    tracedecay_rusqlite_runtime::backup::verify_sqlite_snapshot(path).map_err(|error| {
+        invalid_manifest(&format!(
+            "SQLite snapshot '{}' failed quick_check: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn verify_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
@@ -1524,12 +1576,36 @@ fn verify_sqlite_artifact_contents(source: &Path, target: &Path) -> io::Result<(
 
 async fn verify_sqlite_integrity(
     path: &Path,
+    scratch_root: &Path,
     authority: &crate::db::DatabaseAuthority,
 ) -> io::Result<()> {
-    let (db, _) = crate::db::Database::open_read_only(path, authority)
+    let _authority = authority
+        .hold_for(path, "verify migration SQLite snapshot")
+        .map_err(io::Error::other)?;
+    let snapshot = crate::sqlite_read_snapshot::open_in(path, scratch_root).await?;
+    let mut rows = snapshot
+        .connection()
+        .query("PRAGMA quick_check", ())
         .await
         .map_err(io::Error::other)?;
-    db.close();
+    let mut checked = false;
+    while let Some(row) = rows.next().await.map_err(io::Error::other)? {
+        checked = true;
+        let result = row.get::<String>(0).map_err(io::Error::other)?;
+        if result != "ok" {
+            return Err(invalid_manifest(&format!(
+                "SQLite snapshot '{}' failed quick_check: {result}",
+                path.display()
+            )));
+        }
+    }
+    if !checked {
+        return Err(invalid_manifest(&format!(
+            "SQLite snapshot '{}' quick_check returned no rows",
+            path.display()
+        )));
+    }
+    snapshot.validate_source()?;
     Ok(())
 }
 

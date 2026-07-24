@@ -5,10 +5,9 @@ async fn temporal_schema_complete_object_catalog() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
 
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
     let mut expected = TEMPORAL_SCHEMA_OBJECTS
@@ -27,14 +26,13 @@ async fn temporal_schema_complete_object_catalog() {
 async fn temporal_payload_manifest_schema_is_payload_global() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     let mut rows = conn
         .query(
             "SELECT name FROM pragma_table_info('session_external_payload_manifests')
@@ -140,8 +138,8 @@ async fn temporal_schema_migration_is_atomic_and_idempotent() {
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch("CREATE TABLE session_temporal_generations (wrong_column TEXT);")
         .await
         .unwrap();
@@ -149,7 +147,7 @@ async fn temporal_schema_migration_is_atomic_and_idempotent() {
     drop(raw_db);
 
     assert!(
-        GlobalDb::try_open_at(&db_path).await.is_err(),
+        open_global_db(&db_path).await.is_err(),
         "an incompatible temporal table must reject the whole additive migration"
     );
     assert!(
@@ -161,28 +159,26 @@ async fn temporal_schema_migration_is_atomic_and_idempotent() {
         "a rejected temporal migration must not leave partially-created authority tables"
     );
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute("DROP TABLE session_temporal_generations", ())
         .await
         .unwrap();
     drop(conn);
     drop(raw_db);
 
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("fresh temporal migration should succeed")
-        .expect("global database should open");
+        .expect("fresh temporal migration should succeed");
     drop(db);
     let initial_catalog = temporal_schema_object_catalog(&db_path).await;
     let initial_version = temporal_schema_version(&db_path).await;
 
     let restart_path = tmp.path().join(".tracedecay").join("restart.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = GlobalDb::try_open_at(&restart_path)
+    let reopened = open_global_db(&restart_path)
         .await
-        .expect("idempotent temporal reopen should succeed")
-        .expect("global database should reopen");
+        .expect("idempotent temporal reopen should succeed");
     drop(reopened);
     assert_eq!(
         temporal_schema_version(&restart_path).await,
@@ -198,10 +194,9 @@ async fn temporal_schema_migration_is_atomic_and_idempotent() {
 async fn temporal_schema_replaces_stale_refresh_guards_on_every_reopen() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
     let triggers = [
@@ -214,8 +209,8 @@ async fn temporal_schema_replaces_stale_refresh_guards_on_every_reopen() {
     }
 
     for marker_version in [1_i64, 2_i64] {
-        let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = raw_db.connect().unwrap();
+        let raw_db = TestConnection::open(&db_path);
+        let conn = (*raw_db).clone();
         conn.execute_batch(
             "DROP TRIGGER session_refresh_progress_insert_guard_v1;
              DROP TRIGGER session_refresh_receipts_insert_guard_v1;
@@ -230,17 +225,16 @@ async fn temporal_schema_replaces_stale_refresh_guards_on_every_reopen() {
             "UPDATE session_temporal_schema_migrations
              SET version = ?1
              WHERE name = 'session-temporal'",
-            libsql::params![marker_version],
+            params![marker_version],
         )
         .await
         .unwrap();
         drop(conn);
         drop(raw_db);
 
-        let reopened = GlobalDb::try_open_at(&db_path)
+        let reopened = open_global_db(&db_path)
             .await
-            .expect("stale refresh guards should be replaced")
-            .expect("global database should reopen");
+            .expect("stale refresh guards should be replaced");
         drop(reopened);
         for (trigger, expected) in &canonical {
             assert_eq!(
@@ -258,8 +252,8 @@ async fn temporal_schema_trigger_installation_is_atomic() {
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch("CREATE TABLE authority_audit_checkpoints (wrong_column TEXT);")
         .await
         .unwrap();
@@ -267,7 +261,7 @@ async fn temporal_schema_trigger_installation_is_atomic() {
     drop(raw_db);
 
     assert!(
-        GlobalDb::try_open_at(&db_path).await.is_err(),
+        open_global_db(&db_path).await.is_err(),
         "an invariant-installation failure must reject the temporal migration"
     );
     assert!(
@@ -284,10 +278,9 @@ async fn temporal_schema_trigger_installation_is_atomic() {
 async fn temporal_schema_refuses_future_version_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
     assert!(
         table_exists(&db_path, "session_temporal_schema_migrations").await,
@@ -296,13 +289,13 @@ async fn temporal_schema_refuses_future_version_without_mutation() {
 
     let before_catalog = temporal_schema_object_catalog(&db_path).await;
     let future_version = temporal_schema_version(&db_path).await + 97;
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute(
         "UPDATE session_temporal_schema_migrations
          SET version = ?1
          WHERE name = 'session-temporal'",
-        libsql::params![future_version],
+        params![future_version],
     )
     .await
     .unwrap();
@@ -312,7 +305,7 @@ async fn temporal_schema_refuses_future_version_without_mutation() {
     let restart_path = tmp.path().join(".tracedecay").join("future.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
     assert!(
-        GlobalDb::try_open_at(&restart_path).await.is_err(),
+        open_global_db(&restart_path).await.is_err(),
         "a newer temporal schema must be refused instead of treated as current"
     );
     assert_eq!(temporal_schema_version(&restart_path).await, future_version);
@@ -326,14 +319,13 @@ async fn temporal_schema_refuses_future_version_without_mutation() {
 async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     for (sql, index) in [
         (
             "SELECT occurrence_id
@@ -458,14 +450,13 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
 
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     for (table, index, expected_columns, root_prefix) in [
         (
             "session_occurrences",
@@ -734,14 +725,13 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
 async fn temporal_schema_drops_redundant_receipt_and_progress_indexes() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_session_refresh_progress_operation
              ON session_refresh_progress(session_id, operation_id, progress_ordinal);
@@ -753,13 +743,13 @@ async fn temporal_schema_drops_redundant_receipt_and_progress_indexes() {
     drop(conn);
     drop(raw_db);
 
-    let reopened = GlobalDb::try_open_at(&db_path)
+    let reopened = open_global_db(&db_path)
         .await
         .expect("current-version temporal schema should reopen");
     drop(reopened);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     for index in [
         "idx_session_refresh_progress_operation",
         "idx_session_temporal_projection_receipts_digest",
@@ -767,7 +757,7 @@ async fn temporal_schema_drops_redundant_receipt_and_progress_indexes() {
         let mut rows = conn
             .query(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
-                libsql::params![index],
+                params![index],
             )
             .await
             .unwrap();
@@ -784,8 +774,8 @@ async fn temporal_schema_rejects_malformed_fts_atomically() {
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch(
         "CREATE TABLE session_occurrences_fts (
             index_text TEXT NOT NULL,
@@ -798,7 +788,7 @@ async fn temporal_schema_rejects_malformed_fts_atomically() {
     drop(raw_db);
 
     assert!(
-        GlobalDb::try_open_at(&db_path).await.is_err(),
+        open_global_db(&db_path).await.is_err(),
         "matching columns on an ordinary table must not impersonate the temporal FTS contract"
     );
     assert!(
@@ -815,14 +805,13 @@ async fn temporal_schema_rejects_malformed_fts_atomically() {
 async fn temporal_schema_rebuilds_existing_rows_into_exact_fts_contracts() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch(
         "DROP TRIGGER session_summary_nodes_fts_insert_v1;
          DROP TRIGGER session_summary_nodes_fts_delete_v1;
@@ -844,19 +833,18 @@ async fn temporal_schema_rebuilds_existing_rows_into_exact_fts_contracts() {
     drop(conn);
     drop(raw_db);
 
-    let reopened = GlobalDb::try_open_at(&db_path)
+    let reopened = open_global_db(&db_path)
         .await
-        .expect("missing temporal FTS objects should be rebuilt")
-        .expect("global database should reopen");
+        .expect("missing temporal FTS objects should be rebuilt");
     drop(reopened);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     for (table, expected_content) in [("session_summary_nodes_fts", "session_summary_nodes")] {
         let mut rows = conn
             .query(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                libsql::params![table],
+                params![table],
             )
             .await
             .unwrap();

@@ -1,7 +1,6 @@
 use super::projector::*;
 use super::registry::*;
 use super::wake::*;
-use super::worker::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::PoisonError;
@@ -29,7 +28,6 @@ use tracedecay_store::{
 };
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::db::engine::QueryExecutor as _;
 use crate::global_db::RegisteredGlobalDb;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 

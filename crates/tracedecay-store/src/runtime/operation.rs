@@ -1,12 +1,14 @@
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{ObservationScopeV1, UtcMicros};
 
 use crate::{
-    ConfigurationCommitV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationWrite,
-    SanitizedCleanDiagnosticSnapshotV1, SessionSummaryPublicationRequestV1,
-    SessionTemporalProjectionBatchV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    AnchoredObservationWrite, ConfigurationCommitV1, EvidenceAssemblyWriteV1, FactWriteBatch,
+    GitIndexTransactionRecordV1, ObservationCursorAdvance, RetrievalAnchorDerivativeV1,
+    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
+    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 use super::identity::validate_canonical_id;
@@ -798,8 +800,12 @@ impl StoreOperationMetadataV1 {
 pub enum RepositoryWritePayloadV1 {
     Configuration(Box<ConfigurationCommitV1>),
     Fact(Box<FactWriteBatch>),
-    Observation(Box<ObservationWrite>),
+    Observation(Box<AnchoredObservationWrite>),
+    ObservationCursorAdvance(Box<ObservationCursorAdvance>),
     Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
+    EvidenceAssembly(Box<EvidenceAssemblyWriteV1>),
+    RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
+    RetrievalAnchorDerivative(Box<RetrievalAnchorDerivativeV1>),
     SessionProjection(Box<SessionTemporalProjectionBatchV1>),
     SessionSummary(Box<SessionSummaryPublicationRequestV1>),
     GitIndexTransaction(Box<GitIndexTransactionRecordV1>),
@@ -814,7 +820,11 @@ impl RepositoryWritePayloadV1 {
             Self::Configuration(_) => "commit configuration",
             Self::Fact(_) => "commit fact lineage",
             Self::Observation(_) => "commit observation",
+            Self::ObservationCursorAdvance(_) => "advance observation source cursor",
             Self::Diagnostics(_) => "publish diagnostics",
+            Self::EvidenceAssembly(_) => "publish evidence assembly",
+            Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
+            Self::RetrievalAnchorDerivative(_) => "publish retrieval anchor derivative",
             Self::SessionProjection(_) => "persist temporal projection",
             Self::SessionSummary(_) => "publish summary",
             Self::GitIndexTransaction(_) => "record git index transaction",
@@ -831,7 +841,12 @@ impl RepositoryWritePayloadV1 {
     fn family_name(&self) -> &'static str {
         match self {
             Self::Configuration(_) => "profile",
-            Self::Fact(_) | Self::Observation(_) | Self::Diagnostics(_) => "project",
+            Self::Observation(_) | Self::ObservationCursorAdvance(_) => "observation",
+            Self::Fact(_)
+            | Self::Diagnostics(_)
+            | Self::EvidenceAssembly(_)
+            | Self::RetrievalAnchorDisposition(_)
+            | Self::RetrievalAnchorDerivative(_) => "project",
             Self::SessionProjection(_) | Self::SessionSummary(_) => "sessions",
             Self::GitIndexTransaction(_) => "code",
             Self::EnqueueOutbox(_) | Self::ApplyInbox(_) | Self::AcknowledgeOutbox(_) => "effects",
@@ -841,16 +856,43 @@ impl RepositoryWritePayloadV1 {
     fn matches_scope(&self, scope: &StoreShardScopeV1) -> bool {
         match self {
             Self::Configuration(_) => matches!(scope, StoreShardScopeV1::Profile),
-            Self::Fact(_) | Self::Observation(_) | Self::Diagnostics(_) => {
+            Self::Observation(write) => {
+                observation_scope_matches(write.observation().scope(), scope)
+            }
+            Self::ObservationCursorAdvance(advance) => {
+                observation_scope_matches(advance.next_cursor().scope(), scope)
+            }
+            Self::Fact(_) => {
+                matches!(
+                    scope,
+                    StoreShardScopeV1::ProfileMemory | StoreShardScopeV1::Project { .. }
+                )
+            }
+            Self::Diagnostics(_) => {
                 matches!(scope, StoreShardScopeV1::Project { .. })
             }
+            Self::EvidenceAssembly(_) => matches!(
+                scope,
+                StoreShardScopeV1::Project { .. }
+                    | StoreShardScopeV1::ProjectSessions { .. }
+                    | StoreShardScopeV1::ProfileSessions
+            ),
+            Self::RetrievalAnchorDisposition(_) | Self::RetrievalAnchorDerivative(_) => matches!(
+                scope,
+                StoreShardScopeV1::Project { .. }
+                    | StoreShardScopeV1::ProjectSessions { .. }
+                    | StoreShardScopeV1::ProfileSessions
+            ),
             Self::SessionProjection(_) | Self::SessionSummary(_) => {
-                matches!(scope, StoreShardScopeV1::ProjectSessions { .. })
+                matches!(
+                    scope,
+                    StoreShardScopeV1::ProfileSessions | StoreShardScopeV1::ProjectSessions { .. }
+                )
             }
             Self::GitIndexTransaction(_) => matches!(
                 scope,
                 StoreShardScopeV1::Code {
-                    scope: CodeShardScopeV1::Worktree { .. },
+                    scope: CodeShardScopeV1::Worktree { .. } | CodeShardScopeV1::Branch { .. },
                     ..
                 }
             ),
@@ -875,12 +917,46 @@ impl RepositoryWritePayloadV1 {
             Self::EnqueueOutbox(entry) => entry.validate(),
             Self::ApplyInbox(entry) => entry.validate(),
             Self::AcknowledgeOutbox(inbox) => inbox.validate(),
+            Self::RetrievalAnchorDisposition(record) => record.validate().map_err(|_| {
+                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                }
+            }),
+            Self::RetrievalAnchorDerivative(derivative) => derivative.validate().map_err(|_| {
+                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                }
+            }),
+            Self::EvidenceAssembly(write) => write.validate().map_err(|_| {
+                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                }
+            }),
             Self::Fact(_)
             | Self::Observation(_)
+            | Self::ObservationCursorAdvance(_)
             | Self::Diagnostics(_)
             | Self::SessionProjection(_)
             | Self::SessionSummary(_) => Ok(()),
         }
+    }
+}
+
+fn observation_scope_matches(
+    observation_scope: &ObservationScopeV1,
+    shard_scope: &StoreShardScopeV1,
+) -> bool {
+    match (observation_scope, shard_scope) {
+        (ObservationScopeV1::Profile, StoreShardScopeV1::ProfileSessions) => true,
+        (
+            ObservationScopeV1::Project {
+                project_id: observation_project_id,
+            },
+            StoreShardScopeV1::ProjectSessions {
+                project_id: shard_project_id,
+            },
+        ) => observation_project_id == shard_project_id,
+        _ => false,
     }
 }
 
@@ -905,10 +981,46 @@ impl RepositoryOperationEnvelopeV1 {
                 operation: self.payload.family_name(),
                 shard_family: match self.metadata.shard_id.scope {
                     StoreShardScopeV1::Profile => "profile",
+                    StoreShardScopeV1::ProfileMemory => "profile_memory",
+                    StoreShardScopeV1::ProfileSessions => "profile_sessions",
                     StoreShardScopeV1::Project { .. } => "project",
                     StoreShardScopeV1::ProjectSessions { .. } => "sessions",
                     StoreShardScopeV1::Code { .. } => "code",
                 },
+            });
+        }
+        if let RepositoryWritePayloadV1::Fact(batch) = &self.payload
+            && !fact_owner_matches_shard(batch.owner(), &self.metadata.shard_id)
+        {
+            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                operation: self.payload.family_name(),
+                shard_family: "memory",
+            });
+        }
+        if let RepositoryWritePayloadV1::EvidenceAssembly(write) = &self.payload {
+            let exact_owner = write.owner.owner.profile_id() == &self.metadata.shard_id.profile_id
+                && write.owner.owner.project_id() == self.metadata.shard_id.scope.project_id();
+            if !exact_owner {
+                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                    operation: self.payload.family_name(),
+                    shard_family: "project",
+                });
+            }
+        }
+        if let RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) = &self.payload
+            && !retrieval_anchor_owner_matches_shard(record.owner(), &self.metadata.shard_id)
+        {
+            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                operation: self.payload.family_name(),
+                shard_family: "project",
+            });
+        }
+        if let RepositoryWritePayloadV1::RetrievalAnchorDerivative(derivative) = &self.payload
+            && !retrieval_anchor_owner_matches_shard(derivative.owner(), &self.metadata.shard_id)
+        {
+            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                operation: self.payload.family_name(),
+                shard_family: "project",
             });
         }
         let required = self.payload.required_durability();
@@ -920,6 +1032,41 @@ impl RepositoryOperationEnvelopeV1 {
             });
         }
         Ok(())
+    }
+}
+
+fn fact_owner_matches_shard(
+    owner: &tracedecay_domain::FactOwnerV1,
+    shard_id: &StoreShardIdV1,
+) -> bool {
+    match owner {
+        tracedecay_domain::FactOwnerV1::Profile => {
+            matches!(&shard_id.scope, StoreShardScopeV1::ProfileMemory)
+        }
+        tracedecay_domain::FactOwnerV1::Project { project_id } => matches!(
+            &shard_id.scope,
+            StoreShardScopeV1::Project {
+                project_id: shard_project_id,
+            } if shard_project_id == project_id
+        ),
+    }
+}
+
+fn retrieval_anchor_owner_matches_shard(
+    owner: &crate::RetrievalAnchorOwnerV1,
+    shard_id: &StoreShardIdV1,
+) -> bool {
+    match owner {
+        crate::RetrievalAnchorOwnerV1::V3(owner) => {
+            owner.profile_id() == &shard_id.profile_id
+                && owner.project_id() == shard_id.scope.project_id()
+        }
+        crate::RetrievalAnchorOwnerV1::V2(tracedecay_domain::FactOwnerV1::Project {
+            project_id,
+        }) => shard_id.scope.project_id() == Some(project_id),
+        crate::RetrievalAnchorOwnerV1::V2(tracedecay_domain::FactOwnerV1::Profile) => {
+            matches!(&shard_id.scope, StoreShardScopeV1::ProfileSessions)
+        }
     }
 }
 
@@ -1054,5 +1201,119 @@ impl<'de> Deserialize<'de> for StoreCommitReceiptV1 {
 impl fmt::Display for CommandDigestV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{BrainId, FactOwnerV1, ProjectId, UserProfileId};
+
+    use super::{
+        ObservationScopeV1, StoreShardIdV1, StoreShardScopeV1, fact_owner_matches_shard,
+        observation_scope_matches, retrieval_anchor_owner_matches_shard,
+    };
+
+    #[test]
+    fn observation_scope_requires_the_exact_authoritative_shard() {
+        let project_id = ProjectId::new("project.fixture").unwrap();
+        let other_project_id = ProjectId::new("project.other").unwrap();
+        let project = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+
+        assert!(observation_scope_matches(
+            &ObservationScopeV1::Profile,
+            &StoreShardScopeV1::ProfileSessions
+        ));
+        assert!(!observation_scope_matches(
+            &ObservationScopeV1::Profile,
+            &StoreShardScopeV1::Profile
+        ));
+        assert!(observation_scope_matches(
+            &project,
+            &StoreShardScopeV1::ProjectSessions {
+                project_id: project_id.clone(),
+            }
+        ));
+        assert!(!observation_scope_matches(
+            &project,
+            &StoreShardScopeV1::ProjectSessions {
+                project_id: other_project_id,
+            }
+        ));
+        assert!(!observation_scope_matches(
+            &project,
+            &StoreShardScopeV1::Project {
+                project_id: project_id.clone(),
+            }
+        ));
+        assert!(!observation_scope_matches(
+            &project,
+            &StoreShardScopeV1::Profile
+        ));
+        assert!(!observation_scope_matches(
+            &ObservationScopeV1::Profile,
+            &StoreShardScopeV1::ProjectSessions { project_id }
+        ));
+    }
+
+    #[test]
+    fn profile_retrieval_anchor_requires_the_injected_profile_sessions_shard() {
+        let profile_id = UserProfileId::new("profile.fixture").unwrap();
+        let shard = StoreShardIdV1::profile_sessions(
+            BrainId::new("brain.fixture").unwrap(),
+            profile_id.clone(),
+        );
+        assert!(retrieval_anchor_owner_matches_shard(
+            &FactOwnerV1::Profile.into(),
+            &shard
+        ));
+
+        let project_shard = StoreShardIdV1::project(
+            BrainId::new("brain.fixture").unwrap(),
+            profile_id,
+            ProjectId::new("project.fixture").unwrap(),
+        );
+        assert!(!retrieval_anchor_owner_matches_shard(
+            &FactOwnerV1::Profile.into(),
+            &project_shard
+        ));
+
+        let project_id = ProjectId::new("project.fixture").unwrap();
+        let project_sessions_shard = StoreShardIdV1::project_sessions(
+            BrainId::new("brain.fixture").unwrap(),
+            UserProfileId::new("profile.fixture").unwrap(),
+            project_id.clone(),
+        );
+        assert!(retrieval_anchor_owner_matches_shard(
+            &FactOwnerV1::Project { project_id }.into(),
+            &project_sessions_shard
+        ));
+    }
+
+    #[test]
+    fn profile_facts_require_the_dedicated_profile_memory_shard() {
+        let profile_memory = StoreShardIdV1::profile_memory(
+            BrainId::new("brain.fixture").unwrap(),
+            UserProfileId::new("profile.fixture").unwrap(),
+        );
+        let profile = StoreShardIdV1::profile(
+            BrainId::new("brain.fixture").unwrap(),
+            UserProfileId::new("profile.fixture").unwrap(),
+        );
+        let profile_sessions = StoreShardIdV1::profile_sessions(
+            BrainId::new("brain.fixture").unwrap(),
+            UserProfileId::new("profile.fixture").unwrap(),
+        );
+
+        assert!(fact_owner_matches_shard(
+            &FactOwnerV1::Profile,
+            &profile_memory,
+        ));
+        assert!(!fact_owner_matches_shard(&FactOwnerV1::Profile, &profile));
+        assert!(!fact_owner_matches_shard(
+            &FactOwnerV1::Profile,
+            &profile_sessions,
+        ));
     }
 }

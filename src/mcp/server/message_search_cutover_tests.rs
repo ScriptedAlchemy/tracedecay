@@ -3,30 +3,27 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
-    MessageOccurrenceIdV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId,
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationStore, ObservationWrite,
+    AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use super::{MESSAGE_SEARCH_ROOT_SESSION_ID, McpServer, McpServerConstructionContext};
+use super::{MESSAGE_SEARCH_ROOT_SESSION_ID, McpServer};
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::config::PinnedUserDataDir;
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
-use crate::global_db::GlobalDb;
 use crate::mcp::transport::JsonRpcRequest;
 use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::store::GlobalDbObservationStore;
 use crate::tracedecay::TraceDecay;
 
 fn git(root: &std::path::Path, args: &[&str]) {
@@ -57,58 +54,38 @@ async fn indexed_project() -> (TraceDecay, TempDir, PinnedUserDataDir) {
     (cg, dir, pin)
 }
 
-async fn server_with_authorities() -> (
-    Arc<McpServer>,
-    TempDir,
-    PinnedUserDataDir,
-    Arc<GlobalDb>,
-    Arc<GlobalDb>,
-) {
+async fn server_with_authorities() -> (Arc<McpServer>, TempDir, PinnedUserDataDir) {
     server_with_project_refresh_wake(None).await
 }
 
 async fn server_with_project_refresh_wake(
     project_refresh_wake: Option<SessionTemporalRefreshWake>,
-) -> (
-    Arc<McpServer>,
-    TempDir,
-    PinnedUserDataDir,
-    Arc<GlobalDb>,
-    Arc<GlobalDb>,
-) {
+) -> (Arc<McpServer>, TempDir, PinnedUserDataDir) {
     let (cg, dir, pin) = indexed_project().await;
-    let registry = Arc::new(GlobalDb::open().await.expect("registry"));
-    let project = Arc::new(
-        GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .expect("project sessions"),
-    );
-    let profile_root = registry
-        .db_path()
-        .parent()
-        .expect("profile root")
-        .to_path_buf();
-    let profile = Arc::new(
-        GlobalDb::open_at(&crate::sessions::user_sessions_db_path(&profile_root))
-            .await
-            .expect("profile sessions"),
-    );
-    let mut context = McpServerConstructionContext::direct(cg, None).with_direct_databases(
-        None,
-        Some(registry),
-        Some(Arc::clone(&project)),
-        Some(Arc::clone(&profile)),
-        false,
-    );
-    context.profile_root = Some(profile_root);
+    let runtime = registered_runtime(&cg).await;
+    let mut context = runtime
+        .into_mcp_server_context_for_test(cg, None)
+        .expect("registered MCP server context");
     context.project_session_refresh_wake = project_refresh_wake;
-    (
-        McpServer::new_with_context(context).await,
-        dir,
-        pin,
-        project,
-        profile,
+    (McpServer::new_with_context(context).await, dir, pin)
+}
+
+async fn registered_runtime(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
+    let project_id = ProjectId::new(
+        cg.store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .expect("project identity"),
     )
+    .expect("typed project identity");
+    HostAdmissionTestRuntimeV1::project(
+        crate::config::user_data_dir().expect("isolated profile root"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .expect("registered message-search runtime")
 }
 
 async fn message_search(server: &McpServer, arguments: Value) -> Value {
@@ -131,10 +108,6 @@ async fn message_search(server: &McpServer, arguments: Value) -> Value {
         .filter_map(|item| item["text"].as_str())
         .find_map(|text| serde_json::from_str(text).ok())
         .unwrap_or_else(|| panic!("message-search JSON content: {result}"))
-}
-
-fn fixture_hash(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 #[test]
@@ -187,6 +160,33 @@ fn temporal_lcm_adapters_use_the_shared_cursor_codec() {
     assert!(
         temporal_executor.contains("verify_cursor("),
         "LCM source continuation must verify with the canonical cursor codec"
+    );
+}
+
+#[test]
+fn temporal_lcm_rendering_never_performs_a_second_payload_read() {
+    let temporal_executor = include_str!("../../global_db/session_temporal/mod.rs");
+    let legacy_renderer = include_str!("../../global_db/session_temporal/lcm_render.rs");
+    let registered_renderer =
+        include_str!("../../global_db/session_temporal/registered_lcm_render.rs");
+
+    for forbidden in [
+        ".lcm_describe(",
+        ".lcm_expand(",
+        "hydrate_authorized_anchor_bytes",
+        "payload::expand_payload(",
+        "tombstoned_raw_ref_exists",
+    ] {
+        for renderer in [legacy_renderer, registered_renderer] {
+            assert!(
+                !renderer.contains(forbidden),
+                "LCM renderer must not perform legacy payload lookup `{forbidden}`"
+            );
+        }
+    }
+    assert!(
+        !temporal_executor.contains("canonicalize_lcm_summary_sources"),
+        "summary-source rendering must not start a second hydration path"
     );
 }
 
@@ -255,10 +255,12 @@ fn fixture_observation(
 }
 
 async fn persist_fixture_observation(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
+    scope: HostAdmissionScope,
     observation: DurableObservationV1,
 ) -> tracedecay_domain::RetrievalAnchorRecord {
     let identity = observation.identity();
+    let observation_id = observation.observation_id().clone();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
@@ -282,19 +284,27 @@ async fn persist_fixture_observation(
         authorization,
     )
     .expect("anchor");
-    GlobalDbObservationStore::new(db)
+    let store = runtime
+        .observation_store(scope)
+        .expect("registered observation store");
+    store
         .persist_observation(
             AnchoredObservationWrite::new(write, anchor.clone(), projection)
                 .expect("anchored write"),
         )
         .await
         .expect("persist observation");
+    store
+        .project_observation(&observation_id)
+        .await
+        .expect("project observation");
     anchor
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn seed_temporal_message(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
+    authority_scope: HostAdmissionScope,
     project_key: &str,
     scope: ObservationScopeV1,
     ordinal: u64,
@@ -305,8 +315,12 @@ async fn seed_temporal_message(
 ) {
     let observation =
         fixture_observation(scope, ordinal, session_id, provider, message_id, content);
-    let observation_id = observation.observation_id().clone();
-    let anchor = Box::pin(persist_fixture_observation(db, observation)).await;
+    Box::pin(persist_fixture_observation(
+        runtime,
+        authority_scope,
+        observation,
+    ))
+    .await;
     let legacy_projection_content = format!("legacy projection poison {ordinal}");
     let session = SessionRecord {
         provider: provider.to_string(),
@@ -338,135 +352,35 @@ async fn seed_temporal_message(
         source_offset: None,
         metadata_json: None,
     };
-    assert!(db.upsert_session(&session).await);
-    assert!(db.upsert_session_message(&message).await);
-
-    let writer = db.writer_connection().await.expect("writer connection");
-    if ordinal == 1 {
-        writer
-            .execute(
-                "INSERT INTO session_query_cursor_keys (
-                    key_id, key_version, key_material, created_at, retired_at
-                 ) VALUES ('message-search-key', 1, ?1, 1, NULL)",
-                [vec![0x45_u8; 32]],
+    assert!(
+        !runtime
+            .upsert_transcript_batch_for_test(
+                authority_scope,
+                &session,
+                std::slice::from_ref(&message),
+                &format!(
+                    "message-search-cutover-test:{}:{}",
+                    message.provider, message.message_id
+                ),
+                crate::global_db::ParseOffset::default(),
             )
             .await
-            .expect("cursor key");
-    }
-    let frozen = json!({
-        "active_generation": 1,
-        "cursor_key": {"key_id": "message-search-key", "version": 1},
-        "projection_frontier": 0,
-        "source_frontier": 0,
-        "summary_frontier": 0
-    })
-    .to_string();
-    writer
-        .execute(
-            "INSERT INTO session_temporal_generations (
-                session_id, generation, state, frozen_watermarks_json, created_at
-             ) VALUES (?1, 1, 'building', ?2, 1)",
-            libsql::params![session_id, frozen],
+            .expect("registered transcript seed")
+            .is_empty()
+    );
+    runtime
+        .session_temporal_store_for_test(authority_scope)
+        .expect("registered temporal store")
+        .materialize_pending_session_refresh_for_test(
+            &SessionId::new(session_id).expect("session id"),
         )
         .await
-        .expect("building generation");
-    writer
-        .execute(
-            "UPDATE session_temporal_generations
-             SET state = 'ready', ready_at = 1
-             WHERE session_id = ?1 AND generation = 1",
-            [session_id],
-        )
-        .await
-        .expect("ready generation");
-    writer
-        .execute(
-            "UPDATE session_temporal_generations
-             SET state = 'active', activated_at = 1
-             WHERE session_id = ?1 AND generation = 1",
-            [session_id],
-        )
-        .await
-        .expect("active generation");
-    writer
-        .execute(
-            "INSERT OR IGNORE INTO lcm_raw_messages (
-                provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref,
-                snippet_text, index_text, legacy_source, legacy_truncated
-             ) VALUES (
-                ?1, ?2, ?3, 'assistant', ?4, ?4,
-                ?5, ?6, 'inline', NULL, ?5, ?5, 0, 0
-             )",
-            libsql::params![
-                provider,
-                message_id,
-                session_id,
-                ordinal as i64,
-                legacy_projection_content.clone(),
-                fixture_hash(legacy_projection_content.as_bytes())
-            ],
-        )
-        .await
-        .expect("raw message");
-    let occurrence_id =
-        MessageOccurrenceIdV1::derive(&observation_id, ProjectionOutputOrdinalV1::new(0));
-    writer
-        .execute(
-            "INSERT INTO session_occurrences (
-                session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, message_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                snippet_text, index_text
-             ) VALUES (
-                ?1, 1, ?2, ?3, 0, ?4, ?5,
-                'assistant', ?6, ?7, ?8, ?9, ?9
-             )",
-            libsql::params![
-                session_id,
-                occurrence_id.as_str(),
-                observation_id.as_str(),
-                anchor.anchor_id().as_str(),
-                message_id,
-                ordinal as i64,
-                json!({"kind": "known", "valid_at": ordinal as i64}).to_string(),
-                json!({
-                    "authority": "provider_native",
-                    "evidence_class": "provider_declared",
-                    "source_anchor_id": anchor.anchor_id(),
-                    "sanitization_receipt": {
-                        "receipt_id": format!("receipt-{ordinal}"),
-                        "sanitizer_version": "sanitizer.message-search-test.v1"
-                    }
-                })
-                .to_string(),
-                content
-            ],
-        )
-        .await
-        .expect("occurrence");
-    writer
-        .execute(
-            "INSERT INTO session_current_entities (
-                session_id, generation, entity_kind, entity_id,
-                current_assertion_id, current_occurrence_id, coverage_json
-             ) VALUES (
-                ?1, 1, 'occurrence_anchor', ?2, NULL, ?3,
-                '{\"occurrence_count\":1}'
-             )",
-            libsql::params![
-                session_id,
-                anchor.anchor_id().as_str(),
-                occurrence_id.as_str()
-            ],
-        )
-        .await
-        .expect("current entity");
+        .expect("materialize canonical temporal projection");
 }
 
 #[tokio::test]
 async fn retained_project_and_profile_handles_construct_retrieval_services() {
-    let (server, _dir, _pin, _project, _profile) = server_with_authorities().await;
+    let (server, _dir, _pin) = server_with_authorities().await;
     assert!(server.project_session_retrieval_service.is_some());
     assert!(server.user_session_retrieval_service.is_some());
     server.shutdown().await;
@@ -474,7 +388,7 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
 
 #[tokio::test]
 async fn unavailable_project_worker_rejects_before_expensive_reads() {
-    let (server, dir, _pin, _project, _profile) =
+    let (server, dir, _pin) =
         server_with_project_refresh_wake(Some(SessionTemporalRefreshWake::unavailable())).await;
 
     let payload = tokio::time::timeout(
@@ -525,7 +439,7 @@ async fn fresh_direct_root_reuses_configuration_session_storage() {
 
 #[tokio::test]
 async fn transport_selects_one_service_and_all_registered_never_invokes() {
-    let (server, _dir, _pin, _project, _profile) = server_with_authorities().await;
+    let (server, _dir, _pin) = server_with_authorities().await;
 
     let deferred = message_search(
         &server,
@@ -609,22 +523,36 @@ async fn transport_selects_one_service_and_all_registered_never_invokes() {
 
 #[tokio::test]
 async fn transport_executes_nonempty_project_and_profile_queries_read_only_across_restart() {
-    let (server, dir, _pin, project_db, profile_db) = server_with_authorities().await;
+    let (server, dir, _pin) = server_with_authorities().await;
     assert!(
         server
             .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
             .await
     );
-    let project_key = GlobalDb::canonical_project_key(dir.path());
+    let runtime = server
+        .host_admission_test_runtime_for_test()
+        .expect("retained host-admission test runtime");
+    let project_key = HostAdmissionTestRuntimeV1::canonical_project_key(dir.path());
     let project_scope = ObservationScopeV1::Project {
         project_id: ProjectId::new(project_key.clone()).expect("project id"),
     };
-    for (database, suffix, project_key, scope) in [
-        (&project_db, "project", project_key.as_str(), project_scope),
-        (&profile_db, "profile", "user", ObservationScopeV1::Profile),
+    for (authority_scope, suffix, project_key, scope) in [
+        (
+            HostAdmissionScope::Project,
+            "project",
+            project_key.as_str(),
+            project_scope,
+        ),
+        (
+            HostAdmissionScope::Profile,
+            "profile",
+            "user",
+            ObservationScopeV1::Profile,
+        ),
     ] {
         Box::pin(seed_temporal_message(
-            database,
+            runtime,
+            authority_scope,
             project_key,
             scope.clone(),
             1,
@@ -635,7 +563,8 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         ))
         .await;
         Box::pin(seed_temporal_message(
-            database,
+            runtime,
+            authority_scope,
             project_key,
             scope,
             2,
@@ -645,10 +574,19 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
             &format!("orchard evidence {suffix} two"),
         ))
         .await;
-        database.checkpoint().await;
+        runtime
+            .checkpoint_session_database_for_test(authority_scope)
+            .await
+            .expect("checkpoint seeded session authority");
     }
-    let project_before = Sha256::digest(std::fs::read(project_db.db_path()).expect("project db"));
-    let profile_before = Sha256::digest(std::fs::read(profile_db.db_path()).expect("profile db"));
+    let project_before = runtime
+        .session_database_sha256_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("project session digest");
+    let profile_before = runtime
+        .session_database_sha256_for_test(HostAdmissionScope::Profile)
+        .await
+        .expect("profile session digest");
 
     let first = message_search(
         &server,
@@ -751,55 +689,44 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     assert_eq!(profile["count"], 2);
 
     server.shutdown().await;
-    drop(server);
-    project_db.checkpoint().await;
-    profile_db.checkpoint().await;
     assert_eq!(
-        Sha256::digest(std::fs::read(project_db.db_path()).expect("project db")),
+        runtime
+            .session_database_sha256_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("project session digest after reads"),
         project_before
     );
     assert_eq!(
-        Sha256::digest(std::fs::read(profile_db.db_path()).expect("profile db")),
+        runtime
+            .session_database_sha256_for_test(HostAdmissionScope::Profile)
+            .await
+            .expect("profile session digest after reads"),
         profile_before
     );
+    drop(server);
 
     let cg = TraceDecay::open(dir.path()).await.expect("reopen project");
-    let registry = Arc::new(GlobalDb::open().await.expect("reopen registry"));
-    let project = Arc::new(
-        GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .expect("reopen project sessions"),
-    );
-    let profile_root = registry
-        .db_path()
-        .parent()
-        .expect("profile root")
-        .to_path_buf();
-    let profile = Arc::new(
-        GlobalDb::open_at(&crate::sessions::user_sessions_db_path(&profile_root))
-            .await
-            .expect("reopen profile sessions"),
-    );
-    let mut context = McpServerConstructionContext::direct(cg, None).with_direct_databases(
-        None,
-        Some(registry),
-        Some(Arc::clone(&project)),
-        Some(Arc::clone(&profile)),
-        false,
-    );
-    context.profile_root = Some(profile_root);
+    let runtime = registered_runtime(&cg).await;
+    let context = runtime
+        .into_mcp_server_context_for_test(cg, None)
+        .expect("restarted registered MCP context");
     let restarted = McpServer::new_with_context(context).await;
     assert!(
         restarted
             .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
             .await
     );
-    project.checkpoint().await;
-    profile.checkpoint().await;
-    let restarted_project_before =
-        Sha256::digest(std::fs::read(project.db_path()).expect("restarted project db"));
-    let restarted_profile_before =
-        Sha256::digest(std::fs::read(profile.db_path()).expect("restarted profile db"));
+    let runtime = restarted
+        .host_admission_test_runtime_for_test()
+        .expect("restarted retained host-admission runtime");
+    let restarted_project_before = runtime
+        .session_database_sha256_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("restarted project session digest");
+    let restarted_profile_before = runtime
+        .session_database_sha256_for_test(HostAdmissionScope::Profile)
+        .await
+        .expect("restarted profile session digest");
     let resumed = message_search(
         &restarted,
         json!({
@@ -814,14 +741,18 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     assert_eq!(resumed["outcome"], "complete", "{resumed}");
     assert_eq!(resumed["count"], 1);
     restarted.shutdown().await;
-    project.checkpoint().await;
-    profile.checkpoint().await;
     assert_eq!(
-        Sha256::digest(std::fs::read(project.db_path()).expect("restarted project db")),
+        runtime
+            .session_database_sha256_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("restarted project digest after reads"),
         restarted_project_before
     );
     assert_eq!(
-        Sha256::digest(std::fs::read(profile.db_path()).expect("restarted profile db")),
+        runtime
+            .session_database_sha256_for_test(HostAdmissionScope::Profile)
+            .await
+            .expect("restarted profile digest after reads"),
         restarted_profile_before
     );
 }

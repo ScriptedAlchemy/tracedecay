@@ -13,7 +13,7 @@ pub(super) fn encode_audit_payload(
 const CONFIGURATION_AUDIT_REDACTION_KEY_BYTES: usize = 32;
 
 async fn read_audit_redaction_key(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
 ) -> ConfigurationStoreResult<Option<Zeroizing<Vec<u8>>>> {
     let mut rows = transaction
         .query(
@@ -39,7 +39,7 @@ async fn read_audit_redaction_key(
 }
 
 async fn ensure_audit_redaction_key(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     created_at: UtcMicros,
 ) -> ConfigurationStoreResult<Zeroizing<Vec<u8>>> {
     if let Some(material) = read_audit_redaction_key(transaction).await? {
@@ -81,7 +81,7 @@ pub(super) fn audit_target_commitment(
 }
 
 pub(super) async fn seal_audit_target<T: Serialize>(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     event_id: &ConfigurationAuditEventId,
     target: &T,
     created_at: UtcMicros,
@@ -97,7 +97,7 @@ pub(super) async fn seal_audit_target<T: Serialize>(
 }
 
 pub(super) async fn validate_sealed_audit_target(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     event: &ConfigurationAuditEvent,
     sealed_target_reference: Option<&[u8]>,
 ) -> ConfigurationStoreResult<()> {

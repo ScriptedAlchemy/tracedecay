@@ -3,13 +3,11 @@ use super::*;
 #[tokio::test]
 async fn recent_sessions_orders_by_last_activity_with_provider_filter() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let db_path = isolated_db_path(&tmp);
+    let db = registered_lcm_runtime(&tmp).await;
     // raw_message assigns timestamp = base + ordinal, so the session with
     // more messages has the most recent activity.
     insert_raw_messages(
         &db,
-        &db_path,
         "cursor",
         "session-older",
         &["first turn".to_string(), "second turn".to_string()],
@@ -17,7 +15,6 @@ async fn recent_sessions_orders_by_last_activity_with_provider_filter() {
     .await;
     insert_raw_messages(
         &db,
-        &db_path,
         "codex",
         "session-newer",
         &[
@@ -29,7 +26,7 @@ async fn recent_sessions_orders_by_last_activity_with_provider_filter() {
     .await;
 
     let sessions = db
-        .lcm_recent_sessions(None, 10)
+        .lcm_recent_sessions_for_test(None, 10)
         .await
         .expect("recent sessions should load");
     assert_eq!(
@@ -45,7 +42,7 @@ async fn recent_sessions_orders_by_last_activity_with_provider_filter() {
     assert_eq!(sessions[1].message_count, 2);
 
     let cursor_only = db
-        .lcm_recent_sessions(Some("cursor"), 10)
+        .lcm_recent_sessions_for_test(Some("cursor"), 10)
         .await
         .expect("provider-filtered recent sessions should load");
     assert_eq!(cursor_only.len(), 1);
@@ -55,12 +52,10 @@ async fn recent_sessions_orders_by_last_activity_with_provider_filter() {
 #[tokio::test]
 async fn recent_sessions_uses_store_order_for_null_timestamp_activity() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let db_path = isolated_db_path(&tmp);
+    let db = registered_lcm_runtime(&tmp).await;
 
     insert_raw_messages(
         &db,
-        &db_path,
         "cursor",
         "timestamped-session",
         &["has an epoch timestamp".to_string()],
@@ -87,7 +82,7 @@ async fn recent_sessions_uses_store_order_for_null_timestamp_activity() {
     );
 
     let sessions = db
-        .lcm_recent_sessions(None, 1)
+        .lcm_recent_sessions_for_test(None, 1)
         .await
         .expect("recent sessions should load");
     assert_eq!(sessions.len(), 1);
@@ -98,11 +93,9 @@ async fn recent_sessions_uses_store_order_for_null_timestamp_activity() {
 #[tokio::test]
 async fn session_providers_finds_explicit_session_beyond_recent_limit() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let db_path = isolated_db_path(&tmp);
+    let db = registered_lcm_runtime(&tmp).await;
     insert_raw_messages(
         &db,
-        &db_path,
         "codex",
         "explicit-session",
         &["older explicit turn".to_string()],
@@ -111,7 +104,6 @@ async fn session_providers_finds_explicit_session_beyond_recent_limit() {
     for idx in 0..105 {
         insert_raw_messages(
             &db,
-            &db_path,
             "cursor",
             &format!("newer-session-{idx:03}"),
             &["newer turn".to_string()],
@@ -120,7 +112,7 @@ async fn session_providers_finds_explicit_session_beyond_recent_limit() {
     }
 
     let recent = db
-        .lcm_recent_sessions(None, 100)
+        .lcm_recent_sessions_for_test(None, 100)
         .await
         .expect("recent sessions should load");
     assert!(
@@ -131,7 +123,7 @@ async fn session_providers_finds_explicit_session_beyond_recent_limit() {
     );
 
     let providers = db
-        .lcm_session_providers("explicit-session")
+        .lcm_session_providers_for_test("explicit-session")
         .await
         .expect("explicit session providers should load without recency limit");
     assert_eq!(providers, vec!["codex"]);
@@ -140,18 +132,11 @@ async fn session_providers_finds_explicit_session_beyond_recent_limit() {
 #[tokio::test]
 async fn session_replay_slice_bounds_head_tail_and_summaries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let contents = (1..=12)
         .map(|idx| format!("turn-{idx:02} with a deliberately verbose body"))
         .collect::<Vec<_>>();
-    let store_ids = insert_raw_messages(
-        &db,
-        &isolated_db_path(&tmp),
-        "cursor",
-        "session-replay",
-        &contents,
-    )
-    .await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-replay", &contents).await;
     db.lcm_insert_summary_node(summary_draft(
         "cursor",
         "session-replay",
@@ -164,7 +149,7 @@ async fn session_replay_slice_bounds_head_tail_and_summaries() {
     .expect("summary should insert");
 
     let slice = db
-        .lcm_session_replay_slice(&LcmSessionReplayRequest {
+        .lcm_session_replay_slice_for_test(&LcmSessionReplayRequest {
             provider: "cursor".to_string(),
             session_id: "session-replay".to_string(),
             head_limit: 4,
@@ -219,10 +204,9 @@ async fn session_replay_slice_bounds_head_tail_and_summaries() {
 #[tokio::test]
 async fn session_replay_slice_short_session_has_no_tail_overlap() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-short",
         &[
@@ -234,7 +218,7 @@ async fn session_replay_slice_short_session_has_no_tail_overlap() {
     .await;
 
     let slice = db
-        .lcm_session_replay_slice(&LcmSessionReplayRequest {
+        .lcm_session_replay_slice_for_test(&LcmSessionReplayRequest {
             provider: "cursor".to_string(),
             session_id: "session-short".to_string(),
             head_limit: 4,

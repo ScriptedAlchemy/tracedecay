@@ -228,33 +228,15 @@ async fn test_non_utf8_signature_does_not_crash() {
              docstring, signature, visibility, is_async, \
              branches, loops, returns, max_nesting, \
              unsafe_blocks, unchecked_calls, assertions, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
-        libsql::params![
-            "function:bad_utf8",
-            "function",
-            "render",
-            "src/view.cpp::render",
-            "src/view.cpp",
-            1i64,
-            10i64,
-            0i64,
-            50i64,
-            // docstring with a Latin-1 copyright symbol (0xA9) — invalid UTF-8
-            libsql::Value::Blob(b"Renders the sc\xe8ne with \xa9 effects".to_vec()),
-            // signature with 0xFF byte
-            libsql::Value::Blob(b"void render(const std::string& sc\xe8ne)".to_vec()),
-            "public",
-            0i64,
-            0i64,
-            0i64,
-            0i64,
-            0i64,
-            0i64,
-            0i64,
-            0i64,
-            0i64,
-        ],
+             VALUES (
+                 'function:bad_utf8', 'function', 'render',
+                 'src/view.cpp::render', 'src/view.cpp',
+                 1, 10, 0, 50,
+                 X'52656e6465727320746865207363e86e65207769746820a92065666665637473',
+                 X'766f69642072656e64657228636f6e7374207374643a3a737472696e6726207363e86e6529',
+                 'public', 0, 0, 0, 0, 0, 0, 0, 0, 0
+             )",
+        (),
     )
     .await
     .unwrap();

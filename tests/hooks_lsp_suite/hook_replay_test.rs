@@ -14,7 +14,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay::global_db::{AnalyticsEventQuery, GlobalDb};
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::global_db::AnalyticsEventQuery;
 use tracedecay::storage::{StorageMode, default_profile_sharded_layout};
 
 use crate::common::{git_program, spawn_tracedecay_daemon, tracedecay_command_with_home};
@@ -332,11 +333,11 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     );
     drop(daemon);
 
-    let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
-        .expect("open replay global db");
-    let events = global_db
-        .query_analytics_events(&AnalyticsEventQuery {
+        .expect("open registered replay profile runtime");
+    let events = runtime
+        .query_profile_analytics_events_for_test(&AnalyticsEventQuery {
             provider: None,
             project_id: None,
             session_id: None,
@@ -351,7 +352,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         replays.len(),
         "every replayed hook must bridge into analytics_events"
     );
-    let canonical_project = GlobalDb::canonical_project_key(&project_root);
+    let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_root);
     for replay in &replays {
         let provider = format!("hook_{}", replay.agent);
         let event = events

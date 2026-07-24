@@ -17,6 +17,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const FORBIDDEN_LIBSQL_CRATE: &str = "libsql";
+
 const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "alloc",
     "core",
@@ -1367,7 +1369,11 @@ fn query_source_guard_rejects_import_path_and_macro_bypasses() {
             "type Connection = mongodb::Client;",
             "mongodb",
         ),
-        ("bare forbidden type", "GlobalDb::open();", "globaldb"),
+        (
+            "bare forbidden type",
+            "RuntimeDatabase::open();",
+            "runtimedatabase",
+        ),
         ("raw identifier path", "crate::r#daemon::serve();", "daemon"),
         ("macro path", "sqlx::query!(\"SELECT 1\");", "sqlx"),
         ("attribute macro", "#[mcp]\nfn exposed() {}", "mcp"),
@@ -1410,7 +1416,7 @@ fn query_source_guard_rejects_import_path_and_macro_bypasses() {
     }
 
     for database_crate in [
-        "libsql",
+        FORBIDDEN_LIBSQL_CRATE,
         "sqlx",
         "rusqlite",
         "diesel",
@@ -1456,7 +1462,7 @@ fn query_source_guard_scopes_clippy_lint_to_allowlisted_attribute() {
 fn query_source_guard_allows_comments_strings_and_query_contracts() {
     let source = r##"
         // use crate::daemon::DaemonClient; sqlx::query!("SELECT 1");
-        /* GlobalDb::open(); crate::dashboard::Dashboard::new(); */
+        /* RuntimeDatabase::open(); crate::dashboard::Dashboard::new(); */
         const PROSE: &str = "mcp::Server and crate::automation::run are not references";
         const RAW_PROSE: &str = r#"rusqlite::Connection and crate::transport::send"#;
 

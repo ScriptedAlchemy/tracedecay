@@ -9,10 +9,10 @@
 //! evidence that a run did not finish cleanly, including for providers/sessions
 //! that never produced a `wf_*` run directory.
 
-use libsql::{Connection, params};
 use serde::Serialize;
 
-use crate::global_db::GlobalDb;
+use crate::db::engine::params;
+use crate::global_db::RegisteredGlobalDb;
 
 /// Max characters of collapsed evidence text kept per unfinished-run row before
 /// a single-character `…` truncation, so one row never dominates the listing.
@@ -30,18 +30,15 @@ pub struct WorkflowStateItem {
 }
 
 pub async fn list_unfinished(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {
-    query_unfinished(db.read_connection(), limit).await
-}
-
-async fn query_unfinished(
-    conn: &Connection,
-    limit: usize,
-) -> Result<Vec<WorkflowStateItem>, String> {
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| error.to_string())?;
     let limit = limit.clamp(1, 250) as i64;
-    let mut rows = conn
+    let mut rows = snapshot
         .query(
             "SELECT provider, session_id, message_id, ordinal, content,
                     COALESCE(snippet_text, ''), COALESCE(metadata_json, '')

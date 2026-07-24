@@ -7,14 +7,14 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_application::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
-    CodeQueryScope, CodeRelationRequest, Deadline, DisclosureClass, ExactOccurrenceRequest,
-    PageRequest, PhraseSearchRequest, RequestContext, RequestId, ResolvedScope, ResultProjection,
-    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
-    callable_code_operation,
+    CodeQueryScope, CodeRelationRequest, CodeSymbolSearchRequest, Deadline, DisclosureClass,
+    ExactOccurrenceRequest, OmissionReason, PageRequest, PhraseSearchRequest, RequestContext,
+    RequestId, ResolvedScope, ResultProjection, RetrievalOrder, RetrievalPortContext,
+    RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
 };
 use tracedecay_domain::{
-    ActorId, EphemeralSanitizedQueryViewV1, ManifestDigest, ProjectId, QueryNormalizationRevision,
-    RefId, RepositoryId, SanitizerRevision, UtcMicros, WorktreeId,
+    ActorId, CommitId, EphemeralSanitizedQueryViewV1, ManifestDigest, ProjectId,
+    QueryNormalizationRevision, RefId, RepositoryId, SanitizerRevision, UtcMicros, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -22,7 +22,7 @@ use crate::application::semantic_runtime::{ProductionSemanticRuntimeV1, current_
 #[cfg(feature = "semantic-fastembed")]
 use crate::config::SemanticResourceCeilings;
 #[cfg(feature = "semantic-fastembed")]
-use crate::db::{Database, DatabaseAuthority};
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 #[cfg(feature = "semantic-fastembed")]
 use crate::semantic_code::{
     CatalogedFastEmbedModelV1, DaemonSemanticRuntimeHandleV1, FastEmbedModelCatalogV1,
@@ -44,7 +44,7 @@ struct GitFixture {
 impl GitFixture {
     fn new(files: &[(&str, &str)]) -> Self {
         let root = TempDir::new().expect("fixture root");
-        git(root.path(), &["init", "-q"]);
+        git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.name", "TraceDecay Test"]);
         git(
             root.path(),
@@ -74,6 +74,22 @@ fn git(root: &Path, args: &[&str]) {
         .status()
         .expect("run git fixture command");
     assert!(status.success(), "git fixture command failed: {args:?}");
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("run git fixture command");
+    assert!(
+        output.status.success(),
+        "git fixture command failed: {args:?}"
+    );
+    String::from_utf8(output.stdout)
+        .expect("git fixture stdout")
+        .trim()
+        .to_owned()
 }
 
 fn write(root: &Path, path: &str, source: &str) {
@@ -141,6 +157,62 @@ fn query_meta() -> RetrievalRequestMeta {
         ResultProjection::Evidence,
         RetrievalOrder::Relevance,
     )
+}
+
+#[test]
+fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
+    let latest =
+        tracedecay_domain::CodeGenerationId::new("generation.latest").expect("latest generation");
+    let stale =
+        tracedecay_domain::CodeGenerationId::new("generation.stale").expect("stale generation");
+    let vector = tracedecay_domain::VectorGenerationIdV1::new(
+        tracedecay_domain::canonical_sha256(&"semantic-mcp-vector").expect("vector digest"),
+    );
+
+    assert_eq!(
+        super::queries::semantic_mcp_reason(None, &latest, None),
+        "semantic_runtime_unavailable"
+    );
+    assert_eq!(
+        super::queries::semantic_mcp_reason(Some(&stale), &latest, None),
+        "semantic_generation_stale"
+    );
+    assert_eq!(
+        super::queries::semantic_mcp_reason(Some(&latest), &latest, None),
+        "calibration_unavailable"
+    );
+    for (state, reason) in [
+        (
+            crate::application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+                target_generation: vector.clone(),
+                completed_units: 1,
+                total_units: 2,
+            },
+            "semantic_indexing",
+        ),
+        (
+            crate::application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
+                active_generation: None,
+                reason:
+                    crate::application::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
+            },
+            "semantic_degraded",
+        ),
+        (
+            crate::application::semantic_runtime::SemanticRuntimeStateV1::Failed {
+                model_id: "model.fixture".to_owned(),
+                artifact_digest: format!("sha256:{}", "a".repeat(64)),
+                detail: "fixture failure".to_owned(),
+                retryable: true,
+            },
+            "semantic_failed",
+        ),
+    ] {
+        assert_eq!(
+            super::queries::semantic_mcp_reason(None, &latest, Some(&state)),
+            reason
+        );
+    }
 }
 
 #[test]
@@ -485,6 +557,119 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let first_hook = {
+        let calls = Arc::clone(&first_calls);
+        Arc::new(move |_: &super::CodeIndexPublishedGenerationV1| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            true
+        }) as crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1
+    };
+    assert!(
+        registry
+            .mount_worktree(fixture.path(), store.path().to_path_buf(), Some(first_hook),)
+            .await
+            .expect("mount scheduler")
+    );
+    let first_generation = wait_for_initial_generation(&registry, fixture.path()).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while first_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial semantic schedule");
+
+    let second_calls = Arc::new(AtomicUsize::new(0));
+    let second_hook = {
+        let calls = Arc::clone(&second_calls);
+        Arc::new(move |_: &super::CodeIndexPublishedGenerationV1| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            true
+        }) as crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1
+    };
+    assert!(
+        !registry
+            .mount_worktree(
+                fixture.path(),
+                store.path().to_path_buf(),
+                Some(second_hook),
+            )
+            .await
+            .expect("remount scheduler")
+    );
+    assert_eq!(
+        second_calls.load(Ordering::SeqCst),
+        1,
+        "remount must replay the already-published generation"
+    );
+    let retired_calls = first_calls.load(Ordering::SeqCst);
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if registry.latest_generation_id(fixture.path()).await.as_ref()
+                != Some(&first_generation)
+                && second_calls.load(Ordering::SeqCst) >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement hook scheduled edited generation");
+    assert_eq!(
+        first_calls.load(Ordering::SeqCst),
+        retired_calls,
+        "retired hook must not receive later generations"
+    );
+    let second_generation = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("edited generation");
+    let disabled_calls = second_calls.load(Ordering::SeqCst);
+    assert!(
+        !registry
+            .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+            .await
+            .expect("remount without semantics")
+    );
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while registry.latest_generation_id(fixture.path()).await.as_ref()
+            == Some(&second_generation)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("generation published with semantics disabled");
+    assert_eq!(
+        second_calls.load(Ordering::SeqCst),
+        disabled_calls,
+        "remount without a semantic runtime must clear the stale hook"
+    );
+    registry.shutdown().await;
+}
+
 /// A slow freshness reconcile in one worktree must not serialize another
 /// worktree's query. `latest_complete_fresh` clones the per-worktree handle
 /// under a short map lock and drops the registry guard before reconciling, so
@@ -642,10 +827,14 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         DatabaseAuthority::acquire_test(&database_path, "Jina semantic bridge integration")
             .expect("database authority");
     let database = Arc::new(
-        Database::initialize(&database_path, &authority)
-            .await
-            .expect("project database")
-            .0,
+        Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("project database")
+        .0,
     );
     let handle = DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("semantic handle");
     let runtime = ProductionSemanticRuntimeV1::new(
@@ -735,9 +924,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     .await
     .expect("initial generation published");
     let latest = registry
-        .generation_for(&generation)
+        .latest_complete_fresh(fixture.path())
         .await
         .expect("mounted generation");
+    assert_eq!(latest.generation.manifest().generation_id, generation);
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
         .generation
@@ -761,11 +951,29 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             &exact_request,
         )
         .await;
+    let exact_repeat = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &exact_context,
+                operation: &exact_operation,
+            },
+            &exact_request,
+        )
+        .await;
+    assert_eq!(
+        serde_json::to_vec(exact.evidence()).expect("serialize exact evidence"),
+        serde_json::to_vec(exact_repeat.evidence()).expect("serialize repeated exact evidence"),
+        "same generation and request produce byte-stable production evidence"
+    );
     match exact {
-        RetrievalPortOutcome::Completed(evidence) => assert!(
-            !evidence.payload.expect("exact page").items.is_empty(),
-            "exact operation must return production lane evidence"
-        ),
+        RetrievalPortOutcome::Completed(evidence) => {
+            let page = evidence.payload.expect("exact page");
+            assert_eq!(page.generation, generation);
+            assert!(
+                !page.items.is_empty(),
+                "exact operation must return production lane evidence"
+            );
+        }
         outcome => panic!("expected completed exact operation, got {outcome:?}"),
     }
 
@@ -796,10 +1004,14 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         )
         .await;
     match lexical {
-        RetrievalPortOutcome::Completed(evidence) => assert!(
-            !evidence.payload.expect("lexical page").items.is_empty(),
-            "lexical operation must return production lane evidence"
-        ),
+        RetrievalPortOutcome::Completed(evidence) => {
+            let page = evidence.payload.expect("lexical page");
+            assert_eq!(page.generation, generation);
+            assert!(
+                !page.items.is_empty(),
+                "lexical operation must return production lane evidence"
+            );
+        }
         outcome => panic!("expected completed lexical operation, got {outcome:?}"),
     }
 
@@ -833,10 +1045,14 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         )
         .await;
     match graph {
-        RetrievalPortOutcome::Completed(evidence) => assert!(
-            !evidence.payload.expect("graph page").items.is_empty(),
-            "graph operation must return production lane evidence"
-        ),
+        RetrievalPortOutcome::Completed(evidence) => {
+            let page = evidence.payload.expect("graph page");
+            assert_eq!(page.generation, generation);
+            assert!(
+                !page.items.is_empty(),
+                "graph operation must return production lane evidence"
+            );
+        }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
 
@@ -1248,6 +1464,254 @@ async fn wait_for_initial_generation(
     .expect("initial generation published")
 }
 
+#[tokio::test]
+async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount scheduler");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let first = registry.semantic_mcp_abstention(fixture.path()).await;
+    assert_eq!(first.code_generation.as_deref(), Some(initial.as_str()));
+    assert_eq!(first.reason, "semantic_runtime_unavailable");
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "external"]);
+    let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
+    assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
+    assert_eq!(
+        refreshed.code_generation.as_deref(),
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .as_ref()
+            .map(tracedecay_domain::CodeGenerationId::as_str)
+    );
+    assert_eq!(refreshed.reason, "semantic_runtime_unavailable");
+    registry.shutdown().await;
+}
+
+#[test]
+fn same_content_head_move_publishes_new_source_identity() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let initial = published(scheduler.reconcile_now().expect("initial reconcile"));
+    let initial_generation = scheduler.latest_complete().expect("initial generation");
+    assert_eq!(
+        initial_generation.generation.snapshot().source_revision,
+        Some(
+            CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"]))
+                .expect("initial commit id")
+        )
+    );
+
+    git(
+        fixture.path(),
+        &["commit", "--allow-empty", "-qm", "same tree"],
+    );
+    let moved_head =
+        CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"])).expect("moved HEAD");
+    let refreshed = published(scheduler.reconcile_now().expect("HEAD reconcile"));
+    let served = scheduler.latest_complete().expect("refreshed generation");
+
+    assert_ne!(refreshed.generation_id, initial.generation_id);
+    assert_eq!(
+        refreshed.snapshot_content_identity, initial.snapshot_content_identity,
+        "same tree content remains physically reusable"
+    );
+    assert_eq!(
+        served.generation.snapshot().source_revision,
+        Some(moved_head)
+    );
+    assert_eq!(
+        served
+            .generation
+            .snapshot()
+            .reference
+            .as_ref()
+            .map(RefId::as_str),
+        Some("refs/heads/main")
+    );
+}
+
+#[tokio::test]
+async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
+    let left = GitFixture::new(&[("src/lib.rs", "pub fn left_only() {}\n")]);
+    let right = GitFixture::new(&[("src/lib.rs", "pub fn right_only() {}\n")]);
+    let (first, target, target_literal) = if left.path().canonicalize().expect("left root")
+        < right.path().canonicalize().expect("right root")
+    {
+        (&left, &right, "right_only")
+    } else {
+        (&right, &left, "left_only")
+    };
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    registry
+        .mount_worktree(first.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount first worktree");
+    registry
+        .mount_worktree(target.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount target worktree");
+    wait_for_initial_generation(&registry, first.path()).await;
+    let target_generation = wait_for_initial_generation(&registry, target.path()).await;
+    let target_latest = registry
+        .latest_complete_fresh(target.path())
+        .await
+        .expect("target generation");
+    let repository = target_latest.generation.snapshot().repository.clone();
+    let worktree = target_latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("target worktree identity");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    let scope =
+        CodeQueryScope::new(super::queries::unpinned_latest_generation(), None).expect("scope");
+    let request = ExactOccurrenceRequest::new(target_literal, None, scope, query_meta())
+        .expect("exact request");
+
+    let outcome = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    let served = match outcome {
+        RetrievalPortOutcome::Completed(evidence) => {
+            let page = evidence.payload.expect("exact page");
+            assert!(!page.items.is_empty(), "target-only symbol is returned");
+            page.generation
+        }
+        other => panic!("expected completed scoped query, got {other:?}"),
+    };
+    assert_eq!(served, target_generation);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn pinned_generation_from_another_worktree_is_unavailable() {
+    let owner = GitFixture::new(&[("src/lib.rs", "pub fn owner_only() {}\n")]);
+    let requester = GitFixture::new(&[("src/lib.rs", "pub fn requester_only() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    registry
+        .mount_worktree(owner.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount owner worktree");
+    registry
+        .mount_worktree(requester.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount requester worktree");
+    let owner_generation = wait_for_initial_generation(&registry, owner.path()).await;
+    let requester_latest = registry
+        .latest_complete_fresh(requester.path())
+        .await
+        .expect("requester generation");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let context = application_context(
+        &operation,
+        requester_latest.generation.snapshot().repository.clone(),
+        requester_latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("requester worktree identity"),
+    );
+    let scope = CodeQueryScope::new(owner_generation, None).expect("scope");
+    let request =
+        ExactOccurrenceRequest::new("owner_only", None, scope, query_meta()).expect("request");
+
+    assert!(matches!(
+        registry
+            .exact_occurrence(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await,
+        RetrievalPortOutcome::Unavailable(_)
+    ));
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn planned_unimplemented_operation_is_generation_bound_unsupported() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    let generation = wait_for_initial_generation(&registry, fixture.path()).await;
+    let latest = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("latest generation");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::SymbolSearch).expect("operation");
+    let context = application_context(
+        &operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree identity"),
+    );
+    let query = EphemeralSanitizedQueryViewV1::sanitize(
+        "alpha",
+        SanitizerRevision::new("sanitizer.query.fixture").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.query.fixture").expect("normalization"),
+    )
+    .expect("query");
+    let request = CodeSymbolSearchRequest {
+        query,
+        scope: CodeQueryScope::new(generation.clone(), None).expect("scope"),
+        meta: query_meta(),
+    };
+
+    let outcome = registry
+        .symbol_search(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    let RetrievalPortOutcome::Unavailable(evidence) = outcome else {
+        panic!("planned operation without a production owner must be unavailable");
+    };
+    assert_eq!(evidence.temporal.source_generation, Some(generation));
+    assert_eq!(evidence.omissions.len(), 1);
+    assert_eq!(evidence.omissions[0].reason, OmissionReason::Unsupported);
+    registry.shutdown().await;
+}
+
 /// A query that pins no explicit generation (the reserved unpinned sentinel)
 /// resolves its serving generation through the three-tier freshness ladder. An
 /// out-of-band git commit after indexing is caught by the tier-1 `.git`
@@ -1267,9 +1731,10 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
     // Capture the stable repository/worktree identity from the generation
     // indexed at mount, before the out-of-band change moves HEAD.
     let latest = registry
-        .generation_for(&initial)
+        .latest_complete_fresh(fixture.path())
         .await
         .expect("mounted generation");
+    assert_eq!(latest.generation.manifest().generation_id, initial);
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
         .generation
@@ -1341,9 +1806,10 @@ async fn pinned_query_bypasses_freshness_resolution() {
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
 
     let latest = registry
-        .generation_for(&initial)
+        .latest_complete_fresh(fixture.path())
         .await
         .expect("mounted generation");
+    assert_eq!(latest.generation.manifest().generation_id, initial);
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
         .generation

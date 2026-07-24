@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::analytics::{UsageKind, infer_usage_events};
 use crate::errors::Result;
-use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, GlobalDb};
+use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, RegisteredGlobalDb};
 
 use super::{
     SkillUsageAction, SkillUsageEvent, SkillUsageRecord, config_error, ledger_skill_id,
@@ -56,7 +56,7 @@ pub async fn ingest_analytics_events(
 pub async fn ingest_project_analytics_events(
     profile_root: &Path,
     project_root: &Path,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     limit: usize,
 ) -> Result<Vec<SkillUsageRecord>> {
     let Some(global_db) = global_db else {
@@ -65,7 +65,7 @@ pub async fn ingest_project_analytics_events(
     let events = global_db
         .query_analytics_events(&AnalyticsEventQuery {
             provider: None,
-            project_id: Some(GlobalDb::canonical_project_key(project_root)),
+            project_id: Some(RegisteredGlobalDb::canonical_project_key(project_root)),
             session_id: None,
             event_kind: None,
             since: None,

@@ -117,10 +117,11 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     let project_b = TempDir::new().expect("project b temp dir");
     let project_a = project_a.path().canonicalize().expect("project a path");
     let project_b = project_b.path().canonicalize().expect("project b path");
+    let registry =
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
-    let registry = crate::global_db::GlobalDb::open_at(&global_db_path)
-        .await
-        .expect("open registry");
     registry
         .upsert_code_project("project-a", &project_a, None, None, None)
         .await
@@ -129,8 +130,6 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         .upsert_code_project("project-b", &project_b, None, None, None)
         .await
         .expect("register project b");
-    drop(registry);
-
     let mut base_handshake = test_handshake_defaults();
     base_handshake.project_path = Some(project_a.clone());
     base_handshake.scope_prefix = Some("src".to_string());
@@ -215,10 +214,11 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     let alias = alias.path().canonicalize().expect("canonical alias");
     let nested = alias.join("nested");
     std::fs::create_dir_all(&nested).expect("nested alias path");
+    let registry =
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
-    let registry = crate::global_db::GlobalDb::open_at(&global_db_path)
-        .await
-        .expect("open registry");
     registry
         .upsert_code_project("project-registry-only", &canonical, None, None, None)
         .await
@@ -227,8 +227,6 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
         .upsert_project_alias(&alias, "project-registry-only")
         .await
         .expect("register project alias");
-    drop(registry);
-
     let mut handshake = test_handshake_defaults();
     handshake.allow_initialize_root_routing = true;
     handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());

@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use libsql::{Connection, params};
 use serde_json::{Map, Value, json};
 
+use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::message_storage_text;
 
@@ -71,7 +71,7 @@ struct CompressionTransactionContext {
 }
 
 pub(crate) async fn update_lifecycle(
-    conn: &Connection,
+    conn: &impl Executor,
     update: LcmLifecycleUpdate,
 ) -> Result<LcmLifecycleState, LcmError> {
     upsert_lifecycle_state(conn, &update).await?;
@@ -86,7 +86,7 @@ pub(crate) async fn update_lifecycle(
 }
 
 pub(crate) async fn lifecycle_state(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<LcmLifecycleState, LcmError> {
@@ -121,7 +121,7 @@ pub(crate) async fn lifecycle_state(
 /// cooldown so the new session does not cascade straight back into compression
 /// while pressure is still unrelieved.
 pub(crate) async fn record_session_boundary(
-    conn: &Connection,
+    conn: &impl Executor,
     request: LcmSessionBoundaryRequest,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
     match compression_decision::boundary_transition_decision(
@@ -163,7 +163,7 @@ pub(crate) async fn record_session_boundary(
 /// transition. Historical messages, summary nodes, payloads, and source
 /// lifecycle rows retain their original owner.
 async fn link_session_boundary(
-    conn: &Connection,
+    conn: &impl Executor,
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
@@ -171,7 +171,7 @@ async fn link_session_boundary(
 }
 
 async fn link_in_transaction(
-    conn: &Connection,
+    conn: &impl Executor,
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
@@ -221,7 +221,7 @@ fn session_boundary_response(recorded: bool, reason: &str) -> LcmSessionBoundary
 }
 
 async fn boundary_cooldown_active(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<bool, LcmError> {
@@ -232,7 +232,7 @@ async fn boundary_cooldown_active(
 }
 
 async fn load_boundary_skip_at(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<Option<i64>, LcmError> {
@@ -250,7 +250,7 @@ async fn load_boundary_skip_at(
     })
 }
 
-async fn current_unixepoch(conn: &Connection) -> Result<i64, LcmError> {
+async fn current_unixepoch(conn: &impl QueryExecutor) -> Result<i64, LcmError> {
     let mut rows = conn.query("SELECT unixepoch()", ()).await?;
     let row = rows
         .next()
@@ -260,7 +260,7 @@ async fn current_unixepoch(conn: &Connection) -> Result<i64, LcmError> {
 }
 
 pub(crate) async fn preflight(
-    conn: &Connection,
+    conn: &impl Executor,
     storage_root: &Path,
     request: LcmPreflightRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
@@ -350,7 +350,7 @@ pub(crate) async fn preflight(
 }
 
 pub(crate) async fn compress(
-    conn: &Connection,
+    conn: &impl Executor,
     storage_root: &Path,
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
@@ -423,7 +423,7 @@ pub(crate) async fn compress(
 }
 
 async fn compress_in_transaction(
-    conn: &Connection,
+    conn: &impl Executor,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
 ) -> Result<LcmCompressionResponse, LcmError> {
@@ -447,7 +447,7 @@ async fn compress_in_transaction(
 }
 
 async fn prepare_compression_context(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
 ) -> Result<CompressionTransactionContext, LcmError> {
     let conversation_id = request.session_id.clone();
@@ -516,7 +516,7 @@ fn frontier_changed_response(
 }
 
 async fn no_backlog_compression_response(
-    conn: &Connection,
+    conn: &impl Executor,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: &CompressionTransactionContext,
@@ -568,7 +568,7 @@ async fn no_backlog_compression_response(
 }
 
 async fn overflow_recovery_no_backlog_response(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
     context: &CompressionTransactionContext,
 ) -> Result<LcmCompressionResponse, LcmError> {
@@ -611,7 +611,7 @@ async fn overflow_recovery_no_backlog_response(
 }
 
 async fn backlog_below_threshold_response(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
     context: &CompressionTransactionContext,
 ) -> Result<Option<LcmCompressionResponse>, LcmError> {
@@ -680,7 +680,7 @@ fn auxiliary_summary_response(
 }
 
 async fn persist_and_replay_backlog_compression(
-    conn: &Connection,
+    conn: &impl Executor,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: CompressionTransactionContext,
@@ -782,7 +782,7 @@ async fn persist_and_replay_backlog_compression(
 }
 
 async fn persist_compression_transaction_writes(
-    conn: &Connection,
+    conn: &impl Executor,
     write: CompressionTransactionWriteRequest<'_>,
 ) -> Result<CompressionTransactionWriteResult, LcmError> {
     let pass_limit = if write.forced_overflow_recovery {
@@ -868,7 +868,7 @@ async fn persist_compression_transaction_writes(
 }
 
 async fn upsert_lifecycle_state(
-    conn: &Connection,
+    conn: &impl Executor,
     update: &LcmLifecycleUpdate,
 ) -> Result<(), LcmError> {
     conn.execute(
@@ -897,7 +897,7 @@ async fn upsert_lifecycle_state(
 }
 
 async fn replace_maintenance_debt(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     conversation_id: &str,
     debts: &[LcmMaintenanceDebt],
@@ -930,7 +930,7 @@ async fn replace_maintenance_debt(
 }
 
 async fn load_maintenance_debt(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
 ) -> Result<Vec<LcmMaintenanceDebt>, LcmError> {
@@ -952,7 +952,7 @@ async fn load_maintenance_debt(
 }
 
 async fn lifecycle_state_or_default(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
     session_id: &str,
@@ -1077,7 +1077,7 @@ struct ReplayWindowParts<'a> {
 /// summary node is replayed (budgeted highest depth first), and the raw tail
 /// is trimmed under the effective assembly cap.
 async fn assemble_replay_context(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     anchor_source: &[LcmRawMessage],
@@ -1099,7 +1099,7 @@ async fn assemble_replay_context(
 /// the cap; when nothing beyond the anchors fits, fall back to anchors plus
 /// the most recent message even if that stays over budget.
 async fn assemble_overflow_recovery_replay(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     anchor_source: &[LcmRawMessage],
@@ -1562,7 +1562,7 @@ fn condensation_draft(
 }
 
 async fn condense_summary_nodes_if_ready(
-    conn: &Connection,
+    conn: &impl Executor,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     conversation_id: &str,
@@ -1673,7 +1673,7 @@ async fn condense_summary_nodes_if_ready(
 }
 
 async fn load_condensation_candidates(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     fan_in: usize,
@@ -1753,7 +1753,7 @@ async fn load_condensation_candidates(
 }
 
 async fn ingest_active_messages(
-    conn: &Connection,
+    conn: &impl Executor,
     storage_root: &Path,
     provider: &str,
     session_id: &str,
@@ -1907,7 +1907,7 @@ async fn ingest_active_messages(
 }
 
 async fn message_id_for_store_id(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     store_id: i64,
@@ -1996,7 +1996,7 @@ fn active_replay_for_metadata(replay: &Value) -> Value {
 }
 
 async fn update_active_replay_metadata(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     message_id: &str,
     metadata_json: &str,
@@ -2012,7 +2012,7 @@ async fn update_active_replay_metadata(
 }
 
 async fn ensure_session(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     session_id: &str,
 ) -> Result<(), LcmError> {
@@ -2034,7 +2034,7 @@ async fn ensure_session(
 }
 
 async fn existing_active_message_state(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     message_id: &str,
 ) -> Result<Option<ExistingActiveMessageState>, LcmError> {
@@ -2062,7 +2062,7 @@ async fn existing_active_message_state(
 }
 
 async fn next_ordinal(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
 ) -> Result<i64, LcmError> {
@@ -2082,7 +2082,7 @@ async fn next_ordinal(
 }
 
 async fn load_raw_messages_for_session(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessage>, LcmError> {

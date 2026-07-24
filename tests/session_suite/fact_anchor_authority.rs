@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::db::{
-    Database, DatabaseAuthority, DatabaseAuthorityRole, enter_maintenance_database_scope,
+    Database, DatabaseAuthority, DatabaseAuthorityRole, TestDatabaseRuntimeMode,
+    enter_maintenance_database_scope,
 };
-use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
+use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::store::DatabaseFactStore;
 use tracedecay_domain::{
@@ -211,6 +213,12 @@ async fn fact_db(path: &Path) -> Database {
         .0
 }
 
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
+
 async fn lineage(
     store: &DatabaseFactStore<'_>,
     owner: &FactOwnerV1,
@@ -267,7 +275,14 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
     let authority = DatabaseAuthority::for_runtime(&db_path, "pr7 revoked authority fixture")
         .expect("a live maintenance scope must grant the write authority");
     assert_eq!(authority.role(), DatabaseAuthorityRole::Maintenance);
-    let db = Database::initialize(&db_path, &authority).await.unwrap().0;
+    let db = Database::publish_maintenance_test_runtime(
+        &db_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap()
+    .0;
     let store = DatabaseFactStore::new(&db);
     let owner = profile_owner();
     let batch = assertion_batch(
@@ -408,19 +423,9 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
         "missing daemon must fail closed with the authority error, got {error}"
     );
 
-    let error = match GlobalDb::try_open_at(&db_path).await {
-        Err(error) => error,
-        Ok(_) => panic!("a missing daemon must not open a fallback store"),
-    };
     assert!(
-        error
-            .to_string()
-            .contains("managed-daemon or exclusive-maintenance authority"),
-        "store open must fail closed with the authority error, got {error}"
-    );
-    assert!(
-        GlobalDb::open_at(&db_path).await.is_none(),
-        "the best-effort open must collapse the missing daemon to no store"
+        DatabaseAuthority::for_runtime(&db_path, "pr7 missing daemon retry").is_err(),
+        "a repeated authority request must not mint a fallback writer"
     );
     assert!(
         !db_path.exists(),
@@ -444,64 +449,79 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
         );
     }
 
-    std::fs::remove_dir_all(&root).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir(root.parent().unwrap());
 }
 
 async fn register_project(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
     project_id: &str,
     root: &Path,
     common: &Path,
     remote: &str,
 ) {
-    db.upsert_code_project(project_id, root, Some(common), Some(remote), Some("main"))
+    runtime
+        .upsert_code_project(project_id, root, Some(common), Some(remote), Some("main"))
         .await
         .unwrap();
-    db.upsert_store_instance(StoreInstanceUpsert {
-        store_id: format!("store_{project_id}"),
-        project_id: project_id.to_string(),
-        store_kind: "code_project".to_string(),
-        storage_mode: "profile_sharded".to_string(),
-        store_relpath: format!("projects/{project_id}"),
-        manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
-        last_verified_at: Some(100),
-        last_write_at: Some(101),
-    })
-    .await
-    .unwrap();
+    runtime
+        .upsert_store_instance(StoreInstanceUpsert {
+            store_id: format!("store_{project_id}"),
+            project_id: project_id.to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: format!("projects/{project_id}"),
+            manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+            last_verified_at: Some(100),
+            last_write_at: Some(101),
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical_identity() {
     let tmp = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&tmp.path().join("global.db"))
-        .await
-        .unwrap();
+    let runtime = profile_runtime(&tmp).await;
     let remote = "https://github.com/pr7/ambiguous.git";
     let root_a = tmp.path().join("project-a");
     let common_a = root_a.join(".git");
     let root_b = tmp.path().join("project-b");
     let common_b = root_b.join(".git");
-    register_project(&db, "pr7.project.ambiguity-a", &root_a, &common_a, remote).await;
+    register_project(
+        &runtime,
+        "pr7.project.ambiguity-a",
+        &root_a,
+        &common_a,
+        remote,
+    )
+    .await;
 
-    let unique = db
+    let unique = runtime
         .resolve_unique_project_store_by_git_remote(remote)
         .await
         .expect("a single registered project must resolve through its remote");
     assert_eq!(unique.project.project_id, "pr7.project.ambiguity-a");
 
-    register_project(&db, "pr7.project.ambiguity-b", &root_b, &common_b, remote).await;
+    register_project(
+        &runtime,
+        "pr7.project.ambiguity-b",
+        &root_b,
+        &common_b,
+        remote,
+    )
+    .await;
 
     // Ambiguous scope: two canonical projects share one remote identity, so
     // remote-based resolution must fail closed instead of picking a store.
     assert!(
-        db.resolve_unique_project_store_by_git_remote(remote)
+        runtime
+            .resolve_unique_project_store_by_git_remote(remote)
             .await
             .is_none(),
         "an ambiguous project scope must fail closed"
     );
-    let still_a = db
+    let still_a = runtime
         .resolve_project_store_by_identity(&root_a, Some(&common_a))
         .await
         .unwrap()
@@ -513,7 +533,7 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
     // resolve to the primary checkout's canonical project identity through
     // the shared git common dir.
     let linked_worktree = tmp.path().join("project-a-linked-worktree");
-    let linked = db
+    let linked = runtime
         .resolve_project_store_by_identity(&linked_worktree, Some(&common_a))
         .await
         .unwrap()
@@ -555,17 +575,21 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
     // fallback store minted as a side effect of the lookup.
     let unknown = tmp.path().join("never-registered");
     assert!(
-        db.resolve_project_store_by_identity(&unknown, None)
+        runtime
+            .resolve_project_store_by_identity(&unknown, None)
             .await
             .unwrap()
             .is_none(),
         "an unknown project scope must fail closed"
     );
     assert!(
-        db.resolve_project_store_by_alias(&unknown).await.is_none(),
+        runtime
+            .resolve_project_store_by_alias(&unknown)
+            .await
+            .is_none(),
         "a failed resolution must not mint a fallback alias or store"
     );
-    db.close();
+    drop(runtime);
 }
 
 #[tokio::test]
@@ -774,7 +798,14 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
             .unwrap();
     let authority = DatabaseAuthority::for_runtime(&db_path, "pr7 single writer fixture")
         .expect("a live maintenance scope must grant the write authority");
-    let db = Database::initialize(&db_path, &authority).await.unwrap().0;
+    let db = Database::publish_maintenance_test_runtime(
+        &db_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap()
+    .0;
 
     // A foreign authority for the same database cannot be minted while the
     // writer authority is held: there is no second writer lane to join.

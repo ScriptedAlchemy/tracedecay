@@ -2,16 +2,17 @@ use std::path::{Path, PathBuf};
 
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
 use crate::sessions::{SessionProvider, claude_observation, codex, cursor, cursor_composer};
-use tracedecay_domain::ObservationScopeV1;
+use tracedecay_domain::{BrainId, ObservationScopeV1, UserProfileId};
+use tracedecay_store::StoreShardScopeV1;
 
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, IngestPassOutcome, ProviderRunFold,
-    TranscriptCatchUpFailure, allocate_pass_byte_budgets, classify_transcript_ingest_failure,
-    observation_catch_up_failure, scheduling_write_required,
+    TranscriptCatchUpFailure, allocate_pass_byte_budgets, observation_catch_up_failure,
+    scheduling_write_required,
 };
 use super::scheduler::{
     USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
@@ -27,25 +28,9 @@ pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
 }
 
-pub async fn open_user_session_db(profile_root: &Path) -> Option<GlobalDb> {
-    GlobalDb::open_at(&user_sessions_db_path(profile_root)).await
-}
-
-/// All registry paths that may identify project-owned transcript evidence.
-pub async fn registered_project_roots() -> Vec<PathBuf> {
-    try_registered_project_roots().await.unwrap_or_default()
-}
-
-/// Returns `None` when the registry cannot be opened. User-scope ingestion
-/// must fail closed in that case: an empty root set is valid for a fresh
-/// profile, while an unavailable registry cannot safely prove that evidence
-/// is projectless.
-pub async fn try_registered_project_roots() -> Option<Vec<PathBuf>> {
-    let global = GlobalDb::open().await?;
-    registered_project_roots_from(&global).await
-}
-
-pub(crate) async fn registered_project_roots_from(global: &GlobalDb) -> Option<Vec<PathBuf>> {
+pub(crate) async fn registered_project_roots_from(
+    global: &RegisteredGlobalDb,
+) -> Option<Vec<PathBuf>> {
     let log_unavailable = |surface: &'static str, error: &dyn std::fmt::Display| {
         tracing::warn!(surface, %error, "project registry read failed during user-global ingest");
     };
@@ -73,46 +58,17 @@ pub(crate) async fn registered_project_roots_from(global: &GlobalDb) -> Option<V
     Some(roots)
 }
 
-/// Ingests Codex sessions that have no registered-project attribution into the
-/// profile user session store. `session_id` bounds live hook work to one host
-/// session; `None` performs historical backfill.
-pub async fn ingest_user_codex_sessions(session_id: Option<String>) -> TranscriptIngestStats {
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return TranscriptIngestStats::default();
-    };
-    let Some(registered_roots) = try_registered_project_roots().await else {
-        return TranscriptIngestStats::default();
-    };
-    let Some(db) = open_user_session_db(&profile_root).await else {
-        return TranscriptIngestStats::default();
-    };
-    match try_ingest_user_codex_sessions_with_db(&db, &profile_root, session_id, registered_roots)
-        .await
-    {
-        Ok(stats) => stats,
-        Err(error) => {
-            let failure = classify_transcript_ingest_failure("codex", "observation", &error);
-            tracing::warn!(
-                reason_code = failure.reason_code,
-                retryable = failure.retryable,
-                "Codex observation catch-up failed"
-            );
-            TranscriptIngestStats::default()
-        }
-    }
-}
-
-pub(crate) async fn try_ingest_user_codex_sessions_with_db(
-    db: &GlobalDb,
+pub(crate) async fn try_ingest_user_codex_sessions_with_db_and_admission(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
+    admission: &HostAdmissionFacade<'_>,
 ) -> source::TranscriptIngestResult<TranscriptIngestStats> {
     try_ingest_user_codex_sessions_with_db_bounded(
-        db,
         profile_root,
         session_id,
         registered_roots,
+        admission,
         None,
         &ObservationCancellation::default(),
     )
@@ -121,10 +77,10 @@ pub(crate) async fn try_ingest_user_codex_sessions_with_db(
 }
 
 pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
-    db: &GlobalDb,
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
+    admission: &HostAdmissionFacade<'_>,
     max_total_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
@@ -146,11 +102,11 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
         if cancellation.is_cancelled() {
             break;
         }
-        let progress = codex::try_admit_codex_jsonl_observations_for_profile(
+        let progress = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
             &path,
-            db,
             session_id.as_deref(),
             &registered_roots,
+            admission,
             remaining,
         )
         .await?;
@@ -160,48 +116,18 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
             remaining = Some(available.saturating_sub(progress.bytes_consumed));
         }
     }
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
-    let stats =
-        drain_observation_projections(&facade, &ObservationScopeV1::Profile, "codex", cancellation)
-            .await?;
+    let stats = drain_observation_projections(
+        admission,
+        &ObservationScopeV1::Profile,
+        "codex",
+        cancellation,
+    )
+    .await?;
     Ok(BoundedProviderOutcome {
         stats,
         bytes_consumed,
         deferred_by_byte_cap,
     })
-}
-
-pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return TranscriptIngestStats::default();
-    };
-    let Some(registered_roots) = try_registered_project_roots().await else {
-        return TranscriptIngestStats::default();
-    };
-    let Some(db) = open_user_session_db(&profile_root).await else {
-        return TranscriptIngestStats::default();
-    };
-    match try_ingest_user_cursor_sessions_with_db(&db, registered_roots).await {
-        Ok(stats) => stats,
-        Err(error) => {
-            let failure = classify_transcript_ingest_failure("cursor", "observation", &error);
-            tracing::warn!(
-                reason_code = failure.reason_code,
-                retryable = failure.retryable,
-                "Cursor observation catch-up failed"
-            );
-            TranscriptIngestStats::default()
-        }
-    }
-}
-
-async fn try_ingest_user_cursor_sessions_with_db(
-    db: &GlobalDb,
-    registered_roots: Vec<PathBuf>,
-) -> source::TranscriptIngestResult<TranscriptIngestStats> {
-    try_ingest_user_cursor_sessions_with_db_bounded(db, registered_roots, None)
-        .await
-        .map(|outcome| outcome.stats)
 }
 
 pub(super) struct BoundedProviderOutcome {
@@ -211,14 +137,14 @@ pub(super) struct BoundedProviderOutcome {
 }
 
 pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
-    db: &GlobalDb,
     registered_roots: Vec<PathBuf>,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
     let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
         source
             .ingest_user_capped(
-                db,
+                admission,
                 &registered_roots,
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                 max_new_bytes,
@@ -228,9 +154,9 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
         cursor_composer::CursorComposerSweepOutcome::default()
     };
     let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
-    let sweep = cursor::try_ingest_cursor_user_sweep_capped(
-        db,
+    let sweep = cursor::try_ingest_cursor_user_sweep_capped_with_admission(
         &registered_roots,
+        admission,
         remaining,
         composer.owned_session_ids,
     )
@@ -264,10 +190,6 @@ async fn drain_observation_projections(
     Ok(stats.transcript)
 }
 
-pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
-    ingest_user_global_sources_for_provider(None).await
-}
-
 pub(super) fn provider_selected(
     scope: Option<SessionProvider>,
     candidate: SessionProvider,
@@ -275,31 +197,29 @@ pub(super) fn provider_selected(
     scope.is_none() || scope == Some(candidate)
 }
 
-/// Admits profile-level sources without touching providers outside an
-/// explicitly requested legacy source-admission scope.
-pub async fn ingest_user_global_sources_for_provider(
-    provider: Option<SessionProvider>,
-) -> TranscriptIngestStats {
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return TranscriptIngestStats::default();
-    };
-    let Some(roots) = try_registered_project_roots().await else {
-        return TranscriptIngestStats::default();
-    };
-    let Some(db) = open_user_session_db(&profile_root).await else {
-        return TranscriptIngestStats::default();
-    };
-    ingest_user_global_sources_for_provider_with_roots(&db, &profile_root, provider, roots)
-        .await
-        .stats
-}
-
 pub(crate) async fn ingest_user_global_sources_for_provider_with_authorities(
-    db: &GlobalDb,
-    registry_db: &GlobalDb,
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &RegisteredGlobalDb,
+    registry_db: &RegisteredGlobalDb,
     profile_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestOutcome {
+    let registry_shard = &registry_db.binding().shard_id;
+    if registry_shard.brain_id != *brain_id
+        || registry_shard.profile_id != *profile_id
+        || registry_shard.scope != StoreShardScopeV1::Profile
+    {
+        return TranscriptIngestOutcome::new(
+            TranscriptIngestStats::default(),
+            vec![TranscriptCatchUpFailure::new(
+                provider.map_or("all", SessionProvider::id),
+                "project_registry",
+                "project_registry_authority_mismatch",
+                false,
+            )],
+        );
+    }
     let Some(roots) = registered_project_roots_from(registry_db).await else {
         return TranscriptIngestOutcome::new(
             TranscriptIngestStats::default(),
@@ -311,17 +231,27 @@ pub(crate) async fn ingest_user_global_sources_for_provider_with_authorities(
             )],
         );
     };
-    ingest_user_global_sources_for_provider_with_roots(db, profile_root, provider, roots).await
+    ingest_user_global_sources_for_provider_with_roots(
+        brain_id,
+        profile_id,
+        registered,
+        profile_root,
+        provider,
+        roots,
+    )
+    .await
 }
 
 pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
-    db: &GlobalDb,
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &RegisteredGlobalDb,
     profile_root: &Path,
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
 ) -> TranscriptIngestOutcome {
     ingest_user_global_sources_for_provider_with_roots_bounded(
-        db,
+        (brain_id, profile_id, registered),
         profile_root,
         provider,
         roots,
@@ -332,21 +262,50 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
     .into_transcript_outcome()
 }
 
+#[cfg(test)]
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority(
+    _db: &RegisteredGlobalDb,
+    _profile_root: &Path,
+    provider: Option<SessionProvider>,
+    _roots: Vec<PathBuf>,
+) -> TranscriptIngestOutcome {
+    TranscriptIngestOutcome::new(
+        TranscriptIngestStats::default(),
+        vec![TranscriptCatchUpFailure::registered_authority_unavailable(
+            provider.map_or("all", SessionProvider::id),
+        )],
+    )
+}
+
 /// Bounded fair multi-provider user catch-up with typed coverage outcomes.
 pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
-    db: &GlobalDb,
+    registered: (&BrainId, &UserProfileId, &RegisteredGlobalDb),
     profile_root: &Path,
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
     bounds: IngestPassBounds,
     cancellation: &ObservationCancellation,
 ) -> IngestPassOutcome {
+    let (brain_id, profile_id, registered) = registered;
+    let shard = &registered.binding().shard_id;
+    if shard.brain_id != *brain_id
+        || shard.profile_id != *profile_id
+        || shard.scope != StoreShardScopeV1::ProfileSessions
+    {
+        return IngestPassOutcome::failed(TranscriptCatchUpFailure::new(
+            provider.map_or("all", SessionProvider::id),
+            "profile_sessions_authority",
+            "profile_sessions_authority_mismatch",
+            false,
+        ));
+    }
     let selected: Vec<SessionProvider> = USER_CATCH_UP_PROVIDERS
         .iter()
         .copied()
         .filter(|candidate| provider_selected(provider, *candidate))
         .collect();
-    let Some(frontier) = read_ingest_frontier(db, USER_INGEST_PROVIDER_FRONTIER_KEY).await else {
+    let Some(frontier) = read_ingest_frontier(registered, USER_INGEST_PROVIDER_FRONTIER_KEY).await
+    else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
     let plan = plan_user_provider_admission(selected.len(), frontier, bounds);
@@ -364,7 +323,11 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
         .iter()
         .copied()
         .fold(0_u64, u64::saturating_add);
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+        brain_id.clone(),
+        profile_id.clone(),
+        registered,
+    ));
 
     'providers: for &index in &plan.admitted_indices {
         if cancellation.is_cancelled() {
@@ -388,7 +351,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
                 break 'providers;
             }
             let mut unit_result = run_user_provider(
-                db,
+                registered,
                 profile_root,
                 &roots,
                 &facade,
@@ -475,7 +438,13 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
 
     let write = scheduling_write_required(coverage, attempted, cancelled);
     let scheduling_state_written = if write {
-        write_ingest_frontier(db, USER_INGEST_PROVIDER_FRONTIER_KEY, frontier, attempted).await
+        write_ingest_frontier(
+            registered,
+            USER_INGEST_PROVIDER_FRONTIER_KEY,
+            frontier,
+            attempted,
+        )
+        .await
     } else {
         false
     };

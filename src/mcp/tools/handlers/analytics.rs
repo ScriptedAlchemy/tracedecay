@@ -4,8 +4,8 @@
 //! without querying `.tracedecay` databases directly. Reuses the same
 //! durable-analytics service functions the `tracedecay analytics
 //! diagnostics` CLI and dashboard analytics API use
-//! ([`crate::global_db::GlobalDb::query_analytics_tool_counts`],
-//! [`crate::global_db::GlobalDb::query_analytics_hint_counts`],
+//! ([`crate::global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
+//! [`crate::global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
 //! [`crate::dashboard::analytics_api::hint_summary_from_counts`],
 //! [`crate::automation::run_ledger::load_run_records`]) rather than
 //! re-implementing queries against those tables.
@@ -17,13 +17,13 @@ use serde_json::{Value, json};
 
 use crate::automation::run_ledger::load_run_records;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{AnalyticsToolCounts, GlobalDb};
+use crate::global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use crate::timeutil::parse_rfc3339_timestamp;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 
 use super::super::{ToolResult, renderers};
-use super::memory::open_target_memory_db;
+use super::memory::{memory_application, open_target_memory_db};
 use super::support::{project_registry_context, tool_json_with_md};
 
 /// Bound on how many automation run-ledger rows a single call will scan.
@@ -224,7 +224,7 @@ struct ResolvedScope {
 async fn resolve_scope(
     cg: &TraceDecay,
     args: &Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
     all_projects: bool,
 ) -> Result<ResolvedScope> {
@@ -252,7 +252,7 @@ async fn resolve_scope(
     let filter = if all_projects {
         None
     } else {
-        Some(GlobalDb::canonical_project_key(&project_root))
+        Some(RegisteredGlobalDb::canonical_project_key(&project_root))
     };
     Ok(ResolvedScope {
         filter,
@@ -261,38 +261,20 @@ async fn resolve_scope(
     })
 }
 
-async fn resolved_global_db(
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
-) -> Result<Option<GlobalDb>> {
-    if global_db.is_some() {
-        return Ok(None);
-    }
-    if !allow_default_registry_fallback {
-        return Err(config_error(
-            "client global analytics store is unavailable for tracedecay_analytics",
-        ));
-    }
-    let owned = GlobalDb::open().await.ok_or_else(|| {
-        config_error("could not open tracedecay user-level global DB; run tracedecay init first")
-    })?;
-    Ok(Some(owned))
-}
-
 /// Handles `tracedecay_analytics` tool calls.
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
+    analytics_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let all_projects = parse_scope(&args)?;
     let window_days = parse_window_days(&args);
     let section = parse_section(&args)?;
 
-    let owned_db = resolved_global_db(global_db, allow_default_registry_fallback).await?;
-    let gdb = global_db.or(owned_db.as_ref()).ok_or_else(|| {
-        config_error("tracedecay_analytics could not resolve a global analytics DB")
+    let gdb = analytics_db.ok_or_else(|| {
+        config_error("registered global analytics store is unavailable for tracedecay_analytics")
     })?;
 
     let scope = resolve_scope(
@@ -428,7 +410,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
 async fn facts_section(
     cg: &TraceDecay,
     args: &Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Value {
     let target =
@@ -441,46 +423,36 @@ async fn facts_section(
                 });
             }
         };
-    let query = target
-        .conn()
-        .query(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(retrieval_count), 0),
-                    COALESCE(SUM(CASE WHEN retrieval_count > 0 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(helpful_count), 0),
-                    COALESCE(SUM(unhelpful_count), 0),
-                    COALESCE(SUM(CASE WHEN helpful_count > 0 OR unhelpful_count > 0 THEN 1 ELSE 0 END), 0)
-             FROM memory_facts",
-            (),
-        )
-        .await;
-    let mut rows = match query {
-        Ok(rows) => rows,
+    let memory = match memory_application(&target) {
+        Ok(memory) => memory,
         Err(err) => {
             return json!({
                 "available": false,
-                "reason": format!("fact-store funnel query failed: {err}"),
+                "reason": format!("fact-store funnel unavailable: {err}"),
                 "project_root": target.project_root.display().to_string(),
             });
         }
     };
-    let Ok(Some(row)) = rows.next().await else {
-        return json!({
-            "available": false,
-            "reason": "fact-store funnel query returned no rows",
-            "project_root": target.project_root.display().to_string(),
-        });
+    let status = match memory.compatibility_memory_status().await {
+        Ok(status) => status,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": format!("fact-store funnel unavailable: {err}"),
+                "project_root": target.project_root.display().to_string(),
+            });
+        }
     };
-    let get_i64 = |index: i32| row.get::<i64>(index).unwrap_or(0);
+    let funnel = status.feedback_funnel();
     json!({
         "available": true,
         "project_root": target.project_root.display().to_string(),
-        "facts": get_i64(0),
-        "retrievals": get_i64(1),
-        "facts_retrieved": get_i64(2),
-        "helpful_feedback": get_i64(3),
-        "unhelpful_feedback": get_i64(4),
-        "facts_rated": get_i64(5),
+        "facts": status.fact_count(),
+        "retrievals": funnel.retrieval_count_total(),
+        "facts_retrieved": funnel.retrieved_fact_count(),
+        "helpful_feedback": status.helpful_count(),
+        "unhelpful_feedback": status.unhelpful_count(),
+        "facts_rated": funnel.rated_fact_count(),
     })
 }
 

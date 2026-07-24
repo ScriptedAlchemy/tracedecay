@@ -33,6 +33,58 @@ use super::support::{
     effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
 };
 
+fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSearchModeV1> {
+    match args.get("semantic_mode").and_then(Value::as_str) {
+        None | Some("fallback_allowed") => {
+            Ok(crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed)
+        }
+        Some("strict_semantic") => Ok(crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic),
+        Some(_) => Err(TraceDecayError::Config {
+            message: "semantic_mode must be one of fallback_allowed, strict_semantic".to_owned(),
+        }),
+    }
+}
+
+async fn execute_code_index_search(
+    executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
+    request: crate::mcp::server::CodeIndexSearchRequestV1,
+) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+    match executor {
+        Some(executor) => executor(request).await,
+        None => crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+            crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                code_generation: None,
+                reason:
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                    reason: "code_index_unavailable",
+                },
+            },
+        ),
+    }
+}
+
+fn semantic_status_value(
+    mode: crate::mcp::server::CodeIndexSearchModeV1,
+    status: &crate::mcp::server::CodeIndexSemanticStatusV1,
+) -> Value {
+    let mode = match mode {
+        crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed => "fallback_allowed",
+        crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic => "strict_semantic",
+    };
+    match status {
+        crate::mcp::server::CodeIndexSemanticStatusV1::Complete => json!({
+            "status": "complete",
+            "mode": mode,
+        }),
+        crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable { reason } => json!({
+            "status": "unavailable",
+            "mode": mode,
+            "reason": reason,
+        }),
+    }
+}
+
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }
@@ -113,6 +165,10 @@ pub(super) async fn handle_search(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
+    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
+    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let query =
         args.get("query")
@@ -121,91 +177,69 @@ pub(super) async fn handle_search(
                 message: "missing required parameter: query".to_string(),
             })?;
 
+    let semantic_mode = semantic_search_mode(&args)?;
     let limit = args
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .map_or(10, |v| v.min(500) as usize);
-
-    let results = cg.search(query, limit).await?;
-    let mut results = filter_by_scope(results, scope_prefix, |r| &r.node.file_path);
-    let mut lazy_indexed_files = Vec::new();
-    if dependency_hints::lazy_indexing_requested(&args)
-        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
-    {
-        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
-            cg,
-            query,
-            limit,
-            scope_prefix,
+    let outcome = if scope_prefix.is_some() {
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+            crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                code_generation: None,
+                reason:
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                    reason: "scope_unavailable",
+                },
+            },
         )
-        .await?;
-        if !lazy_indexed_files.is_empty() {
-            results = filter_by_scope(cg.search(query, limit).await?, scope_prefix, |r| {
-                &r.node.file_path
+    } else {
+        execute_code_index_search(
+            search_executor,
+            crate::mcp::server::CodeIndexSearchRequestV1 {
+                project_root: cg.project_root().to_path_buf(),
+                query: query.to_owned(),
+                limit,
+                mode: semantic_mode,
+                authority: search_authority.cloned(),
+                deadline,
+                cancellation,
+            },
+        )
+        .await
+    };
+    match outcome {
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+            let output = json!({
+                "results": &complete.ordered_candidates,
+                "code_generation": complete.code_generation,
+                "pr9_fallback_digest": &complete.pr9_fallback.digest,
+                "semantic": semantic_status_value(semantic_mode, &complete.semantic),
             });
+            Ok(rendered_tool_result(cg, &args, &output, Vec::new(), || {
+                render_search_md(&output)
+            }))
+        }
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
+            let reason = unavailable.reason.as_str();
+            let output = json!({
+                "results": [],
+                "code_generation": unavailable.code_generation,
+                "pr9_fallback_digest": Value::Null,
+                "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
+                "status": "unavailable",
+                "reason": reason,
+            });
+            let failure = format!("code-index search unavailable: {reason}");
+            let mut result =
+                rendered_tool_result(cg, &args, &output, Vec::new(), || render_search_md(&output))
+                    .with_failure_message(failure);
+            if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic {
+                result = result.with_semantic_error(true);
+            }
+            Ok(result)
         }
     }
-    let coverage_hint = cg.index_coverage_hint(results.len());
-    let lazy_match_visible = results
-        .iter()
-        .any(|result| lazy_indexed_files.contains(&result.node.file_path));
-    let ignored_dependency_hint = if !lazy_match_visible
-        && dependency_hints::should_check_ignored_dependency_hint(results.len(), limit)
-    {
-        dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
-    } else {
-        None
-    };
-
-    let touched_files = unique_file_paths(
-        results
-            .iter()
-            .map(|r| r.node.file_path.as_str())
-            .chain(lazy_indexed_files.iter().map(String::as_str)),
-    );
-
-    let items: Vec<Value> = results
-        .iter()
-        .map(|r| {
-            json!({
-                "id": r.node.id,
-                "name": r.node.name,
-                "kind": r.node.kind.as_str(),
-                "file": r.node.file_path,
-                "line": user_line(r.node.start_line),
-                "signature": r.node.signature,
-                "score": r.score,
-            })
-        })
-        .collect();
-
-    let output_value = if coverage_hint.is_some() || ignored_dependency_hint.is_some() {
-        let mut value = json!({ "results": items });
-        if !lazy_indexed_files.is_empty() {
-            value["lazy_indexed_ignored_dependency_files"] = json!(lazy_indexed_files);
-        }
-        if let Some(hint) = coverage_hint {
-            value["index_coverage_hint"] = json!(hint);
-        }
-        if let Some(hint) = ignored_dependency_hint {
-            value["ignored_dependency_hint"] = hint;
-        }
-        value
-    } else if !lazy_indexed_files.is_empty() {
-        json!({
-            "results": items,
-            "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
-        })
-    } else {
-        json!(items)
-    };
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &output_value,
-        touched_files,
-        || render_search_md(&output_value),
-    ))
 }
 
 fn render_search_md(value: &Value) -> String {
@@ -219,6 +253,23 @@ fn render_search_md(value: &Value) -> String {
     match items {
         Some(items) if !items.is_empty() => {
             for it in items {
+                if let Some(candidate) = it.get("candidate") {
+                    let anchor = render::field_str(candidate, "anchor_id");
+                    let exact_class = render::field_str(candidate, "exact_class");
+                    let utility = candidate
+                        .get("utility_micros")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    let ordinal = it
+                        .get("final_ordinal")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    md.bullet(&format!(
+                        "**{anchor}** ({exact_class}) — rank {} · utility {utility}",
+                        ordinal.saturating_add(1)
+                    ));
+                    continue;
+                }
                 let name = render::field_str(it, "name");
                 let kind = render::field_str(it, "kind");
                 let file = render::field_str(it, "file");
@@ -239,6 +290,19 @@ fn render_search_md(value: &Value) -> String {
         _ => {
             md.empty_note("No matching symbols.");
         }
+    }
+    if let Some(reason) = value.get("reason").and_then(Value::as_str) {
+        md.blank()
+            .heading(3, "Availability")
+            .line(&format!("Search unavailable: {reason}."));
+    }
+    if let Some(semantic) = value.get("semantic")
+        && semantic.get("status").and_then(Value::as_str) == Some("unavailable")
+        && let Some(reason) = semantic.get("reason").and_then(Value::as_str)
+    {
+        md.blank()
+            .heading(3, "Semantic")
+            .line(&format!("Semantic lane unavailable: {reason}."));
     }
     if let Some(msg) = value
         .get("index_coverage_hint")
@@ -1795,6 +1859,84 @@ async fn collect_method_bodies(
 mod tests {
     use super::*;
     use crate::memory::types::{FactRecord, FactSearchResult, MemoryCategory};
+
+    #[tokio::test]
+    async fn installed_search_executor_owns_fallback_allowed_dispatch() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = std::sync::Arc::clone(&calls);
+        let executor: crate::mcp::server::CodeIndexSearchExecutor = std::sync::Arc::new(
+            move |request| {
+                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert_eq!(
+                    request.mode,
+                    crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed
+                );
+                assert_eq!(request.query, "fixture");
+                Box::pin(async {
+                    crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: Some("generation.fixture".to_owned()),
+                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "calibration_unavailable",
+                            },
+                        },
+                    )
+                })
+            },
+        );
+        let outcome = execute_code_index_search(
+            Some(&executor),
+            crate::mcp::server::CodeIndexSearchRequestV1 {
+                project_root: std::path::PathBuf::from("/fixture"),
+                query: "fixture".to_owned(),
+                limit: 10,
+                mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
+                authority: None,
+                deadline: None,
+                cancellation: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                    reason:
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    ..
+                }
+            )
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_search_executor_is_typed_capability_unavailable() {
+        let outcome = execute_code_index_search(
+            None,
+            crate::mcp::server::CodeIndexSearchRequestV1 {
+                project_root: std::path::PathBuf::from("/fixture"),
+                query: "fixture".to_owned(),
+                limit: 10,
+                mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,
+                authority: None,
+                deadline: None,
+                cancellation: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                    reason:
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
+                    ..
+                }
+            )
+        ));
+    }
 
     #[test]
     fn context_markdown_lane_preview_keeps_all_lanes_visible() {

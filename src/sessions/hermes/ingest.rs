@@ -6,15 +6,14 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::agents::hermes::read_config_pinned_project_root;
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::global_db::GlobalDb;
+use crate::application::host_admission::HostAdmissionFacade;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::{TranscriptIngestStats, path_belongs_to_project};
 
-use super::coverage::{drain_hermes_projections, drain_hermes_projections_with_admission};
+use super::coverage::drain_hermes_projections_with_admission;
 use super::state_db::{
-    try_ingest_state_db, try_ingest_state_db_bounded_with_admission,
-    try_ingest_state_db_for_projects, try_ingest_user_state_db_bounded,
+    try_ingest_state_db_bounded_with_admission, try_ingest_state_db_for_projects,
+    try_ingest_user_state_db_bounded_with_admission,
 };
 
 /// Result of a Hermes sweep with one aggregate logical source-byte budget.
@@ -31,11 +30,11 @@ pub struct HermesSweepOutcome {
 /// Discovery is bounded to the default user integration (`~/.hermes`) and its
 /// immediate named-profile children; environment overrides are ignored.
 pub async fn ingest_for_project(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     project_root: &Path,
     project_id: ProjectId,
 ) -> TranscriptIngestStats {
-    ingest_for_project_capped(db, project_root, project_id, None)
+    ingest_for_project_capped(admission, project_root, project_id, None)
         .await
         .stats
 }
@@ -43,16 +42,12 @@ pub async fn ingest_for_project(
 /// [`ingest_for_project`] with one aggregate logical source-byte budget shared
 /// across every discovered Hermes profile.
 pub async fn ingest_for_project_capped(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     project_root: &Path,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
-        project_id.clone(),
-    ));
-    ingest_for_project_capped_with_admission(project_root, project_id, &admission, max_new_bytes)
+    ingest_for_project_capped_with_admission(project_root, project_id, admission, max_new_bytes)
         .await
 }
 
@@ -61,7 +56,7 @@ pub async fn ingest_for_project_capped(
 /// The project provider composes repository provenance once from the
 /// authoritative project root and passes it through this path. Direct and
 /// profile entrypoints intentionally continue to construct their own facade.
-pub(crate) async fn ingest_for_project_capped_with_admission(
+pub async fn ingest_for_project_capped_with_admission(
     project_root: &Path,
     project_id: ProjectId,
     admission: &HostAdmissionFacade<'_>,
@@ -77,7 +72,7 @@ pub(crate) async fn ingest_for_project_capped_with_admission(
 /// One project-store destination for a shared Hermes source sweep.
 #[derive(Clone)]
 pub struct ProjectIngestDestination<'a> {
-    pub db: &'a GlobalDb,
+    pub admission: &'a HostAdmissionFacade<'a>,
     pub project_root: &'a Path,
     pub project_id: ProjectId,
 }
@@ -125,7 +120,9 @@ pub async fn ingest_homes_for_projects(
         let scope = ObservationScopeV1::Project {
             project_id: destination.project_id.clone(),
         };
-        if let Err(error) = drain_hermes_projections(destination.db, &scope).await {
+        if let Err(error) =
+            drain_hermes_projections_with_admission(destination.admission, &scope).await
+        {
             tracing::debug!(error, "Hermes shared projection drain deferred");
         }
     }
@@ -136,38 +133,34 @@ pub async fn ingest_homes_for_projects(
 /// seam for pointing the sweep at a temporary home instead of the real
 /// `~/.hermes`.
 pub async fn ingest_homes(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
 ) -> TranscriptIngestStats {
-    ingest_homes_capped(db, hermes_homes, project_root, project_id, None)
+    ingest_homes_capped(admission, hermes_homes, project_root, project_id, None)
         .await
         .stats
 }
 
 pub async fn ingest_homes_capped(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
-        project_id.clone(),
-    ));
     ingest_homes_capped_with_admission(
         hermes_homes,
         project_root,
         project_id,
-        &admission,
+        admission,
         max_new_bytes,
     )
     .await
 }
 
-async fn ingest_homes_capped_with_admission(
+pub async fn ingest_homes_capped_with_admission(
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
@@ -211,28 +204,40 @@ async fn ingest_homes_capped_with_admission(
 /// Hermes profile. Project ingestion separately admits each turn to every
 /// registered project it touched using the same stable message IDs.
 pub async fn ingest_user_sessions_capped(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
     let homes = crate::sessions::home_dir()
         .map(|home| vec![home.join(".hermes")])
         .unwrap_or_default();
-    ingest_user_homes_capped(db, &homes, registered_roots, max_new_bytes).await
+    ingest_user_homes_capped(admission, &homes, registered_roots, max_new_bytes).await
+}
+
+pub(crate) async fn ingest_user_sessions_capped_with_admission(
+    admission: &HostAdmissionFacade<'_>,
+    registered_roots: &[PathBuf],
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
+    let homes = crate::sessions::home_dir()
+        .map(|home| vec![home.join(".hermes")])
+        .unwrap_or_default();
+    ingest_user_homes_capped_with_admission(admission, &homes, registered_roots, max_new_bytes)
+        .await
 }
 
 pub async fn ingest_user_homes(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
 ) -> TranscriptIngestStats {
-    ingest_user_homes_capped(db, hermes_homes, registered_roots, None)
+    ingest_user_homes_capped(admission, hermes_homes, registered_roots, None)
         .await
         .stats
 }
 
 pub async fn ingest_user_homes_capped(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
@@ -243,7 +248,14 @@ pub async fn ingest_user_homes_capped(
         None => IngestByteBudget::unbounded(),
     };
     for source in all_profile_sources(hermes_homes) {
-        match try_ingest_user_state_db_bounded(db, &source, registered_roots, &mut budget).await {
+        match try_ingest_user_state_db_bounded_with_admission(
+            admission,
+            &source,
+            registered_roots,
+            &mut budget,
+        )
+        .await
+        {
             Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
             Err(error) => tracing::debug!(
                 state_db = %source.state_db.display(),
@@ -252,7 +264,47 @@ pub async fn ingest_user_homes_capped(
             ),
         }
     }
-    if let Err(error) = drain_hermes_projections(db, &ObservationScopeV1::Profile).await {
+    if let Err(error) =
+        drain_hermes_projections_with_admission(admission, &ObservationScopeV1::Profile).await
+    {
+        tracing::debug!(error, "Hermes profile projection drain deferred");
+    }
+    outcome.bytes_consumed = budget.consumed();
+    outcome.deferred_by_byte_cap = budget.deferred();
+    outcome
+}
+
+async fn ingest_user_homes_capped_with_admission(
+    admission: &HostAdmissionFacade<'_>,
+    hermes_homes: &[PathBuf],
+    registered_roots: &[PathBuf],
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
+    let mut outcome = HermesSweepOutcome::default();
+    let mut budget = match max_new_bytes {
+        Some(limit) => IngestByteBudget::bounded(limit),
+        None => IngestByteBudget::unbounded(),
+    };
+    for source in all_profile_sources(hermes_homes) {
+        match try_ingest_user_state_db_bounded_with_admission(
+            admission,
+            &source,
+            registered_roots,
+            &mut budget,
+        )
+        .await
+        {
+            Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
+            Err(error) => tracing::debug!(
+                state_db = %source.state_db.display(),
+                error,
+                "skipping projectless Hermes transcript source"
+            ),
+        }
+    }
+    if let Err(error) =
+        drain_hermes_projections_with_admission(admission, &ObservationScopeV1::Profile).await
+    {
         tracing::debug!(error, "Hermes profile projection drain deferred");
     }
     outcome.bytes_consumed = budget.consumed();
@@ -264,7 +316,7 @@ pub async fn ingest_user_homes_capped(
 /// resolved by the migration layer. Unlike the normal catch-up sweep, any
 /// open/query/write failure is returned so callers retain the pin and source.
 pub(crate) async fn ingest_legacy_pinned_profile(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     profile_dir: &Path,
     project_root: &Path,
     project_id: ProjectId,
@@ -292,8 +344,16 @@ pub(crate) async fn ingest_legacy_pinned_profile(
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
-    let stats = try_ingest_state_db(db, &source, project_root, project_id).await?;
-    drain_hermes_projections(db, &scope).await?;
+    let mut budget = IngestByteBudget::unbounded();
+    let stats = try_ingest_state_db_bounded_with_admission(
+        &source,
+        project_root,
+        project_id,
+        admission,
+        &mut budget,
+    )
+    .await?;
+    drain_hermes_projections_with_admission(admission, &scope).await?;
     Ok(stats)
 }
 

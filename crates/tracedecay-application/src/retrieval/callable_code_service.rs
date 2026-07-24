@@ -26,6 +26,8 @@ use super::{
     TypeHierarchyRecord,
 };
 
+const UNPINNED_LATEST_GENERATION_SENTINEL: &str = "code-generation:unpinned-latest.v1";
+
 pub type CallableCodeQueryFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<CodeQueryPage<T>>> + Send + 'a>>;
 
@@ -268,13 +270,23 @@ fn validate_code_query_outcome<T>(
     requested_page_size: u32,
 ) -> Result<(), ApplicationProblem> {
     let evidence = outcome.evidence();
+    let unpinned = requested_generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL;
     if evidence.temporal.requested_mode != TemporalModeV1::Current {
         return Err(invalid_code_query_outcome_problem());
     }
     if let Some(page) = &evidence.payload {
-        if &page.generation != requested_generation
-            || evidence.temporal.source_generation.as_ref() != Some(requested_generation)
-        {
+        let source_generation = evidence
+            .temporal
+            .source_generation
+            .as_ref()
+            .ok_or_else(stale_code_query_problem)?;
+        let generation_matches_request = if unpinned {
+            page.generation.as_str() != UNPINNED_LATEST_GENERATION_SENTINEL
+                && source_generation == &page.generation
+        } else {
+            &page.generation == requested_generation && source_generation == requested_generation
+        };
+        if !generation_matches_request {
             return Err(stale_code_query_problem());
         }
         if page.validate().is_err() {
@@ -289,13 +301,14 @@ fn validate_code_query_outcome<T>(
         {
             return Err(invalid_code_query_outcome_problem());
         }
-    } else if evidence
-        .temporal
-        .source_generation
-        .as_ref()
-        .is_some_and(|generation| generation != requested_generation)
-    {
-        return Err(stale_code_query_problem());
+    } else {
+        match evidence.temporal.source_generation.as_ref() {
+            Some(generation)
+                if unpinned && generation.as_str() != UNPINNED_LATEST_GENERATION_SENTINEL => {}
+            Some(generation) if !unpinned && generation == requested_generation => {}
+            None if !unpinned => {}
+            _ => return Err(stale_code_query_problem()),
+        }
     }
     Ok(())
 }

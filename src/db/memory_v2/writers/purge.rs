@@ -8,14 +8,16 @@ use tracedecay_domain::{
     PayloadAccessState, SourceStoreId, UtcMicros,
 };
 
-use crate::db::engine::{self, Executor, params};
+#[cfg(test)]
+use crate::db::engine;
+use crate::db::engine::params;
 use crate::errors::Result;
 use crate::tracedecay::current_timestamp;
 
 use super::super::types::OwnerKey;
 use super::super::{
     MemoryV2Executor, OPERATION, canonical_replay, current_fact_state, db_error, db_message,
-    optional_i64, optional_string, row_exists,
+    load_legacy_entity_ids, optional_i64, optional_string, row_exists,
 };
 #[cfg(test)]
 use super::super::{
@@ -282,24 +284,7 @@ async fn purge_legacy_fact(conn: &impl MemoryV2Executor, legacy_fact_id: i64) ->
     conn.execute("DELETE FROM memory_banks", ())
         .await
         .map_err(|error| db_error("memory_v2_purge", error))?;
-    let mut rows = conn
-        .query(
-            "SELECT entity_id FROM memory_fact_entities WHERE fact_id = ?1",
-            params![legacy_fact_id],
-        )
-        .await
-        .map_err(|error| db_error("memory_v2_purge", error))?;
-    let mut entity_ids = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error("memory_v2_purge", error))?
-    {
-        entity_ids.push(
-            row.get::<i64>(0)
-                .map_err(|error| db_error("memory_v2_purge", error))?,
-        );
-    }
+    let entity_ids = load_legacy_entity_ids(conn, legacy_fact_id, "memory_v2_purge").await?;
     conn.execute(
         "DELETE FROM memory_facts WHERE fact_id = ?1",
         params![legacy_fact_id],

@@ -332,6 +332,7 @@ pub struct GitHubReviewItemV1 {
     pub thread_id: Option<GitHubReviewThreadIdV1>,
     pub comment_id: GitHubReviewCommentIdV1,
     pub reply_to_comment_id: Option<GitHubReviewCommentIdV1>,
+    pub version_digest: ManifestDigest,
     pub author_anchor: RetrievalAnchorId,
     pub author_class: GitHubReviewAuthorClassV1,
     pub review_state: GitHubReviewStateV1,
@@ -359,6 +360,7 @@ impl GitHubReviewItemV1 {
         self.reply_to_comment_id
             .as_ref()
             .map_or(Ok(()), GitHubReviewCommentIdV1::validate)?;
+        self.version_digest.validate()?;
         self.author_anchor.validate()?;
         self.body_digest.validate()?;
         self.body_anchor.validate()?;

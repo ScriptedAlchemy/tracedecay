@@ -24,25 +24,31 @@ use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
     HttpApplicationRequest, application_problem_response, sse_response,
 };
+use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, GraphImpactPrimitiveRequest, SymbolGraphScope,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
-    CancellationContext, CancellationSignal, Deadline, HealthReadRequest, IdempotencyKey,
-    LegalAction, OperationTermination, PageRequest, ProblemOwningLayer, RequestContext, RequestId,
-    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
-    RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent,
-    StreamEventKind,
+    ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
+    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
+    IdempotencyKey, LegalAction, OperationTermination, PageRequest, ProblemOwningLayer,
+    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder,
+    RetrievalRequestMeta, RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
+    StreamEvent, StreamEventKind,
+};
+use tracedecay_domain::configuration::{
+    ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
+    ProtectedChange, RollbackModeV1, SettingKey,
 };
 use tracedecay_domain::{
     GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexTransactionOperationV1,
     HunkRefV1, ManifestDigest, ProjectId, RepositoryStateSnapshotV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{
-    BindingSurface, CatalogSnapshotV1, CatalogValidationError, IdentifierError, ProfileId,
-    SchemaId, SurfaceOperationName,
+    BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, IdentifierError,
+    ProfileId, SchemaId, SurfaceOperationName, UseCaseId,
 };
 
 use crate::application::feedback::observations::{
@@ -59,7 +65,10 @@ use crate::application::primitives::{
     QualifiedNamePrimitiveRequest, SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest,
     StorageStatusPrimitiveRequest,
 };
-use crate::catalog_composition::{CatalogCompositionError, build_application_catalog_snapshot};
+use crate::catalog_composition::{
+    ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
+    compose_application_catalog_with,
+};
 use crate::daemon_client::{
     BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
@@ -96,9 +105,22 @@ pub enum ApplicationSurfaceOperation {
     HealthRead,
     StorageStatus,
     DiagnosticsRead,
+    ConfigurationList,
+    ConfigurationExplain,
+    ConfigurationGet,
+    ConfigurationSet,
+    ConfigurationUnset,
+    ConfigurationBatch,
+    ConfigurationWriteCredential,
+    ConfigurationObservedState,
+    ConfigurationProtectedPreview,
+    ConfigurationProtectedApply,
+    ConfigurationRollbackPreview,
+    ConfigurationRollbackApply,
+    ConfigurationAudit,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 21] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 34] = [
     ApplicationSurfaceOperation::GitPreview,
     ApplicationSurfaceOperation::GitApply,
     ApplicationSurfaceOperation::FeedbackDiagnostics,
@@ -120,6 +142,19 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 21] = [
     ApplicationSurfaceOperation::HealthRead,
     ApplicationSurfaceOperation::StorageStatus,
     ApplicationSurfaceOperation::DiagnosticsRead,
+    ApplicationSurfaceOperation::ConfigurationList,
+    ApplicationSurfaceOperation::ConfigurationExplain,
+    ApplicationSurfaceOperation::ConfigurationGet,
+    ApplicationSurfaceOperation::ConfigurationSet,
+    ApplicationSurfaceOperation::ConfigurationUnset,
+    ApplicationSurfaceOperation::ConfigurationBatch,
+    ApplicationSurfaceOperation::ConfigurationWriteCredential,
+    ApplicationSurfaceOperation::ConfigurationObservedState,
+    ApplicationSurfaceOperation::ConfigurationProtectedPreview,
+    ApplicationSurfaceOperation::ConfigurationProtectedApply,
+    ApplicationSurfaceOperation::ConfigurationRollbackPreview,
+    ApplicationSurfaceOperation::ConfigurationRollbackApply,
+    ApplicationSurfaceOperation::ConfigurationAudit,
 ];
 
 impl ApplicationSurfaceOperation {
@@ -146,6 +181,19 @@ impl ApplicationSurfaceOperation {
             Self::HealthRead => "health_read",
             Self::StorageStatus => "storage_status",
             Self::DiagnosticsRead => "diagnostics_read",
+            Self::ConfigurationList => "configuration_list",
+            Self::ConfigurationExplain => "configuration_explain",
+            Self::ConfigurationGet => "configuration_get",
+            Self::ConfigurationSet => "configuration_set",
+            Self::ConfigurationUnset => "configuration_unset",
+            Self::ConfigurationBatch => "configuration_batch",
+            Self::ConfigurationWriteCredential => "configuration_write_credential",
+            Self::ConfigurationObservedState => "configuration_observed_state",
+            Self::ConfigurationProtectedPreview => "configuration_protected_preview",
+            Self::ConfigurationProtectedApply => "configuration_protected_apply",
+            Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
+            Self::ConfigurationRollbackApply => "configuration_rollback_apply",
+            Self::ConfigurationAudit => "configuration_audit",
         }
     }
 
@@ -208,6 +256,118 @@ const fn default_affected_tests_depth() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct TestResultsSurfaceRequest {}
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationListSurfaceRequest {}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationKeySurfaceRequest {
+    pub key: SettingKey,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "operation")]
+pub enum ConfigurationDirectMutationSurfaceRequest {
+    Set {
+        layer: ConfigurationLayerIdV1,
+        key: SettingKey,
+        value: ConfigurationValueV1,
+    },
+    Unset {
+        layer: ConfigurationLayerIdV1,
+        key: SettingKey,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationSetSurfaceRequest {
+    pub layer: ConfigurationLayerIdV1,
+    pub key: SettingKey,
+    pub value: ConfigurationValueV1,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationUnsetSurfaceRequest {
+    pub layer: ConfigurationLayerIdV1,
+    pub key: SettingKey,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationBatchSurfaceRequest {
+    pub mutations: Vec<ConfigurationDirectMutationSurfaceRequest>,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationWriteCredentialSurfaceRequest {
+    pub expected_reference_id: Option<CredentialReferenceId>,
+    pub kind: CredentialKindV1,
+    pub write_handle: String,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationObservedStateSurfaceRequest {}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationProtectedPreviewSurfaceRequest {
+    pub change: ProtectedChange,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationProtectedApplySurfaceRequest {
+    pub plan_id: ChangePlanId,
+    pub expected_base_revision_id: ConfigurationRevisionId,
+    pub operation_digest: ManifestDigest,
+    pub idempotency_key: ConfigurationIdempotencyKey,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationRollbackPreviewSurfaceRequest {
+    pub target_revision_id: ConfigurationRevisionId,
+    pub mode: RollbackModeV1,
+}
+
+pub type ConfigurationRollbackApplySurfaceRequest = ConfigurationProtectedApplySurfaceRequest;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationAuditSurfaceRequest {
+    #[serde(default)]
+    pub after_event_id: Option<ConfigurationAuditEventId>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "request")]
+pub enum ConfigurationSurfaceRequest {
+    List(ConfigurationListSurfaceRequest),
+    Explain(ConfigurationKeySurfaceRequest),
+    Get(ConfigurationKeySurfaceRequest),
+    Set(ConfigurationSetSurfaceRequest),
+    Unset(ConfigurationUnsetSurfaceRequest),
+    Batch(ConfigurationBatchSurfaceRequest),
+    WriteCredential(ConfigurationWriteCredentialSurfaceRequest),
+    ObservedState(ConfigurationObservedStateSurfaceRequest),
+    ProtectedPreview(ConfigurationProtectedPreviewSurfaceRequest),
+    ProtectedApply(ConfigurationProtectedApplySurfaceRequest),
+    RollbackPreview(ConfigurationRollbackPreviewSurfaceRequest),
+    RollbackApply(ConfigurationRollbackApplySurfaceRequest),
+    Audit(ConfigurationAuditSurfaceRequest),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitPreviewSurfaceRequest {
@@ -244,6 +404,7 @@ pub enum ApplicationSurfaceRequest {
     AffectedTests(AffectedTestsSurfaceRequest),
     TestResults(TestResultsSurfaceRequest),
     Primitive(Pr12PrimitiveRequest),
+    Configuration(ConfigurationSurfaceRequest),
 }
 
 pub struct ApplicationSurfaceInvocationResult {
@@ -256,28 +417,56 @@ pub struct ApplicationSurfaceInvocationResult {
 pub type HttpApplicationInvocationFuture =
     Pin<Box<dyn Future<Output = CanonicalInvocationResult<Value>> + Send + 'static>>;
 
+struct HttpApplicationCatalogDispatcher {
+    client: crate::daemon_client::DaemonInvocationClient,
+    catalog: Arc<CatalogSnapshotV1>,
+}
+
+struct CatalogBoundHttpApplicationRequest {
+    capability_id: CapabilityId,
+    use_case_id: UseCaseId,
+    request: HttpApplicationRequest,
+}
+
+impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
+    for HttpApplicationCatalogDispatcher
+{
+    type Output = HttpApplicationInvocationFuture;
+
+    fn invoke(
+        &self,
+        operation: &ApplicationOperation,
+        request: CatalogBoundHttpApplicationRequest,
+    ) -> Self::Output {
+        assert_eq!(operation.capability_id(), &request.capability_id);
+        assert_eq!(operation.use_case_id(), &request.use_case_id);
+        let client = self.client.clone();
+        let catalog = self.catalog.clone();
+        Box::pin(async move {
+            invoke_http_application_request(request.request, &client, &catalog).await
+        })
+    }
+}
+
 pub fn http_application_invoker(
     client: crate::daemon_client::DaemonInvocationClient,
 ) -> Result<
     impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
     ApplicationSurfaceAdapterError,
 > {
-    let catalog = Arc::new(application_surface_catalog()?);
-    let resolver = CatalogBindingResolver::new(&catalog);
+    let composition = Arc::new(compose_application_catalog_with(|catalog| {
+        HttpApplicationCatalogDispatcher {
+            client,
+            catalog: Arc::new(catalog.clone()),
+        }
+    })?);
+    let resolver = CatalogBindingResolver::new(composition.snapshot());
     for operation in APPLICATION_SURFACE_OPERATIONS {
         if resolve_application_binding(&resolver, BindingSurface::Http, operation).is_none() {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }
     }
-    Ok(move |request| {
-        let client = client.clone();
-        let catalog = Arc::clone(&catalog);
-        let invocation: HttpApplicationInvocationFuture =
-            Box::pin(
-                async move { invoke_http_application_request(request, &client, &catalog).await },
-            );
-        invocation
-    })
+    Ok(move |request| invoke_catalog_bound_http_application_request(request, &composition))
 }
 
 pub fn http_application_router(
@@ -1053,6 +1242,58 @@ impl ApplicationSurfaceRequest {
                         | ApplicationSurfaceOperation::StorageStatus
                         | ApplicationSurfaceOperation::DiagnosticsRead
                 )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::List(_)),
+                    ApplicationSurfaceOperation::ConfigurationList
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Explain(_)),
+                    ApplicationSurfaceOperation::ConfigurationExplain
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Get(_)),
+                    ApplicationSurfaceOperation::ConfigurationGet
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Set(_)),
+                    ApplicationSurfaceOperation::ConfigurationSet
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Unset(_)),
+                    ApplicationSurfaceOperation::ConfigurationUnset
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Batch(_)),
+                    ApplicationSurfaceOperation::ConfigurationBatch
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::WriteCredential(_)),
+                    ApplicationSurfaceOperation::ConfigurationWriteCredential
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::ObservedState(_)),
+                    ApplicationSurfaceOperation::ConfigurationObservedState
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::ProtectedPreview(_)),
+                    ApplicationSurfaceOperation::ConfigurationProtectedPreview
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::ProtectedApply(_)),
+                    ApplicationSurfaceOperation::ConfigurationProtectedApply
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::RollbackPreview(_)),
+                    ApplicationSurfaceOperation::ConfigurationRollbackPreview
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::RollbackApply(_)),
+                    ApplicationSurfaceOperation::ConfigurationRollbackApply
+                )
+                | (
+                    Self::Configuration(ConfigurationSurfaceRequest::Audit(_)),
+                    ApplicationSurfaceOperation::ConfigurationAudit
+                )
         )
     }
 }
@@ -1149,6 +1390,58 @@ pub fn parse_application_surface_request(
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
+        ApplicationSurfaceOperation::ConfigurationList => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::List)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationExplain => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Explain)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationGet => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Get)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationSet => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Set)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationUnset => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Unset)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationBatch => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Batch)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationWriteCredential => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::WriteCredential)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationObservedState => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::ObservedState)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationProtectedPreview => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::ProtectedPreview)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationProtectedApply => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::ProtectedApply)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationRollbackPreview => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::RollbackPreview)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationRollbackApply => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::RollbackApply)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationAudit => serde_json::from_value(value)
+            .map(ConfigurationSurfaceRequest::Audit)
+            .map(ApplicationSurfaceRequest::Configuration)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::FeedbackDiagnostics
         | ApplicationSurfaceOperation::FeedbackGet
         | ApplicationSurfaceOperation::FeedbackExpand
@@ -1272,6 +1565,16 @@ pub async fn execute_application_surface(
                 cancellation_context,
             )
         }
+        ApplicationSurfaceRequest::Configuration(request) => {
+            crate::daemon::DaemonInvocationRequest::configuration(
+                request_id.as_str(),
+                operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
     }
     .with_delivery_route(delivery_route);
     let Some(client) = client else {
@@ -1289,7 +1592,16 @@ pub async fn execute_application_surface(
             requested_format,
         });
     };
-    let policy = if operation == ApplicationSurfaceOperation::GitApply {
+    let policy = if matches!(
+        operation,
+        ApplicationSurfaceOperation::GitApply
+            | ApplicationSurfaceOperation::ConfigurationSet
+            | ApplicationSurfaceOperation::ConfigurationUnset
+            | ApplicationSurfaceOperation::ConfigurationBatch
+            | ApplicationSurfaceOperation::ConfigurationWriteCredential
+            | ApplicationSurfaceOperation::ConfigurationProtectedApply
+            | ApplicationSurfaceOperation::ConfigurationRollbackApply
+    ) {
         InvocationCancellationPolicy::AuthoritativeEffect
     } else {
         InvocationCancellationPolicy::ReadOnly
@@ -1381,6 +1693,14 @@ pub async fn execute_application_surface(
                 result.into_application(),
             ))
         }
+        crate::daemon::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+            Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome,
+            })
+        }
         crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
             ApplicationProblemEnvelope::new(result_contract.clone(), request_id.clone(), problem),
         ),
@@ -1444,7 +1764,22 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::FileMetadata
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::StorageStatus
-        | ApplicationSurfaceOperation::DiagnosticsRead => Plan26FeedbackOperationV1::FeedbackCycle,
+        | ApplicationSurfaceOperation::DiagnosticsRead
+        | ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit => {
+            Plan26FeedbackOperationV1::FeedbackCycle
+        }
     }
 }
 
@@ -1635,6 +1970,37 @@ pub fn resolve_application_surface_dispatch_with_controls(
     Ok(dispatched)
 }
 
+fn invoke_catalog_bound_http_application_request(
+    request: HttpApplicationRequest,
+    composition: &ApplicationCatalogComposition<HttpApplicationCatalogDispatcher>,
+) -> HttpApplicationInvocationFuture {
+    let surface_operation = application_operation_for_http(request.operation);
+    let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)
+        .unwrap_or_else(|_| panic!("the application profile id is static"));
+    let operation_name = SurfaceOperationName::new(surface_operation.as_str())
+        .unwrap_or_else(|_| panic!("the application operation name is static"));
+    let capability = composition
+        .snapshot()
+        .resolve_binding(
+            &profile_id,
+            BindingSurface::Http,
+            &operation_name,
+            1,
+            &BTreeSet::new(),
+        )
+        .unwrap_or_else(|| {
+            panic!("HTTP bindings are validated before the application router is mounted")
+        });
+    let handler = composition
+        .handler(capability.use_case_id())
+        .unwrap_or_else(|| panic!("catalog composition validates every callable handler"));
+    handler.invoke(CatalogBoundHttpApplicationRequest {
+        capability_id: capability.capability_id().clone(),
+        use_case_id: capability.use_case_id().clone(),
+        request,
+    })
+}
+
 async fn invoke_http_application_request(
     request: HttpApplicationRequest,
     client: &crate::daemon_client::DaemonInvocationClient,
@@ -1745,6 +2111,41 @@ fn application_operation_for_http(
         HttpApplicationOperation::HealthRead => ApplicationSurfaceOperation::HealthRead,
         HttpApplicationOperation::StorageStatus => ApplicationSurfaceOperation::StorageStatus,
         HttpApplicationOperation::DiagnosticsRead => ApplicationSurfaceOperation::DiagnosticsRead,
+        HttpApplicationOperation::ConfigurationList => {
+            ApplicationSurfaceOperation::ConfigurationList
+        }
+        HttpApplicationOperation::ConfigurationExplain => {
+            ApplicationSurfaceOperation::ConfigurationExplain
+        }
+        HttpApplicationOperation::ConfigurationGet => ApplicationSurfaceOperation::ConfigurationGet,
+        HttpApplicationOperation::ConfigurationSet => ApplicationSurfaceOperation::ConfigurationSet,
+        HttpApplicationOperation::ConfigurationUnset => {
+            ApplicationSurfaceOperation::ConfigurationUnset
+        }
+        HttpApplicationOperation::ConfigurationBatch => {
+            ApplicationSurfaceOperation::ConfigurationBatch
+        }
+        HttpApplicationOperation::ConfigurationWriteCredential => {
+            ApplicationSurfaceOperation::ConfigurationWriteCredential
+        }
+        HttpApplicationOperation::ConfigurationObservedState => {
+            ApplicationSurfaceOperation::ConfigurationObservedState
+        }
+        HttpApplicationOperation::ConfigurationProtectedPreview => {
+            ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        }
+        HttpApplicationOperation::ConfigurationProtectedApply => {
+            ApplicationSurfaceOperation::ConfigurationProtectedApply
+        }
+        HttpApplicationOperation::ConfigurationRollbackPreview => {
+            ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        }
+        HttpApplicationOperation::ConfigurationRollbackApply => {
+            ApplicationSurfaceOperation::ConfigurationRollbackApply
+        }
+        HttpApplicationOperation::ConfigurationAudit => {
+            ApplicationSurfaceOperation::ConfigurationAudit
+        }
     }
 }
 

@@ -14,8 +14,9 @@ use super::super::projection::{
     resolve_compatibility_target_tx,
 };
 use crate::db::Database;
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use libsql::{Transaction, params};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use tracedecay_domain::{
@@ -69,7 +70,7 @@ fn compatibility_normalize_tags(tags: &[String]) -> Vec<String> {
 }
 
 pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     target: &CompatibilityFactTargetV1,
 ) -> FactStoreResult<(FactId, StoredFactV1, CompatibilityFactMappingV1)> {
     let fact_id = resolve_compatibility_target_tx(transaction, target)
@@ -101,7 +102,7 @@ pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
 }
 
 pub(in crate::store::memory) async fn compatibility_curation_evidence_ids_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     evidence: &[CompatibilityFactTargetV1],
 ) -> FactStoreResult<Vec<FactId>> {
@@ -124,7 +125,7 @@ pub(in crate::store::memory) async fn compatibility_curation_evidence_ids_tx(
 }
 
 pub(super) async fn compatibility_curation_mappings_from_ids_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     ids: &[FactId],
 ) -> FactStoreResult<Vec<CompatibilityFactMappingV1>> {
@@ -159,7 +160,7 @@ pub(super) async fn compatibility_sanitized_relation_metadata(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn compatibility_upsert_legacy_relation_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     source_legacy_fact_id: i64,
     target_legacy_fact_id: i64,
     relation: CompatibilityFactRelationV1,
@@ -227,7 +228,7 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
 }
 
 pub(super) async fn compatibility_link_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
     operation: &CompatibilityFactLinkV1,
@@ -391,7 +392,7 @@ pub(super) fn compatibility_curated_correction_batch(
 
 pub(super) async fn compatibility_normalize_tags_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
     operation: &CompatibilityFactNormalizeTagsV1,

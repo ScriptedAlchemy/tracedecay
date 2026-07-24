@@ -300,8 +300,8 @@ impl RuntimeReadOperationV1 {
                     Self::MAX_GRAPH_QUERY_BYTES,
                 )
             }
-            // Repository reads are validated by their typed store DTOs at
-            // construction; the runtime port performs no extra checks yet.
+            // Repository DTO and exact-shard validation runs on the complete
+            // request because it requires the daemon-verified binding.
             Self::Repository { .. } => return Ok(()),
             _ => return Ok(()),
         };
@@ -391,6 +391,9 @@ impl RuntimeReadRequestV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.control.validate()?;
         self.operation.validate()?;
+        if let RuntimeReadOperationV1::Repository { op } = &self.operation {
+            op.validate_for_binding(&self.binding)?;
+        }
         if self.admission_bytes == 0 {
             return Err(StorageRuntimeContractErrorV1::Zero {
                 field: "read admission bytes",

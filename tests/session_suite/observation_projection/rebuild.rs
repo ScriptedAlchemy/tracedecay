@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let observations = [
         observation(
             "session-rebuild",
@@ -60,8 +62,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
             .await
             .unwrap();
     }
-    let mut rows_before = db
-        .search_session_messages("claude", Some("user"), "frozen frontier", 10)
+    let mut rows_before = search_session_messages(&tmp, "frozen frontier", 10)
         .await
         .into_iter()
         .map(|hit| (hit.message.message_id, hit.message.text))
@@ -72,11 +73,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let raw_store_ids_before = projected_raw_store_ids(&tmp).await;
     assert_eq!(counts_before, (1, 2, 2, 1, 0, 1));
     let anchor_store_id = raw_store_ids_before[0].1;
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO lcm_summary_nodes (
@@ -88,33 +85,28 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
              )",
             (),
         )
-        .await
         .unwrap();
     raw_conn
         .execute(
             "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
              VALUES ('summary.rebuild-store-id', 'raw_message', ?1, 0)",
-            libsql::params![anchor_store_id.to_string()],
+            rusqlite::params![anchor_store_id.to_string()],
         )
-        .await
         .unwrap();
     raw_conn
         .execute(
             "INSERT INTO lcm_lifecycle_state (
                 provider, conversation_id, current_session_id, current_frontier_store_id
              ) VALUES ('claude', 'session-rebuild', 'session-rebuild', ?1)",
-            libsql::params![anchor_store_id],
+            rusqlite::params![anchor_store_id],
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
     let rebuilt = rebuild_projection_to_completion(&store, 2).await;
     assert_eq!(rebuilt.checkpoint().last_sequence(), 2);
     assert_eq!(rebuilt.projected_rows(), 2);
-    let mut rows_after = db
-        .search_session_messages("claude", Some("user"), "frozen frontier", 10)
+    let mut rows_after = search_session_messages(&tmp, "frozen frontier", 10)
         .await
         .into_iter()
         .map(|hit| (hit.message.message_id, hit.message.text))
@@ -122,13 +114,9 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     rows_after.sort();
     assert_eq!(rows_after, rows_before);
     assert_eq!(projected_raw_store_ids(&tmp).await, raw_store_ids_before);
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    let mut identity_rows = raw_conn
-        .query(
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let identity = raw_conn
+        .query_row(
             "SELECT source.source_id, lifecycle.current_frontier_store_id
              FROM lcm_summary_sources AS source
              JOIN lcm_lifecycle_state AS lifecycle
@@ -136,19 +124,12 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
               AND lifecycle.conversation_id = 'session-rebuild'
              WHERE source.node_id = 'summary.rebuild-store-id'",
             (),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
-        .await
         .unwrap();
-    let identity = identity_rows.next().await.unwrap().unwrap();
-    assert_eq!(
-        identity.get::<String>(0).unwrap(),
-        anchor_store_id.to_string()
-    );
-    assert_eq!(identity.get::<i64>(1).unwrap(), anchor_store_id);
-    drop(identity);
-    drop(identity_rows);
+    assert_eq!(identity.0, anchor_store_id.to_string());
+    assert_eq!(identity.1, anchor_store_id);
     drop(raw_conn);
-    drop(raw_db);
     assert_eq!(projection_provenance_rows(&tmp).await, provenance_before);
     assert_eq!(projection_counts(&tmp).await, counts_before);
     assert!(
@@ -224,8 +205,10 @@ async fn canonical_provider_incremental_and_rebuild_projection_converge() {
     ];
 
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
 
     for (index, provider) in PROVIDERS.into_iter().enumerate() {
         let observation = canonical_observation(provider, index as u64 + 1);
@@ -310,8 +293,10 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
     );
 
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         persist(&store, first.clone(), None).await;
         store
             .project_observation(first.observation_id())
@@ -320,8 +305,10 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
     }
     reinstall_legacy_projection_provenance_schema(&tmp).await;
 
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     persist(
         &store,
         same_content.clone(),
@@ -378,8 +365,10 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
 #[tokio::test]
 async fn durable_projection_alias_survives_rebuild_without_rewriting_observation() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(
         "session-alias",
         0,
@@ -389,25 +378,19 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
     );
     persist(&store, candidate.clone(), None).await;
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_projection_aliases
                 (projector_version, observation_id, output_provider, output_message_id)
              VALUES (?1, ?2, 'claude', 'consolidated/source/message-alias')",
-            libsql::params![
+            rusqlite::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
     drain_projection_queue(&store).await;
     let provenance = projection_provenance_rows(&tmp).await;
@@ -437,8 +420,10 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
 #[tokio::test]
 async fn rebuild_preserves_output_referenced_by_another_projector_version() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(
         "session-shared-output",
         0,
@@ -469,8 +454,10 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
 #[tokio::test]
 async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let first = observation(
         "session-version-migration",
         0,
@@ -496,127 +483,114 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
     )
     .await;
     drain_projection_queue(&store).await;
-    drop(db);
+    drop(store);
+    drop(runtime);
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute(
             "UPDATE observation_projection_provenance SET projector_version = ?1
              WHERE projector_version = ?2",
-            libsql::params![
+            rusqlite::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
-        .await
         .unwrap();
     raw_conn
         .execute(
             "UPDATE observation_projection_checkpoints SET projector_version = ?1
              WHERE projector_version = ?2",
-            libsql::params![
+            rusqlite::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
-        .await
         .unwrap();
     raw_conn
         .execute("DELETE FROM projection_queue", ())
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
-    let reopened = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
-        .await
+    let reopened_runtime = profile_runtime(&tmp).await;
+    let store = reopened_runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let store = GlobalDbObservationStore::new(&reopened);
     assert_eq!(table_count(&tmp, "projection_queue").await, 0);
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
         2
     );
-    drop(reopened);
+    drop(store);
+    drop(reopened_runtime);
 
-    let restarted = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
-        .await
+    let restarted_runtime = profile_runtime(&tmp).await;
+    let store = restarted_runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let store = GlobalDbObservationStore::new(&restarted);
     assert_eq!(table_count(&tmp, "projection_queue").await, 0);
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
         2
     );
-    drop(restarted);
+    drop(store);
+    drop(restarted_runtime);
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     for version in [
         SESSION_MESSAGE_PROJECTOR_VERSION_V2,
         SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     ] {
-        let mut rows = raw_conn
-            .query(
+        let (count, created) = raw_conn
+            .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(message_created), 0)
                  FROM observation_projection_provenance
                  WHERE projector_version = ?1",
-                libsql::params![version],
+                rusqlite::params![version],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
-            .await
             .unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(row.get::<i64>(0).unwrap(), 2);
+        assert_eq!(count, 2);
         let expected_created = if version == SESSION_MESSAGE_PROJECTOR_VERSION_V2 {
             2
         } else {
             0
         };
-        assert_eq!(row.get::<i64>(1).unwrap(), expected_created);
+        assert_eq!(created, expected_created);
     }
     assert_eq!(table_count(&tmp, "session_messages").await, 2);
 
     raw_conn
         .execute(
             "DELETE FROM observation_projection_provenance WHERE projector_version = ?1",
-            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
-        .await
         .unwrap();
     raw_conn
         .execute(
             "DELETE FROM observation_projection_checkpoints WHERE projector_version = ?1",
-            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
-        .await
         .unwrap();
-    let mut rows = raw_conn
-        .query(
+    let v2_count = raw_conn
+        .query_row(
             "SELECT COUNT(*) FROM observation_projection_provenance
              WHERE projector_version = ?1",
-            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V2],
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION_V2],
+            |row| row.get::<_, i64>(0),
         )
-        .await
         .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        2
-    );
+    assert_eq!(v2_count, 2);
     assert_eq!(table_count(&tmp, "session_messages").await, 2);
 }
 
 #[tokio::test]
 async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let original = observation_in_generation(
         "session-global-owner",
         GENERATION,
@@ -669,8 +643,10 @@ async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
 #[tokio::test]
 async fn rebuild_freezes_cross_projector_multi_generation_ownership() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let original = observation_in_generation(
         "session-retained-generations",
         GENERATION,
@@ -724,10 +700,12 @@ async fn rebuild_freezes_cross_projector_multi_generation_ownership() {
 }
 
 #[tokio::test]
-async fn projection_owner_cache_refreshes_after_another_connection_commits() {
+async fn projection_owner_cache_refreshes_after_another_registered_store_commits() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let first = observation(
         "session-data-version",
         0,
@@ -754,10 +732,9 @@ async fn projection_owner_cache_refreshes_after_another_connection_commits() {
     )
     .await;
 
-    let other_db = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
-        .await
+    let other_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let other_store = GlobalDbObservationStore::new(&other_db);
     other_store
         .project_observation(second.observation_id())
         .await
@@ -774,8 +751,10 @@ async fn projection_owner_cache_refreshes_after_another_connection_commits() {
 #[tokio::test]
 async fn rebuild_processes_more_than_two_pages_at_one_frozen_frontier() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let mut expected_cursor = None;
     for index in 0..257_u64 {
         let start = index * 100;
@@ -809,8 +788,10 @@ async fn rebuild_processes_more_than_two_pages_at_one_frozen_frontier() {
 #[tokio::test]
 async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let mut expected_cursor = None;
     let mut aliased_observation = None;
     for index in 0..257_u64 {
@@ -833,11 +814,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
         expected_cursor = Some(cursor("session-interrupted-rebuild", end));
     }
     let aliased_observation = aliased_observation.unwrap();
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_projection_aliases (
@@ -846,12 +823,11 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
                 ?1, ?2, 'claude',
                 'consolidated/pinned/message-interrupted-rebuild-200'
              )",
-            libsql::params![
+            rusqlite::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
-        .await
         .unwrap();
     rebuild_projection_to_completion(&store, 257).await;
 
@@ -863,7 +839,6 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
                 SELECT RAISE(ABORT, 'injected rebuild page interruption');
              END;",
         )
-        .await
         .unwrap();
     let pending = store.rebuild_projection(257).await.unwrap();
     assert!(!pending.is_complete());
@@ -877,47 +852,38 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
             "UPDATE observation_projection_aliases
              SET output_message_id = 'consolidated/transient/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
-            libsql::params![
+            rusqlite::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
-        .await
         .unwrap();
-    let mut alias_rows = raw_conn
-        .query(
+    let pinned_alias = raw_conn
+        .query_row(
             "SELECT output_message_id
              FROM observation_projection_rebuild_aliases
              WHERE projector_version = ?1 AND observation_id = ?2",
-            libsql::params![
+            rusqlite::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
+            |row| row.get::<_, String>(0),
         )
-        .await
         .unwrap();
     assert_eq!(
-        alias_rows
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
+        pinned_alias,
         "consolidated/pinned/message-interrupted-rebuild-200"
     );
-    drop(alias_rows);
     raw_conn
         .execute(
             "UPDATE observation_projection_aliases
              SET output_message_id = 'consolidated/pinned/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
-            libsql::params![
+            rusqlite::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
-        .await
         .unwrap();
     let past_frontier = observation(
         "session-interrupted-rebuild",
@@ -930,21 +896,23 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
         ),
     );
     persist(&store, past_frontier.clone(), expected_cursor).await;
-    let mut rows = raw_conn
-        .query(
+    let (generation, staged_through, state) = raw_conn
+        .query_row(
             "SELECT generation, staged_through, state
              FROM observation_projection_rebuilds
              WHERE projector_version = ?1",
-            libsql::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            rusqlite::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
-        .await
         .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    let generation = row.get::<String>(0).unwrap();
-    assert_eq!(row.get::<i64>(1).unwrap(), 128);
-    assert_eq!(row.get::<String>(2).unwrap(), "building");
-    drop(row);
-    drop(rows);
+    assert_eq!(staged_through, 128);
+    assert_eq!(state, "building");
     assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 1));
     raw_conn
         .execute_batch(
@@ -954,7 +922,6 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
                 SELECT RAISE(ABORT, 'injected rebuild activation interruption');
              END;",
         )
-        .await
         .unwrap();
     let error = store
         .rebuild_projection(257)
@@ -963,14 +930,10 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
     assert!(matches!(error, ProjectionStoreError::Storage { .. }));
     assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 1));
     drop(raw_conn);
-    drop(raw_db);
-    db.checkpoint().await;
-    drop(db);
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    drop(store);
+    drop(runtime);
+    checkpoint_database(&tmp).await;
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute_batch(
             "DROP TRIGGER interrupt_projection_rebuild_activation;
@@ -980,13 +943,13 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
                 SELECT RAISE(ABORT, 'identical rebuild job was replaced');
              END;",
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
-    let reopened = open_lcm_db(&tmp).await;
-    let reopened_store = GlobalDbObservationStore::new(&reopened);
+    let reopened_runtime = profile_runtime(&tmp).await;
+    let reopened_store = reopened_runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let activation_started = std::time::Instant::now();
     let rebuilt = rebuild_projection_to_completion(&reopened_store, 257).await;
     assert!(
@@ -1034,8 +997,10 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
 #[tokio::test]
 async fn high_generation_output_uses_constant_size_owner_state() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let mut expected_cursor = None;
     for generation_offset in 0..257_u64 {
         let generation = GENERATION + generation_offset;
@@ -1073,8 +1038,10 @@ async fn cross_provider_projection_duplicate_reorder_conflict_and_restart_are_id
 
     for provider in PROVIDERS {
         let tmp = TempDir::new().unwrap();
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
 
         let (first, second, third, conflicting) = if provider == "claude" {
             let session = format!("session.cross-projection-{provider}");
@@ -1265,10 +1232,13 @@ async fn cross_provider_projection_duplicate_reorder_conflict_and_restart_are_id
         );
         let provenance_before = projection_provenance_rows(&tmp).await;
         let counts_before = projection_counts(&tmp).await;
-        drop(db);
+        drop(store);
+        drop(runtime);
 
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         let restarted = store
             .project_observation(first.observation_id())
             .await

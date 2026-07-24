@@ -9,7 +9,7 @@ use tracedecay_domain::{
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, EvidenceAvailabilityV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, RepositoryId, RetentionClass, SessionId, WorktreeId,
+    ProviderId, RepositoryId, RetentionClass, SessionId, UserProfileId, WorktreeId,
 };
 use tracedecay_store::ObservationReplayRequest;
 
@@ -88,14 +88,15 @@ fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureOb
 #[test]
 fn probe_distinguishes_unknown_provider_and_missing_authority() {
     let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
-    assert_eq!(
-        facade.probe("other", HostAdmissionScope::Project).status,
-        HostAdmissionStatus::Unknown
-    );
-    assert_eq!(
-        facade.probe("claude", HostAdmissionScope::Project).status,
-        HostAdmissionStatus::Unavailable
-    );
+    let unknown = facade.probe("other", HostAdmissionScope::Project);
+    assert_eq!(unknown.status, HostAdmissionStatus::Unknown);
+    assert_eq!(unknown.reason_code, Some("unknown_provider"));
+    assert!(!unknown.retryable);
+
+    let unavailable = facade.probe("claude", HostAdmissionScope::Project);
+    assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(unavailable.reason_code, Some("authority_unavailable"));
+    assert!(unavailable.retryable);
 }
 
 #[test]
@@ -187,13 +188,26 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     let root = TempDir::new().unwrap();
     let repository_root = root.path().join("repository");
     initialize_repository(&repository_root);
-    let project_db = GlobalDb::open_at(&root.path().join("project.db"))
-        .await
-        .unwrap();
-    let profile_db = GlobalDb::open_at(&root.path().join("profile.db"))
-        .await
-        .unwrap();
     let project_id = ProjectId::new("project.host-provenance").unwrap();
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&root.path().join("profile")).unwrap();
+    let _daemon_scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "host-provenance-authority-test",
+    )
+    .unwrap();
+    let registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .unwrap();
+    let project_registered = registry
+        .project_sessions(project_id.clone(), [repository_root.clone()])
+        .await
+        .unwrap();
+    let profile_registered = registry.profile_sessions().await.unwrap();
     let provenance = RepositoryProvenanceAdmissionContext::new(
         repository_root.clone(),
         project_id.clone(),
@@ -202,8 +216,13 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
         [0x51; 32],
     );
     let facade = HostAdmissionFacade::new(
-        HostAdmissionAuthorities::for_project(&project_db, project_id.clone())
-            .with_repository_provenance(provenance.clone()),
+        HostAdmissionAuthorities::for_project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+            project_registered.as_ref(),
+        )
+        .with_repository_provenance(provenance.clone()),
     );
     let project_scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
@@ -277,7 +296,12 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     assert_eq!(mismatched.reason_code, Some("project_authority_mismatch"));
 
     let profile_facade = HostAdmissionFacade::new(
-        HostAdmissionAuthorities::for_profile(&profile_db).with_repository_provenance(provenance),
+        HostAdmissionAuthorities::for_profile(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            profile_registered.as_ref(),
+        )
+        .with_repository_provenance(provenance),
     );
     let profile_project = profile_facade
         .capture(host_capture_request(
@@ -314,9 +338,252 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     ));
     assert!(profile_attachment.anchor().is_none());
 
-    let project_rows = GlobalDbObservationStore::new(&project_db)
+    let project_rows = project_registered
+        .observation_store()
         .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
         .await
         .unwrap();
     assert_eq!(project_rows.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() {
+    let temporary = TempDir::new().unwrap();
+    let profile_root = temporary.path().join("profile");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let daemon_scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "host-admission-authority-test",
+    )
+    .unwrap();
+    let registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .unwrap();
+    let registered = registry.profile_sessions().await.unwrap();
+
+    let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::unavailable_for_profile(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+    ))
+    .capture(host_capture_request(
+        ObservationScopeV1::Profile,
+        "host.registered.missing",
+    ))
+    .await;
+    assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(
+        unavailable.reason_code,
+        Some("registered_authority_unavailable")
+    );
+    assert!(unavailable.retryable);
+    assert!(
+        registered
+            .observation_store()
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .is_empty(),
+        "missing registered authority must not fall back to a direct write"
+    );
+
+    let authoritative = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        registered.as_ref(),
+    ))
+    .capture_observation(host_capture_request(
+        ObservationScopeV1::Profile,
+        "host.registered.committed",
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        authoritative,
+        CaptureObservationOutcome::Persisted { outcome, .. }
+            if matches!(*outcome, ObservationPersistOutcome::Committed(_))
+    ));
+
+    let mismatch = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+        identity.brain_id().clone(),
+        UserProfileId::new("profile.other").unwrap(),
+        registered.as_ref(),
+    ))
+    .capture(host_capture_request(
+        ObservationScopeV1::Profile,
+        "host.registered.mismatch",
+    ))
+    .await;
+    assert_eq!(mismatch.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(mismatch.reason_code, Some("project_authority_mismatch"));
+    assert!(!mismatch.retryable);
+    assert_eq!(
+        registered
+            .observation_store()
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "mismatched registered authority must not fall back to a direct write"
+    );
+
+    drop(daemon_scope);
+    let revoked = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        registered.as_ref(),
+    ))
+    .capture(host_capture_request(
+        ObservationScopeV1::Profile,
+        "host.registered.revoked",
+    ))
+    .await;
+    assert_eq!(revoked.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(
+        registered
+            .observation_store()
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "revoked daemon write authority must be rechecked by the runtime writer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
+    let temporary = TempDir::new().unwrap();
+    let profile_root = temporary.path().join("profile");
+    let project_root = temporary.path().join("project");
+    initialize_repository(&project_root);
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let daemon_scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "host-admission-project-authority-test",
+    )
+    .unwrap();
+    let registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .unwrap();
+    let project_id = ProjectId::new("project.registered.exact").unwrap();
+    let registered = registry
+        .project_sessions(project_id.clone(), [project_root])
+        .await
+        .unwrap();
+    let profile_registered = registry.profile_sessions().await.unwrap();
+    let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::unavailable_for_project(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    ))
+    .capture(host_capture_request(
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        "host.project.registered.missing",
+    ))
+    .await;
+    assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(
+        unavailable.reason_code,
+        Some("registered_authority_unavailable")
+    );
+    assert!(unavailable.retryable);
+
+    let other_project_id = ProjectId::new("project.registered.other").unwrap();
+    let mismatch = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        other_project_id.clone(),
+        registered.as_ref(),
+    ))
+    .capture(host_capture_request(
+        ObservationScopeV1::Project {
+            project_id: other_project_id,
+        },
+        "host.project.registered.mismatch",
+    ))
+    .await;
+    assert_eq!(mismatch.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(mismatch.reason_code, Some("project_authority_mismatch"));
+    assert!(!mismatch.retryable);
+
+    let wrong_shard = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+        profile_registered.as_ref(),
+    ))
+    .capture(host_capture_request(
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        "host.project.registered.wrong-shard",
+    ))
+    .await;
+    assert_eq!(wrong_shard.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(wrong_shard.reason_code, Some("project_authority_mismatch"));
+    assert!(!wrong_shard.retryable);
+    assert!(
+        registered
+            .observation_store()
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .is_empty(),
+        "missing or mismatched ProjectSessions authority must not use a path fallback"
+    );
+
+    let committed = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+        registered.as_ref(),
+    ))
+    .capture_observation(host_capture_request(
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        "host.project.registered.committed",
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        committed,
+        CaptureObservationOutcome::Persisted { outcome, .. }
+            if matches!(*outcome, ObservationPersistOutcome::Committed(_))
+    ));
+
+    drop(daemon_scope);
+    let revoked = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+        registered.as_ref(),
+    ))
+    .capture(host_capture_request(
+        ObservationScopeV1::Project { project_id },
+        "host.project.registered.revoked",
+    ))
+    .await;
+    assert_eq!(revoked.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(
+        registered
+            .observation_store()
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "revoked ProjectSessions authority must be rechecked at actor time"
+    );
 }

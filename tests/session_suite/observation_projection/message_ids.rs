@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn safe_sanitized_uuid_remains_the_v1_message_id() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let payload = json!({
         "type": "assistant",
         "uuid": "safe-sanitized-uuid",
@@ -32,8 +34,10 @@ async fn safe_sanitized_uuid_remains_the_v1_message_id() {
 #[tokio::test]
 async fn redacted_message_ids_use_injective_v1_fallbacks() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let marker = "[TraceDecay redacted:message-id]";
     let mut first = conversational_payload(marker, "first redacted message ID");
     first["uuid"] = Value::from("record-first-redacted-message-id");
@@ -77,8 +81,10 @@ async fn redacted_message_ids_use_injective_v1_fallbacks() {
 #[tokio::test]
 async fn redacted_uuid_ids_use_injective_v1_fallbacks() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     for (start, end, receipt_id, text) in [
         (0, 100, "receipt.redacted-uuid-first", "first redacted UUID"),
         (

@@ -42,6 +42,7 @@ const ALLOWED_ROOT_PACKAGE_ALIASES: &[(&str, &str)] = &[
         "tokensave-large-treesitters",
     ),
 ];
+const FORBIDDEN_ROOT_RUNTIME_PACKAGES: &[&str] = &["libsql"];
 
 // This is a sample project indexed by context-evaluation tests. Its Rust files
 // are deliberately source input, not modules or targets of the tracedecay crate.
@@ -263,6 +264,63 @@ fn validate_query_dependency_aliases(
     }
 }
 
+fn forbidden_root_runtime_dependencies(
+    manifest: &toml::Table,
+    forbidden_packages: &[&str],
+) -> BTreeSet<String> {
+    let mut violations = BTreeSet::new();
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        inspect_dependency_table(
+            manifest.get(section),
+            section,
+            forbidden_packages,
+            &mut violations,
+        );
+    }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (selector, target) in targets {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                inspect_dependency_table(
+                    target.get(section),
+                    &format!("target.{selector}.{section}"),
+                    forbidden_packages,
+                    &mut violations,
+                );
+            }
+        }
+    }
+    violations
+}
+
+fn inspect_dependency_table(
+    value: Option<&toml::Value>,
+    section: &str,
+    forbidden_packages: &[&str],
+    violations: &mut BTreeSet<String>,
+) {
+    let Some(dependencies) = value.and_then(toml::Value::as_table) else {
+        return;
+    };
+    for (alias, specification) in dependencies {
+        let package = specification
+            .as_table()
+            .and_then(|table| table.get("package"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or(alias);
+        if forbidden_packages
+            .iter()
+            .any(|forbidden| package == *forbidden)
+        {
+            violations.insert(format!(
+                "root Cargo manifest {section} aliases forbidden runtime package {alias} -> {package}"
+            ));
+        }
+    }
+}
+
 fn validate_contract_package_dependencies(
     manifest_path: &Path,
     dependencies: &[CargoDependency],
@@ -287,6 +345,42 @@ fn validate_contract_package_dependencies(
             ));
         }
     }
+}
+
+#[test]
+fn root_manifest_rejects_libsql_runtime_dependencies() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest: toml::Table = fs::read_to_string(repository.join("Cargo.toml"))
+        .expect("read root Cargo manifest")
+        .parse()
+        .expect("parse root Cargo manifest");
+    assert!(
+        forbidden_root_runtime_dependencies(&manifest, FORBIDDEN_ROOT_RUNTIME_PACKAGES).is_empty(),
+        "root Cargo manifest must not restore libsql dependencies"
+    );
+
+    for fixture in [
+        "[dependencies]\nlibsql = \"0.9\"\n",
+        "[dev-dependencies]\nlibsql = \"0.9\"\n",
+        "[build-dependencies]\nsqlite-driver = { package = \"libsql\", version = \"0.9\" }\n",
+        "[target.'cfg(windows)'.dependencies]\nlibsql = \"0.9\"\n",
+        "[target.'cfg(windows)'.dev-dependencies]\nsqlite-driver = { package = \"libsql\", version = \"0.9\" }\n",
+        "[target.'cfg(unix)'.build-dependencies]\nsqlite-driver = { package = \"libsql\", version = \"0.9\" }\n",
+    ] {
+        let manifest: toml::Table = fixture.parse().expect("parse forbidden manifest fixture");
+        assert!(
+            !forbidden_root_runtime_dependencies(&manifest, FORBIDDEN_ROOT_RUNTIME_PACKAGES)
+                .is_empty(),
+            "root manifest guard accepted forbidden dependency fixture: {fixture}"
+        );
+    }
+
+    let allowed: toml::Table = "[dependencies]\nlibsqlite3-sys = \"0.38\"\n"
+        .parse()
+        .expect("parse allowed manifest fixture");
+    assert!(
+        forbidden_root_runtime_dependencies(&allowed, FORBIDDEN_ROOT_RUNTIME_PACKAGES).is_empty()
+    );
 }
 
 fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {

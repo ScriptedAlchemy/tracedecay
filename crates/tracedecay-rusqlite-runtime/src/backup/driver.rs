@@ -4,7 +4,7 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use rusqlite::{Connection, OpenFlags};
@@ -236,7 +236,7 @@ impl<A: RestorePublicationAuthority> BackupDriver for SqliteOnlineBackupDriver<'
                 }
             })?;
             if matches!(&artifact.identity, ArtifactIdentity::Store(_)) {
-                verify_sqlite_snapshot(path)?;
+                verify_sqlite_snapshot(&path)?;
             }
             artifacts.push(SnapshotArtifact {
                 identity: artifact.identity.clone(),
@@ -330,7 +330,9 @@ impl Cancellation for NeverCancel {
     }
 }
 
-fn verify_sqlite_snapshot(path: PathBuf) -> Result<(), OnlineBackupError> {
+/// Verifies a completed SQLite backup through the runtime's read-only
+/// `PRAGMA quick_check` authority.
+pub fn verify_sqlite_snapshot(path: &Path) -> Result<(), OnlineBackupError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;

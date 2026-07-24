@@ -1,4 +1,8 @@
-use libsql::params;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay_domain::{
@@ -9,6 +13,9 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_rusqlite_runtime::migration_sql::{
+    MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
@@ -17,12 +24,33 @@ use tracedecay_store::{
     build_observation_retrieval_anchor_v2,
 };
 
-use crate::global_db::GlobalDb;
+use super::prepare_projection_version_migration_with_engine;
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::db::engine::{TestConnection, params};
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::cursor_composer::{
     normalize_cursor_composer_observation,
     normalize_cursor_composer_observation_with_projected_message_id,
 };
-use crate::store::GlobalDbObservationStore;
+
+async fn registered_runtime(
+    profile_root: &std::path::Path,
+) -> crate::errors::Result<HostAdmissionTestRuntimeV1> {
+    HostAdmissionTestRuntimeV1::profile(profile_root).await
+}
+
+fn registered_database(runtime: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
+    runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile observation database")
+}
+
+async fn audit_observation_authority(runtime: &HostAdmissionTestRuntimeV1) {
+    let snapshot = registered_database(runtime).read_snapshot().await.unwrap();
+    crate::global_db::schema_stages::validate_observation_authority_connection(&snapshot)
+        .await
+        .unwrap();
+}
 
 fn durable_fixture_observation(
     envelope: CanonicalObservationEnvelopeV1,
@@ -310,13 +338,17 @@ struct LegacyClaudeProjectionSeed {
 }
 
 async fn seed_v1_legacy_claude_projection(
-    db_path: &std::path::Path,
+    profile_root: &std::path::Path,
     corrupted_text: Option<&str>,
 ) -> LegacyClaudeProjectionSeed {
     let observation = legacy_claude_source_key_observation();
     let observation_id = observation.observation_id().as_str().to_owned();
-    let db = GlobalDb::open_at(db_path).await.unwrap();
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = registered_runtime(profile_root).await.unwrap();
+    let db = registered_database(&runtime);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = db.writer_connection().unwrap();
     let previous_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
@@ -325,7 +357,7 @@ async fn seed_v1_legacy_claude_projection(
         observation.identity().position().start(),
     )
     .unwrap();
-    db.conn
+    writer
         .execute(
             "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
              VALUES (?1, ?2, ?3)",
@@ -346,8 +378,7 @@ async fn seed_v1_legacy_claude_projection(
         store.project_observation(&queued).await.unwrap(),
         ProjectionPersistOutcome::Projected(_)
     ));
-    let mut digest_rows = db
-        .conn
+    let mut digest_rows = writer
         .query(
             "SELECT output_digest FROM observation_projection_provenance
              WHERE projector_version = ?1 AND observation_id = ?2",
@@ -368,7 +399,7 @@ async fn seed_v1_legacy_claude_projection(
     drop(digest_rows);
 
     // Recreate the V1 predecessor shape without retaining live session data.
-    db.conn
+    writer
         .execute(
             "UPDATE session_messages SET source_path = ?2
              WHERE provider = 'claude' AND message_id = ?1",
@@ -380,7 +411,7 @@ async fn seed_v1_legacy_claude_projection(
         .await
         .unwrap();
     if let Some(text) = corrupted_text {
-        db.conn
+        writer
             .execute(
                 "UPDATE session_messages SET text = ?2
                  WHERE provider = 'claude' AND message_id = ?1",
@@ -389,7 +420,7 @@ async fn seed_v1_legacy_claude_projection(
             .await
             .unwrap();
     }
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_provenance
              SET projector_version = ?1
@@ -402,7 +433,7 @@ async fn seed_v1_legacy_claude_projection(
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_checkpoints SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -413,7 +444,9 @@ async fn seed_v1_legacy_claude_projection(
         )
         .await
         .unwrap();
-    drop(db);
+    drop(store);
+    drop(writer);
+    drop(runtime);
     LegacyClaudeProjectionSeed {
         observation_id,
         output_digest,
@@ -423,12 +456,12 @@ async fn seed_v1_legacy_claude_projection(
 #[tokio::test]
 async fn v1_upgrade_adopts_legacy_claude_source_path_and_preserves_ownership() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
-    let seed = Box::pin(seed_v1_legacy_claude_projection(&db_path, None)).await;
-    let reopened = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    reopened.audit_observation_authority().await.unwrap();
-    let mut rows = reopened
-        .conn
+    let profile_root = tmp.path().join(".tracedecay");
+    let seed = Box::pin(seed_v1_legacy_claude_projection(&profile_root, None)).await;
+    let reopened = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&reopened).await;
+    let writer = registered_database(&reopened).writer_connection().unwrap();
+    let mut rows = writer
         .query(
             "SELECT
                 (SELECT source_path FROM session_messages
@@ -465,14 +498,14 @@ async fn v1_upgrade_adopts_legacy_claude_source_path_and_preserves_ownership() {
 #[tokio::test]
 async fn v1_upgrade_rejects_non_source_path_projection_differences() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
+    let profile_root = tmp.path().join(".tracedecay");
     Box::pin(seed_v1_legacy_claude_projection(
-        &db_path,
+        &profile_root,
         Some("Conflicting legacy text."),
     ))
     .await;
 
-    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+    let Err(error) = registered_runtime(&profile_root).await else {
         panic!("non-source-path mismatch must collide");
     };
     assert!(error.to_string().contains("projection output collided"));
@@ -481,9 +514,13 @@ async fn v1_upgrade_rejects_non_source_path_projection_differences() {
 #[tokio::test]
 async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let store = GlobalDbObservationStore::new(&db);
+    let profile_root = tmp.path().join(".tracedecay");
+    let runtime = registered_runtime(&profile_root).await.unwrap();
+    let db = registered_database(&runtime);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = db.writer_connection().unwrap();
     for observation in checked_in_v2_observations() {
         store.persist_observation(write(observation)).await.unwrap();
     }
@@ -495,8 +532,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         ));
     }
     assert!(store.next_queued_observation().await.unwrap().is_some());
-    let mut initial_rows = db
-        .conn
+    let mut initial_rows = writer
         .query(
             "SELECT
                 (SELECT COUNT(*) FROM observation_projection_provenance
@@ -536,7 +572,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
     drop(initial);
     drop(initial_rows);
 
-    db.conn
+    writer
         .execute_batch(
             "DELETE FROM observation_workflow_facts;
              DELETE FROM session_messages
@@ -551,7 +587,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_dispositions SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -562,7 +598,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_provenance SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -573,7 +609,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_checkpoints SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -584,7 +620,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute_batch(
             "CREATE TABLE observation_projection_provenance_v2 (
                 projector_version TEXT NOT NULL,
@@ -611,7 +647,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "INSERT INTO observation_projection_checkpoints (
                 projector_version, last_sequence
@@ -620,12 +656,15 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         )
         .await
         .unwrap();
-    drop(db);
+    drop(store);
+    drop(writer);
+    drop(runtime);
 
-    let reopened = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    reopened.audit_observation_authority().await.unwrap();
-    let mut rows = reopened
-        .conn
+    let reopened = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&reopened).await;
+    let reopened_db = registered_database(&reopened);
+    let reopened_writer = reopened_db.writer_connection().unwrap();
+    let mut rows = reopened_writer
         .query(
             "SELECT
                 (SELECT COUNT(*) FROM observation_projection_provenance
@@ -662,7 +701,9 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
     drop(row);
     drop(rows);
 
-    let store = GlobalDbObservationStore::new(&reopened);
+    let store = reopened
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let mut projected = 0;
     while let Some(queued) = store.next_queued_observation().await.unwrap() {
         assert!(matches!(
@@ -672,12 +713,14 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         projected += 1;
     }
     assert_eq!(projected, 1);
+    drop(store);
+    drop(reopened_writer);
     drop(reopened);
 
-    let converged = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    converged.audit_observation_authority().await.unwrap();
-    let mut converged_rows = converged
-        .conn
+    let converged = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&converged).await;
+    let converged_writer = registered_database(&converged).writer_connection().unwrap();
+    let mut converged_rows = converged_writer
         .query(
             "SELECT
                 (SELECT COUNT(*) FROM projection_queue),
@@ -695,9 +738,13 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
 #[tokio::test]
 async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let store = GlobalDbObservationStore::new(&db);
+    let profile_root = tmp.path().join(".tracedecay");
+    let runtime = registered_runtime(&profile_root).await.unwrap();
+    let db = registered_database(&runtime);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = db.writer_connection().unwrap();
     let first = composer_rollover_observation(
         1,
         "First generation body.",
@@ -720,7 +767,7 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
         .unwrap();
     let queued = store.next_queued_observation().await.unwrap().unwrap();
     store.project_observation(&queued).await.unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_provenance SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -731,7 +778,7 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_checkpoints SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -742,12 +789,15 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
         )
         .await
         .unwrap();
-    drop(db);
+    drop(store);
+    drop(writer);
+    drop(runtime);
 
-    let reopened = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    reopened.audit_observation_authority().await.unwrap();
-    let mut rows = reopened
-        .conn
+    let reopened = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&reopened).await;
+    let reopened_db = registered_database(&reopened);
+    let reopened_writer = reopened_db.writer_connection().unwrap();
+    let mut rows = reopened_writer
         .query(
             "SELECT
                 (SELECT text FROM session_messages
@@ -778,15 +828,16 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
         "Third generation body.",
         "receipt.cursor-composer-rollover.third",
     );
-    let store = GlobalDbObservationStore::new(&reopened);
+    let store = reopened
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     store
         .persist_observation(write_after(third, Some(second_cursor)))
         .await
         .unwrap();
     let queued = store.next_queued_observation().await.unwrap().unwrap();
     store.project_observation(&queued).await.unwrap();
-    let mut text_rows = reopened
-        .conn
+    let mut text_rows = reopened_writer
         .query(
             "SELECT text FROM session_messages
              WHERE provider = 'cursor'
@@ -810,9 +861,12 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
 #[tokio::test]
 async fn duplicate_output_identity_converges_as_a_durable_collision_skip() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = registered_runtime(&tmp.path().join(".tracedecay"))
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
 
     // Two distinct claude observations (different byte ranges, so different
     // observation identities) carrying the same session/message uuid — the
@@ -910,7 +964,7 @@ async fn duplicate_output_identity_converges_as_a_durable_collision_skip() {
         store.project_observation(&second_queued).await.unwrap(),
         ProjectionPersistOutcome::ExactDuplicate(_)
     ));
-    db.audit_observation_authority().await.unwrap();
+    audit_observation_authority(&runtime).await;
 }
 
 #[tokio::test]
@@ -918,9 +972,13 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
     const PREDECESSOR_ROWS: usize = 6;
 
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let store = GlobalDbObservationStore::new(&db);
+    let profile_root = tmp.path().join(".tracedecay");
+    let runtime = registered_runtime(&profile_root).await.unwrap();
+    let db = registered_database(&runtime);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = db.writer_connection().unwrap();
     for index in 0..PREDECESSOR_ROWS {
         store
             .persist_observation(write(checked_in_codex_session_boundary(index)))
@@ -933,7 +991,7 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
             ProjectionPersistOutcome::Skipped { .. }
         ));
     }
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_dispositions SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -944,7 +1002,7 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_checkpoints SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -958,7 +1016,7 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
     // Break the predecessor lineage the way an interrupted older writer can:
     // one observation has no terminal predecessor outcome at all, so the
     // incremental page validation can never pass.
-    db.conn
+    writer
         .execute(
             "DELETE FROM observation_projection_dispositions
              WHERE projector_version = ?1
@@ -971,18 +1029,20 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
         )
         .await
         .unwrap();
-    drop(db);
+    drop(store);
+    drop(writer);
+    drop(runtime);
 
     // Every reopen must succeed (never fail closed) and the staged rebuild
     // must converge to a superseded incremental migration.
     let mut superseded = false;
     for attempt in 0..16 {
-        let open = match GlobalDb::try_open_at(&db_path).await {
-            Ok(open) => open.unwrap(),
+        let open = match registered_runtime(&profile_root).await {
+            Ok(open) => open,
             Err(error) => panic!("open attempt {attempt} failed: {error}"),
         };
-        let mut rows = open
-            .conn
+        let writer = registered_database(&open).writer_connection().unwrap();
+        let mut rows = writer
             .query(
                 "SELECT completed FROM observation_projection_migrations
                  WHERE source_projector_version = ?1
@@ -1001,10 +1061,11 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
             .map(|row| row.get::<i64>(0).unwrap());
         drop(rows);
         if completed == Some(1) {
-            open.audit_observation_authority().await.unwrap();
+            audit_observation_authority(&open).await;
             superseded = true;
             break;
         }
+        drop(writer);
         drop(open);
     }
     assert!(
@@ -1018,9 +1079,13 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     const PREDECESSOR_ROWS: usize = 257;
 
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let store = GlobalDbObservationStore::new(&db);
+    let profile_root = tmp.path().join(".tracedecay");
+    let runtime = registered_runtime(&profile_root).await.unwrap();
+    let db = registered_database(&runtime);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = db.writer_connection().unwrap();
     for index in 0..PREDECESSOR_ROWS {
         store
             .persist_observation(write(checked_in_codex_session_boundary(index)))
@@ -1033,7 +1098,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
             ProjectionPersistOutcome::Skipped { .. }
         ));
     }
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_dispositions SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -1044,7 +1109,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_checkpoints SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -1055,7 +1120,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "INSERT INTO observation_projection_checkpoints (
                 projector_version, last_sequence
@@ -1064,12 +1129,16 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
         )
         .await
         .unwrap();
-    drop(db);
+    drop(store);
+    drop(writer);
+    drop(runtime);
 
-    let first_open = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    first_open.audit_observation_authority().await.unwrap();
-    let mut page_rows = first_open
-        .conn
+    let first_open = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&first_open).await;
+    let first_writer = registered_database(&first_open)
+        .writer_connection()
+        .unwrap();
+    let mut page_rows = first_writer
         .query(
             "SELECT
                 (SELECT last_sequence FROM observation_projection_checkpoints
@@ -1096,12 +1165,15 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     assert_eq!(page.get::<i64>(3).unwrap(), 0);
     drop(page);
     drop(page_rows);
+    drop(first_writer);
     drop(first_open);
 
-    let second_open = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    second_open.audit_observation_authority().await.unwrap();
-    let mut rows = second_open
-        .conn
+    let second_open = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&second_open).await;
+    let second_writer = registered_database(&second_open)
+        .writer_connection()
+        .unwrap();
+    let mut rows = second_writer
         .query(
             "SELECT
                 (SELECT last_sequence FROM observation_projection_checkpoints
@@ -1130,12 +1202,15 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     assert_eq!(row.get::<i64>(4).unwrap(), 0);
     drop(row);
     drop(rows);
+    drop(second_writer);
     drop(second_open);
 
-    let final_open = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    final_open.audit_observation_authority().await.unwrap();
-    let mut rows = final_open
-        .conn
+    let final_open = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&final_open).await;
+    let final_writer = registered_database(&final_open)
+        .writer_connection()
+        .unwrap();
+    let mut rows = final_writer
         .query(
             "SELECT
                 (SELECT last_sequence FROM observation_projection_checkpoints
@@ -1164,18 +1239,23 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     assert_eq!(row.get::<i64>(4).unwrap(), 1);
     drop(row);
     drop(rows);
+    drop(final_writer);
     drop(final_open);
 
-    let converged = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    converged.audit_observation_authority().await.unwrap();
+    let converged = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&converged).await;
 }
 
 #[tokio::test]
 async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let store = GlobalDbObservationStore::new(&db);
+    let profile_root = tmp.path().join(".tracedecay");
+    let runtime = registered_runtime(&profile_root).await.unwrap();
+    let db = registered_database(&runtime);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = db.writer_connection().unwrap();
     let observation = checked_in_v2_observations().remove(0);
     let observation_id = observation.observation_id().clone();
     store.persist_observation(write(observation)).await.unwrap();
@@ -1184,8 +1264,7 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
         store.project_observation(&queued).await.unwrap(),
         ProjectionPersistOutcome::Projected(_)
     ));
-    let canonical_anchor_id: String = db
-        .conn
+    let canonical_anchor_id: String = writer
         .query(
             "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
             params![observation_id.as_str()],
@@ -1198,7 +1277,7 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
         .unwrap()
         .get(0)
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_provenance
              SET projector_version = ?1, retrieval_anchor_id = NULL
@@ -1210,7 +1289,7 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_aliases SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -1221,7 +1300,7 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
         )
         .await
         .unwrap();
-    db.conn
+    writer
         .execute(
             "UPDATE observation_projection_checkpoints SET projector_version = ?1
              WHERE projector_version = ?2",
@@ -1232,12 +1311,14 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
         )
         .await
         .unwrap();
-    drop(db);
+    drop(store);
+    drop(writer);
+    drop(runtime);
 
-    let reopened = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
-    reopened.audit_observation_authority().await.unwrap();
-    let mut rows = reopened
-        .conn
+    let reopened = registered_runtime(&profile_root).await.unwrap();
+    audit_observation_authority(&reopened).await;
+    let reopened_writer = registered_database(&reopened).writer_connection().unwrap();
+    let mut rows = reopened_writer
         .query(
             "SELECT
                 (SELECT retrieval_anchor_id FROM observation_projection_provenance
@@ -1258,4 +1339,166 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
     assert_eq!(row.get::<String>(0).unwrap(), canonical_anchor_id);
     assert_eq!(row.get::<i64>(1).unwrap(), 1);
     assert_eq!(row.get::<i64>(2).unwrap(), 1);
+}
+
+async fn initialize_engine_migration_state(connection: &TestConnection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE observation_projection_checkpoints (
+                projector_version TEXT PRIMARY KEY NOT NULL,
+                last_sequence INTEGER NOT NULL
+             );
+             CREATE TABLE observation_projection_migrations (
+                source_projector_version TEXT NOT NULL,
+                target_projector_version TEXT NOT NULL,
+                source_frontier INTEGER NOT NULL,
+                migrated_through INTEGER NOT NULL,
+                completed INTEGER NOT NULL,
+                PRIMARY KEY(source_projector_version, target_projector_version)
+             );",
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn registered_engine_migration_replay_preserves_completed_version_receipt() {
+    let temporary = TempDir::new().unwrap();
+    let connection = TestConnection::open(&temporary.path().join("projection.db"));
+    initialize_engine_migration_state(&connection).await;
+    connection
+        .execute(
+            "INSERT INTO observation_projection_checkpoints VALUES (?1, 7)",
+            crate::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+        )
+        .await
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO observation_projection_migrations VALUES (?1, ?2, 7, 7, 1)",
+            crate::db::engine::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+            ],
+        )
+        .await
+        .unwrap();
+
+    prepare_projection_version_migration_with_engine(&connection)
+        .await
+        .unwrap();
+    prepare_projection_version_migration_with_engine(&connection)
+        .await
+        .unwrap();
+
+    let mut rows = connection
+        .query(
+            "SELECT source_frontier, migrated_through, completed, COUNT(*)
+             FROM observation_projection_migrations
+             WHERE source_projector_version = ?1 AND target_projector_version = ?2",
+            crate::db::engine::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 7);
+    assert_eq!(row.get::<i64>(1).unwrap(), 7);
+    assert_eq!(row.get::<i64>(2).unwrap(), 1);
+    assert_eq!(row.get::<i64>(3).unwrap(), 1);
+}
+
+#[tokio::test]
+async fn registered_engine_migration_rejects_inconsistent_resume_receipt() {
+    let temporary = TempDir::new().unwrap();
+    let connection = TestConnection::open(&temporary.path().join("projection.db"));
+    initialize_engine_migration_state(&connection).await;
+    connection
+        .execute(
+            "INSERT INTO observation_projection_checkpoints VALUES (?1, 7)",
+            crate::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+        )
+        .await
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO observation_projection_migrations VALUES (?1, ?2, 7, 6, 1)",
+            crate::db::engine::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+            ],
+        )
+        .await
+        .unwrap();
+
+    let error = prepare_projection_version_migration_with_engine(&connection)
+        .await
+        .expect_err("completed migration must cover its exact source frontier");
+    assert!(
+        error
+            .to_string()
+            .contains("progress is inconsistent with its source frontier")
+    );
+}
+
+struct RevocableMigrationWriteAuthority {
+    active: AtomicBool,
+}
+
+impl RevocableMigrationWriteAuthority {
+    fn active() -> Self {
+        Self {
+            active: AtomicBool::new(true),
+        }
+    }
+
+    fn revoke(&self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
+}
+
+impl MigrationSqlWriteAuthority for RevocableMigrationWriteAuthority {
+    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+        if self.active.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(MigrationSqlError::AuthorityDenied(
+                "projection migration authority revoked".to_owned(),
+            ))
+        }
+    }
+}
+
+#[tokio::test]
+async fn registered_engine_migration_rechecks_actor_time_authority_before_progress_write() {
+    let temporary = TempDir::new().unwrap();
+    let authority = Arc::new(RevocableMigrationWriteAuthority::active());
+    let connection = TestConnection::open_with_write_authority(
+        &temporary.path().join("projection.db"),
+        authority.clone(),
+    );
+    initialize_engine_migration_state(&connection).await;
+    connection
+        .execute(
+            "INSERT INTO observation_projection_checkpoints VALUES (?1, 1)",
+            crate::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+        )
+        .await
+        .unwrap();
+    authority.revoke();
+
+    let error = prepare_projection_version_migration_with_engine(&connection)
+        .await
+        .expect_err("revoked actor-time authority must deny migration");
+    assert!(error.to_string().contains("authority revoked"));
+    let mut rows = connection
+        .query("SELECT COUNT(*) FROM observation_projection_migrations", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
 }

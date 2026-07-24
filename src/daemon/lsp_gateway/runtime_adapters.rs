@@ -238,6 +238,7 @@ fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayD
         code: diagnostic.code,
         message: diagnostic.message,
         source: DiagnosticSource::Upstream,
+        data: None,
     }
 }
 
@@ -1515,8 +1516,9 @@ mod tests {
     use super::*;
 
     use super::super::context::{
-        ContextCoverage, ContextExpansionEnvelope, ContextExpansionScope,
-        ContextProjectionEnvelope, ContextProjectionKind, ContextProjectionRegistration,
+        ContextCoverage, ContextExpansionEnvelope, ContextExpansionScope, ContextFreshness,
+        ContextProducerState, ContextProjectionEnvelope, ContextProjectionIdentity,
+        ContextProjectionKind, ContextProjectionRegistration,
     };
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1540,6 +1542,17 @@ mod tests {
 
     struct Context;
 
+    fn fixture_projection_identity(document_scoped: bool) -> ContextProjectionIdentity {
+        ContextProjectionIdentity {
+            head_commit_id: "0123456789abcdef".to_owned(),
+            code_generation_id: "generation:7".to_owned(),
+            snapshot_digest: format!("sha256:{}", "a".repeat(64)),
+            invalidation_digest: format!("sha256:{}", "b".repeat(64)),
+            snapshot_content_digest: format!("sha256:{}", "c".repeat(64)),
+            document_content_digest: document_scoped.then(|| format!("sha256:{}", "d".repeat(64))),
+        }
+    }
+
     impl CanonicalContextProjectionAuthority for Context {
         fn registrations(&self) -> Vec<ContextProjectionRegistration> {
             vec![ContextProjectionRegistration {
@@ -1555,15 +1568,20 @@ mod tests {
             request: ContextProjectionRequest,
         ) -> LspRuntimeFuture<ContextProjectionOutcome> {
             Box::pin(async move {
+                let identity = fixture_projection_identity(request.document_uri.is_some());
                 ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
                     root_uri: root.uri().to_owned(),
                     document_uri: request.document_uri,
                     kind: request.kind,
                     generation: 7,
+                    identity,
+                    freshness: ContextFreshness::Current,
+                    producer_state: ContextProducerState::Complete,
                     coverage: ContextCoverage::Complete,
                     revision: 1,
                     items: Vec::new(),
                     omitted_count: 0,
+                    omission_reasons: Vec::new(),
                     retrieval_handle: None,
                 })
             })
@@ -1584,8 +1602,7 @@ mod tests {
                     generation: 7,
                     scope: ContextExpansionScope {
                         scope_digest: "sha256:scope".to_owned(),
-                        head_commit_id: "0123456789abcdef".to_owned(),
-                        code_generation_id: "generation:7".to_owned(),
+                        identity: fixture_projection_identity(false),
                     },
                     expires_at: 10_000,
                     coverage: ContextCoverage::Complete,

@@ -3,20 +3,22 @@
 pub(crate) use std::fs;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::Command;
+pub(crate) use std::sync::Arc;
 pub(crate) use std::thread;
 
 pub(crate) use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, MessageRecordBuilder, create_runtime,
     fake_codex_bin, get_json, http_agent, http_agent_with_timeout, install_fake_codex_launcher,
     pick_free_port, response_to_json, tempdir_or_panic, wait_for_dashboard,
-    write_empty_global_db_schema,
 };
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
+pub(crate) use tracedecay::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1,
+};
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
 pub(crate) use tracedecay::errors::TraceDecayError;
-pub(crate) use tracedecay::global_db::GlobalDb;
 pub(crate) use tracedecay::memory::types::{
     AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
@@ -24,6 +26,7 @@ pub(crate) use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 pub(crate) use tracedecay::tracedecay::TraceDecay;
+pub(crate) use tracedecay_domain::ProjectId;
 
 pub(crate) struct MessageDetails<'a> {
     pub(crate) timestamp: i64,
@@ -65,6 +68,8 @@ pub(crate) struct DashboardFixture {
     pub(crate) home: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
+    pub(crate) host_runtime: Arc<HostAdmissionTestRuntimeV1>,
+    pub(crate) project_graphs: dashboard::DashboardTestProjectGraphsV1,
     pub(crate) server: DashboardServer,
 }
 
@@ -97,25 +102,54 @@ impl Drop for DashboardServer {
 }
 
 pub(crate) fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, port)
+    spawn_dashboard_server_with_runner(cg, None, port)
 }
 
 pub(crate) fn spawn_dashboard_server_lightweight(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, port)
+    spawn_dashboard_server_with_runner(cg, None, port)
 }
 
-fn spawn_dashboard_server_with_runner(cg: TraceDecay, port: u16) -> DashboardServer {
+pub(crate) fn spawn_dashboard_server_with_host_runtime(
+    cg: TraceDecay,
+    host_runtime: Arc<HostAdmissionTestRuntimeV1>,
+    project_graphs: dashboard::DashboardTestProjectGraphsV1,
+    port: u16,
+) -> DashboardServer {
+    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), port)
+}
+
+fn spawn_dashboard_server_with_runner(
+    cg: TraceDecay,
+    host_authority: Option<(
+        Arc<HostAdmissionTestRuntimeV1>,
+        dashboard::DashboardTestProjectGraphsV1,
+    )>,
+    port: u16,
+) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let thread = thread::spawn(move || {
         let runtime = create_runtime();
         runtime.block_on(async move {
-            let result =
-                dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, async move {
+            let cg = Arc::new(cg);
+            let (host_runtime, project_graphs) = match host_authority {
+                Some(authority) => authority,
+                None => (
+                    open_dashboard_host_runtime(&cg).await,
+                    dashboard::DashboardTestProjectGraphsV1::default(),
+                ),
+            };
+            let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
+                Arc::clone(&cg),
+                host_runtime,
+                project_graphs,
+                "127.0.0.1",
+                port,
+                async move {
                     let _ = shutdown_rx.await;
-                })
-                .await;
+                },
+            )
+            .await;
             let _ = cg.checkpoint().await;
-            cg.close();
             let _ = result;
         });
     });
@@ -141,24 +175,38 @@ pub(crate) async fn setup_project(project_root: &Path) -> TraceDecay {
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
     );
-    // Pre-create the GlobalDb-schema stores that init and the dashboard
-    // server will open, from the cached empty template: opening an existing
-    // DB is a file copy instead of a full schema creation (slow on Windows).
-    if let Some(global_db_path) = std::env::var_os(GLOBAL_DB_ENV) {
-        let global_db_path = PathBuf::from(global_db_path);
-        if !global_db_path.exists() {
-            write_empty_global_db_schema(&global_db_path).await;
-        }
-    }
-    let cg = match TraceDecay::init(project_root).await {
+    match TraceDecay::init(project_root).await {
         Ok(cg) => cg,
         Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
-    };
-    let sessions_db_path = &cg.store_layout().sessions_db_path;
-    if !sessions_db_path.exists() {
-        write_empty_global_db_schema(sessions_db_path).await;
     }
-    cg
+}
+
+pub(crate) async fn open_dashboard_host_runtime(
+    cg: &TraceDecay,
+) -> Arc<HostAdmissionTestRuntimeV1> {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|project_id| ProjectId::new(project_id.to_owned()).ok())
+        .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project id"));
+    let project_id_text = project_id.as_str().to_owned();
+    let runtime = Arc::new(
+        HostAdmissionTestRuntimeV1::project(
+            tracedecay::storage::default_profile_root()
+                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
+            cg.project_root(),
+            project_id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("open dashboard host-admission runtime: {error}")),
+    );
+    runtime
+        .upsert_code_project(&project_id_text, cg.project_root(), None, None, None)
+        .await
+        .unwrap_or_else(|| panic!("register dashboard fixture project"));
+    runtime
 }
 
 pub(crate) struct AppliedDashboardAutomationFact {
@@ -193,12 +241,8 @@ pub(crate) async fn apply_dashboard_automation_fact(
     use tracedecay::store::memory::DatabaseFactStore;
     use tracedecay_store::CompatibilityFactProposalPromotionV1;
 
-    let memory_db = cg
-        .open_project_store_db()
-        .await
-        .unwrap_or_else(|error| panic!("open outcome memory authority: {error}"));
     let owner = dashboard_fixture_project_owner(cg);
-    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&memory_db))
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
         .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
     let request = AddFactRequest {
         content: content.to_string(),
@@ -263,12 +307,8 @@ pub(crate) async fn delete_dashboard_automation_fact(
         CompatibilityFactTargetV1,
     };
 
-    let memory_db = cg
-        .open_project_store_db()
-        .await
-        .unwrap_or_else(|error| panic!("open outcome memory authority: {error}"));
     let owner = dashboard_fixture_project_owner(cg);
-    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&memory_db))
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
         .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
     let context = MemoryOperationContext::from_trusted_request_id(
         &owner,
@@ -406,7 +446,7 @@ pub(crate) fn fixture_fact_id(
         .unwrap_or_else(|| panic!("seeded dashboard fact not found for prefix: {content_prefix}"))
 }
 
-pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
+pub(crate) async fn seed_lcm_fixture(runtime: &HostAdmissionTestRuntimeV1, project_path: &Path) {
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "sess-dashboard-1".to_string(),
@@ -422,7 +462,11 @@ pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) 
         agent_id: None,
         parent_tool_use_id: None,
     };
-    if !global_db.upsert_session(&session).await {
+    if !runtime
+        .upsert_session_for_test(HostAdmissionScope::Project, &session)
+        .await
+        .unwrap_or_else(|error| panic!("failed to upsert session fixture: {error}"))
+    {
         panic!("failed to upsert session fixture");
     }
 
@@ -475,7 +519,16 @@ pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) 
     ];
 
     for message in messages {
-        if !global_db.upsert_session_message(&message).await {
+        if !runtime
+            .upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to upsert LCM message fixture {}: {error}",
+                    message.message_id
+                )
+            })
+        {
             panic!(
                 "failed to upsert LCM message fixture {}",
                 message.message_id
@@ -483,12 +536,20 @@ pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) 
         }
     }
 
-    let msg_1 = match global_db.lcm_load_raw_message("cursor", "msg-1").await {
-        Some(record) => record.store_id,
+    let msg_1 = match runtime
+        .lcm_raw_store_id_for_test(HostAdmissionScope::Project, "cursor", "msg-1")
+        .await
+        .unwrap_or_else(|error| panic!("load seeded message msg-1: {error}"))
+    {
+        Some(store_id) => store_id,
         None => panic!("missing seeded message msg-1"),
     };
-    let msg_2 = match global_db.lcm_load_raw_message("cursor", "msg-2").await {
-        Some(record) => record.store_id,
+    let msg_2 = match runtime
+        .lcm_raw_store_id_for_test(HostAdmissionScope::Project, "cursor", "msg-2")
+        .await
+        .unwrap_or_else(|error| panic!("load seeded message msg-2: {error}"))
+    {
+        Some(store_id) => store_id,
         None => panic!("missing seeded message msg-2"),
     };
 
@@ -512,7 +573,10 @@ pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) 
                 .to_string(),
         ),
     };
-    if let Err(err) = global_db.lcm_insert_summary_node(draft).await {
+    if let Err(err) = runtime
+        .lcm_insert_summary_node_for_test(HostAdmissionScope::Project, draft)
+        .await
+    {
         panic!("failed to insert summary node fixture: {err}");
     }
 }
@@ -649,15 +713,19 @@ async fn start_dashboard_fixture_with_options(
         seed_memory_fixture(&cg).await;
     }
 
+    let host_runtime = open_dashboard_host_runtime(&cg).await;
+    let project_graphs = dashboard::DashboardTestProjectGraphsV1::default();
     if seed_lcm {
-        let session_store = open_project_session_store(&project_root).await;
-        seed_lcm_fixture(&session_store, &project_root).await;
-        drop(session_store);
+        seed_lcm_fixture(&host_runtime, &project_root).await;
     }
-
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let server = spawn_dashboard_server(cg, port);
+    let server = spawn_dashboard_server_with_host_runtime(
+        cg,
+        Arc::clone(&host_runtime),
+        project_graphs.clone(),
+        port,
+    );
 
     let agent = http_agent();
     wait_for_dashboard(&agent, &base_url).await;
@@ -671,6 +739,8 @@ async fn start_dashboard_fixture_with_options(
         home,
         base_url,
         project_root,
+        host_runtime,
+        project_graphs,
         server,
     }
 }
@@ -741,16 +811,21 @@ pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay, context: &str)
 /// sharded by default, project-local only for explicit or legacy projects.
 /// A missing store is written from the cached empty-schema template so the
 /// open skips full schema creation (a large fixed cost on Windows).
-pub(crate) async fn open_project_session_store(project_root: &Path) -> GlobalDb {
-    let db_path = tracedecay::sessions::cursor::project_session_db_path(project_root);
-    if !db_path.exists() {
-        write_empty_global_db_schema(&db_path).await;
-    }
-    match GlobalDb::open_at(&db_path).await {
-        Some(db) => db,
-        None => panic!(
-            "failed to open project session store at {}",
-            db_path.display()
-        ),
-    }
+pub(crate) async fn open_project_session_store(
+    project_root: &Path,
+) -> Arc<HostAdmissionTestRuntimeV1> {
+    let project_id = tracedecay::storage::read_repository_identity_marker(project_root)
+        .unwrap_or_else(|error| panic!("read dashboard project identity: {error}"))
+        .and_then(|marker| ProjectId::new(marker.project_id).ok())
+        .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project identity"));
+    Arc::new(
+        HostAdmissionTestRuntimeV1::project(
+            tracedecay::storage::default_profile_root()
+                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
+            project_root,
+            project_id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("open dashboard project session authority: {error}")),
+    )
 }

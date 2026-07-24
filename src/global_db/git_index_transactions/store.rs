@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use libsql::{Row, Transaction, params};
 use tracedecay_domain::{
     GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewV1,
     GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
@@ -12,20 +11,97 @@ use tracedecay_store::{
     GitIndexTransactionTerminalWriteV1,
 };
 
-use crate::global_db::{GlobalDb, GlobalDbReadSnapshot, GlobalDbWriteTransaction};
+#[cfg(test)]
+use crate::db::engine::{Connection, Transaction, TransactionBehavior};
+use crate::db::engine::{Executor, IntoParams, QueryExecutor, ReadSnapshot, Row, Rows, params};
+use crate::global_db::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};
 
 /// Async canonical-store adapter for PR11 transaction state.
 ///
-/// The adapter borrows the already-open authoritative `GlobalDb`; it never
+/// The adapter borrows the already-mounted registered session database; it never
 /// opens a database or derives a path. Every mutation owns one `IMMEDIATE`
-/// transaction from that `GlobalDb` through commit or rollback.
+/// transaction from that runtime through commit or rollback.
 pub(crate) struct GlobalDbGitIndexTransactionStore<'db> {
-    db: &'db GlobalDb,
+    db: GitIndexDatabase<'db>,
+}
+
+#[derive(Clone, Copy)]
+enum GitIndexDatabase<'db> {
+    Registered(&'db RegisteredGlobalDb),
+    #[cfg(test)]
+    Engine(&'db Connection),
+}
+
+enum GitIndexWriteTransaction<'db> {
+    Registered(RegisteredGlobalDbWriteTransaction<'db>),
+    #[cfg(test)]
+    Engine(Transaction),
+}
+
+impl QueryExecutor for GitIndexWriteTransaction<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        match self {
+            Self::Registered(transaction) => transaction.query(sql, params).await,
+            #[cfg(test)]
+            Self::Engine(transaction) => transaction.query(sql, params).await,
+        }
+    }
+}
+
+impl Executor for GitIndexWriteTransaction<'_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: IntoParams,
+    {
+        match self {
+            Self::Registered(transaction) => transaction.execute(sql, params).await,
+            #[cfg(test)]
+            Self::Engine(transaction) => transaction.execute(sql, params).await,
+        }
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        match self {
+            Self::Registered(transaction) => transaction.execute_batch(sql).await,
+            #[cfg(test)]
+            Self::Engine(transaction) => transaction.execute_batch(sql).await,
+        }
+    }
+}
+
+impl GitIndexWriteTransaction<'_> {
+    async fn commit(self) -> crate::db::engine::Result<()> {
+        match self {
+            Self::Registered(transaction) => transaction.commit().await,
+            #[cfg(test)]
+            Self::Engine(transaction) => transaction.commit().await,
+        }
+    }
+
+    async fn rollback(self) -> crate::db::engine::Result<()> {
+        match self {
+            Self::Registered(transaction) => transaction.rollback().await,
+            #[cfg(test)]
+            Self::Engine(transaction) => transaction.rollback().await,
+        }
+    }
 }
 
 impl<'db> GlobalDbGitIndexTransactionStore<'db> {
-    pub(crate) const fn new(db: &'db GlobalDb) -> Self {
-        Self { db }
+    pub(crate) const fn new(db: &'db RegisteredGlobalDb) -> Self {
+        Self {
+            db: GitIndexDatabase::Registered(db),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_engine_test(db: &'db Connection) -> Self {
+        Self {
+            db: GitIndexDatabase::Engine(db),
+        }
     }
 
     pub(crate) async fn save_preview(
@@ -410,17 +486,33 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    async fn begin_write(&self) -> GitIndexTransactionStoreResult<GlobalDbWriteTransaction<'_>> {
-        self.db.begin_write_transaction().await.map_err(unavailable)
+    async fn begin_write(&self) -> GitIndexTransactionStoreResult<GitIndexWriteTransaction<'_>> {
+        match self.db {
+            GitIndexDatabase::Registered(db) => db
+                .begin_write_transaction()
+                .await
+                .map(GitIndexWriteTransaction::Registered)
+                .map_err(unavailable),
+            #[cfg(test)]
+            GitIndexDatabase::Engine(db) => db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map(GitIndexWriteTransaction::Engine)
+                .map_err(unavailable),
+        }
     }
 
-    async fn read_snapshot(&self) -> GitIndexTransactionStoreResult<GlobalDbReadSnapshot> {
-        self.db.read_snapshot().await.map_err(unavailable)
+    async fn read_snapshot(&self) -> GitIndexTransactionStoreResult<ReadSnapshot> {
+        match self.db {
+            GitIndexDatabase::Registered(db) => db.read_snapshot().await.map_err(unavailable),
+            #[cfg(test)]
+            GitIndexDatabase::Engine(db) => db.read_snapshot().await.map_err(unavailable),
+        }
     }
 }
 
 async fn commit_outcome<T>(
-    transaction: GlobalDbWriteTransaction<'_>,
+    transaction: GitIndexWriteTransaction<'_>,
     outcome: GitIndexTransactionStoreResult<T>,
 ) -> GitIndexTransactionStoreResult<T> {
     match outcome {
@@ -436,10 +528,13 @@ async fn commit_outcome<T>(
     }
 }
 
-async fn insert_preview_if_absent(
-    transaction: &Transaction,
+async fn insert_preview_if_absent<E>(
+    transaction: &E,
     preview: &GitIndexPreviewV1,
-) -> GitIndexTransactionStoreResult<()> {
+) -> GitIndexTransactionStoreResult<()>
+where
+    E: Executor,
+{
     if let Some(existing) = read_preview_from_transaction(transaction, &preview.preview_id).await? {
         return if existing == *preview {
             Ok(())
@@ -479,11 +574,14 @@ async fn insert_preview_if_absent(
         .map_err(unavailable)
 }
 
-async fn insert_journal(
-    transaction: &Transaction,
+async fn insert_journal<E>(
+    transaction: &E,
     idempotency_key: &GitIndexIdempotencyKey,
     journal: &GitIndexTransactionJournalV1,
-) -> GitIndexTransactionStoreResult<()> {
+) -> GitIndexTransactionStoreResult<()>
+where
+    E: Executor,
+{
     transaction
         .execute(
             "INSERT INTO git_index_transaction_journals
@@ -512,10 +610,13 @@ async fn insert_journal(
         .map_err(unavailable)
 }
 
-async fn read_preview_from_transaction(
-    transaction: &Transaction,
+async fn read_preview_from_transaction<Q>(
+    transaction: &Q,
     preview_id: &GitIndexPreviewId,
-) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
+) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT preview_json FROM git_index_preview_commitments WHERE preview_id = ?1",
@@ -539,10 +640,13 @@ async fn read_preview_from_transaction(
     Ok(Some(preview))
 }
 
-async fn read_record_from_transaction(
-    transaction: &Transaction,
+async fn read_record_from_transaction<Q>(
+    transaction: &Q,
     idempotency_key: &GitIndexIdempotencyKey,
-) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>> {
+) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT input.idempotency_key, input.input_digest, preview.preview_json,
@@ -575,10 +679,13 @@ async fn read_record_from_transaction(
     Ok(Some(record))
 }
 
-async fn record_by_transaction_id(
-    transaction: &Transaction,
+async fn record_by_transaction_id<Q>(
+    transaction: &Q,
     transaction_id: &GitIndexTransactionId,
-) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>> {
+) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT input.idempotency_key, input.input_digest, preview.preview_json,
@@ -611,10 +718,13 @@ async fn record_by_transaction_id(
     Ok(Some(record))
 }
 
-async fn records_for_repository(
-    transaction: &Transaction,
+async fn records_for_repository<Q>(
+    transaction: &Q,
     repository_id: &RepositoryId,
-) -> GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>> {
+) -> GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT input.idempotency_key, input.input_digest, preview.preview_json,
@@ -674,10 +784,13 @@ fn decode_record(row: &Row) -> GitIndexTransactionStoreResult<GitIndexTransactio
     Ok(record)
 }
 
-async fn transaction_id_exists(
-    transaction: &Transaction,
+async fn transaction_id_exists<Q>(
+    transaction: &Q,
     transaction_id: &GitIndexTransactionId,
-) -> GitIndexTransactionStoreResult<bool> {
+) -> GitIndexTransactionStoreResult<bool>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT 1 FROM git_index_transaction_inputs WHERE transaction_id = ?1",
@@ -691,10 +804,13 @@ async fn transaction_id_exists(
         .map_err(unavailable)
 }
 
-async fn repository_has_active_quarantine(
-    transaction: &Transaction,
+async fn repository_has_active_quarantine<Q>(
+    transaction: &Q,
     repository_id: &RepositoryId,
-) -> GitIndexTransactionStoreResult<bool> {
+) -> GitIndexTransactionStoreResult<bool>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT 1 FROM git_index_repository_quarantines
@@ -709,11 +825,14 @@ async fn repository_has_active_quarantine(
         .map_err(unavailable)
 }
 
-async fn transaction_has_active_quarantine(
-    transaction: &Transaction,
+async fn transaction_has_active_quarantine<Q>(
+    transaction: &Q,
     repository_id: &RepositoryId,
     transaction_id: &GitIndexTransactionId,
-) -> GitIndexTransactionStoreResult<bool> {
+) -> GitIndexTransactionStoreResult<bool>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT 1 FROM git_index_repository_quarantines
@@ -730,10 +849,13 @@ async fn transaction_has_active_quarantine(
 
 /// Create the durable fence once. A prior proven clear is immutable evidence:
 /// it must not be silently reactivated or have its recovery receipt erased.
-async fn ensure_active_quarantine(
-    transaction: &Transaction,
+async fn ensure_active_quarantine<E>(
+    transaction: &E,
     journal: &GitIndexTransactionJournalV1,
-) -> GitIndexTransactionStoreResult<()> {
+) -> GitIndexTransactionStoreResult<()>
+where
+    E: Executor,
+{
     let inserted = transaction
         .execute(
             "INSERT INTO git_index_repository_quarantines
@@ -767,11 +889,14 @@ async fn ensure_active_quarantine(
 /// publishes a native-observed terminal receipt. The retained resolution row
 /// prevents a crash between receipt publication and fence clearing from
 /// permanently quarantining a transaction that recovery already proved.
-async fn resolve_active_quarantine(
-    transaction: &Transaction,
+async fn resolve_active_quarantine<E>(
+    transaction: &E,
     journal: &GitIndexTransactionJournalV1,
     receipt: &GitIndexTransactionReceiptV1,
-) -> GitIndexTransactionStoreResult<()> {
+) -> GitIndexTransactionStoreResult<()>
+where
+    E: Executor,
+{
     let updated = transaction
         .execute(
             "UPDATE git_index_repository_quarantines
@@ -793,10 +918,13 @@ async fn resolve_active_quarantine(
     }
 }
 
-async fn needs_inspection_recovery_transactions(
-    transaction: &Transaction,
+async fn needs_inspection_recovery_transactions<Q>(
+    transaction: &Q,
     repository_id: &RepositoryId,
-) -> GitIndexTransactionStoreResult<BTreeSet<GitIndexTransactionId>> {
+) -> GitIndexTransactionStoreResult<BTreeSet<GitIndexTransactionId>>
+where
+    Q: QueryExecutor,
+{
     let mut rows = transaction
         .query(
             "SELECT journal.transaction_id

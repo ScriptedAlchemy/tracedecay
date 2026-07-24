@@ -167,6 +167,7 @@ pub struct GraphImpactResult {
 #[serde(deny_unknown_fields)]
 pub struct AffectedTestsRequest {
     pub symbol: SymbolOccurrenceId,
+    pub generation: CodeGenerationId,
     pub meta: RetrievalRequestMeta,
 }
 

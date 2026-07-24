@@ -1,7 +1,8 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::HashSet;
 
-use super::connection::{Database, DatabaseWriterConnection};
+use super::connection::{Database, DatabaseWriteTransaction};
+use super::engine::{Value, params_from_iter};
 use super::sql::build_qmark_placeholders;
 use crate::errors::{Result, TraceDecayError};
 
@@ -13,7 +14,7 @@ impl Database {
         &self,
         candidate_ids: &[String],
     ) -> Result<HashSet<String>> {
-        // Keep each IN list well below SQLite/libSQL variable limits. Large
+        // Keep each IN list well below SQLite variable limits. Large
         // repos can pass tens of thousands of function ids from test-risk
         // analysis, and one giant placeholder list fails before the query runs.
         const CHUNK_SIZE: usize = 500;
@@ -34,13 +35,10 @@ impl Database {
                    AND e.kind = 'annotates' \
                    AND e.target IN ({placeholders})",
             );
-            let param_values: Vec<libsql::Value> = chunk
-                .iter()
-                .map(|id| libsql::Value::Text(id.clone()))
-                .collect();
+            let param_values: Vec<Value> = chunk.iter().map(|id| Value::Text(id.clone())).collect();
             let mut rows = self
-                .conn()
-                .query(&sql, libsql::params_from_iter(param_values))
+                .engine_conn()
+                .query(&sql, params_from_iter(param_values))
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query test-annotated nodes: {e}"),
@@ -69,14 +67,14 @@ impl Database {
                      AND n.name = 'test' \
                      AND e.kind = 'annotates' \
                      AND t.kind IN ('function', 'method')";
-        let mut rows = self
-            .conn()
-            .query(sql, ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query test-annotation files: {e}"),
-                operation: "get_files_with_test_annotations".to_string(),
-            })?;
+        let mut rows =
+            self.engine_conn()
+                .query(sql, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query test-annotation files: {e}"),
+                    operation: "get_files_with_test_annotations".to_string(),
+                })?;
         let mut result = HashSet::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read test-annotation file row: {e}"),
@@ -92,14 +90,14 @@ impl Database {
     /// Returns all node IDs whose docstring contains `skip-test-coverage`.
     pub async fn get_skip_test_coverage_node_ids(&self) -> Result<HashSet<String>> {
         let sql = "SELECT id FROM nodes WHERE docstring LIKE '%skip-test-coverage%'";
-        let mut rows = self
-            .conn()
-            .query(sql, ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query skip-test-coverage nodes: {e}"),
-                operation: "get_skip_test_coverage_node_ids".to_string(),
-            })?;
+        let mut rows =
+            self.engine_conn()
+                .query(sql, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query skip-test-coverage nodes: {e}"),
+                    operation: "get_skip_test_coverage_node_ids".to_string(),
+                })?;
         let mut result = HashSet::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read skip-test-coverage row: {e}"),
@@ -124,13 +122,17 @@ impl Database {
     /// JOIN+LIKE form times out at >25s on chromium. Both pathologies stem
     /// from re-running the wildcard scan per candidate row.
     pub async fn collect_test_marker_ids(&self) -> Result<Vec<String>> {
-        let connection = self.writer_connection("collect test marker ids").await?;
-        self.collect_test_marker_ids_on(&connection).await
+        let transaction = self
+            .begin_write_transaction("collect test marker ids")
+            .await?;
+        let result = self.collect_test_marker_ids_on(&transaction).await;
+        let _ = transaction.rollback().await;
+        result
     }
 
     pub(crate) async fn collect_test_marker_ids_on(
         &self,
-        conn: &DatabaseWriterConnection<'_>,
+        conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<Vec<String>> {
         let op = "collect_test_marker_ids";
         let sql = "SELECT id FROM nodes
@@ -142,7 +144,7 @@ impl Database {
                          OR name LIKE '%::wasm_bindgen_test'
                      )";
         let mut rows = conn
-            .query(sql, ())
+            .query_engine(sql, ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query test marker ids: {e}"),
@@ -175,7 +177,7 @@ impl Database {
     /// `find_dead_code` for the wrapping pattern.
     pub(crate) async fn populate_test_marker_temp_table_unlocked(
         &self,
-        conn: &DatabaseWriterConnection<'_>,
+        conn: &DatabaseWriteTransaction<'_>,
         ids: &[String],
     ) -> Result<()> {
         // `SQLite`'s default parameter limit is 999. Chunk well under that.
@@ -184,7 +186,7 @@ impl Database {
         let op = "populate_test_marker_temp_table";
         // Drop + recreate so we always start from an empty table.
         self.drop_test_marker_temp_table_unlocked(conn).await?;
-        conn.execute("CREATE TEMP TABLE test_markers (id TEXT PRIMARY KEY)", ())
+        conn.execute_engine("CREATE TEMP TABLE test_markers (id TEXT PRIMARY KEY)", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to create temp.test_markers: {e}"),
@@ -203,11 +205,8 @@ impl Database {
                 }
                 sql.push_str("(?)");
             }
-            let params: Vec<libsql::Value> = chunk
-                .iter()
-                .map(|id| libsql::Value::Text(id.clone()))
-                .collect();
-            conn.execute(&sql, libsql::params_from_iter(params))
+            let params: Vec<Value> = chunk.iter().map(|id| Value::Text(id.clone())).collect();
+            conn.execute_engine(&sql, params_from_iter(params))
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to bulk-insert test markers: {e}"),
@@ -224,9 +223,9 @@ impl Database {
     /// Safe to call even if the table doesn't exist (uses `IF EXISTS`).
     pub(crate) async fn drop_test_marker_temp_table_unlocked(
         &self,
-        conn: &DatabaseWriterConnection<'_>,
+        conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
-        conn.execute("DROP TABLE IF EXISTS temp.test_markers", ())
+        conn.execute_engine("DROP TABLE IF EXISTS temp.test_markers", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_markers: {e}"),
@@ -258,7 +257,7 @@ impl Database {
     /// 0.75 s end-to-end (vs. >60 s for the single-temp-table form).
     pub(crate) async fn populate_test_annotated_targets_temp_table_unlocked(
         &self,
-        conn: &DatabaseWriterConnection<'_>,
+        conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
         let op = "populate_test_annotated_targets_temp_table";
 
@@ -266,7 +265,7 @@ impl Database {
         // hygiene as the test_markers temp table.
         self.drop_test_annotated_targets_temp_table_unlocked(conn)
             .await?;
-        conn.execute(
+        conn.execute_engine(
             "CREATE TEMP TABLE test_annotated_targets (target TEXT PRIMARY KEY)",
             (),
         )
@@ -279,7 +278,7 @@ impl Database {
         // `INSERT OR IGNORE` because a single function can have multiple
         // test markers (e.g. `#[test] #[cfg(target_os = "linux")]`) — one
         // row per target, not per (target, marker) pair.
-        conn.execute(
+        conn.execute_engine(
             "INSERT OR IGNORE INTO temp.test_annotated_targets (target)
              SELECT e.target FROM edges e
              WHERE e.kind = 'annotates'
@@ -298,9 +297,9 @@ impl Database {
     /// `populate_test_annotated_targets_temp_table`.
     pub(crate) async fn drop_test_annotated_targets_temp_table_unlocked(
         &self,
-        conn: &DatabaseWriterConnection<'_>,
+        conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
-        conn.execute("DROP TABLE IF EXISTS temp.test_annotated_targets", ())
+        conn.execute_engine("DROP TABLE IF EXISTS temp.test_annotated_targets", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_annotated_targets: {e}"),
@@ -317,6 +316,7 @@ mod tests {
 
     use super::super::access::DatabaseAuthority;
     use super::*;
+    use crate::db::TestDatabaseRuntimeMode;
     use crate::graph::queries::GraphQueryManager;
 
     async fn assert_waits_for_writer<Operation, OperationFuture>(
@@ -355,7 +355,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "coverage writer").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
 
         assert_waits_for_writer(&db, |db| async move {
             GraphQueryManager::new(&db)

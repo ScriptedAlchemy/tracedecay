@@ -4,10 +4,9 @@ use super::*;
 async fn temporal_schema_persists_cursor_keys_without_read_creation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
     assert!(
         table_exists(&db_path, "session_query_cursor_keys").await,
@@ -15,8 +14,8 @@ async fn temporal_schema_persists_cursor_keys_without_read_creation() {
     );
     assert_eq!(row_count(&db_path, "session_query_cursor_keys").await, 0);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute(
         "INSERT INTO session_query_cursor_keys (
             key_id, key_version, key_material, created_at, retired_at
@@ -31,10 +30,9 @@ async fn temporal_schema_persists_cursor_keys_without_read_creation() {
 
     let restart_path = tmp.path().join(".tracedecay").join("restart.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = GlobalDb::try_open_at(&restart_path)
+    let reopened = open_global_db(&restart_path)
         .await
-        .expect("writer reopen should preserve a persisted cursor key")
-        .expect("global database should reopen");
+        .expect("writer reopen should preserve a persisted cursor key");
     drop(reopened);
     assert_eq!(
         row_count(&restart_path, "session_query_cursor_keys").await,
@@ -42,15 +40,21 @@ async fn temporal_schema_persists_cursor_keys_without_read_creation() {
     );
 
     let missing_path = tmp.path().join(".tracedecay").join("missing.db");
-    assert!(GlobalDb::open_read_only_at(&missing_path).await.is_none());
+    assert!(
+        open_read_only_global_db(&missing_path)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         !missing_path.exists(),
         "a read-only open must not create an absent store"
     );
 
-    let reader = GlobalDb::open_read_only_at(&restart_path)
+    let reader = open_read_only_global_db(&restart_path)
         .await
-        .expect("existing temporal schema should open read-only");
+        .expect("existing temporal schema should open read-only")
+        .expect("existing database should have a read-only runtime");
     drop(reader);
     assert_eq!(
         row_count(&restart_path, "session_query_cursor_keys").await,
@@ -63,14 +67,13 @@ async fn temporal_schema_persists_cursor_keys_without_read_creation() {
 async fn temporal_schema_rejects_direct_cursor_retirement() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute(
         "INSERT INTO session_query_cursor_keys (
             key_id, key_version, key_material, created_at, retired_at
@@ -96,14 +99,13 @@ async fn temporal_schema_rejects_direct_cursor_retirement() {
 async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute(
         "INSERT INTO session_query_cursor_keys (
             key_id, key_version, key_material, created_at, retired_at
@@ -212,10 +214,9 @@ async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
 
     let restart_path = tmp.path().join(".tracedecay").join("cursor-restart.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = GlobalDb::try_open_at(&restart_path)
+    let reopened = open_global_db(&restart_path)
         .await
-        .expect("rotated cursor key authority must pass restart validation")
-        .expect("global database should reopen");
+        .expect("rotated cursor key authority must pass restart validation");
     drop(reopened);
     assert_eq!(
         row_count(&restart_path, "session_query_cursor_keys").await,
@@ -227,14 +228,13 @@ async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
 async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute(
         "INSERT INTO session_query_cursor_keys (
             key_id, key_version, key_material, created_at, retired_at
@@ -262,7 +262,7 @@ async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
     let restart_path = tmp.path().join(".tracedecay").join("cursor-audit.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
     assert!(
-        GlobalDb::try_open_at(&restart_path).await.is_err(),
+        open_global_db(&restart_path).await.is_err(),
         "restart audit must reject an active key that is not the monotonic maximum"
     );
 }
@@ -279,14 +279,13 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
             .join(fixture)
             .join(".tracedecay")
             .join("sessions.db");
-        let db = GlobalDb::try_open_at(&db_path)
+        let db = open_global_db(&db_path)
             .await
-            .expect("temporal schema initialization should not error")
-            .expect("global database should open");
+            .expect("temporal schema initialization should not error");
         drop(db);
 
-        let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = raw_db.connect().unwrap();
+        let raw_db = TestConnection::open(&db_path);
+        let conn = (*raw_db).clone();
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
@@ -301,7 +300,7 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
                 ('broken-v1', ?1, X'01', 100, 300),
                 ('broken-v2', ?2, X'02', 200, 300),
                 ('broken-v3', ?3, X'03', 300, NULL)",
-            libsql::params![versions[0], versions[1], versions[2]],
+            params![versions[0], versions[1], versions[2]],
         )
         .await
         .unwrap();
@@ -315,7 +314,7 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
             .join("restart.db");
         copy_database_for_temporal_restart(&db_path, &restart_path).await;
         assert!(
-            GlobalDb::try_open_at(&restart_path).await.is_err(),
+            open_global_db(&restart_path).await.is_err(),
             "{fixture}: a later key must not satisfy a skipped immediate-successor retirement"
         );
     }
@@ -333,21 +332,20 @@ async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
             .join(fixture)
             .join(".tracedecay")
             .join("sessions.db");
-        let db = GlobalDb::try_open_at(&db_path)
+        let db = open_global_db(&db_path)
             .await
-            .expect("temporal schema initialization should not error")
-            .expect("global database should open");
+            .expect("temporal schema initialization should not error");
         drop(db);
 
-        let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = raw_db.connect().unwrap();
+        let raw_db = TestConnection::open(&db_path);
+        let conn = (*raw_db).clone();
         for (ordinal, version) in versions.into_iter().enumerate() {
             let created_at = ((ordinal + 1) * 100) as i64;
             conn.execute(
                 "INSERT INTO session_query_cursor_keys (
                     key_id, key_version, key_material, created_at, retired_at
                  ) VALUES (?1, ?2, X'01', ?3, NULL)",
-                libsql::params![format!("{fixture}-key-{version}"), version, created_at],
+                params![format!("{fixture}-key-{version}"), version, created_at],
             )
             .await
             .unwrap();
@@ -362,10 +360,9 @@ async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
             .join(".tracedecay")
             .join("valid-restart.db");
         copy_database_for_temporal_restart(&db_path, &restart_path).await;
-        let reopened = GlobalDb::try_open_at(&restart_path)
+        let reopened = open_global_db(&restart_path)
             .await
-            .expect("valid immediate-successor chain must pass restart audit")
-            .expect("global database should reopen");
+            .expect("valid immediate-successor chain must pass restart audit");
         drop(reopened);
         assert_valid_cursor_chain(&cursor_key_history(&restart_path).await);
     }
@@ -375,14 +372,13 @@ async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
 async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let seed_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let initial = seed_db.connect().unwrap();
+    let seed_db = TestConnection::open(&db_path);
+    let initial = (*seed_db).clone();
     initial
         .execute(
             "INSERT INTO session_query_cursor_keys (
@@ -395,25 +391,16 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
     drop(initial);
     drop(seed_db);
 
-    // Separate Database/Connection handles so the holder and competitors contend
-    // at the SQLite file lock, not within a shared in-process writer queue.
-    let holder_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let holder = holder_db.connect().unwrap();
-    let lower_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let higher_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let lower_conn = lower_db.connect().unwrap();
-    let higher_conn = higher_db.connect().unwrap();
-    lower_conn
-        .busy_timeout(Duration::from_millis(1))
-        .expect("competitor busy_timeout");
-    higher_conn
-        .busy_timeout(Duration::from_millis(1))
-        .expect("competitor busy_timeout");
+    // All contenders submit through one physical writer runtime. S11 removes
+    // file-lock retry behavior from callers; the runtime owns serialization.
+    let runtime = TestConnection::open(&db_path);
+    let holder = (*runtime).clone();
+    let lower_conn = (*runtime).clone();
+    let higher_conn = (*runtime).clone();
 
     let (lock_held_tx, lock_held_rx) = oneshot::channel::<()>();
-    let (contention_tx, contention_rx) = oneshot::channel::<()>();
+    let (submitted_tx, submitted_rx) = oneshot::channel::<()>();
     let (release_tx, release_rx) = oneshot::channel::<()>();
-    let probe = Arc::new(ContentionProbe::new(contention_tx));
 
     let lower_sql = "INSERT INTO session_query_cursor_keys (
         key_id, key_version, key_material, created_at, retired_at
@@ -423,12 +410,12 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
      ) VALUES ('concurrent-key-3', 3, X'03', 300, NULL)";
 
     let holder_fut = async {
-        holder
-            .execute("BEGIN IMMEDIATE", ())
+        let transaction = holder
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .expect("holder must acquire a write transaction");
         // Prove the reserved lock is live with a no-op write under the txn.
-        holder
+        transaction
             .execute(
                 "UPDATE session_temporal_schema_migrations
                  SET version = version
@@ -443,8 +430,8 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
             Ok(Err(_)) => panic!("release signal dropped before holder cleanup"),
             Err(_) => panic!("timed out waiting to release holder after contention"),
         }
-        holder
-            .execute("ROLLBACK", ())
+        transaction
+            .rollback()
             .await
             .expect("holder must release the write lock");
     };
@@ -454,24 +441,21 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
             .await
             .expect("timed out waiting for holder write lock")
             .expect("lock-held signal dropped");
-        let lower_probe = Arc::clone(&probe);
-        let higher_probe = Arc::clone(&probe);
+        submitted_tx
+            .send(())
+            .expect("competitor submission signal must remain live");
         tokio::join!(
-            execute_with_busy_retry(&lower_conn, lower_sql, Some(lower_probe.as_ref())),
-            execute_with_busy_retry(&higher_conn, higher_sql, Some(higher_probe.as_ref()))
+            lower_conn.execute(lower_sql, ()),
+            higher_conn.execute(higher_sql, ())
         )
     };
 
     let coordinator_fut = async {
-        timeout(Duration::from_secs(3), contention_rx)
+        timeout(Duration::from_secs(3), submitted_rx)
             .await
-            .expect("must observe at least one BUSY/LOCKED retry under held write lock")
-            .expect("contention signal dropped");
-        assert!(
-            probe.busy_retries() >= 1,
-            "BUSY/LOCKED retry path must run at least once before release, got {}",
-            probe.busy_retries()
-        );
+            .expect("competitors must submit while the writer transaction is held")
+            .expect("competitor submission signal dropped");
+        tokio::task::yield_now().await;
         release_tx
             .send(())
             .expect("holder must still be waiting for release");
@@ -487,24 +471,36 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
         higher_result.is_ok(),
         "highest monotonic rotation must commit after bounded serialization: {higher_result:?}"
     );
+    let successful_rotations =
+        usize::from(lower_result.is_ok()) + usize::from(higher_result.is_ok());
+    assert!(
+        successful_rotations >= 1,
+        "the one-writer runtime must commit at least one submitted rotation"
+    );
+    for result in [&lower_result, &higher_result] {
+        let message = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            !message.contains("busy") && !message.contains("locked"),
+            "writer serialization must not leak SQLite lock retries: {message}"
+        );
+    }
     if let Err(error) = lower_result {
+        let error = error.to_string();
         assert!(
             error.contains("strictly monotonic") || error.contains("UNIQUE"),
             "lower rotation may fail only after a higher rotation commits: {error}"
         );
     }
-    assert!(
-        probe.busy_retries() >= 1,
-        "BUSY/LOCKED retry path must have run, got {}",
-        probe.busy_retries()
-    );
 
     drop(lower_conn);
     drop(higher_conn);
     drop(holder);
-    drop(lower_db);
-    drop(higher_db);
-    drop(holder_db);
+    drop(runtime);
 
     let history = cursor_key_history(&db_path).await;
     assert_eq!(history.last().unwrap().0, 3);
@@ -520,10 +516,9 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
 
     let restart_path = tmp.path().join(".tracedecay").join("concurrent-restart.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = GlobalDb::try_open_at(&restart_path)
+    let reopened = open_global_db(&restart_path)
         .await
-        .expect("serialized concurrent rotations must pass restart audit")
-        .expect("global database should reopen");
+        .expect("serialized concurrent rotations must pass restart audit");
     drop(reopened);
     assert_valid_cursor_chain(&cursor_key_history(&restart_path).await);
 }

@@ -1,22 +1,17 @@
 use tempfile::TempDir;
-use tracedecay::global_db::{GlobalDb, ParseOffset};
+use tracedecay::application::host_admission::HostAdmissionScope;
+use tracedecay::global_db::ParseOffset;
+use tracedecay::sessions::SessionProvider;
 use tracedecay::sessions::cline_like::ClineLikeSource;
-use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
-use tracedecay::sessions::source::{
-    StoredCursor, TranscriptIngestError, TranscriptSource, try_ingest_source,
-};
-use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
-#[cfg(not(windows))]
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay::sessions::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
 #[cfg(not(windows))]
 use tracedecay_store::ObservationProjectionStore;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
-#[cfg(not(windows))]
-use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
-    assert_secret_absent_from_observation_sinks, mark_test_project, observation_source_cursor,
-    set_projection_failure,
+    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
+    ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
+    open_project_session_db, set_projection_failure, try_ingest_source,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
@@ -32,7 +27,10 @@ pub(super) fn vscode_storage_root(
         .join("tasks")
 }
 
-async fn parse_offset_for_path(db: &GlobalDb, path: &std::path::Path) -> Option<ParseOffset> {
+async fn parse_offset_for_path(
+    db: &ProjectSessionTestRuntime,
+    path: &std::path::Path,
+) -> Option<ParseOffset> {
     let path = path.to_string_lossy();
     if let Some(offset) = db.get_parse_offset(path.as_ref()).await {
         return Some(offset);
@@ -54,8 +52,8 @@ async fn parse_offset_for_path(db: &GlobalDb, path: &std::path::Path) -> Option<
 }
 
 pub(super) async fn parse_offset_for_task_history(
-    db: &GlobalDb,
-    project: &std::path::Path,
+    db: &ProjectSessionTestRuntime,
+    _project: &std::path::Path,
     path: &std::path::Path,
 ) -> Option<ParseOffset> {
     if let Some(offset) = parse_offset_for_path(db, path).await {
@@ -65,33 +63,11 @@ pub(super) async fn parse_offset_for_task_history(
     let task_dir = path.parent()?.file_name()?.to_string_lossy();
     let file_name = path.file_name()?.to_string_lossy();
     let expected_suffix = format!("{task_dir}/{file_name}");
-    let raw_db = libsql::Builder::new_local(project_session_db_path(project))
-        .build()
+    db.runtime()
+        .project_parse_offset_by_suffix_for_test(&expected_suffix)
         .await
-        .ok()?;
-    let conn = raw_db.connect().ok()?;
-    let mut rows = conn
-        .query(
-            "SELECT file_path, byte_offset, mtime, file_id FROM parse_offsets",
-            (),
-        )
-        .await
-        .ok()?;
-    while let Some(row) = rows.next().await.ok()? {
-        let file_path: String = row.get(0).ok()?;
-        let normalized = file_path.replace('\\', "/");
-        if normalized.ends_with(&expected_suffix) {
-            let offset: i64 = row.get(1).ok()?;
-            let mtime: i64 = row.get(2).ok()?;
-            let file_id: i64 = row.get(3).ok()?;
-            return Some(ParseOffset {
-                byte_offset: offset as u64,
-                mtime: mtime as u64,
-                file_id: file_id as u64,
-            });
-        }
-    }
-    None
+        .ok()
+        .flatten()
 }
 
 pub(super) fn write_task(
@@ -145,7 +121,7 @@ pub(super) fn write_task_with_api_filename(
 async fn assert_provider_ingests(
     provider: &str,
     source: ClineLikeSource,
-    db: &tracedecay::global_db::GlobalDb,
+    db: &ProjectSessionTestRuntime,
     ingest_project: &std::path::Path,
     transcript_project: &std::path::Path,
 ) {
@@ -857,7 +833,6 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             Some(prefix_cursor.clone()),
             "{provider}: frontier unchanged on restart"
         );
-        drop(replay);
 
         // Replacement with an extra durable turn, interrupted by projection failure.
         std::fs::write(
@@ -882,14 +857,12 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             .unwrap(),
         )
         .unwrap();
-        set_projection_failure(&project, true).await;
-        let rejected = open_project_session_db(&project).await.unwrap();
+        set_projection_failure(&replay, true).await;
         let _ =
-            ingest_global_sources_for_provider(&rejected, &project, Some(selected_provider)).await;
-        let committed_cursor =
-            observation_source_cursor(&rejected, provider, &session_id, &project)
-                .await
-                .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
+            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider)).await;
+        let committed_cursor = observation_source_cursor(&replay, provider, &session_id, &project)
+            .await
+            .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
         assert_ne!(
             committed_cursor.generation(),
             prefix_cursor.generation(),
@@ -901,25 +874,23 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             "{provider}: observation frontier commits before projection acknowledgement"
         );
         assert_eq!(
-            rejected.session_message_count().await.unwrap(),
+            replay.session_message_count().await.unwrap(),
             3,
             "{provider}: failed projection preserves prior durable cardinality"
         );
         assert!(
-            rejected
+            replay
                 .search_session_messages(provider, None, "projection retry suffix", 10)
                 .await
                 .is_empty(),
             "{provider}: failed suffix must stay non-durable"
         );
-        drop(rejected);
 
-        set_projection_failure(&project, false).await;
-        let recovered = open_project_session_db(&project).await.unwrap();
+        set_projection_failure(&replay, false).await;
         let _ =
-            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider)).await;
+            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider)).await;
         assert_eq!(
-            recovered
+            replay
                 .search_session_messages(provider, None, "projection retry suffix", 10)
                 .await
                 .len(),
@@ -927,12 +898,12 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             "{provider}: recovered suffix searchable"
         );
         assert_eq!(
-            observation_source_cursor(&recovered, provider, &session_id, &project).await,
+            observation_source_cursor(&replay, provider, &session_id, &project).await,
             Some(committed_cursor),
             "{provider}: retry must not advance the committed observation frontier"
         );
         assert_eq!(
-            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider),)
+            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider),)
                 .await
                 .messages_upserted,
             0,
@@ -1005,8 +976,11 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
             .messages_upserted,
         0
     );
-    let committed = durable_table_count(&project, "observations").await;
-    let store = GlobalDbObservationStore::new(&reopened);
+    let committed = durable_table_count(&reopened, "observations").await;
+    let store = reopened
+        .runtime()
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
     loop {
         if store
             .rebuild_projection(committed)

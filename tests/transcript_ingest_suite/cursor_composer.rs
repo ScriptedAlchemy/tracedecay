@@ -2,7 +2,7 @@
 //! ([`tracedecay::sessions::cursor_composer`]).
 //!
 //! Each test builds a small synthetic `state.vscdb` (and, for the DAG test, a
-//! `store.db`) with libsql, then drives the read-only composer sweep and
+//! `store.db`) with rusqlite, then drives the read-only composer sweep and
 //! asserts the mapped rows, JSONL dedupe, incremental watermark, and malformed
 //! tolerance. No real Cursor data is touched.
 
@@ -10,51 +10,42 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use tempfile::TempDir;
-use tracedecay::sessions::cursor::{
-    CursorSweepSource, cursor_project_slug, open_project_session_db,
-    resolved_project_session_db_path,
-};
+use tracedecay::application::host_admission::HostAdmissionScope;
+use tracedecay::sessions::SessionProvider;
+use tracedecay::sessions::cursor::{CursorSweepSource, cursor_project_slug};
 use tracedecay::sessions::cursor_composer::CursorComposerSource;
-use tracedecay::sessions::source::try_ingest_source;
-use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
+use tracedecay_store::ObservationReplayRequest;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    durable_table_count, fixture_project_id, mark_test_project, observation_source_cursor,
-    set_projection_failure,
+    ProjectSessionTestRuntime, durable_table_count, fixture_project_id,
+    ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
+    open_project_session_db, set_projection_failure, try_ingest_source,
 };
 use crate::support::{init_git_repo, init_project};
 
 const CAP: usize = 256;
 
-async fn composer_workflow_fact_count(project: &Path) -> u64 {
-    let db_path = resolved_project_session_db_path(project).await.unwrap();
-    let raw = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = raw.connect().unwrap();
-    let mut rows = conn
-        .query("SELECT COUNT(*) FROM observation_workflow_facts", ())
+async fn composer_workflow_fact_count(runtime: &ProjectSessionTestRuntime) -> u64 {
+    runtime
+        .runtime()
+        .project_observation_table_count_for_test("observation_workflow_facts")
         .await
-        .unwrap();
-    let count = rows.next().await.unwrap().unwrap().get::<u64>(0).unwrap();
-    drop(rows);
-    drop(conn);
-    drop(raw);
-    count
+        .unwrap()
 }
 
-async fn composer_observation_json_blobs(project: &Path) -> Vec<String> {
-    let db_path = resolved_project_session_db_path(project).await.unwrap();
-    let raw = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = raw.connect().unwrap();
-    let mut rows = conn
-        .query("SELECT observation_json FROM observations", ())
+async fn composer_observation_json_blobs(runtime: &ProjectSessionTestRuntime) -> Vec<String> {
+    runtime
+        .runtime()
+        .replay_observations(
+            HostAdmissionScope::Project,
+            ObservationReplayRequest::new(0, 10_000).unwrap(),
+        )
         .await
-        .unwrap();
-    let mut values = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        values.push(row.get::<String>(0).unwrap());
-    }
-    values
+        .unwrap()
+        .into_iter()
+        .map(|row| serde_json::to_string(row.observation()).unwrap())
+        .collect()
 }
 
 /// Write a `state.vscdb` with the `cursorDiskKV` schema at the real Cursor
@@ -67,26 +58,21 @@ async fn write_state_vscdb(home: &Path, rows: &[(String, String)]) {
         .join("globalStorage");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("state.vscdb");
-    let db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
     // DELETE journalling keeps everything in the main file so the immutable
     // read path sees it without a -wal sidecar.
     conn.execute_batch(
         "PRAGMA journal_mode=DELETE;\n\
          CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
     )
-    .await
     .unwrap();
     for (key, value) in rows {
         conn.execute(
             "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
-            libsql::params![key.clone(), value.clone()],
+            rusqlite::params![key, value],
         )
-        .await
         .unwrap();
     }
-    drop(conn);
-    drop(db);
 }
 
 fn envelope(composer_id: &str, project: &Path, header_bubble_ids: &[&str]) -> serde_json::Value {
@@ -157,7 +143,12 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
 
     assert_eq!(
@@ -273,7 +264,12 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
     assert!(outcome.owned_session_ids.contains("comp-1"));
 
@@ -289,12 +285,16 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
     );
 
     // Control: without the skip set the same JSONL file would ingest.
-    let db2 = open_project_session_db(&project).await.unwrap();
     let _ = CursorComposerSource::with_home(&home)
-        .ingest(&db2, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
     let plain_sweep = CursorSweepSource::with_home(&home);
-    let plain = try_ingest_source(&db2, &plain_sweep, &project, None)
+    let plain = try_ingest_source(&db, &plain_sweep, &project, None)
         .await
         .unwrap();
     assert_eq!(
@@ -325,12 +325,22 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CursorComposerSource::with_home(&home);
     let first = source
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
     assert_eq!(first.sessions_upserted, 1);
 
     let second = source
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
     assert_eq!(
         second.sessions_upserted, 0,
@@ -352,7 +362,12 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
     )
     .await;
     let third = source
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
     assert_eq!(third.sessions_upserted, 1, "growth re-ingests");
     let reply = db
@@ -397,8 +412,8 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
         .await
         .expect("committed Cursor composer observation cursor");
     assert!(prefix_cursor.position() >= 1);
-    let observations_before = durable_table_count(&project, "observations").await;
-    let receipts_before = durable_table_count(&project, "sanitization_receipts").await;
+    let observations_before = durable_table_count(&db, "observations").await;
+    let receipts_before = durable_table_count(&db, "sanitization_receipts").await;
 
     let grown = envelope("comp-crash", &project, &["b1", "b2"]);
     let b2 = serde_json::json!({ "type": 2, "text": "Composer projection retry suffix." });
@@ -412,7 +427,7 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
     )
     .await;
 
-    set_projection_failure(&project, true).await;
+    set_projection_failure(&db, true).await;
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
     let committed_cursor = observation_source_cursor(&db, "cursor", "comp-crash", &project)
         .await
@@ -420,19 +435,19 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
     assert_eq!(committed_cursor.generation(), prefix_cursor.generation());
     assert!(committed_cursor.position() > prefix_cursor.position());
     // Canonical observation + receipt commit before V1 projection acknowledgement.
-    let committed_observations = durable_table_count(&project, "observations").await;
-    let committed_receipts = durable_table_count(&project, "sanitization_receipts").await;
+    let committed_observations = durable_table_count(&db, "observations").await;
+    let committed_receipts = durable_table_count(&db, "sanitization_receipts").await;
     assert!(committed_observations > observations_before);
     assert!(committed_receipts > receipts_before);
-    assert!(durable_table_count(&project, "projection_queue").await >= 1);
+    assert!(durable_table_count(&db, "projection_queue").await >= 1);
     assert!(
         db.search_session_messages("cursor", None, "projection retry suffix", 10)
             .await
             .is_empty()
     );
+    set_projection_failure(&db, false).await;
     drop(db);
 
-    set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
     let _ = ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Cursor))
         .await;
@@ -448,14 +463,14 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
         Some(committed_cursor.clone())
     );
     assert_eq!(
-        durable_table_count(&project, "observations").await,
+        durable_table_count(&recovered, "observations").await,
         committed_observations
     );
     assert_eq!(
-        durable_table_count(&project, "sanitization_receipts").await,
+        durable_table_count(&recovered, "sanitization_receipts").await,
         committed_receipts
     );
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Cursor))
             .await
@@ -489,7 +504,12 @@ async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
     let source = CursorComposerSource::with_home(&home);
     assert_eq!(
         source
-            .ingest(&db, &project, fixture_project_id(), CAP)
+            .ingest(
+                &db.runtime().facade(),
+                &project,
+                db.project_id().clone(),
+                CAP,
+            )
             .await
             .sessions_upserted,
         1
@@ -510,7 +530,12 @@ async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
     .await;
     assert_eq!(
         source
-            .ingest(&db, &project, fixture_project_id(), CAP)
+            .ingest(
+                &db.runtime().facade(),
+                &project,
+                db.project_id().clone(),
+                CAP,
+            )
             .await
             .sessions_upserted,
         1
@@ -523,7 +548,12 @@ async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
     );
     assert_eq!(
         source
-            .ingest(&db, &project, fixture_project_id(), CAP)
+            .ingest(
+                &db.runtime().facade(),
+                &project,
+                db.project_id().clone(),
+                CAP,
+            )
             .await
             .sessions_upserted,
         0
@@ -558,9 +588,9 @@ async fn composer_late_header_converges_with_rebuild() {
     let source = CursorComposerSource::with_home(&incremental_home);
     source
         .ingest(
-            &incremental_db,
+            &incremental_db.runtime().facade(),
             &incremental_project,
-            fixture_project_id(),
+            incremental_db.project_id().clone(),
             CAP,
         )
         .await;
@@ -580,12 +610,23 @@ async fn composer_late_header_converges_with_rebuild() {
     .await;
     source
         .ingest(
-            &incremental_db,
+            &incremental_db.runtime().facade(),
             &incremental_project,
-            fixture_project_id(),
+            incremental_db.project_id().clone(),
             CAP,
         )
         .await;
+
+    let mut incremental_messages = Vec::new();
+    for bubble_id in ["b1", "b2", "b3"] {
+        let message_id = format!("comp-late:{bubble_id}");
+        let message = incremental_db
+            .get_session_message("cursor", &message_id)
+            .await
+            .unwrap_or_else(|| panic!("incremental replay lost {bubble_id}"));
+        incremental_messages.push((bubble_id, message.role, message.text, message.kind));
+    }
+    drop(incremental_db);
 
     let rebuild_tmp = TempDir::new().unwrap();
     let rebuild_project = init_project(&rebuild_tmp);
@@ -605,22 +646,23 @@ async fn composer_late_header_converges_with_rebuild() {
     .await;
     let rebuild_db = open_project_session_db(&rebuild_project).await.unwrap();
     CursorComposerSource::with_home(&rebuild_home)
-        .ingest(&rebuild_db, &rebuild_project, fixture_project_id(), CAP)
+        .ingest(
+            &rebuild_db.runtime().facade(),
+            &rebuild_project,
+            rebuild_db.project_id().clone(),
+            CAP,
+        )
         .await;
 
-    for bubble_id in ["b1", "b2", "b3"] {
+    for (bubble_id, role, text, kind) in incremental_messages {
         let message_id = format!("comp-late:{bubble_id}");
-        let incremental = incremental_db
-            .get_session_message("cursor", &message_id)
-            .await
-            .unwrap_or_else(|| panic!("incremental replay lost {bubble_id}"));
         let rebuilt = rebuild_db
             .get_session_message("cursor", &message_id)
             .await
             .unwrap_or_else(|| panic!("rebuild lost {bubble_id}"));
-        assert_eq!(incremental.role, rebuilt.role);
-        assert_eq!(incremental.text, rebuilt.text);
-        assert_eq!(incremental.kind, rebuilt.kind);
+        assert_eq!(role, rebuilt.role);
+        assert_eq!(text, rebuilt.text);
+        assert_eq!(kind, rebuilt.kind);
     }
 }
 
@@ -650,7 +692,12 @@ async fn composer_reordered_headers_keep_native_identity() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CursorComposerSource::with_home(&home);
     source
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
 
     write_state_vscdb(
@@ -667,7 +714,12 @@ async fn composer_reordered_headers_keep_native_identity() {
     )
     .await;
     source
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
 
     for (bubble_id, text) in [
@@ -719,7 +771,12 @@ async fn composer_tolerates_malformed_and_reads_store_db() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
 
     // Both the composer envelope session and the store.db chat session ingested.
@@ -768,28 +825,21 @@ async fn composer_sql_oversized_bubble_is_non_durable_without_payload_leak() {
         .join("globalStorage");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("state.vscdb");
-    let db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=DELETE;\n\
          CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
-        libsql::params![format!("composerData:comp-oversize"), env.to_string()],
+        rusqlite::params!["composerData:comp-oversize", env.to_string()],
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
-        libsql::params![
-            format!("bubbleId:comp-oversize:b-ok"),
-            ok_bubble.to_string()
-        ],
+        rusqlite::params!["bubbleId:comp-oversize:b-ok", ok_bubble.to_string()],
     )
-    .await
     .unwrap();
     // 1 MiB + 2 of hex zeros via zeroblob — never a Rust String of that size
     // in the product path. length(value) = 2 * 524289 = 1_048_578.
@@ -798,14 +848,17 @@ async fn composer_sql_oversized_bubble_is_non_durable_without_payload_leak() {
          SELECT 'bubbleId:comp-oversize:b-huge', hex(zeroblob(524289))",
         (),
     )
-    .await
     .unwrap();
-    drop(conn);
-    drop(db);
 
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest_capped(&db, &project, fixture_project_id(), CAP, Some(64 * 1024))
+        .ingest_capped(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+            Some(64 * 1024),
+        )
         .await;
 
     assert!(
@@ -853,20 +906,17 @@ async fn write_store_db(path: &Path) {
     });
     let meta_hex = hex::encode(meta.to_string().as_bytes());
 
-    let db = libsql::Builder::new_local(path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode=DELETE;\n\
          CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);\n\
          CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);",
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO meta (key, value) VALUES ('0', ?1)",
-        libsql::params![meta_hex],
+        rusqlite::params![meta_hex],
     )
-    .await
     .unwrap();
     let blobs: Vec<(String, Vec<u8>)> = vec![
         (sys_id, sys.to_string().into_bytes()),
@@ -878,13 +928,10 @@ async fn write_store_db(path: &Path) {
     for (id, data) in blobs {
         conn.execute(
             "INSERT INTO blobs (id, data) VALUES (?1, ?2)",
-            libsql::params![id, libsql::Value::Blob(data)],
+            rusqlite::params![id, data],
         )
-        .await
         .unwrap();
     }
-    drop(conn);
-    drop(db);
 }
 
 /// Production path: checked-in envelope todos admit as WorkflowLifecycle facts
@@ -925,12 +972,12 @@ async fn composer_envelope_todos_admit_workflow_lifecycle_facts() {
     let db = open_project_session_db(&project).await.unwrap();
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
     assert_eq!(
-        durable_table_count(&project, "projection_queue").await,
+        durable_table_count(&db, "projection_queue").await,
         0,
         "envelope lifecycle projection must be applied synchronously"
     );
     assert_eq!(
-        composer_workflow_fact_count(&project).await,
+        composer_workflow_fact_count(&db).await,
         3,
         "one TodoList and two TodoItem facts must be projected"
     );
@@ -1001,18 +1048,15 @@ async fn composer_envelope_todos_exact_duplicate_is_idempotent() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
-    let observations_before = durable_table_count(&project, "observations").await;
-    let workflow_before = composer_workflow_fact_count(&project).await;
+    let observations_before = durable_table_count(&db, "observations").await;
+    let workflow_before = composer_workflow_fact_count(&db).await;
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
     assert_eq!(
-        durable_table_count(&project, "observations").await,
+        durable_table_count(&db, "observations").await,
         observations_before,
         "unchanged envelope todos must not create observations"
     );
-    assert_eq!(
-        composer_workflow_fact_count(&project).await,
-        workflow_before
-    );
+    assert_eq!(composer_workflow_fact_count(&db).await, workflow_before);
     assert_eq!(
         db.search_session_messages("cursor", None, "First todo", 10)
             .await
@@ -1039,11 +1083,15 @@ async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
 
     let db = open_project_session_db(&project).await.unwrap();
     CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, fixture_project_id(), CAP)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
         .await;
-    drop(db);
 
-    let joined = composer_observation_json_blobs(&project).await.join("\n");
+    let joined = composer_observation_json_blobs(&db).await.join("\n");
     assert!(joined.contains("workflow_lifecycle"));
     assert!(
         !joined.contains(SECRET),
@@ -1084,7 +1132,7 @@ async fn composer_envelope_todos_conflict_does_not_overwrite() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
-    let workflow_before = composer_workflow_fact_count(&project).await;
+    let workflow_before = composer_workflow_fact_count(&db).await;
     assert_eq!(workflow_before, 3);
 
     // New snapshot generation, same todos (same content fingerprint checkpoint),
@@ -1109,7 +1157,7 @@ async fn composer_envelope_todos_conflict_does_not_overwrite() {
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
 
     assert_eq!(
-        composer_workflow_fact_count(&project).await,
+        composer_workflow_fact_count(&db).await,
         workflow_before,
         "identity collision must not project a second todo snapshot"
     );
@@ -1183,7 +1231,7 @@ async fn composer_envelope_todo_status_update_after_restart_admits_new_checkpoin
     let db = open_project_session_db(&project).await.unwrap();
     let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
     assert_eq!(
-        composer_workflow_fact_count(&project).await,
+        composer_workflow_fact_count(&db).await,
         6,
         "restart update must project a second list snapshot"
     );
@@ -1263,13 +1311,17 @@ async fn live_smoke_real_state_vscdb() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let db = tracedecay::global_db::GlobalDb::open_at(&tmp.path().join("sessions.db"))
-        .await
-        .unwrap();
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        tmp.path(),
+        &project,
+        fixture_project_id(),
+    )
+    .await
+    .unwrap();
 
     let start = std::time::Instant::now();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, fixture_project_id(), 50)
+        .ingest(&runtime.facade(), &project, fixture_project_id(), 50)
         .await;
     let elapsed = start.elapsed();
     eprintln!(

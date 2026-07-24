@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
+use tracedecay_domain::{BrainId, UserProfileId};
 
 use super::failure::{IngestPassCoverage, IngestPassOutcome, TranscriptCatchUpFailure};
 use super::user::{
@@ -96,12 +97,40 @@ impl Drop for StartupUserIngestGuard {
 }
 
 /// Coalesces the profile-wide user transcript sweep shared by every project
-/// server created during daemon startup. Live hooks still call
-/// [`crate::sessions::ingest_user_global_sources`] directly, so the cooldown cannot hide a
-/// completed turn.
+/// server created during daemon startup. Live hooks use the retained
+/// registered profile authority, so the cooldown cannot hide a completed turn.
 pub(crate) async fn ingest_user_global_sources_for_startup_with_db(
-    db: &GlobalDb,
-    registry_db: &GlobalDb,
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &RegisteredGlobalDb,
+    registry_db: &RegisteredGlobalDb,
+    profile_root: &Path,
+) -> TranscriptIngestOutcome {
+    ingest_user_global_sources_for_startup_inner(
+        (brain_id, profile_id, registered),
+        registry_db,
+        profile_root,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn ingest_user_global_sources_for_startup_with_db_without_registered_authority(
+    _db: &RegisteredGlobalDb,
+    _registry_db: &RegisteredGlobalDb,
+    _profile_root: &Path,
+) -> TranscriptIngestOutcome {
+    TranscriptIngestOutcome::new(
+        TranscriptIngestStats::default(),
+        vec![TranscriptCatchUpFailure::registered_authority_unavailable(
+            "all",
+        )],
+    )
+}
+
+async fn ingest_user_global_sources_for_startup_inner(
+    registered: (&BrainId, &UserProfileId, &RegisteredGlobalDb),
+    registry_db: &RegisteredGlobalDb,
     profile_root: &Path,
 ) -> TranscriptIngestOutcome {
     let Some(mut guard) = StartupUserIngestGuard::claim(profile_root.to_path_buf()) else {
@@ -118,8 +147,16 @@ pub(crate) async fn ingest_user_global_sources_for_startup_with_db(
             )],
         );
     };
-    let outcome =
-        ingest_user_global_sources_for_provider_with_roots(db, profile_root, None, roots).await;
+    let (brain_id, profile_id, registered) = registered;
+    let outcome = ingest_user_global_sources_for_provider_with_roots(
+        brain_id,
+        profile_id,
+        registered,
+        profile_root,
+        None,
+        roots,
+    )
+    .await;
     if !outcome.is_success() {
         return outcome;
     }

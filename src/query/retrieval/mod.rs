@@ -32,7 +32,8 @@ pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
 };
 pub use self::pr9_authority::{
-    AuthorizedPr9FallbackV1, Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1,
+    AuthorizedPr9FallbackV1, PR9_CURSOR_TTL_MICROS_V1, PR9_RANKING_REVISION_V1,
+    Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1,
 };
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};

@@ -1,13 +1,14 @@
 use std::fs;
 use std::path::Path;
 
-use libsql::{Connection, TransactionBehavior, params};
-
 use super::filesystem_authority::{
     ensure_contained, existing_payload_dir_opt, inspect_payload_file_for_delete,
     read_payload_file_for_verify, remove_verified_payload_file, verify_payload_file_authority,
 };
 use super::{LcmError, gc, load_payload_metadata, util, validate_payload_ref};
+#[cfg(test)]
+use crate::db::engine::{Connection, TransactionBehavior};
+use crate::db::engine::{Executor, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOpts {
@@ -46,6 +47,7 @@ pub(crate) enum CommittedPayloadRemoval {
     ReplacementPreserved,
 }
 
+#[cfg(test)]
 pub async fn delete_external_payload(
     conn: &Connection,
     storage_root: &Path,
@@ -61,7 +63,26 @@ pub async fn delete_external_payload(
     transaction.commit().await?;
     let mut outcome = prepared.outcome;
     if prepared.pending_removal_bytes.is_some() {
-        let drained = gc::drain_pending_payload_delete(conn, storage_root, payload_ref).await;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+        let drained = gc::drain_pending_payload_delete_in_transaction(
+            &transaction,
+            storage_root,
+            payload_ref,
+        )
+        .await;
+        let drained = match drained {
+            Ok(removed) => transaction
+                .commit()
+                .await
+                .map(|()| removed)
+                .map_err(Into::into),
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        };
         reconcile_committed_payload_drain(&mut outcome, payload_ref, drained);
     }
     Ok(outcome)
@@ -90,7 +111,7 @@ pub(crate) fn reconcile_committed_payload_drain(
 }
 
 pub(crate) async fn delete_external_payload_in_transaction(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
     opts: &DeleteOpts,
@@ -353,7 +374,7 @@ pub(crate) fn payload_file_fingerprint(
 }
 
 async fn tombstone_residual_placeholders(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     payload_ref: &str,
 ) -> Result<usize, LcmError> {
     let mut rows = conn
@@ -425,7 +446,13 @@ async fn tombstone_residual_placeholders(
                 "UPDATE lcm_raw_messages
                  SET storage_kind = 'inline', payload_ref = NULL, content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
                  WHERE store_id = ?1",
-                params![store_id, util::opt_text(content.as_deref()), snippet_text, index_text, util::opt_text(metadata_json.as_deref())],
+                params![
+                    store_id,
+                    content.as_deref(),
+                    snippet_text,
+                    index_text,
+                    metadata_json.as_deref()
+                ],
             )
             .await?;
         } else {
@@ -435,10 +462,10 @@ async fn tombstone_residual_placeholders(
                  WHERE store_id = ?1",
                 params![
                     store_id,
-                    util::opt_text(content.as_deref()),
+                    content.as_deref(),
                     snippet_text,
                     index_text,
-                    util::opt_text(metadata_json.as_deref())
+                    metadata_json.as_deref()
                 ],
             )
             .await?;

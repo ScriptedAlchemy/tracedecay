@@ -1,15 +1,14 @@
 //! Legacy memory-store merge: facts, entities, associations, and feedback.
 
 use std::collections::HashMap;
-use std::path::Path;
 
-use libsql::{Connection, Value, params};
 use sha2::{Digest, Sha256};
 
 use super::copy::{count_exact_rows, insert_row_or_skip_exact, quote_identifier, table_columns};
 use super::fingerprint::hash_sqlite_value;
 use super::pipeline::verify_source;
 use crate::db::Database;
+use crate::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
 use crate::memory::store::MemoryStore;
 
 pub(crate) fn source_integer(columns: &[String], values: &[Value], name: &str) -> Option<i64> {
@@ -72,10 +71,10 @@ fn sqlite_row_fingerprint(columns: &[String], values: &[Value]) -> String {
     hex::encode(hash.finalize())
 }
 
-async fn memory_fact_id_by_content(
-    target: &Connection,
-    content: &str,
-) -> Result<Option<i64>, String> {
+async fn memory_fact_id_by_content<Q>(target: &Q, content: &str) -> Result<Option<i64>, String>
+where
+    Q: QueryExecutor + ?Sized,
+{
     let mut rows = target
         .query(
             "SELECT fact_id FROM memory_facts WHERE content = ?1",
@@ -138,13 +137,16 @@ fn merged_fact_metadata(
     (target.to_string(), false)
 }
 
-async fn record_memory_fact_merge_marker(
-    target: &Connection,
+async fn record_memory_fact_merge_marker<E>(
+    target: &E,
     target_id: i64,
     columns: &[String],
     values: &[Value],
     fingerprint: &str,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    E: Executor + ?Sized,
+{
     let mut rows = target
         .query(
             "SELECT metadata FROM memory_facts WHERE fact_id = ?1",
@@ -170,13 +172,16 @@ async fn record_memory_fact_merge_marker(
     Ok(())
 }
 
-async fn merge_memory_fact_collision(
-    target: &Connection,
+async fn merge_memory_fact_collision<E>(
+    target: &E,
     target_id: i64,
     columns: &[String],
     values: &[Value],
     fingerprint: &str,
-) -> Result<u64, String> {
+) -> Result<u64, String>
+where
+    E: Executor + ?Sized,
+{
     let mut rows = target
         .query(
             "SELECT category, tags, trust_score, retrieval_count, access_count,
@@ -290,10 +295,11 @@ async fn merge_memory_fact_collision(
     Ok(1)
 }
 
-async fn copy_memory_facts(
-    source: &Connection,
-    target: &Connection,
-) -> Result<(u64, HashMap<i64, i64>), String> {
+async fn copy_memory_facts<S, T>(source: &S, target: &T) -> Result<(u64, HashMap<i64, i64>), String>
+where
+    S: QueryExecutor + ?Sized,
+    T: Executor + ?Sized,
+{
     let source_columns = table_columns(source, "memory_facts").await?;
     let target_columns = table_columns(target, "memory_facts").await?;
     let columns = source_columns
@@ -358,10 +364,14 @@ async fn copy_memory_facts(
     Ok((copied, fact_ids))
 }
 
-async fn copy_memory_entities(
-    source: &Connection,
-    target: &Connection,
-) -> Result<(u64, HashMap<i64, i64>), String> {
+async fn copy_memory_entities<S, T>(
+    source: &S,
+    target: &T,
+) -> Result<(u64, HashMap<i64, i64>), String>
+where
+    S: QueryExecutor + ?Sized,
+    T: Executor + ?Sized,
+{
     let source_columns = table_columns(source, "memory_entities").await?;
     if source_columns.is_empty() {
         return Ok((0, HashMap::new()));
@@ -428,12 +438,16 @@ async fn copy_memory_entities(
     Ok((inserted, entity_ids))
 }
 
-async fn copy_memory_fact_entities(
-    source: &Connection,
-    target: &Connection,
+async fn copy_memory_fact_entities<S, T>(
+    source: &S,
+    target: &T,
     fact_ids: &HashMap<i64, i64>,
     entity_ids: &HashMap<i64, i64>,
-) -> Result<u64, String> {
+) -> Result<u64, String>
+where
+    S: QueryExecutor + ?Sized,
+    T: Executor + ?Sized,
+{
     if table_columns(source, "memory_fact_entities")
         .await?
         .is_empty()
@@ -479,11 +493,15 @@ async fn copy_memory_fact_entities(
     Ok(inserted)
 }
 
-async fn copy_memory_feedback(
-    source: &Connection,
-    target: &Connection,
+async fn copy_memory_feedback<S, T>(
+    source: &S,
+    target: &T,
     fact_ids: &HashMap<i64, i64>,
-) -> Result<u64, String> {
+) -> Result<u64, String>
+where
+    S: QueryExecutor + ?Sized,
+    T: Executor + ?Sized,
+{
     let source_columns = table_columns(source, "memory_feedback_events").await?;
     if source_columns.is_empty() {
         return Ok(0);
@@ -555,17 +573,18 @@ async fn copy_memory_feedback(
             continue;
         }
         inserted += target
-            .execute(
-                &insert_sql,
-                libsql::params_from_iter(values.iter().cloned()),
-            )
+            .execute(&insert_sql, params_from_iter(values.iter().cloned()))
             .await
             .map_err(|error| format!("could not copy legacy memory feedback: {error}"))?;
     }
     Ok(inserted)
 }
 
-async fn copy_memory_tables(source: &Connection, target: &Connection) -> Result<u64, String> {
+async fn copy_memory_tables<S, T>(source: &S, target: &T) -> Result<u64, String>
+where
+    S: QueryExecutor + ?Sized,
+    T: Executor + ?Sized,
+{
     let (fact_rows, fact_ids) = copy_memory_facts(source, target).await?;
     let (entity_rows, entity_ids) = copy_memory_entities(source, target).await?;
     let association_rows =
@@ -574,29 +593,48 @@ async fn copy_memory_tables(source: &Connection, target: &Connection) -> Result<
     Ok(fact_rows + entity_rows + association_rows + feedback_rows)
 }
 
-pub(crate) async fn merge_memory_snapshot(
-    source: &Connection,
-    target_path: &Path,
-) -> Result<u64, String> {
+#[cfg(test)]
+pub(super) async fn merge_memory_snapshot_for_test<S>(
+    source: &S,
+    target: &crate::db::engine::Connection,
+) -> Result<u64, String>
+where
+    S: QueryExecutor + ?Sized,
+{
     if table_columns(source, "memory_facts").await?.is_empty() {
         return Ok(0);
     }
     verify_source(source).await?;
-    let authority =
-        crate::db::DatabaseAuthority::for_runtime(target_path, "merge memory migration target")
-            .map_err(|error| format!("could not authorize target memory store: {error}"))?;
-    let (target, _) = if target_path.is_file() {
-        Database::open(target_path, &authority).await
-    } else {
-        Database::initialize(target_path, &authority).await
-    }
-    .map_err(|error| format!("could not open target memory store: {error}"))?;
     let transaction = target
-        .begin_write_transaction("merge memory migration snapshot")
+        .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
         .await
         .map_err(|error| format!("could not begin target memory migration: {error}"))?;
     let rows_copied = copy_memory_tables(source, &transaction).await?;
-    MemoryStore::new(&transaction)
+    MemoryStore::new_engine_transaction(&transaction)
+        .rebuild_all_banks()
+        .await
+        .map_err(|error| format!("could not rebuild migrated memory banks: {error}"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("could not commit target memory migration: {error}"))?;
+    Ok(rows_copied)
+}
+
+pub(crate) async fn merge_memory_snapshot<S>(source: &S, target: &Database) -> Result<u64, String>
+where
+    S: QueryExecutor + ?Sized,
+{
+    if table_columns(source, "memory_facts").await?.is_empty() {
+        return Ok(0);
+    }
+    verify_source(source).await?;
+    let transaction = target
+        .begin_memory_write_transaction("merge memory migration snapshot")
+        .await
+        .map_err(|error| format!("could not begin target memory migration: {error}"))?;
+    let rows_copied = copy_memory_tables(source, &transaction).await?;
+    MemoryStore::new_database_transaction(&transaction)
         .rebuild_all_banks()
         .await
         .map_err(|error| format!("could not rebuild migrated memory banks: {error}"))?;

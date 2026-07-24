@@ -27,19 +27,6 @@ use crate::sessions::lcm::{
     LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt,
 };
 
-async fn missing_lcm_read_store(
-    context: LcmHandlerContext<'_>,
-    args: &Value,
-) -> Option<ToolResult> {
-    if context.project_root.is_none() || context.retrieval_service.is_some() {
-        return None;
-    }
-    match open_lcm_storage(context, args, LcmOpenMode::ReadOnlyOrMissing).await {
-        LcmStorageResolution::Available(_) => None,
-        LcmStorageResolution::Unavailable(result) => Some(result),
-    }
-}
-
 fn lcm_status_payload<T: Serialize>(
     provider: &str,
     session_id: Option<&str>,
@@ -446,7 +433,6 @@ pub(in super::super) async fn handle_lcm_load_session(
     let provider = provider_or_all_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let (content_slice, content_limit_clamped_from) = lcm_load_content_slice(&args)?;
-    let after_store_id = non_negative_i64_arg(&args, "after_store_id")?;
     let cursor = lcm_cursor_arg(&args)?;
     let roles = lcm_roles_arg(&args)?;
     let limit = bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(50);
@@ -470,16 +456,6 @@ pub(in super::super) async fn handle_lcm_load_session(
             end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
         },
     )?;
-    if missing_lcm_read_store(context, &args).await.is_some() {
-        return Ok(lcm_typed_outcome(
-            context.project_root,
-            &args,
-            "messages",
-            SessionRetrievalServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::service_not_configured(),
-            ),
-        ));
-    }
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
         None => SessionRetrievalServiceOutcome::Unavailable(
@@ -520,17 +496,8 @@ pub(in super::super) async fn handle_lcm_load_session(
     // non-terminal outcome always carries a page.
     #[allow(clippy::expect_used)]
     let page = page.expect("page exists for non-terminal LCM outcome");
-    let mut results = page.results;
-    results.sort_by(|left, right| {
-        right
-            .message
-            .timestamp
-            .cmp(&left.message.timestamp)
-            .then_with(|| right.message.ordinal.cmp(&left.message.ordinal))
-            .then_with(|| left.message.provider.cmp(&right.message.provider))
-            .then_with(|| left.message.message_id.cmp(&right.message.message_id))
-    });
-    let messages = results
+    let messages = page
+        .results
         .into_iter()
         .map(|result| sliced_message(result, content_slice))
         .collect::<Vec<_>>();
@@ -543,15 +510,6 @@ pub(in super::super) async fn handle_lcm_load_session(
         "omitted": omitted,
     });
     apply_lcm_temporal_fields(&mut payload, &page.temporal);
-    if let Some(after_store_id) = after_store_id {
-        payload["coverage_state"] = json!("partial");
-        payload["compatibility"] = json!({
-            "after_store_id": after_store_id,
-            "deprecated": true,
-            "pinned": false,
-            "note": "after_store_id is accepted only for an unpinned first page; continue with next_cursor",
-        });
-    }
     if let Some(clamped_from) = content_limit_clamped_from
         && let Some(object) = payload.as_object_mut()
     {
@@ -635,9 +593,6 @@ pub(in super::super) async fn handle_lcm_grep(
         lcm_roles_arg(&args)?,
         message_search_time_range(&args)?,
     )?;
-    if let Some(result) = missing_lcm_read_store(context, &args).await {
-        return Ok(result);
-    }
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
         None => SessionRetrievalServiceOutcome::Unavailable(
@@ -720,9 +675,6 @@ pub(in super::super) async fn handle_lcm_describe(
     };
     let session_id =
         SessionId::new(session_id).map_err(|error| argument_error(error.to_string()))?;
-    if let Some(result) = missing_lcm_read_store(context, &args).await {
-        return Ok(result);
-    }
     let outcome = match context.retrieval_service {
         Some(service) => {
             service
@@ -840,9 +792,6 @@ pub(in super::super) async fn handle_lcm_expand(
     };
     let session_id =
         SessionId::new(session_id).map_err(|error| argument_error(error.to_string()))?;
-    if let Some(result) = missing_lcm_read_store(context, &args).await {
-        return Ok(result);
-    }
     let outcome = match context.retrieval_service {
         Some(service) => {
             service
@@ -1114,9 +1063,6 @@ pub(in super::super) async fn handle_lcm_expand_query(
         max_tokens,
         context_max_tokens,
     };
-    if let Some(result) = missing_lcm_read_store(context, &args).await {
-        return Ok(result);
-    }
     if !request.node_ids.is_empty() {
         let Some(service) = context.retrieval_service else {
             return Ok(lcm_typed_outcome(
@@ -1397,7 +1343,7 @@ pub(in super::super) async fn handle_lcm_preflight(
             session_id,
             &messages,
         )
-        .await;
+        .await?;
     }
     Ok(lcm_preflight_tool_json(
         context.project_root,
@@ -1723,6 +1669,38 @@ mod compatibility_tests {
     }
 
     #[tokio::test]
+    async fn load_preserves_the_kernel_page_order_bound_to_its_cursor() {
+        let first = result("kernel-first", "assistant");
+        let mut second = result("kernel-second", "assistant");
+        second.message.message_id = "message-2".to_string();
+        second.message.timestamp = Some(30);
+        second.message.ordinal = 4;
+        let service = RecordingService::new(SessionRetrievalServiceOutcome::Complete {
+            page: SessionRetrievalPageView {
+                results: vec![first, second],
+                temporal: temporal(Some("opaque-next")),
+            },
+            freshness: SessionDataFreshness::Fresh,
+        });
+        let response = payload(
+            handle_lcm_load_session(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "session_id": "session-exact",
+                    "cursor": "opaque-current",
+                    "format": "json"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(response["messages"][0]["content"], "kernel-first");
+        assert_eq!(response["messages"][1]["content"], "kernel-second");
+        assert_eq!(response["next_cursor"], "opaque-next");
+    }
+
+    #[tokio::test]
     async fn grep_preserves_exact_phrase_cjk_emoji_and_maps_exact_session_filters() {
         let query = "\"exact phrase\" 精确 😀";
         let service = RecordingService::new(complete(query, "user", Some("grep-next")));
@@ -1920,22 +1898,22 @@ mod compatibility_tests {
 
         let service = RecordingService::new(complete("compat", "assistant", Some("opaque-next")));
         let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
-        let response = payload(
-            handle_lcm_load_session(
-                context,
-                json!({
-                    "session_id": "session-exact",
-                    "after_store_id": 7,
-                    "format": "json"
-                }),
-            )
-            .await
-            .unwrap(),
+        let error = handle_lcm_load_session(
+            context,
+            json!({
+                "session_id": "session-exact",
+                "after_store_id": 7,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect_err("legacy offset pagination must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("after_store_id is no longer supported")
         );
-        assert_eq!(service.command().query().cursor(), None);
-        assert_eq!(response["next_cursor"], "opaque-next");
-        assert_eq!(response["coverage_state"], "partial");
-        assert_eq!(response["compatibility"]["after_store_id"], 7);
+        assert_eq!(service.calls(), 0);
 
         let missing_path = Path::new("/definitely/missing/tracedecay-sessions.db");
         let missing_context = LcmHandlerContext::user(missing_path, None, None);
@@ -1970,6 +1948,27 @@ mod compatibility_tests {
             "lcm_retrieval_service_unavailable"
         );
         assert_eq!(response["hits"], json!([]));
+        assert!(!missing_path.exists());
+    }
+
+    #[tokio::test]
+    async fn project_read_alias_without_service_never_probes_the_store_path() {
+        let temp = TempDir::new().unwrap();
+        let missing_path = temp.path().join("sessions.db");
+        let response = payload(
+            handle_lcm_load_session(
+                LcmHandlerContext::project_for_test(temp.path(), &missing_path, None),
+                json!({"session_id": "session-exact", "format": "json"}),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(response["status"], "unavailable");
+        assert_eq!(
+            response["error"]["code"],
+            "lcm_retrieval_service_unavailable"
+        );
         assert!(!missing_path.exists());
     }
 

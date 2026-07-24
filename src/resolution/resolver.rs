@@ -292,7 +292,7 @@ impl<'a> ReferenceResolver<'a> {
                 || name.starts_with("rayon::")
                 || name.starts_with("clap::")
                 || name.starts_with("glob::")
-                || name.starts_with("libsql::")
+                || name.starts_with("rusqlite::")
                 || name.starts_with("sha2::")
                 || name.starts_with("tree_sitter::")
                 || name.starts_with("serde_json::")

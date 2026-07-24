@@ -200,8 +200,8 @@ impl<'a> ContextBuilder<'a> {
         // searched the full query, every extracted symbol, every stem, and
         // every extra keyword separately — but these sets overlap heavily
         // (e.g. `symbol` "foo" and `keyword` "foo" produce identical FTS
-        // results). libsql serializes queries on a single connection, so each
-        // duplicate term costs a full roundtrip. Order matters for the
+        // results). Each duplicate term still costs a full query roundtrip.
+        // Order matters for the
         // `cap`-based early exit, so we keep the original priority:
         //   full query → symbols → stems → extra keywords.
         let mut fts_terms: Vec<String> = Vec::new();

@@ -3,27 +3,25 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cline_like::ClineLikeSource;
 use tracedecay::sessions::codex::CodexSource;
 use tracedecay::sessions::cursor::{
-    ingest_cursor_transcript_event, open_project_session_db, project_session_db_path,
-    try_ingest_cursor_transcript_event,
+    ingest_cursor_transcript_event as ingest_cursor_transcript_event_registered,
+    try_ingest_cursor_transcript_event as try_ingest_cursor_transcript_event_registered,
 };
-use tracedecay::sessions::source::{TranscriptIngestError, TranscriptSource, try_ingest_source};
-use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
+use tracedecay::sessions::source::{TranscriptIngestError, TranscriptSource};
+use tracedecay::sessions::{SessionMessageSearchResult, SessionProvider};
 use tracedecay::storage::{read_repository_identity_marker, write_repository_identity_marker};
-use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
     ProviderId, SessionId,
 };
-use tracedecay_store::{ObservationReplayRequest, ObservationStore};
+use tracedecay_store::ObservationReplayRequest;
 
 use crate::claude::write_claude_transcript;
-use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
+use crate::cline_like::{vscode_storage_root, write_task};
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::support::{init_git_repo, init_project, setup};
 
@@ -50,35 +48,191 @@ pub(super) fn mark_test_project(project: &Path) -> ProjectId {
     project_id
 }
 
+pub(super) struct ProjectSessionTestRuntime {
+    runtime: HostAdmissionTestRuntimeV1,
+    project_id: ProjectId,
+}
+
+impl ProjectSessionTestRuntime {
+    pub(super) fn runtime(&self) -> &HostAdmissionTestRuntimeV1 {
+        &self.runtime
+    }
+
+    pub(super) fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub(super) async fn get_parse_offset(
+        &self,
+        path: &str,
+    ) -> Option<tracedecay::global_db::ParseOffset> {
+        self.runtime
+            .project_parse_offset_for_test(path)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn session_message_count(&self) -> tracedecay::errors::Result<i64> {
+        self.runtime.project_session_message_count_for_test().await
+    }
+
+    pub(super) async fn get_session(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Option<tracedecay::sessions::SessionRecord> {
+        self.runtime
+            .project_session_for_test(provider, session_id)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn get_session_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<tracedecay::sessions::SessionMessageRecord> {
+        self.runtime
+            .project_session_message_for_test(provider, message_id)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn search_session_messages(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.runtime
+            .search_project_session_messages_for_test(provider, project_key, query, limit)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+        self.runtime
+            .project_lcm_raw_message_for_test(provider, message_id)
+            .await
+            .unwrap()
+    }
+}
+
+pub(super) async fn open_project_session_db(project: &Path) -> Option<ProjectSessionTestRuntime> {
+    let profile_root = project.parent()?.join("tracedecay-test-profile");
+    let project_id = read_repository_identity_marker(project)
+        .ok()
+        .flatten()
+        .and_then(|marker| ProjectId::new(marker.project_id).ok())
+        .unwrap_or_else(|| mark_test_project(project));
+    let runtime = HostAdmissionTestRuntimeV1::project(profile_root, project, project_id.clone())
+        .await
+        .ok()?;
+    Some(ProjectSessionTestRuntime {
+        runtime,
+        project_id,
+    })
+}
+
+pub(super) async fn try_ingest_source(
+    runtime: &ProjectSessionTestRuntime,
+    source: &dyn TranscriptSource,
+    project_root: &Path,
+    max_new_bytes: Option<u64>,
+) -> tracedecay::sessions::source::TranscriptIngestResult<
+    tracedecay::sessions::shared::TranscriptIngestStats,
+> {
+    runtime
+        .runtime
+        .ingest_project_transcript_source_for_test(source, project_root, max_new_bytes)
+        .await
+}
+
+async fn ingest_cursor_transcript_event(
+    event_json: &str,
+    runtime: &ProjectSessionTestRuntime,
+    project_id: ProjectId,
+) -> tracedecay::sessions::cursor::CursorTranscriptIngestStats {
+    ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
+        .await
+}
+
+async fn try_ingest_cursor_transcript_event(
+    event_json: &str,
+    runtime: &ProjectSessionTestRuntime,
+    project_id: ProjectId,
+) -> tracedecay::sessions::source::TranscriptIngestResult<
+    tracedecay::sessions::cursor::CursorTranscriptIngestStats,
+> {
+    try_ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
+        .await
+}
+
+pub(super) async fn ingest_global_sources_for_provider(
+    runtime: &ProjectSessionTestRuntime,
+    project_root: &Path,
+    provider: Option<SessionProvider>,
+) -> tracedecay::sessions::shared::TranscriptIngestStats {
+    runtime
+        .runtime
+        .ingest_project_provider_for_test(project_root, provider)
+        .await
+        .unwrap()
+}
+
+async fn parse_offset_for_task_history(
+    runtime: &ProjectSessionTestRuntime,
+    _project: &Path,
+    path: &Path,
+) -> Option<tracedecay::global_db::ParseOffset> {
+    let path_text = path.to_string_lossy();
+    if let Some(offset) = runtime.get_parse_offset(path_text.as_ref()).await {
+        return Some(offset);
+    }
+    #[cfg(windows)]
+    {
+        let alternate = if path_text.contains('/') {
+            path_text.replace('/', "\\")
+        } else {
+            path_text.replace('\\', "/")
+        };
+        if alternate != path_text
+            && let Some(offset) = runtime.get_parse_offset(&alternate).await
+        {
+            return Some(offset);
+        }
+    }
+    let task_dir = path.parent()?.file_name()?.to_string_lossy();
+    let file_name = path.file_name()?.to_string_lossy();
+    runtime
+        .runtime
+        .project_parse_offset_by_suffix_for_test(&format!("{task_dir}/{file_name}"))
+        .await
+        .ok()
+        .flatten()
+}
+
 fn claude_cursor_key(source: &ClaudeSource, project: &Path) -> String {
     let paths = source.transcript_paths(project);
     assert_eq!(paths.len(), 1);
     paths[0].to_string_lossy().into_owned()
 }
 
-pub(super) async fn set_projection_failure(project: &Path, enabled: bool) {
-    let db = libsql::Builder::new_local(project_session_db_path(project))
-        .build()
+pub(super) async fn set_projection_failure(runtime: &ProjectSessionTestRuntime, enabled: bool) {
+    runtime
+        .runtime
+        .set_project_projection_failure_for_test(enabled)
         .await
         .unwrap();
-    let conn = db.connect().unwrap();
-    let statement = if enabled {
-        "CREATE TRIGGER fail_session_message_projection
-         BEFORE INSERT ON session_messages
-         BEGIN
-            SELECT RAISE(ABORT, 'projection failure');
-         END;"
-    } else {
-        "DROP TRIGGER IF EXISTS fail_session_message_projection;
-         DROP TRIGGER IF EXISTS fail_claude_suffix_projection;"
-    };
-    conn.execute_batch(statement).await.unwrap();
-    drop(conn);
-    drop(db);
 }
 
 pub(super) async fn observation_source_cursor(
-    db: &GlobalDb,
+    runtime: &ProjectSessionTestRuntime,
     provider: &str,
     session_id: &str,
     project: &Path,
@@ -92,53 +246,50 @@ pub(super) async fn observation_source_cursor(
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(db, project_id));
-    facade
-        .get_source_cursor(&source, &scope)
+    assert_eq!(
+        scope,
+        ObservationScopeV1::Project {
+            project_id: test_project_id(project)
+        }
+    );
+    runtime
+        .runtime
+        .project_observation_source_cursor_for_test(&source)
         .await
         .ok()
         .flatten()
 }
 
 async fn observation_source_cursor_position(
-    db: &GlobalDb,
+    runtime: &ProjectSessionTestRuntime,
     provider: &str,
     session_id: &str,
     project: &Path,
 ) -> Option<u64> {
-    observation_source_cursor(db, provider, session_id, project)
+    observation_source_cursor(runtime, provider, session_id, project)
         .await
         .map(|cursor| cursor.position())
 }
 
-pub(super) async fn durable_table_count(project: &Path, table: &str) -> u64 {
-    assert!(matches!(
-        table,
-        "observations" | "sanitization_receipts" | "projection_queue"
-    ));
-    let db = libsql::Builder::new_local(project_session_db_path(project))
-        .build()
+pub(super) async fn durable_table_count(runtime: &ProjectSessionTestRuntime, table: &str) -> u64 {
+    runtime
+        .runtime
+        .project_observation_table_count_for_test(table)
         .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-        .await
-        .unwrap();
-    let count = rows.next().await.unwrap().unwrap().get::<u64>(0).unwrap();
-    drop(rows);
-    drop(conn);
-    drop(db);
-    count
+        .unwrap()
 }
 
 pub(super) async fn assert_secret_absent_from_observation_sinks(
-    db: &GlobalDb,
+    runtime: &ProjectSessionTestRuntime,
     provider: &str,
     secret: &str,
 ) {
-    let stored = GlobalDbObservationStore::new(db)
-        .replay_observations(ObservationReplayRequest::new(0, 100).unwrap())
+    let stored = runtime
+        .runtime
+        .replay_observations(
+            HostAdmissionScope::Project,
+            ObservationReplayRequest::new(0, 100).unwrap(),
+        )
         .await
         .unwrap();
     assert!(
@@ -150,7 +301,8 @@ pub(super) async fn assert_secret_absent_from_observation_sinks(
         "{provider}: secret leaked into durable observation state"
     );
     assert!(
-        db.search_session_messages(provider, None, secret, 10)
+        runtime
+            .search_session_messages(provider, None, secret, 10)
             .await
             .is_empty(),
         "{provider}: secret leaked into the visible V1 projection"
@@ -186,8 +338,14 @@ fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> Pa
     path
 }
 
-fn assert_no_transcript_adjacent_fallback_writer(project: &Path, transcript: &Path) {
-    let session_db = project_session_db_path(project);
+fn assert_no_transcript_adjacent_fallback_writer(
+    runtime: &ProjectSessionTestRuntime,
+    transcript: &Path,
+) {
+    let session_db = runtime
+        .runtime
+        .database_path(HostAdmissionScope::Project)
+        .expect("registered project sessions path");
     assert!(
         session_db.exists(),
         "provider ingest must open the project session database"
@@ -244,9 +402,8 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     drop(transcript);
     drop(db);
 
-    set_projection_failure(&project, true).await;
-
     let rejected = open_project_session_db(&project).await.unwrap();
+    set_projection_failure(&rejected, true).await;
     let failed = try_ingest_source(&rejected, &source, &project, None).await;
     assert!(
         failed.is_err(),
@@ -268,9 +425,8 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
             .await
             .is_none()
     );
+    set_projection_failure(&rejected, false).await;
     drop(rejected);
-
-    set_projection_failure(&project, false).await;
 
     let reopened = open_project_session_db(&project).await.unwrap();
     let suffix = try_ingest_source(&reopened, &source, &project, None)
@@ -594,7 +750,7 @@ async fn cursor_restart_is_idempotent_and_ingests_only_the_appended_suffix() {
         observation_source_cursor_position(&db, "cursor", "cursor-restart", &project)
             .await
             .expect("cursor observation frontier after first ingest");
-    assert_no_transcript_adjacent_fallback_writer(&project, &transcript_path);
+    assert_no_transcript_adjacent_fallback_writer(&db, &transcript_path);
     drop(db);
 
     let reopened = open_project_session_db(&project).await.unwrap();
@@ -745,6 +901,14 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
         .messages_upserted,
         1
     );
+    let mut incremental_messages = incremental_db
+        .search_session_messages("claude", None, "billing", 10)
+        .await
+        .into_iter()
+        .map(|hit| (hit.message.message_id, hit.message.role, hit.message.text))
+        .collect::<Vec<_>>();
+    incremental_messages.sort();
+    drop(incremental_db);
 
     let rebuild_tmp = TempDir::new().unwrap();
     let (rebuild_home, rebuild_project) = setup(&rebuild_tmp);
@@ -776,19 +940,12 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
         3
     );
 
-    let mut incremental_messages = incremental_db
-        .search_session_messages("claude", None, "billing", 10)
-        .await
-        .into_iter()
-        .map(|hit| (hit.message.message_id, hit.message.role, hit.message.text))
-        .collect::<Vec<_>>();
     let mut rebuilt_messages = rebuild_db
         .search_session_messages("claude", None, "billing", 10)
         .await
         .into_iter()
         .map(|hit| (hit.message.message_id, hit.message.role, hit.message.text))
         .collect::<Vec<_>>();
-    incremental_messages.sort();
     rebuilt_messages.sort();
     assert_eq!(incremental_messages, rebuilt_messages);
     assert_eq!(incremental_messages.len(), 3);
@@ -1026,11 +1183,9 @@ async fn cursor_commit_before_projection_ack_retries_without_duplicate() {
         "workspace_roots": [project]
     });
 
-    // Ensure schema exists, then fail projection on the first durable message write.
-    drop(open_project_session_db(&project).await.unwrap());
-    set_projection_failure(&project, true).await;
-
+    // Fail projection on the first durable message write.
     let rejected = open_project_session_db(&project).await.unwrap();
+    set_projection_failure(&rejected, true).await;
     let failed = try_ingest_cursor_transcript_event(
         &event.to_string(),
         &rejected,
@@ -1061,15 +1216,15 @@ async fn cursor_commit_before_projection_ack_retries_without_duplicate() {
         .await,
         Some(committed_cursor)
     );
-    drop(rejected);
-    assert_eq!(durable_table_count(&project, "observations").await, 1);
+    assert_eq!(durable_table_count(&rejected, "observations").await, 1);
     assert_eq!(
-        durable_table_count(&project, "sanitization_receipts").await,
+        durable_table_count(&rejected, "sanitization_receipts").await,
         1
     );
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 1);
+    assert_eq!(durable_table_count(&rejected, "projection_queue").await, 1);
+    set_projection_failure(&rejected, false).await;
+    drop(rejected);
 
-    set_projection_failure(&project, false).await;
     let retried = open_project_session_db(&project).await.unwrap();
     let recovered =
         try_ingest_cursor_transcript_event(&event.to_string(), &retried, test_project_id(&project))
@@ -1083,12 +1238,12 @@ async fn cursor_commit_before_projection_ack_retries_without_duplicate() {
             .len(),
         1
     );
-    assert_eq!(durable_table_count(&project, "observations").await, 1);
+    assert_eq!(durable_table_count(&retried, "observations").await, 1);
     assert_eq!(
-        durable_table_count(&project, "sanitization_receipts").await,
+        durable_table_count(&retried, "sanitization_receipts").await,
         1
     );
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(durable_table_count(&retried, "projection_queue").await, 0);
     assert_eq!(
         observation_source_cursor_position(
             &retried,
@@ -1105,8 +1260,8 @@ async fn cursor_commit_before_projection_ack_retries_without_duplicate() {
             .messages_upserted,
         0
     );
-    assert_eq!(durable_table_count(&project, "observations").await, 1);
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(durable_table_count(&retried, "observations").await, 1);
+    assert_eq!(durable_table_count(&retried, "projection_queue").await, 0);
 }
 
 #[tokio::test]
@@ -1129,7 +1284,7 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
         .transcript_path
         .expect("Codex durable transcript path");
     let first_offset = db.get_parse_offset(&path_key).await.unwrap();
-    assert_no_transcript_adjacent_fallback_writer(&project, &path);
+    assert_no_transcript_adjacent_fallback_writer(&db, &path);
     drop(db);
 
     // Partial final line: frontier stays at the last complete frame.
@@ -1166,8 +1321,8 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
         "payload": {"type": "user_message", "message": "Codex suffix after restart"}
     });
     std::fs::write(&path, format!("{prefix}{suffix}\n")).unwrap();
-    set_projection_failure(&project, true).await;
     let rejected = open_project_session_db(&project).await.unwrap();
+    set_projection_failure(&rejected, true).await;
     let failed = try_ingest_source(&rejected, &source, &project, None).await;
     assert!(
         failed.is_err(),
@@ -1187,9 +1342,9 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
             .await
             .is_empty()
     );
+    set_projection_failure(&rejected, false).await;
     drop(rejected);
 
-    set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
         try_ingest_source(&recovered, &source, &project, None)
@@ -1290,8 +1445,8 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
     )
     .unwrap();
 
-    set_projection_failure(&project, true).await;
     let rejected = open_project_session_db(&project).await.unwrap();
+    set_projection_failure(&rejected, true).await;
     assert!(
         try_ingest_source(&rejected, &source, &project, None)
             .await
@@ -1309,9 +1464,9 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
         parse_offset_for_task_history(&rejected, &project, &history_path).await,
         Some(offset)
     );
+    set_projection_failure(&rejected, false).await;
     drop(rejected);
 
-    set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
         try_ingest_source(&recovered, &source, &project, None)
@@ -1665,11 +1820,9 @@ async fn codex_observation_commit_before_ack_replays_after_reopen() {
     mark_test_project(&project);
     let path = write_codex_rollout_fixture(&home, &project, "codex-commit-before-ack");
 
-    drop(open_project_session_db(&project).await.unwrap());
-    assert_no_transcript_adjacent_fallback_writer(&project, &path);
-    set_projection_failure(&project, true).await;
-
     let rejected = open_project_session_db(&project).await.unwrap();
+    assert_no_transcript_adjacent_fallback_writer(&rejected, &path);
+    set_projection_failure(&rejected, true).await;
     let _ =
         ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Codex)).await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 0);
@@ -1684,12 +1837,12 @@ async fn codex_observation_commit_before_ack_replays_after_reopen() {
             .await
             .expect("Codex observation frontier commits before projection ack");
     assert!(committed_cursor > 0);
+    assert!(durable_table_count(&rejected, "observations").await >= 1);
+    assert!(durable_table_count(&rejected, "sanitization_receipts").await >= 1);
+    assert!(durable_table_count(&rejected, "projection_queue").await >= 1);
+    set_projection_failure(&rejected, false).await;
     drop(rejected);
-    assert!(durable_table_count(&project, "observations").await >= 1);
-    assert!(durable_table_count(&project, "sanitization_receipts").await >= 1);
-    assert!(durable_table_count(&project, "projection_queue").await >= 1);
 
-    set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Codex))
@@ -1714,7 +1867,7 @@ async fn codex_observation_commit_before_ack_replays_after_reopen() {
         .await,
         Some(committed_cursor)
     );
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Codex))
             .await
@@ -1736,11 +1889,9 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
     mark_test_project(&project);
     let path = write_claude_transcript(&home, &project, "claude-commit-before-ack");
 
-    drop(open_project_session_db(&project).await.unwrap());
-    assert_no_transcript_adjacent_fallback_writer(&project, &path);
-    set_projection_failure(&project, true).await;
-
     let rejected = open_project_session_db(&project).await.unwrap();
+    assert_no_transcript_adjacent_fallback_writer(&rejected, &path);
+    set_projection_failure(&rejected, true).await;
     let _ = ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Claude))
         .await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 0);
@@ -1750,10 +1901,9 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
             .await
             .is_empty()
     );
-    drop(rejected);
-    let observations = durable_table_count(&project, "observations").await;
-    let receipts = durable_table_count(&project, "sanitization_receipts").await;
-    let queued = durable_table_count(&project, "projection_queue").await;
+    let observations = durable_table_count(&rejected, "observations").await;
+    let receipts = durable_table_count(&rejected, "sanitization_receipts").await;
+    let queued = durable_table_count(&rejected, "projection_queue").await;
     assert!(
         observations >= 1,
         "Claude observation commits before projection ack"
@@ -1766,8 +1916,9 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
         queued >= 1,
         "Claude projection work stays queued across the failed ack"
     );
+    set_projection_failure(&rejected, false).await;
+    drop(rejected);
 
-    set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Claude))
@@ -1783,14 +1934,14 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
         1
     );
     assert_eq!(
-        durable_table_count(&project, "observations").await,
+        durable_table_count(&recovered, "observations").await,
         observations
     );
     assert_eq!(
-        durable_table_count(&project, "sanitization_receipts").await,
+        durable_table_count(&recovered, "sanitization_receipts").await,
         receipts
     );
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Claude))
             .await

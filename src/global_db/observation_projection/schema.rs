@@ -1,5 +1,6 @@
-use libsql::{Connection, params};
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V4;
+
+use crate::db::engine::{Error, Executor, QueryExecutor, params};
 
 const LEGACY_PROJECTION_PROVENANCE_TABLE_SQL: &str =
     "CREATE TABLE observation_projection_provenance (
@@ -73,8 +74,8 @@ fn normalize_schema_sql(sql: &str) -> String {
 }
 
 pub(in super::super) async fn ensure_observation_projection_schema(
-    conn: &Connection,
-) -> Result<(), libsql::Error> {
+    conn: &impl Executor,
+) -> Result<(), Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS observation_projection_provenance (
             projector_version TEXT NOT NULL,
@@ -326,7 +327,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
 /// `WHERE retrieval_anchor_id IS NULL` scan below cheap in the steady state
 /// where that partial index is empty, instead of running the two `UPDATE`s as
 /// unindexed full-table scans.
-async fn backfill_v4_projection_anchor_bindings(conn: &Connection) -> Result<(), libsql::Error> {
+async fn backfill_v4_projection_anchor_bindings(conn: &impl Executor) -> Result<(), Error> {
     for table in [
         "observation_projection_provenance",
         "observation_workflow_facts",
@@ -354,7 +355,7 @@ async fn backfill_v4_projection_anchor_bindings(conn: &Connection) -> Result<(),
     Ok(())
 }
 
-async fn ensure_projection_anchor_columns(conn: &Connection) -> Result<(), libsql::Error> {
+async fn ensure_projection_anchor_columns(conn: &impl Executor) -> Result<(), Error> {
     for table in [
         "observation_projection_provenance",
         "observation_workflow_facts",
@@ -365,13 +366,58 @@ async fn ensure_projection_anchor_columns(conn: &Connection) -> Result<(), libsq
             "ALTER TABLE {table} ADD COLUMN retrieval_anchor_id TEXT \
              REFERENCES retrieval_anchors(anchor_id)"
         );
-        super::super::ensure_table_columns(conn, table, &[("retrieval_anchor_id", ddl.as_str())])
+        ensure_projection_table_columns(conn, table, &[("retrieval_anchor_id", ddl.as_str())])
             .await?;
     }
     Ok(())
 }
 
-async fn ensure_v4_projection_binding_triggers(conn: &Connection) -> Result<(), libsql::Error> {
+async fn projection_table_column_exists(
+    conn: &impl QueryExecutor,
+    table: &str,
+    column: &str,
+) -> Result<bool, Error> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 COLLATE NOCASE",
+            params![table, column],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+async fn add_projection_table_column_after_missing_check(
+    conn: &impl Executor,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> Result<bool, Error> {
+    match conn.execute(ddl, ()).await {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            if projection_table_column_exists(conn, table, column).await? {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn ensure_projection_table_columns(
+    conn: &impl Executor,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> Result<(), Error> {
+    for &(column, ddl) in columns {
+        if !projection_table_column_exists(conn, table, column).await? {
+            add_projection_table_column_after_missing_check(conn, table, column, ddl).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_v4_projection_binding_triggers(conn: &impl Executor) -> Result<(), Error> {
     conn.execute_batch(include_str!("projection_v4_binding_triggers.sql"))
         .await
         .map(|_| ())
@@ -414,7 +460,7 @@ const CURRENT_REBUILD_MESSAGE_COLUMNS: &[&str] = &[
     "index_text",
 ];
 
-async fn migrate_projection_rebuild_schema(conn: &Connection) -> Result<(), libsql::Error> {
+async fn migrate_projection_rebuild_schema(conn: &impl Executor) -> Result<(), Error> {
     let rebuild_columns =
         projection_rebuild_column_names(conn, "observation_projection_rebuilds").await?;
     let message_columns =
@@ -524,9 +570,9 @@ async fn migrate_projection_rebuild_schema(conn: &Connection) -> Result<(), libs
 }
 
 async fn projection_rebuild_column_names(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     table: &str,
-) -> Result<Vec<String>, libsql::Error> {
+) -> Result<Vec<String>, Error> {
     let mut rows = conn
         .query(
             "SELECT name FROM pragma_table_xinfo(?1) ORDER BY cid",
@@ -547,7 +593,7 @@ fn columns_match(actual: &[String], expected: &[&str]) -> bool {
         .eq(expected.iter().copied())
 }
 
-async fn projection_rebuild_supports_aliasing(conn: &Connection) -> Result<bool, libsql::Error> {
+async fn projection_rebuild_supports_aliasing(conn: &impl QueryExecutor) -> Result<bool, Error> {
     let mut rows = conn
         .query(
             "SELECT sql FROM sqlite_schema
@@ -561,7 +607,7 @@ async fn projection_rebuild_supports_aliasing(conn: &Connection) -> Result<bool,
     Ok(row.get::<String>(0)?.contains("'aliasing'"))
 }
 
-async fn replace_empty_projection_rebuild_root(conn: &Connection) -> Result<(), libsql::Error> {
+async fn replace_empty_projection_rebuild_root(conn: &impl Executor) -> Result<(), Error> {
     conn.execute_batch(
         "DROP TABLE observation_projection_rebuilds;
          CREATE TABLE observation_projection_rebuilds (
@@ -581,9 +627,7 @@ async fn replace_empty_projection_rebuild_root(conn: &Connection) -> Result<(), 
     Ok(())
 }
 
-async fn create_current_projection_rebuild_messages(
-    conn: &Connection,
-) -> Result<(), libsql::Error> {
+async fn create_current_projection_rebuild_messages(conn: &impl Executor) -> Result<(), Error> {
     conn.execute_batch(
         "CREATE TABLE observation_projection_rebuild_messages (
             projector_version TEXT NOT NULL,
@@ -604,11 +648,11 @@ async fn create_current_projection_rebuild_messages(
     Ok(())
 }
 
-fn unsupported_projection_rebuild_schema() -> libsql::Error {
-    libsql::Error::Misuse("unsupported observation projection rebuild schema".to_string())
+fn unsupported_projection_rebuild_schema() -> Error {
+    Error::invalid_operation("unsupported observation projection rebuild schema")
 }
 
-async fn has_legacy_projection_output_uniqueness(conn: &Connection) -> Result<bool, libsql::Error> {
+async fn has_legacy_projection_output_uniqueness(conn: &impl QueryExecutor) -> Result<bool, Error> {
     let mut rows = conn
         .query("PRAGMA index_list(observation_projection_provenance)", ())
         .await?;
@@ -639,8 +683,8 @@ async fn has_legacy_projection_output_uniqueness(conn: &Connection) -> Result<bo
 }
 
 async fn validate_legacy_projection_provenance_schema(
-    conn: &Connection,
-) -> Result<Vec<String>, libsql::Error> {
+    conn: &impl QueryExecutor,
+) -> Result<Vec<String>, Error> {
     require_projection_provenance_table(conn).await?;
     let columns_match = legacy_projection_columns_match(conn).await?;
     let foreign_keys_match = legacy_projection_foreign_keys_match(conn).await?;
@@ -655,7 +699,7 @@ async fn validate_legacy_projection_provenance_schema(
     }
 }
 
-async fn require_projection_provenance_table(conn: &Connection) -> Result<(), libsql::Error> {
+async fn require_projection_provenance_table(conn: &impl QueryExecutor) -> Result<(), Error> {
     let mut objects = conn
         .query(
             "SELECT type FROM sqlite_schema
@@ -670,18 +714,18 @@ async fn require_projection_provenance_table(conn: &Connection) -> Result<(), li
         .get::<String>(0)?;
     drop(objects);
     if object_type != "table" {
-        return Err(libsql::Error::Misuse(format!(
+        return Err(Error::invalid_operation(format!(
             "unsupported observation_projection_provenance {object_type}"
         )));
     }
     Ok(())
 }
 
-fn unsupported_legacy_projection_schema() -> libsql::Error {
-    libsql::Error::Misuse("unsupported observation_projection_provenance legacy schema".to_string())
+fn unsupported_legacy_projection_schema() -> Error {
+    Error::invalid_operation("unsupported observation_projection_provenance legacy schema")
 }
 
-async fn legacy_projection_columns_match(conn: &Connection) -> Result<bool, libsql::Error> {
+async fn legacy_projection_columns_match(conn: &impl QueryExecutor) -> Result<bool, Error> {
     const EXPECTED: &[(&str, &str, i64)] = &[
         ("projector_version", "TEXT", 1),
         ("observation_id", "TEXT", 2),
@@ -720,7 +764,7 @@ async fn legacy_projection_columns_match(conn: &Connection) -> Result<bool, libs
     Ok(rows.next().await?.is_none())
 }
 
-async fn legacy_projection_foreign_keys_match(conn: &Connection) -> Result<bool, libsql::Error> {
+async fn legacy_projection_foreign_keys_match(conn: &impl QueryExecutor) -> Result<bool, Error> {
     const EXPECTED: &[(&str, &str, &str)] = &[
         ("observation_id", "observations", "observation_id"),
         ("receipt_id", "sanitization_receipts", "receipt_id"),
@@ -750,7 +794,7 @@ async fn legacy_projection_foreign_keys_match(conn: &Connection) -> Result<bool,
     Ok(rows.next().await?.is_none())
 }
 
-async fn legacy_projection_indexes_match(conn: &Connection) -> Result<bool, libsql::Error> {
+async fn legacy_projection_indexes_match(conn: &impl QueryExecutor) -> Result<bool, Error> {
     const EXPECTED: &[(&str, &[&str])] = &[
         ("pk", &["projector_version", "observation_id"]),
         (
@@ -793,10 +837,10 @@ async fn legacy_projection_indexes_match(conn: &Connection) -> Result<bool, libs
 }
 
 async fn legacy_projection_index_columns_match(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     index_name: &str,
     expected_columns: &[&str],
-) -> Result<bool, libsql::Error> {
+) -> Result<bool, Error> {
     let mut rows = conn
         .query(
             "SELECT name, desc, coll FROM pragma_index_xinfo(?1)
@@ -818,7 +862,7 @@ async fn legacy_projection_index_columns_match(
     Ok(rows.next().await?.is_none())
 }
 
-async fn legacy_projection_table_sql_matches(conn: &Connection) -> Result<bool, libsql::Error> {
+async fn legacy_projection_table_sql_matches(conn: &impl QueryExecutor) -> Result<bool, Error> {
     let mut sql_rows = conn
         .query(
             "SELECT sql FROM sqlite_schema
@@ -829,14 +873,14 @@ async fn legacy_projection_table_sql_matches(conn: &Connection) -> Result<bool, 
     let sql = sql_rows
         .next()
         .await?
-        .ok_or_else(|| libsql::Error::Misuse("legacy projection table is missing".to_string()))?
+        .ok_or_else(|| Error::invalid_operation("legacy projection table is missing"))?
         .get::<String>(0)?;
     Ok(normalize_schema_sql(&sql) == normalize_schema_sql(LEGACY_PROJECTION_PROVENANCE_TABLE_SQL))
 }
 
 async fn read_supported_legacy_projection_triggers(
-    conn: &Connection,
-) -> Result<Vec<String>, libsql::Error> {
+    conn: &impl QueryExecutor,
+) -> Result<Vec<String>, Error> {
     let mut trigger_rows = conn
         .query(
             "SELECT name, sql FROM sqlite_schema
@@ -853,12 +897,12 @@ async fn read_supported_legacy_projection_triggers(
             .iter()
             .find(|(expected_name, _)| *expected_name == name)
         else {
-            return Err(libsql::Error::Misuse(format!(
+            return Err(Error::invalid_operation(format!(
                 "unsupported observation_projection_provenance trigger {name}"
             )));
         };
         if normalize_schema_sql(&sql) != normalize_schema_sql(expected_sql) {
-            return Err(libsql::Error::Misuse(format!(
+            return Err(Error::invalid_operation(format!(
                 "unsupported definition for observation_projection_provenance trigger {name}"
             )));
         }
@@ -867,9 +911,7 @@ async fn read_supported_legacy_projection_triggers(
     Ok(triggers)
 }
 
-async fn migrate_legacy_projection_output_uniqueness(
-    conn: &Connection,
-) -> Result<(), libsql::Error> {
+async fn migrate_legacy_projection_output_uniqueness(conn: &impl Executor) -> Result<(), Error> {
     if !has_legacy_projection_output_uniqueness(conn).await? {
         return Ok(());
     }
@@ -916,9 +958,7 @@ async fn migrate_legacy_projection_output_uniqueness(
     Ok(())
 }
 
-async fn migrate_projection_multi_output_primary_key(
-    conn: &Connection,
-) -> Result<(), libsql::Error> {
+async fn migrate_projection_multi_output_primary_key(conn: &impl Executor) -> Result<(), Error> {
     require_projection_provenance_table(conn).await?;
     if has_output_ordinal(conn).await? {
         return Ok(());
@@ -970,7 +1010,7 @@ async fn migrate_projection_multi_output_primary_key(
     Ok(())
 }
 
-async fn restore_projection_output_audit_triggers(conn: &Connection) -> Result<(), libsql::Error> {
+async fn restore_projection_output_audit_triggers(conn: &impl Executor) -> Result<(), Error> {
     conn.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS projection_output_audit_invalidate_update_v1
          AFTER UPDATE ON session_messages
@@ -999,7 +1039,7 @@ async fn restore_projection_output_audit_triggers(conn: &Connection) -> Result<(
     Ok(())
 }
 
-async fn has_output_ordinal(conn: &Connection) -> Result<bool, libsql::Error> {
+async fn has_output_ordinal(conn: &impl QueryExecutor) -> Result<bool, Error> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM pragma_table_xinfo('observation_projection_provenance')
@@ -1012,14 +1052,21 @@ async fn has_output_ordinal(conn: &Connection) -> Result<bool, libsql::Error> {
 
 #[cfg(test)]
 mod tests {
-    use libsql::Builder;
     use tempfile::TempDir;
 
-    use crate::global_db::GlobalDb;
+    use crate::db::engine::TestConnection;
+    use crate::global_db::ensure_registered_schema;
+
+    async fn open_registered_schema(
+        path: &std::path::Path,
+    ) -> crate::errors::Result<TestConnection> {
+        let conn = TestConnection::open(path);
+        ensure_registered_schema(&conn).await?;
+        Ok(conn)
+    }
 
     async fn seed_legacy_rebuild_schema(path: &std::path::Path, legacy_messages: bool) {
-        let database = Builder::new_local(path).build().await.unwrap();
-        let conn = database.connect().unwrap();
+        let conn = TestConnection::open(path);
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE observation_projection_rebuilds (
@@ -1069,9 +1116,8 @@ mod tests {
         let path = temp.path().join("global.db");
         seed_legacy_rebuild_schema(&path, false).await;
 
-        let db = GlobalDb::open_at(&path).await.unwrap();
-        let mut rows = db
-            .conn
+        let conn = open_registered_schema(&path).await.unwrap();
+        let mut rows = conn
             .query(
                 "SELECT aliases_staged_through, staged_through, state
                  FROM observation_projection_rebuilds
@@ -1092,13 +1138,12 @@ mod tests {
         let path = temp.path().join("global.db");
         seed_legacy_rebuild_schema(&path, true).await;
 
-        let db = GlobalDb::open_at(&path).await.unwrap();
+        let conn = open_registered_schema(&path).await.unwrap();
         for table in [
             "observation_projection_rebuilds",
             "observation_projection_rebuild_messages",
         ] {
-            let count = db
-                .conn
+            let count = conn
                 .query(&format!("SELECT COUNT(*) FROM {table}"), ())
                 .await
                 .unwrap()
@@ -1110,15 +1155,14 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0);
         }
-        db.conn
-            .execute(
-                "INSERT INTO observation_projection_rebuilds (
+        conn.execute(
+            "INSERT INTO observation_projection_rebuilds (
                     projector_version, generation, frontier_sequence, state
                  ) VALUES ('projector-v2', 'generation-v2', 0, 'aliasing')",
-                (),
-            )
-            .await
-            .unwrap();
+            (),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1126,8 +1170,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
         seed_legacy_rebuild_schema(&path, false).await;
-        let database = Builder::new_local(&path).build().await.unwrap();
-        let conn = database.connect().unwrap();
+        let conn = TestConnection::open(&path);
         conn.execute(
             "CREATE TABLE observation_projection_provenance (unsupported TEXT)",
             (),
@@ -1135,12 +1178,10 @@ mod tests {
         .await
         .unwrap();
         drop(conn);
-        drop(database);
 
-        assert!(GlobalDb::open_at(&path).await.is_none());
+        assert!(open_registered_schema(&path).await.is_err());
 
-        let database = Builder::new_local(&path).build().await.unwrap();
-        let conn = database.connect().unwrap();
+        let conn = TestConnection::open(&path);
         let mut columns = conn
             .query(
                 "SELECT name FROM pragma_table_xinfo('observation_projection_rebuilds')

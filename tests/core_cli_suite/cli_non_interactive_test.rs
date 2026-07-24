@@ -6,23 +6,25 @@ use crate::common::{MessageRecordBuilder, create_runtime, global_session, sample
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
 use tracedecay::branch_meta::BranchMeta;
-use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
+use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay::migrate::inventory::{MigrationInventory, StoreStatus};
 use tracedecay::migrate::manifest::{
     ArtifactState, MigrationArtifact, MigrationManifest, MigrationProtocol, load_manifest,
     save_manifest, verify_migration_manifest,
 };
 use tracedecay::storage::{
-    EnrollmentMarker, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
-    StorageMode, StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
+    EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
     profile_sharded_layout, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_domain::ProjectId;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -202,33 +204,43 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
     std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
     init_project_in_process(home.path(), &project_root);
     let project_id = default_profile_project_id(&project_root);
-    let sessions_db_path = profile_sharded_data_root(&profile_root(home.path()), &project_id)
-        .join(SESSIONS_DB_FILENAME);
 
     create_runtime().block_on(async {
-        let db = GlobalDb::open_at(&sessions_db_path)
-            .await
-            .expect("session db");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            profile_root(home.path()),
+            &project_root,
+            ProjectId::new(project_id).expect("valid fixture project id"),
+        )
+        .await
+        .expect("registered project runtime");
         assert!(
-            db.upsert_session(&global_session("claude", "session-1", "proj_cli"))
+            runtime
+                .upsert_session_for_test(
+                    HostAdmissionScope::Project,
+                    &global_session("claude", "session-1", "proj_cli"),
+                )
                 .await
+                .expect("session fixture write")
         );
         assert!(
-            db.upsert_session_message(
-                &MessageRecordBuilder::new(
-                    "claude",
-                    "message-1",
-                    "session-1",
-                    "assistant",
-                    1,
-                    "Blocked: waiting on missing deploy credentials",
-                    "message",
+            runtime
+                .upsert_session_message_for_test(
+                    HostAdmissionScope::Project,
+                    &MessageRecordBuilder::new(
+                        "claude",
+                        "message-1",
+                        "session-1",
+                        "assistant",
+                        1,
+                        "Blocked: waiting on missing deploy credentials",
+                        "message",
+                    )
+                    .with_source(Some("/tmp/project/transcript.jsonl"), Some(1))
+                    .with_metadata(Some(r#"{"task_id":"task-7"}"#))
+                    .build(),
                 )
-                .with_source(Some("/tmp/project/transcript.jsonl"), Some(1))
-                .with_metadata(Some(r#"{"task_id":"task-7"}"#))
-                .build()
-            )
-            .await
+                .await
+                .expect("session message fixture write")
         );
     });
 
@@ -306,26 +318,28 @@ fn write_sqlite_placeholder(path: &Path) {
 }
 
 async fn register_profile_sharded_store(
-    db: &GlobalDb,
+    runtime: &HostAdmissionTestRuntimeV1,
     project_root: &std::path::Path,
     project_id: &str,
 ) {
-    db.upsert(project_root, 42).await;
-    db.upsert_code_project(project_id, project_root, None, None, Some("main"))
+    runtime.upsert(project_root, 42).await;
+    runtime
+        .upsert_code_project(project_id, project_root, None, None, Some("main"))
         .await
         .expect("code project should upsert");
-    db.upsert_store_instance(StoreInstanceUpsert {
-        store_id: format!("store:{project_id}:profile_sharded"),
-        project_id: project_id.to_string(),
-        store_kind: "code_project".to_string(),
-        storage_mode: "profile_sharded".to_string(),
-        store_relpath: format!("projects/{project_id}"),
-        manifest_relpath: Some(STORE_MANIFEST_FILENAME.to_string()),
-        last_verified_at: Some(1_800_000_000),
-        last_write_at: Some(1_800_000_000),
-    })
-    .await
-    .expect("store instance should upsert");
+    runtime
+        .upsert_store_instance(StoreInstanceUpsert {
+            store_id: format!("store:{project_id}:profile_sharded"),
+            project_id: project_id.to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: format!("projects/{project_id}"),
+            manifest_relpath: Some(STORE_MANIFEST_FILENAME.to_string()),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .expect("store instance should upsert");
 }
 
 fn write_branch_meta(
@@ -1218,12 +1232,12 @@ async fn list_all_reports_profile_sharded_store_without_stale_label() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
-    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    db.checkpoint().await;
-    db.close();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
@@ -1250,12 +1264,12 @@ async fn list_all_reports_profile_sharded_store_without_stale_label() {
 async fn projects_list_json_reads_global_registry() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
-    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    db.checkpoint().await;
-    db.close();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["projects", "list", "--json"]);
@@ -1285,12 +1299,12 @@ async fn projects_list_json_reads_global_registry() {
 async fn projects_search_text_matches_registered_alias() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
-    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    db.checkpoint().await;
-    db.close();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["projects", "search", "proj_cli"]);
@@ -1317,12 +1331,12 @@ async fn projects_search_text_matches_registered_alias() {
 async fn projects_context_resolves_project_id_and_path() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
-    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    db.checkpoint().await;
-    db.close();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut by_id = tracedecay_command(home.path(), project.path());
     by_id.args(["projects", "context", "proj_cli", "--json"]);
@@ -1378,32 +1392,34 @@ async fn projects_context_resolves_linked_worktree_path_by_git_common_dir() {
         ],
     );
 
-    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
-    db.upsert_code_project(
-        "proj_cli_worktree",
-        &main,
-        Some(&main.join(".git")),
-        None,
-        Some("main"),
-    )
-    .await
-    .expect("code project should upsert with git common-dir alias");
-    db.upsert_store_instance(StoreInstanceUpsert {
-        store_id: "store:proj_cli_worktree:profile_sharded".to_string(),
-        project_id: "proj_cli_worktree".to_string(),
-        store_kind: "code_project".to_string(),
-        storage_mode: "profile_sharded".to_string(),
-        store_relpath: "projects/proj_cli_worktree".to_string(),
-        manifest_relpath: Some(STORE_MANIFEST_FILENAME.to_string()),
-        last_verified_at: Some(1_800_000_000),
-        last_write_at: Some(1_800_000_000),
-    })
-    .await
-    .expect("store instance should upsert");
-    db.checkpoint().await;
-    db.close();
+    runtime
+        .upsert_code_project(
+            "proj_cli_worktree",
+            &main,
+            Some(&main.join(".git")),
+            None,
+            Some("main"),
+        )
+        .await
+        .expect("code project should upsert with git common-dir alias");
+    runtime
+        .upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_cli_worktree:profile_sharded".to_string(),
+            project_id: "proj_cli_worktree".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_cli_worktree".to_string(),
+            manifest_relpath: Some(STORE_MANIFEST_FILENAME.to_string()),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .expect("store instance should upsert");
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command(home.path(), &linked);
     command.args(["projects", "context", linked.to_str().unwrap(), "--json"]);
@@ -1429,11 +1445,13 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
-    let db_path = profile_root(home.path()).join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    db.checkpoint().await;
-    db.close();
+    let profile_root = profile_root(home.path());
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command_with_stdin_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all"]);
@@ -1453,7 +1471,9 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     );
     assert!(!shard_root.join("tracedecay.db").exists());
     assert!(!shard_root.join(STORE_MANIFEST_FILENAME).exists());
-    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
     assert!(
         reopened.list_project_paths_compat().await.is_empty(),
         "global projects table should be empty after wipe --all"
@@ -1514,12 +1534,12 @@ async fn list_all_uses_registry_profile_shard_when_enrollment_marker_missing() {
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
     std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
-    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
-    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    db.checkpoint().await;
-    db.close();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
@@ -1549,11 +1569,12 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     write_profile_sharded_fixture(home.path(), project.path());
     std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
     let shard_root = profile_shard_root(home.path());
-    let db_path = profile_root(home.path()).join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    db.checkpoint().await;
-    db.close();
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command_with_stdin_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all"]);
@@ -1833,14 +1854,17 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
 
     let stale_project = canonical_temp_path(home.path()).join("gone-project");
     create_runtime().block_on(async {
-        let db = GlobalDb::open_at(&global_db_path)
-            .await
-            .expect("open global db");
-        db.upsert(&live_project, 1).await;
-        db.upsert(&stale_project, 1).await;
-        db.upsert_code_project("stale-identity", &stale_project, None, None, None)
+        let runtime =
+            HostAdmissionTestRuntimeV1::profile(global_db_path.parent().expect("global db parent"))
+                .await
+                .expect("open registered global runtime");
+        runtime.upsert(&live_project, 1).await;
+        runtime.upsert(&stale_project, 1).await;
+        runtime
+            .upsert_code_project("stale-identity", &stale_project, None, None, None)
             .await
             .expect("register stale project identity");
+        runtime.checkpoint_profile_database_for_test().await;
     });
 
     let blocked_manifest = profile_root(home.path())
@@ -1911,9 +1935,9 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     assert_eq!(offline_apply["deleted_count"], 0);
 
     let remaining = create_runtime().block_on(async {
-        GlobalDb::open_at(&global_db_path)
+        HostAdmissionTestRuntimeV1::profile(global_db_path.parent().expect("global db parent"))
             .await
-            .expect("reopen global db")
+            .expect("reopen registered global runtime")
             .list_project_paths_compat()
             .await
     });

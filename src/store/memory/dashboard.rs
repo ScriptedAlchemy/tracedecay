@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use crate::memory::encoding::HolographicEncoder;
 
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::Value;
 
 use tracedecay_domain::{FactId, FactOwnerV1, UtcMicros};
@@ -32,7 +33,7 @@ use super::projection::{
 // The legacy tables remain a compatibility projection, never an alternate fact
 // authority or a source for ownerless rows.
 async fn dashboard_compatibility_fact_summaries_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     limit: usize,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::CompatibilityDashboardFactSummaryV1>> {
@@ -92,7 +93,7 @@ async fn dashboard_compatibility_fact_summaries_tx(
 }
 
 async fn dashboard_compatibility_entities_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     limit: usize,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::CompatibilityDashboardEntityV1>> {
@@ -162,7 +163,7 @@ async fn dashboard_compatibility_entities_tx(
 }
 
 async fn dashboard_compatibility_fact_entity_links_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_ids: &BTreeSet<String>,
     entity_ids: &BTreeSet<i64>,
@@ -229,7 +230,7 @@ async fn dashboard_compatibility_fact_entity_links_tx(
 }
 
 async fn dashboard_compatibility_owner_count_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_count: bool,
 ) -> FactCompatibilityResult<u64> {
@@ -293,7 +294,7 @@ enum CompatibilityDashboardNamedCountKind {
 }
 
 async fn dashboard_compatibility_named_counts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     kind: CompatibilityDashboardNamedCountKind,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::CompatibilityDashboardNamedCountV1>> {
@@ -414,7 +415,7 @@ fn dashboard_compatibility_dimension(
 }
 
 async fn dashboard_compatibility_hrr_coverage_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::CompatibilityDashboardHrrCoverageV1>> {
     let key = OwnerKey::new(owner)?;
@@ -509,7 +510,7 @@ async fn dashboard_compatibility_hrr_coverage_tx(
 }
 
 fn dashboard_compatibility_memory_bank_from_row(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
 ) -> FactCompatibilityResult<tracedecay_store::CompatibilityDashboardMemoryBankV1> {
     tracedecay_store::CompatibilityDashboardMemoryBankV1::new(
         row_string(row, 0, COMPATIBILITY_READ_OPERATION)?,
@@ -528,7 +529,7 @@ fn dashboard_compatibility_memory_bank_from_row(
 }
 
 async fn dashboard_compatibility_memory_banks_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::CompatibilityDashboardMemoryBankV1>> {
     let key = OwnerKey::new(owner)?;
@@ -565,7 +566,7 @@ async fn dashboard_compatibility_memory_banks_tx(
 }
 
 async fn dashboard_compatibility_growth_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::CompatibilityDashboardGrowthPointV1>> {
     let key = OwnerKey::new(owner)?;
@@ -640,7 +641,7 @@ async fn dashboard_compatibility_growth_tx(
 }
 
 pub(super) async fn dashboard_compatibility_memory_overview_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityDashboardMemoryOverviewQueryV1,
 ) -> FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1> {
     let owner = query.owner();
@@ -706,7 +707,7 @@ pub(super) async fn dashboard_compatibility_memory_overview_tx(
 }
 
 async fn dashboard_compatibility_entities_for_fact_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::CompatibilityDashboardEntityV1>> {
@@ -779,7 +780,7 @@ async fn dashboard_compatibility_entities_for_fact_tx(
 }
 
 pub(super) async fn dashboard_compatibility_fact_detail_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityDashboardFactDetailQueryV1,
 ) -> FactCompatibilityResult<Option<CompatibilityDashboardFactDetailV1>> {
     let owner = query.target().owner();
@@ -818,7 +819,7 @@ fn dashboard_compatibility_like_pattern(search: &str) -> String {
 }
 
 pub(super) async fn dashboard_compatibility_vector_points_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityDashboardVectorPointsQueryV1,
 ) -> FactCompatibilityResult<Vec<CompatibilityDashboardVectorPointV1>> {
     let key = OwnerKey::new(query.owner())?;
@@ -891,17 +892,16 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
             )
             .into());
         };
-        let vector =
-            match row.get_value(1) {
-                Ok(libsql::Value::Blob(bytes)) => HolographicEncoder::deserialize(&bytes)
-                    .ok()
-                    .filter(|vector| {
-                        !vector.is_empty()
-                            && vector.len() <= 16_384
-                            && vector.iter().all(|value| value.is_finite())
-                    }),
-                Ok(libsql::Value::Null | _) | Err(_) => None,
-            };
+        let vector = match row.get::<crate::db::engine::Value>(1) {
+            Ok(crate::db::engine::Value::Blob(bytes)) => HolographicEncoder::deserialize(&bytes)
+                .ok()
+                .filter(|vector| {
+                    !vector.is_empty()
+                        && vector.len() <= 16_384
+                        && vector.iter().all(|value| value.is_finite())
+                }),
+            Ok(crate::db::engine::Value::Null | _) | Err(_) => None,
+        };
         let vector = matches!(&fact, CompatibilityFactProjectionV1::Available(_))
             .then_some(vector)
             .flatten();
@@ -947,7 +947,7 @@ fn dashboard_compatibility_oplog_details(
 }
 
 pub(super) async fn dashboard_compatibility_memory_oplog_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityDashboardOplogQueryV1,
 ) -> FactCompatibilityResult<Vec<CompatibilityDashboardOplogEntryV1>> {
     let key = OwnerKey::new(query.owner())?;

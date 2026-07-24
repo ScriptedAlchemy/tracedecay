@@ -29,14 +29,21 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
         &profile_root,
         "migration inventory",
     )?;
-    build_inventory_in_scope(options, None).await
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+    let registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity,
+        )
+        .await?;
+    let global_db = registry.profile_database().await?;
+    build_inventory_in_scope(options, Some(global_db.as_ref())).await
 }
 
 /// Builds a read-only inventory through the daemon's existing database
 /// authority instead of opening a second process-local database client.
 pub(crate) async fn build_inventory_for_daemon(
     options: MigrationInventoryOptions,
-    global_db: &global_db::GlobalDb,
+    global_db: &global_db::RegisteredGlobalDb,
 ) -> Result<MigrationInventory> {
     if options
         .global_db_path
@@ -53,7 +60,7 @@ pub(crate) async fn build_inventory_for_daemon(
 
 async fn build_inventory_in_scope(
     options: MigrationInventoryOptions,
-    daemon_global_db: Option<&global_db::GlobalDb>,
+    daemon_global_db: Option<&global_db::RegisteredGlobalDb>,
 ) -> Result<MigrationInventory> {
     let mut stores = Vec::new();
     let mut skipped = Vec::new();

@@ -1,14 +1,15 @@
 //! Read-only `tracedecay_workflows` query surface.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
 use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::GitScopeFilter;
-use crate::sessions::workflow_index::{MAX_WORKFLOW_LIMIT, WorkflowIndexError};
+use crate::sessions::workflow_index::{
+    MAX_WORKFLOW_LIMIT, RegisteredWorkflowIndexSnapshot, WorkflowIndexError,
+};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -81,36 +82,39 @@ fn parse_mode(args: &Value) -> Result<WorkflowMode> {
     Ok(WorkflowMode::GitScope { filter: git_filter })
 }
 
-pub(super) async fn handle_workflows(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_workflows(
+    cg: &TraceDecay,
+    args: Value,
+    database: Option<&RegisteredGlobalDb>,
+) -> Result<ToolResult> {
     let mode = parse_mode(&args)?;
     let limit = bounded_limit(&args)?;
 
-    let db_path = cg.store_layout().sessions_db_path.clone();
-    if !db_path.is_file() {
-        return Ok(empty_payload(cg.project_root(), &args, &mode));
-    }
-    let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
+    let Some(database) = database else {
         return Ok(tool_json_with_md(
             Some(cg.project_root()),
             &args,
             &json!({
                 "status": "unavailable",
-                "message": "could not open project tracedecay session database",
+                "message": "registered project session database is unavailable",
                 "runs": [],
                 "count": 0
             }),
             || "No workflow index available.".to_string(),
         ));
     };
+    let database = RegisteredWorkflowIndexSnapshot::new(database)
+        .await
+        .map_err(workflow_error)?;
 
     let payload = match &mode {
         WorkflowMode::Run {
             run_id,
             agent_label,
-        } => run_payload(&db, run_id, agent_label.as_deref(), limit).await?,
+        } => run_payload(&database, run_id, agent_label.as_deref(), limit).await?,
         WorkflowMode::Session { session_id } => {
-            let runs = db
-                .workflow_runs_for_session(session_id, limit)
+            let runs = database
+                .runs_for_session(session_id, limit)
                 .await
                 .map_err(workflow_error)?;
             json!({
@@ -122,8 +126,8 @@ pub(super) async fn handle_workflows(cg: &TraceDecay, args: Value) -> Result<Too
             })
         }
         WorkflowMode::GitScope { filter } => {
-            let runs = db
-                .workflow_runs_for_git_scope(filter, limit)
+            let runs = database
+                .runs_for_git_scope(filter, limit)
                 .await
                 .map_err(workflow_error)?;
             json!({
@@ -168,20 +172,16 @@ fn run_not_found_payload(run_id: &str) -> Value {
 }
 
 async fn run_payload(
-    db: &GlobalDb,
+    database: &RegisteredWorkflowIndexSnapshot,
     run_id: &str,
     agent_label: Option<&str>,
     limit: usize,
 ) -> Result<Value> {
-    let Some(run) = db
-        .workflow_run_for_id(run_id)
-        .await
-        .map_err(workflow_error)?
-    else {
+    let Some(run) = database.run_for_id(run_id).await.map_err(workflow_error)? else {
         return Ok(run_not_found_payload(run_id));
     };
-    let agents = db
-        .workflow_agents_for_run(run_id, limit)
+    let agents = database
+        .agents_for_run(run_id, limit)
         .await
         .map_err(workflow_error)?;
     match agent_label {
@@ -207,23 +207,6 @@ async fn run_payload(
             "agent_count": agents.len(),
         })),
     }
-}
-
-fn empty_payload(project_root: &Path, args: &Value, mode: &WorkflowMode) -> ToolResult {
-    let payload = match mode {
-        WorkflowMode::Run { run_id, .. } => run_not_found_payload(run_id),
-        WorkflowMode::Session { session_id } => json!({
-            "status": "ok", "mode": "session", "session_id": session_id,
-            "runs": [], "count": 0,
-        }),
-        WorkflowMode::GitScope { filter } => json!({
-            "status": "ok", "mode": "git_scope", "git_filter": filter,
-            "runs": [], "count": 0,
-        }),
-    };
-    tool_json_with_md(Some(project_root), args, &payload, || {
-        render_workflows_md(&payload)
-    })
 }
 
 fn render_workflows_md(value: &Value) -> String {

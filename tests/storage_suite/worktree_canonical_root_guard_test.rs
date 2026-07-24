@@ -1,8 +1,8 @@
 //! End-to-end coverage for the registry canonical_root worktree guard.
 //!
 //! A tracedecay project id is shared across every linked worktree of a
-//! repository (see `crate::global_db::GlobalDb::upsert_code_project`'s
-//! `git-common-dir:<common dir>` alias). Before the guard in
+//! repository through the registered profile registry's
+//! `git-common-dir:<common dir>` alias. Before the guard in
 //! `tracedecay::project_registry::primary_checkout_root`, opening a session
 //! from *any* linked worktree would re-register the shared project with
 //! `canonical_root`/`display_root` pinned to that worktree's own (often
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::support::HOME_ENV_LOCK;
@@ -153,12 +153,13 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
         .expect("primary checkout should have a repository identity path");
     std::fs::remove_file(&marker_path).unwrap();
 
-    let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
         .await
         .expect("global db should open");
     assert!(
         db.project_registry_context_by_alias(&fx.worktree)
             .await
+            .unwrap()
             .is_none(),
         "the linked worktree must resolve through git common-dir, not a preexisting path alias"
     );
@@ -182,7 +183,7 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
         primary.database_path(),
         database_path.canonicalize().unwrap()
     );
-    db.close();
+    drop(db);
 }
 
 #[tokio::test]
@@ -203,7 +204,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
     );
     drop(from_worktree);
 
-    let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
         .await
         .expect("global db should open");
     let record = db
@@ -212,7 +213,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         .expect("project should be registered");
     assert_eq!(
         record.canonical_root,
-        GlobalDb::canonical_project_key(&fx.main),
+        HostAdmissionTestRuntimeV1::canonical_project_key(&fx.main),
         "canonical_root must stay pinned to the primary checkout, not the worktree that just touched it"
     );
     assert_eq!(
@@ -228,7 +229,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         .project_registry_context_by_id(&project_id)
         .await
         .expect("registry context should exist");
-    let worktree_key = GlobalDb::canonical_project_key(&fx.worktree);
+    let worktree_key = HostAdmissionTestRuntimeV1::canonical_project_key(&fx.worktree);
     assert!(
         context
             .aliases
@@ -248,7 +249,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
     // Simulate the pre-guard bug: some earlier session registered straight
     // from the worktree and pinned canonical_root/display_root to it.
     {
-        let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+        let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
             .await
             .expect("global db should open");
         let git_common_dir = tracedecay::worktree::git_common_dir(&fx.worktree);
@@ -261,10 +262,10 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         )
         .await
         .expect("seeding the stale row should succeed");
-        db.checkpoint().await;
-        db.close();
+        db.checkpoint_profile_database_for_test().await;
+        drop(db);
 
-        let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+        let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
             .await
             .expect("global db should reopen");
         let stale = db
@@ -273,10 +274,10 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
             .expect("stale row should exist");
         assert_eq!(
             stale.canonical_root,
-            GlobalDb::canonical_project_key(&fx.worktree),
+            HostAdmissionTestRuntimeV1::canonical_project_key(&fx.worktree),
             "fixture setup should have produced the stale (bug) state"
         );
-        db.close();
+        drop(db);
     }
 
     // Any subsequent touch — even one opened from the same worktree — must
@@ -286,7 +287,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         .expect("reopen from worktree should succeed");
     drop(reopened);
 
-    let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
         .await
         .expect("global db should open");
     let healed = db
@@ -295,7 +296,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         .expect("project should still be registered");
     assert_eq!(
         healed.canonical_root,
-        GlobalDb::canonical_project_key(&fx.main),
+        HostAdmissionTestRuntimeV1::canonical_project_key(&fx.main),
         "a stale worktree-pinned canonical_root must heal back to the primary checkout on touch"
     );
     assert_eq!(healed.display_root, fx.main.to_string_lossy());

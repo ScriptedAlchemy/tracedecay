@@ -636,7 +636,7 @@ fn automation_record_mutates_store(
 }
 
 struct DashboardAutomationRunContext {
-    cg: crate::tracedecay::TraceDecay,
+    cg: Arc<crate::tracedecay::TraceDecay>,
     config: crate::automation::config::AutomationConfig,
     backend: crate::automation::backend::CodexAppServerBackend,
 }
@@ -646,11 +646,11 @@ async fn dashboard_automation_run_context(
 ) -> Result<DashboardAutomationRunContext, String> {
     use crate::automation::backend::CodexAppServerBackend;
     use crate::automation::config::{AutomationBackend, effective_config, load_project_config};
-    use crate::tracedecay::TraceDecay;
-
-    let cg = TraceDecay::open(&state.project_root)
-        .await
-        .map_err(|e| e.to_string())?;
+    let cg = state
+        .project_graph
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or_else(|| "retained dashboard project graph is unavailable".to_string())?;
     let global = crate::user_config::UserConfig::load().automation;
     let project = load_project_config(&state.dashboard_root)
         .await

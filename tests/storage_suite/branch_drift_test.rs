@@ -440,13 +440,12 @@ async fn branch_serving_instance_writes_facts_to_the_project_wide_store() {
     close_graph(cg).await;
 
     let count = |path: PathBuf| async move {
-        let db = libsql::Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        let mut rows = conn
-            .query("SELECT COUNT(*) FROM memory_v2_current_facts", ())
-            .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memory_v2_current_facts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
     };
     assert_eq!(
         count(project_db_path).await,

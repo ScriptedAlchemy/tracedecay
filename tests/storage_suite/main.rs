@@ -2,9 +2,8 @@
 //!
 //! Each module was previously a standalone integration-test binary; merging
 //! them into one binary removes ten separate link steps, which dominate
-//! Windows CI time. Test paths keep their old binary name as the module
-//! prefix (e.g. `migration_test::test_migrate_from_v0`) so nextest filters
-//! and test-group assignments stay readable.
+//! Windows CI time. Migration engine coverage now lives beside the private
+//! runtime APIs in `db::migrations::tests`.
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -19,7 +18,6 @@ mod fact_merge_hydration_test;
 mod global_registry_test;
 mod migrate_inventory_test;
 mod migration_manifest_test;
-mod migration_test;
 mod multi_connection_test;
 mod native_project_alias_test;
 mod profile_storage_migration_test;

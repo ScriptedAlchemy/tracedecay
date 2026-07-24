@@ -11,7 +11,8 @@ use crate::application::context::CancellationToken;
 use crate::daemon::lsp_gateway::{
     AdmittedRoot, LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFuture,
     LspSemanticOperationOutcome, LspSemanticRequestAuthority, Pr12SemanticProviderAdapter,
-    SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
+    SemanticCapability, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
+    SemanticResponse,
 };
 use crate::db::Database;
 use crate::diagnostics::lsp::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
@@ -25,19 +26,40 @@ const MAX_GRAPH_SEMANTIC_ITEMS: usize = 64;
 pub struct Pr12ProductionSemanticAuthorities {
     pub semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     pub cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
+    pub analyzer_available: bool,
+    pub semantic_capabilities: BTreeSet<SemanticCapability>,
+}
+
+/// Semantic methods implemented by the retained graph authority.
+pub fn graph_semantic_capabilities() -> BTreeSet<SemanticCapability> {
+    [
+        SemanticCapability::Declaration,
+        SemanticCapability::Definition,
+        SemanticCapability::TypeDefinition,
+        SemanticCapability::Implementation,
+        SemanticCapability::References,
+        SemanticCapability::Hover,
+        SemanticCapability::DocumentSymbol,
+        SemanticCapability::WorkspaceSymbol,
+        SemanticCapability::CallHierarchy,
+        SemanticCapability::SignatureHelp,
+        SemanticCapability::TypeHierarchy,
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// Builds the concrete PR12 semantic and cancellation trait objects consumed
 /// by `application::lsp_runtime::pr12_lsp_session_factory`.
 ///
-/// The returned semantic provider first uses the retained stdio analyzer and
-/// falls back to the canonical project graph only when the analyzer reports
-/// the standard method as unavailable.
+/// The returned semantic provider first uses the retained stdio analyzer when
+/// installed and otherwise serves the canonical project graph directly. It
+/// also falls back to that graph when an analyzer lacks a standard method.
 pub async fn pr12_production_semantic_authorities(
     runtime: Handle,
     diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
     graph_database: Database,
-    language: &str,
+    language: Option<&str>,
     workspace_root: PathBuf,
     root_uri: impl Into<String>,
     timeouts: LspRefreshTimeouts,
@@ -46,8 +68,15 @@ pub async fn pr12_production_semantic_authorities(
     let (upstream_authority, project_root) = {
         let mut broker = diagnostic_broker.lock().await;
         let project_root = broker.project_root().to_path_buf();
-        let authority =
-            broker.semantic_authority(language, workspace_root, root_uri.clone(), timeouts)?;
+        let authority = match language {
+            Some(language) => broker.semantic_authority_if_available(
+                language,
+                workspace_root,
+                root_uri.clone(),
+                timeouts,
+            )?,
+            None => None,
+        };
         (authority, project_root)
     };
     Ok(pr12_semantic_authorities_from_parts(
@@ -63,10 +92,12 @@ pub async fn pr12_production_semantic_authorities(
 
 pub fn pr12_semantic_authorities_from_parts(
     runtime: Handle,
-    upstream: Arc<StdioLspSemanticAuthority>,
+    upstream: Option<Arc<StdioLspSemanticAuthority>>,
     graph: Arc<DatabaseGraphSemanticAuthority>,
 ) -> Pr12ProductionSemanticAuthorities {
-    let upstream = Pr12SemanticProviderAdapter::shared(runtime.clone(), upstream);
+    let analyzer_available = upstream.is_some();
+    let upstream =
+        upstream.map(|upstream| Pr12SemanticProviderAdapter::shared(runtime.clone(), upstream));
     let graph = Pr12SemanticProviderAdapter::shared(runtime, graph);
     let provider = Arc::new(StdioGraphSemanticProvider {
         upstream: upstream.clone(),
@@ -83,19 +114,24 @@ pub fn pr12_semantic_authorities_from_parts(
     Pr12ProductionSemanticAuthorities {
         semantics,
         cancellation,
+        analyzer_available,
+        semantic_capabilities: graph_semantic_capabilities(),
     }
 }
 
 struct SemanticCancellationGroup {
     provider: Arc<StdioGraphSemanticProvider>,
-    upstream: Arc<Pr12SemanticProviderAdapter>,
+    upstream: Option<Arc<Pr12SemanticProviderAdapter>>,
     graph: Arc<Pr12SemanticProviderAdapter>,
 }
 
 impl LspAnalyzerCancellationAuthority for SemanticCancellationGroup {
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
         self.provider.cancel_request(root, request_id)
-            | self.upstream.cancel_request(root, request_id)
+            | self
+                .upstream
+                .as_ref()
+                .is_some_and(|upstream| upstream.cancel_request(root, request_id))
             | self.graph.cancel_request(root, request_id)
     }
 }
@@ -107,7 +143,7 @@ struct ProviderRequestKey {
 }
 
 struct StdioGraphSemanticProvider {
-    upstream: Arc<Pr12SemanticProviderAdapter>,
+    upstream: Option<Arc<Pr12SemanticProviderAdapter>>,
     graph: Arc<Pr12SemanticProviderAdapter>,
     graph_requests: SyncMutex<BTreeSet<ProviderRequestKey>>,
 }
@@ -150,7 +186,10 @@ impl SemanticProviderPort for StdioGraphSemanticProvider {
             return outcome;
         }
 
-        match SemanticProviderPort::request(&self.upstream, root, request_id, request) {
+        let Some(upstream) = &self.upstream else {
+            return SemanticProviderPort::request(&self.graph, root, request_id, request);
+        };
+        match SemanticProviderPort::request(upstream, root, request_id, request) {
             SemanticProviderOutcome::Unavailable => {
                 let Ok(mut requests) = self.graph_requests.try_lock() else {
                     return SemanticProviderOutcome::Pending;
@@ -822,4 +861,31 @@ fn bounded_graph_failure(value: &str) -> String {
         .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
         .take(64)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertised_semantics_derive_from_the_graph_provider_contract() {
+        assert_eq!(
+            graph_semantic_capabilities(),
+            [
+                SemanticCapability::Declaration,
+                SemanticCapability::Definition,
+                SemanticCapability::TypeDefinition,
+                SemanticCapability::Implementation,
+                SemanticCapability::References,
+                SemanticCapability::Hover,
+                SemanticCapability::DocumentSymbol,
+                SemanticCapability::WorkspaceSymbol,
+                SemanticCapability::CallHierarchy,
+                SemanticCapability::SignatureHelp,
+                SemanticCapability::TypeHierarchy,
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
 }

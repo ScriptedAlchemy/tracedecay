@@ -27,7 +27,7 @@ async fn repository_marker_resolves_through_symlinked_root() {
         project_id
     );
 
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     register_identity_store(&db, project_id, &project, &git_common_dir).await;
@@ -39,7 +39,6 @@ async fn repository_marker_resolves_through_symlinked_root() {
         .expect("symlinked root should resolve to the enrolled store");
     assert_eq!(resolution.project.project_id, project_id);
     assert_eq!(resolution.store.store_id, format!("store_{project_id}"));
-    db.close();
 }
 
 #[tokio::test]
@@ -54,7 +53,7 @@ async fn repository_marker_survives_rename_within_parent() {
     let project_id = "proj_rename";
     write_repository_identity_marker(&project, project_id).unwrap();
 
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     register_identity_store(&db, project_id, &project, &git_common_dir).await;
@@ -76,7 +75,6 @@ async fn repository_marker_survives_rename_within_parent() {
         .unwrap()
         .expect("renamed checkout should resolve to its registered store");
     assert_eq!(resolution.project.project_id, project_id);
-    db.close();
 }
 
 #[tokio::test]
@@ -94,7 +92,7 @@ async fn repository_marker_survives_move_across_parents() {
     let project_id = "proj_move";
     write_repository_identity_marker(&project, project_id).unwrap();
 
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     register_identity_store(&db, project_id, &project, &git_common_dir).await;
@@ -114,7 +112,6 @@ async fn repository_marker_survives_move_across_parents() {
         .unwrap()
         .expect("moved checkout should resolve to its registered store");
     assert_eq!(resolution.project.project_id, project_id);
-    db.close();
 }
 
 #[cfg(unix)]
@@ -133,7 +130,7 @@ async fn repository_marker_resolves_through_two_symlink_aliases() {
     symlink(&project, &alias_a).unwrap();
     symlink(&project, &alias_b).unwrap();
 
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     register_identity_store(&db, project_id, &project, &git_common_dir).await;
@@ -156,7 +153,6 @@ async fn repository_marker_resolves_through_two_symlink_aliases() {
         assert_eq!(resolution.project.project_id, project_id);
         assert_eq!(resolution.store.store_id, format!("store_{project_id}"));
     }
-    db.close();
 }
 
 #[tokio::test]
@@ -250,7 +246,7 @@ async fn resolve_project_store_by_identity_propagates_marker_conflict() {
     let project_id = "proj_conflict";
     write_repository_identity_marker(&original, project_id).unwrap();
 
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     register_identity_store(&db, project_id, &original, &git_common_dir).await;
@@ -275,5 +271,4 @@ async fn resolve_project_store_by_identity_propagates_marker_conflict() {
             .is_none(),
         "a swallowed conflict must not have minted a new project row"
     );
-    db.close();
 }

@@ -8,12 +8,13 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::mcp::tools::ToolCallRegistryOptions;
 use tracedecay::sessions::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
-use tracedecay::sessions::workflow_ingest::ingest_workflow_runs;
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_domain::ProjectId;
 
 use crate::common;
 
@@ -175,24 +176,54 @@ fn extract_json(result: &tracedecay::mcp::ToolResult) -> Value {
 
 /// Renders a tool call as markdown (no `format:"json"` override) so tests can
 /// assert on the summary-first markdown surface.
-async fn call_md(cg: &TraceDecay, tool: &str, args: Value) -> String {
-    let result = tracedecay::mcp::handle_tool_call(cg, tool, args, None, None)
-        .await
-        .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
+async fn call_md(
+    cg: &TraceDecay,
+    runtime: &HostAdmissionTestRuntimeV1,
+    tool: &str,
+    args: Value,
+) -> String {
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+        cg,
+        tool,
+        args,
+        None,
+        None,
+        ToolCallRegistryOptions {
+            session_authorities: runtime.mcp_session_authorities(),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     result.value["content"][0]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("{tool} result should carry text content: {}", result.value))
         .to_string()
 }
 
-async fn call(cg: &TraceDecay, tool: &str, mut args: Value) -> Value {
+async fn call(
+    cg: &TraceDecay,
+    runtime: &HostAdmissionTestRuntimeV1,
+    tool: &str,
+    mut args: Value,
+) -> Value {
     if let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
-    let result = tracedecay::mcp::handle_tool_call(cg, tool, args, None, None)
-        .await
-        .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+        cg,
+        tool,
+        args,
+        None,
+        None,
+        ToolCallRegistryOptions {
+            session_authorities: runtime.mcp_session_authorities(),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     extract_json(&result)
 }
 
@@ -213,20 +244,30 @@ async fn workflows_query_surface_end_to_end() {
     // so the ingest sweep attributes the run to this project.
     write_workflow_fixture(&home, cg.project_root());
 
-    let db_path = cg.store_layout().sessions_db_path.clone();
-    let db = GlobalDb::open_at(&db_path)
-        .await
-        .unwrap_or_else(|| panic!("open sessions.db"));
+    let marker = tracedecay::storage::read_repository_identity_marker(cg.project_root())
+        .unwrap_or_else(|error| panic!("read project identity: {error}"))
+        .unwrap_or_else(|| panic!("project identity marker"));
+    let project_id =
+        ProjectId::new(marker.project_id).unwrap_or_else(|error| panic!("project id: {error}"));
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        env.home().join(".tracedecay"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("registered session runtime: {error}"));
 
-    // The public ingest entrypoint reads $HOME (isolated to the tempdir), so it
-    // sweeps our fixture tree.
-    let stats = ingest_workflow_runs(&db, cg.project_root()).await;
+    let stats = runtime
+        .ingest_workflows_for_test(cg.project_root())
+        .await
+        .unwrap_or_else(|error| panic!("ingest workflows: {error}"));
     assert_eq!(stats.runs_ingested, 1, "one run ingested: {stats:?}");
     assert_eq!(stats.agents_ingested, 2, "two agents ingested: {stats:?}");
 
     // (a) session mode: list runs spawned by the parent thread.
     let by_session = call(
         &cg,
+        &runtime,
         "tracedecay_workflows",
         json!({ "session_id": SESSION_ID }),
     )
@@ -238,7 +279,13 @@ async fn workflows_query_surface_end_to_end() {
     assert_eq!(by_session["runs"][0]["agent_count"], 2);
 
     // (b) run mode: one run shows its phases + the two-agent roster + summary.
-    let by_run = call(&cg, "tracedecay_workflows", json!({ "run_id": RUN_ID })).await;
+    let by_run = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "run_id": RUN_ID }),
+    )
+    .await;
     assert_eq!(by_run["mode"], "run", "{by_run}");
     assert_eq!(by_run["found"], true, "{by_run}");
     assert_eq!(by_run["agent_count"], 2, "{by_run}");
@@ -268,7 +315,13 @@ async fn workflows_query_surface_end_to_end() {
 
     // Markdown for the run detail is summary-first (phases + agents headings,
     // no leaked JSON object).
-    let run_md = call_md(&cg, "tracedecay_workflows", json!({ "run_id": RUN_ID })).await;
+    let run_md = call_md(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "run_id": RUN_ID }),
+    )
+    .await;
     assert!(run_md.contains("Workflow Run"), "{run_md}");
     assert!(run_md.contains("Phases"), "{run_md}");
     assert!(run_md.contains("Agents"), "{run_md}");
@@ -278,6 +331,7 @@ async fn workflows_query_surface_end_to_end() {
     // mine agent had a real transcript, so ingest recorded its transcript_path.
     let drill = call(
         &cg,
+        &runtime,
         "tracedecay_workflows",
         json!({ "run_id": RUN_ID, "agent_label": AGENT_MINE_LABEL }),
     )
@@ -298,15 +352,17 @@ async fn workflows_query_surface_end_to_end() {
     // (d) git-scope mode: after a span places the parent thread on a branch,
     // the run surfaces via the parent-session span join.
     let worktree = project_key.clone();
-    db.git_record_span_observation(
-        &span(SESSION_ID, "feat/evals", &worktree, 1_783_142_254),
-        DEFAULT_SPAN_MERGE_GAP_SECS,
-    )
-    .await
-    .unwrap_or_else(|e| panic!("record span: {e}"));
+    runtime
+        .record_project_span_for_test(
+            &span(SESSION_ID, "feat/evals", &worktree, 1_783_142_254),
+            DEFAULT_SPAN_MERGE_GAP_SECS,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("record span: {e}"));
 
     let by_branch = call(
         &cg,
+        &runtime,
         "tracedecay_workflows",
         json!({ "branch": "feat/evals" }),
     )
@@ -318,12 +374,13 @@ async fn workflows_query_surface_end_to_end() {
     // A branch nothing ran on returns no runs.
     let by_absent = call(
         &cg,
+        &runtime,
         "tracedecay_workflows",
         json!({ "branch": "feat/absent" }),
     )
     .await;
     assert_eq!(by_absent["count"], 0, "{by_absent}");
 
-    drop(db);
+    drop(runtime);
     cg.close();
 }

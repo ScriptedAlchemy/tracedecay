@@ -5,18 +5,37 @@ use serde_json::json;
 use crate::branch::BranchAddOutcome;
 use crate::errors::TraceDecayError;
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
-use crate::tracedecay::TraceDecay;
 
-use super::{DaemonHandshake, StoreAdministration, open_project_for_handshake};
+use super::{DaemonHandshake, StoreAdministration};
 
 const BRANCH_ADD_TOOL_NAME: &str = "tracedecay_admin_branch_add";
 
 pub(super) fn coordinated_hook_branch_writer(
     administration: StoreAdministration,
 ) -> crate::mcp::server::HookBranchWriter {
-    Arc::new(move |request| {
+    Arc::new(move |mut request| {
         let administration = administration.clone();
         Box::pin(async move {
+            let canonical_root = request
+                .root
+                .canonicalize()
+                .unwrap_or_else(|_| request.root.clone());
+            let active_branch = crate::branch::current_branch(&canonical_root);
+            let mounted = administration.mounted_project_graphs().await;
+            if let Some(graph) = mounted.iter().find(|graph| {
+                graph.project_root() == canonical_root
+                    && graph.active_branch() == active_branch.as_deref()
+            }) {
+                request.graph = Arc::clone(graph);
+            } else if !mounted
+                .iter()
+                .any(|graph| Arc::ptr_eq(graph, &request.graph))
+                || request.graph.branch_drifted()
+            {
+                return Err(TraceDecayError::Config {
+                    message: "retained hook branch graph is unavailable".to_string(),
+                });
+            }
             administration
                 .with_writer(|| async move {
                     crate::mcp::server::execute_hook_branch_write_direct(request).await
@@ -72,26 +91,34 @@ pub(super) async fn branch_add_response(
         }
     };
 
-    let result = administration
-        .with_writer(|| async {
-            let project_root =
-                handshake
-                    .project_path
-                    .as_deref()
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: "branch add requires a project path".to_string(),
-                    })?;
-            let cg = open_project_for_handshake(project_root, handshake).await?;
-            let outcome = TraceDecay::add_branch_tracking_with_options(
-                cg.project_root(),
-                branch,
-                cg.open_options(),
-            )
-            .await;
-            drop(cg);
-            outcome
-        })
-        .await;
+    let result = async {
+        let project_root =
+            handshake
+                .project_path
+                .as_deref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "branch add requires a project path".to_string(),
+                })?;
+        let canonical_root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let active_branch = crate::branch::current_branch(&canonical_root);
+        let cg = administration
+            .mounted_project_graphs()
+            .await
+            .into_iter()
+            .find(|graph| {
+                graph.project_root() == canonical_root
+                    && graph.active_branch() == active_branch.as_deref()
+            })
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "retained branch-add graph is unavailable".to_string(),
+            })?;
+        administration
+            .with_writer(|| async { cg.track_worktree_branch(cg.project_root(), branch).await })
+            .await
+    }
+    .await;
 
     match result {
         Ok(outcome) => {

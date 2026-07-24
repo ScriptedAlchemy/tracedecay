@@ -14,7 +14,10 @@ use crate::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
-use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, GlobalDb};
+use crate::db::engine::params;
+use crate::global_db::{
+    AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, RegisteredGlobalDb,
+};
 
 use super::DashboardState;
 use super::util::{i64_field, query_i64, query_rows, str_field};
@@ -44,14 +47,14 @@ struct HintCounts {
 /// `GET /api/plugins/analytics/overview`
 pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    let hints = hint_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await;
-    let usage = usage_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await;
-    let agents = agent_usage_summary(state.lcm_conn.as_deref()).await;
+    let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
+    let usage = usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
+    let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
     let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
-    let underused = underused_tool_families(state.lcm_conn.as_deref()).await;
+    let underused = underused_tool_families(state.lcm_db.as_deref()).await;
 
     Json(json!({
-        "available": state.lcm_conn.is_some() || durable_events.is_some(),
+        "available": state.lcm_db.is_some() || durable_events.is_some(),
         "db": state.lcm_db_path,
         "scope": state.lcm_scope,
         "hints": hints,
@@ -62,8 +65,8 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
     }))
 }
 
-async fn agent_usage_summary(conn: Option<&libsql::Connection>) -> Value {
-    let Some(conn) = conn else {
+async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
+    let Some(db) = db else {
         return json!({
             "available": false,
             "source": "session_store_unavailable",
@@ -72,7 +75,7 @@ async fn agent_usage_summary(conn: Option<&libsql::Connection>) -> Value {
     };
 
     let rows = query_rows(
-        conn,
+        db.read_connection(),
         "SELECT COALESCE(agent_id, '') AS agent_id,
                 COALESCE(metadata_json, '') AS metadata_json
          FROM sessions
@@ -120,13 +123,13 @@ fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Optio
 /// `GET /api/plugins/analytics/hints`
 pub(crate) async fn hints(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(hint_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await)
+    Json(hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/usage`
 pub(crate) async fn usage(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(usage_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await)
+    Json(usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/diagnostics`
@@ -138,9 +141,9 @@ pub(crate) async fn diagnostics(State(state): State<DashboardState>) -> Json<Val
 /// `GET /api/plugins/analytics/underused`
 pub(crate) async fn underused(State(state): State<DashboardState>) -> Json<Value> {
     Json(json!({
-        "available": state.lcm_conn.is_some(),
+        "available": state.lcm_db.is_some(),
         "db": state.lcm_db_path,
-        "families": underused_tool_families(state.lcm_conn.as_deref()).await,
+        "families": underused_tool_families(state.lcm_db.as_deref()).await,
     }))
 }
 
@@ -162,15 +165,15 @@ fn empty_hint_rows() -> Vec<Value> {
 async fn durable_analytics_rows_for_state(state: &DashboardState) -> Option<Vec<Value>> {
     durable_analytics_rows(
         state.savings_db.as_deref(),
-        state.lcm_conn.as_deref(),
-        &GlobalDb::canonical_project_key(&state.project_root),
+        state.lcm_db.as_deref(),
+        &RegisteredGlobalDb::canonical_project_key(&state.project_root),
     )
     .await
 }
 
 async fn durable_analytics_rows(
-    global_db: Option<&GlobalDb>,
-    lcm_conn: Option<&libsql::Connection>,
+    global_db: Option<&RegisteredGlobalDb>,
+    lcm_db: Option<&RegisteredGlobalDb>,
     project_id: &str,
 ) -> Option<Vec<Value>> {
     if let Some(db) = global_db
@@ -190,7 +193,7 @@ async fn durable_analytics_rows(
     }
 
     let rows = query_rows(
-        lcm_conn?,
+        lcm_db?.read_connection(),
         "SELECT provider, timestamp, event_kind, hook_name, tool_name,
                 tool_category, skill_name, hint_category, outcome, metadata_json
          FROM (
@@ -202,7 +205,7 @@ async fn durable_analytics_rows(
              LIMIT 10000
          )
          ORDER BY timestamp, id",
-        libsql::params![project_id],
+        params![project_id],
     )
     .await
     .ok()?;
@@ -364,15 +367,12 @@ fn hint_efficacy_from_events(events: &[Value]) -> Value {
     })
 }
 
-async fn hint_summary(
-    conn: Option<&libsql::Connection>,
-    durable_events: Option<&[Value]>,
-) -> Value {
+async fn hint_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {
     if let Some(events) = durable_events {
         return hint_summary_from_events(events);
     }
 
-    let Some(conn) = conn else {
+    let Some(db) = db else {
         return json!({
             "available": false,
             "source": "session_store_unavailable",
@@ -381,7 +381,7 @@ async fn hint_summary(
     };
 
     let has_table = query_i64(
-        conn,
+        db.read_connection(),
         "SELECT COUNT(*) FROM sqlite_master
          WHERE type IN ('table', 'view') AND name = 'dashboard_hint_events'",
         (),
@@ -397,7 +397,7 @@ async fn hint_summary(
     }
 
     let rows = match query_rows(
-        conn,
+        db.read_connection(),
         "SELECT category,
                 SUM(CASE WHEN event_type = 'emitted' THEN 1 ELSE 0 END) AS emitted,
                 SUM(CASE WHEN event_type = 'followed' THEN 1 ELSE 0 END) AS followed,
@@ -446,10 +446,10 @@ async fn hint_summary(
     })
 }
 
-async fn session_message_rows(conn: Option<&libsql::Connection>) -> Option<Vec<Value>> {
-    let conn = conn?;
+async fn session_message_rows(db: Option<&RegisteredGlobalDb>) -> Option<Vec<Value>> {
+    let db = db?;
     query_rows(
-        conn,
+        db.read_connection(),
         "SELECT COALESCE(tool_names, '') AS tool_names,
                 COALESCE(text, '') AS text,
                 COALESCE(metadata_json, '') AS metadata_json
@@ -546,15 +546,12 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
         .or_default() += 1;
 }
 
-async fn usage_summary(
-    conn: Option<&libsql::Connection>,
-    durable_events: Option<&[Value]>,
-) -> Value {
+async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {
     if let Some(events) = durable_events {
         return usage_summary_from_events(events);
     }
 
-    let Some(rows) = session_message_rows(conn).await else {
+    let Some(rows) = session_message_rows(db).await else {
         return json!({
             "available": false,
             "message_count": 0,
@@ -594,7 +591,7 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<Value> {
 }
 
 async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Value]>) -> Value {
-    let message_count = session_message_rows(state.lcm_conn.as_deref())
+    let message_count = session_message_rows(state.lcm_db.as_deref())
         .await
         .map_or(0, |rows| rows.len() as i64);
     let hook_analytics = read_hook_analytics_rows(state);
@@ -934,8 +931,8 @@ fn recent_hook_rows(rows: &[Value], limit: usize) -> Vec<Value> {
         .collect()
 }
 
-async fn underused_tool_families(conn: Option<&libsql::Connection>) -> Value {
-    let Some(rows) = session_message_rows(conn).await else {
+async fn underused_tool_families(db: Option<&RegisteredGlobalDb>) -> Value {
+    let Some(rows) = session_message_rows(db).await else {
         return Value::Array(Vec::new());
     };
 

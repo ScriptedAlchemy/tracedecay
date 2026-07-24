@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::cell::Cell;
 
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalObservationIdV1, MessageOccurrenceIdV1, ProjectionOutputOrdinalV1,
@@ -267,7 +267,7 @@ struct KeyRow {
     retired_at: Option<i64>,
 }
 
-pub(super) async fn preflight(conn: &Connection) -> Result<()> {
+pub(super) async fn preflight(conn: &impl Executor) -> Result<()> {
     for spec in IMMUTABLE_UNIONS {
         reject_row_collisions(conn, spec).await?;
     }
@@ -282,7 +282,7 @@ pub(super) async fn preflight(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn merge(conn: &Connection) -> Result<()> {
+pub(super) async fn merge(conn: &impl Executor) -> Result<()> {
     let generations = generation_union(conn).await?;
     let refreshes = refresh_union(conn).await?;
     let keys = key_union(conn).await?;
@@ -413,7 +413,7 @@ pub(super) async fn merge(conn: &Connection) -> Result<()> {
     assert_zero_legacy_temporal_authority(conn).await
 }
 
-async fn preflight_summary_graph(conn: &Connection) -> Result<()> {
+async fn preflight_summary_graph(conn: &impl Executor) -> Result<()> {
     let edges = "SELECT predecessor_summary_id, successor_summary_id
                  FROM main.session_summary_successors
                  UNION
@@ -498,7 +498,7 @@ async fn preflight_summary_graph(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+async fn table_columns(conn: &impl Executor, table: &str) -> Result<Vec<String>> {
     let sql = format!("PRAGMA source.table_info({})", quote_identifier(table));
     let mut rows = conn
         .query(&sql, ())
@@ -524,7 +524,7 @@ async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     Ok(columns)
 }
 
-async fn reject_row_collisions(conn: &Connection, spec: &UnionSpec) -> Result<()> {
+async fn reject_row_collisions(conn: &impl Executor, spec: &UnionSpec) -> Result<()> {
     let table = quote_identifier(spec.table);
     let columns = table_columns(conn, spec.table).await?;
     let same_row = columns
@@ -560,7 +560,7 @@ async fn reject_row_collisions(conn: &Connection, spec: &UnionSpec) -> Result<()
     Ok(())
 }
 
-async fn merge_plain(conn: &Connection, table: &str, order: &str) -> Result<()> {
+async fn merge_plain(conn: &impl Executor, table: &str, order: &str) -> Result<()> {
     let table = quote_identifier(table);
     conn.execute(
         &format!(
@@ -574,7 +574,7 @@ async fn merge_plain(conn: &Connection, table: &str, order: &str) -> Result<()> 
     Ok(())
 }
 
-async fn merge_projection_receipts(conn: &Connection) -> Result<()> {
+async fn merge_projection_receipts(conn: &impl Executor) -> Result<()> {
     let columns = table_columns(conn, "session_temporal_projection_receipts").await?;
     let column_list = columns
         .iter()
@@ -607,7 +607,7 @@ async fn merge_projection_receipts(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn preflight_observation_effects(conn: &Connection) -> Result<()> {
+async fn preflight_observation_effects(conn: &impl Executor) -> Result<()> {
     for schema in ["main", "source"] {
         let schema = quote_identifier(schema);
         if query_i64(
@@ -654,7 +654,7 @@ async fn preflight_observation_effects(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn merge_observation_effects(conn: &Connection) -> Result<()> {
+async fn merge_observation_effects(conn: &impl Executor) -> Result<()> {
     conn.execute_batch(
         "INSERT OR IGNORE INTO session_temporal_observation_effects(
              observation_id, observation_sequence, session_id, receipt_id,
@@ -674,7 +674,7 @@ async fn merge_observation_effects(conn: &Connection) -> Result<()> {
 }
 
 async fn read_generations(
-    conn: &Connection,
+    conn: &impl Executor,
     schema: &str,
 ) -> Result<BTreeMap<(String, i64), GenerationRow>> {
     let schema = quote_identifier(schema);
@@ -743,7 +743,7 @@ fn generation_prefix(earlier: &GenerationRow, later: &GenerationRow) -> bool {
     )
 }
 
-async fn generation_union(conn: &Connection) -> Result<BTreeMap<(String, i64), GenerationRow>> {
+async fn generation_union(conn: &impl Executor) -> Result<BTreeMap<(String, i64), GenerationRow>> {
     let target_rows = read_generations(conn, "main").await?;
     let mut merged = target_rows.clone();
     for (key, source) in read_generations(conn, "source").await? {
@@ -799,7 +799,7 @@ async fn generation_union(conn: &Connection) -> Result<BTreeMap<(String, i64), G
 }
 
 async fn seed_generations(
-    conn: &Connection,
+    conn: &impl Executor,
     generations: &BTreeMap<(String, i64), GenerationRow>,
 ) -> Result<()> {
     let existing = read_generations(conn, "main").await?;
@@ -826,7 +826,7 @@ async fn seed_generations(
 }
 
 async fn replay_generations(
-    conn: &Connection,
+    conn: &impl Executor,
     generations: &BTreeMap<(String, i64), GenerationRow>,
 ) -> Result<()> {
     let mut current = read_generations(conn, "main").await?;
@@ -966,7 +966,7 @@ async fn replay_generations(
 }
 
 async fn read_refreshes(
-    conn: &Connection,
+    conn: &impl Executor,
     schema: &str,
 ) -> Result<BTreeMap<(String, String), RefreshRow>> {
     let schema = quote_identifier(schema);
@@ -1029,7 +1029,7 @@ fn merge_refresh_rows(left: &RefreshRow, right: &RefreshRow) -> Option<RefreshRo
     }
 }
 
-async fn refresh_union(conn: &Connection) -> Result<BTreeMap<(String, String), RefreshRow>> {
+async fn refresh_union(conn: &impl Executor) -> Result<BTreeMap<(String, String), RefreshRow>> {
     let mut merged = read_refreshes(conn, "main").await?;
     for (key, source) in read_refreshes(conn, "source").await? {
         if let Some(target) = merged.get(&key) {
@@ -1057,7 +1057,7 @@ async fn refresh_union(conn: &Connection) -> Result<BTreeMap<(String, String), R
 }
 
 async fn seed_refresh_operations(
-    conn: &Connection,
+    conn: &impl Executor,
     refreshes: &BTreeMap<(String, String), RefreshRow>,
 ) -> Result<()> {
     let existing = read_refreshes(conn, "main").await?;
@@ -1085,7 +1085,7 @@ async fn seed_refresh_operations(
 }
 
 async fn replay_refresh_operations(
-    conn: &Connection,
+    conn: &impl Executor,
     refreshes: &BTreeMap<(String, String), RefreshRow>,
 ) -> Result<()> {
     let current = read_refreshes(conn, "main").await?;
@@ -1133,7 +1133,7 @@ async fn replay_refresh_operations(
     Ok(())
 }
 
-async fn read_keys(conn: &Connection, schema: &str) -> Result<Vec<KeyRow>> {
+async fn read_keys(conn: &impl Executor, schema: &str) -> Result<Vec<KeyRow>> {
     let schema = quote_identifier(schema);
     let mut rows = conn
         .query(
@@ -1192,7 +1192,7 @@ fn key_prefix(prefix: &[KeyRow], full: &[KeyRow]) -> bool {
         })
 }
 
-async fn key_union(conn: &Connection) -> Result<Vec<KeyRow>> {
+async fn key_union(conn: &impl Executor) -> Result<Vec<KeyRow>> {
     let target = read_keys(conn, "main").await?;
     let source = read_keys(conn, "source").await?;
     if !validate_key_history(&target) || !validate_key_history(&source) {
@@ -1215,7 +1215,7 @@ async fn key_union(conn: &Connection) -> Result<Vec<KeyRow>> {
     Ok(merged)
 }
 
-async fn replay_keys(conn: &Connection, keys: &[KeyRow]) -> Result<()> {
+async fn replay_keys(conn: &impl Executor, keys: &[KeyRow]) -> Result<()> {
     let current = read_keys(conn, "main").await?;
     for row in keys.iter().skip(current.len()) {
         conn.execute(
@@ -1281,7 +1281,7 @@ struct LegacyCandidateRow {
 /// sinks. Multi-output observations keep their projection output ordinals.
 /// Recovery is whole-TX rematch (no mid-batch resume). Receipt rows are PR19
 /// deletion-gate evidence that every legacy row has an explicit disposition.
-async fn forward_migrate_legacy_sources(conn: &Connection) -> Result<()> {
+async fn forward_migrate_legacy_sources(conn: &impl Executor) -> Result<()> {
     if !main_table_exists(conn, "lcm_raw_messages").await? {
         return Ok(());
     }
@@ -1296,7 +1296,7 @@ async fn forward_migrate_legacy_sources(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn main_table_exists(conn: &Connection, table: &str) -> Result<bool> {
+async fn main_table_exists(conn: &impl Executor, table: &str) -> Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
@@ -1311,7 +1311,7 @@ async fn main_table_exists(conn: &Connection, table: &str) -> Result<bool> {
         .is_some())
 }
 
-async fn legacy_migration_sessions(conn: &Connection) -> Result<Vec<String>> {
+async fn legacy_migration_sessions(conn: &impl Executor) -> Result<Vec<String>> {
     let mut rows = conn
         .query(
             "SELECT DISTINCT session_id
@@ -1332,7 +1332,7 @@ async fn legacy_migration_sessions(conn: &Connection) -> Result<Vec<String>> {
     Ok(sessions)
 }
 
-async fn migrate_session_legacy_sources(conn: &Connection, session_id: &str) -> Result<()> {
+async fn migrate_session_legacy_sources(conn: &impl Executor, session_id: &str) -> Result<()> {
     let candidates = load_legacy_candidate_rows(conn, session_id).await?;
     if candidates.is_empty() {
         return Ok(());
@@ -1389,7 +1389,7 @@ async fn migrate_session_legacy_sources(conn: &Connection, session_id: &str) -> 
 }
 
 async fn load_legacy_candidate_rows(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
 ) -> Result<Vec<LegacyCandidateRow>> {
     let has_observation_binding = main_table_exists(conn, "observations").await?
@@ -1605,7 +1605,7 @@ fn migration_watermarks_json(items: &[LegacyCandidateRow]) -> String {
 }
 
 async fn write_migration_dispositions(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     generation: i64,
     batch_ordinal: i64,
@@ -1681,7 +1681,7 @@ fn legacy_row_digest(session_id: &str, item: &LegacyCandidateRow) -> String {
 }
 
 async fn migration_receipt_covers(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     source_digest: &str,
 ) -> Result<bool> {
@@ -1701,7 +1701,7 @@ async fn migration_receipt_covers(
         .is_some())
 }
 
-async fn ensure_migration_generation(conn: &Connection, session_id: &str) -> Result<i64> {
+async fn ensure_migration_generation(conn: &impl Executor, session_id: &str) -> Result<i64> {
     if let Some(generation) = active_or_building_generation(conn, session_id).await? {
         return Ok(generation);
     }
@@ -1745,7 +1745,10 @@ async fn ensure_migration_generation(conn: &Connection, session_id: &str) -> Res
     Ok(generation)
 }
 
-async fn active_or_building_generation(conn: &Connection, session_id: &str) -> Result<Option<i64>> {
+async fn active_or_building_generation(
+    conn: &impl Executor,
+    session_id: &str,
+) -> Result<Option<i64>> {
     let mut rows = conn
         .query(
             "SELECT generation FROM session_temporal_generations
@@ -1774,7 +1777,7 @@ async fn active_or_building_generation(conn: &Connection, session_id: &str) -> R
     )
 }
 
-async fn next_generation_number(conn: &Connection, session_id: &str) -> Result<i64> {
+async fn next_generation_number(conn: &impl Executor, session_id: &str) -> Result<i64> {
     let mut rows = conn
         .query(
             "SELECT COALESCE(MAX(generation), 0) + 1
@@ -1798,7 +1801,7 @@ async fn next_generation_number(conn: &Connection, session_id: &str) -> Result<i
 }
 
 async fn next_migration_batch_ordinal(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     generation: i64,
 ) -> Result<i64> {
@@ -1829,7 +1832,7 @@ async fn next_migration_batch_ordinal(
 }
 
 async fn import_legacy_item(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     generation: i64,
     item: &LegacyCandidateRow,
@@ -1924,7 +1927,7 @@ async fn import_legacy_item(
     Ok(1)
 }
 
-async fn rebuild_migrated_current_entities(conn: &Connection) -> Result<()> {
+async fn rebuild_migrated_current_entities(conn: &impl Executor) -> Result<()> {
     if !main_table_exists(conn, "session_occurrences").await?
         || !main_table_exists(conn, "session_current_entities").await?
     {
@@ -2045,7 +2048,7 @@ async fn rebuild_migrated_current_entities(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn parity_check_temporal_fts_derivatives(conn: &Connection) -> Result<()> {
+async fn parity_check_temporal_fts_derivatives(conn: &impl Executor) -> Result<()> {
     if !main_table_exists(conn, "session_occurrences").await?
         || !main_table_exists(conn, "session_occurrences_fts").await?
     {
@@ -2117,7 +2120,7 @@ async fn parity_check_temporal_fts_derivatives(conn: &Connection) -> Result<()> 
 /// Executable PR19 deletion gate: every legacy raw row has an explicit
 /// disposition receipt, and no eligible legacy row remains without a covering
 /// temporal occurrence + migration receipt.
-pub(super) async fn assert_zero_legacy_temporal_authority(conn: &Connection) -> Result<()> {
+pub(super) async fn assert_zero_legacy_temporal_authority(conn: &impl Executor) -> Result<()> {
     if !main_table_exists(conn, "lcm_raw_messages").await? {
         return Ok(());
     }

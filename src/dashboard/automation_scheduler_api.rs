@@ -73,8 +73,10 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         _ => AutomationPendingCounts::default(),
     };
     let now = current_timestamp();
-    let activity =
-        load_session_activity(&state.store_root.join(crate::storage::SESSIONS_DB_FILENAME)).await;
+    let activity = match state.lcm_db.as_deref() {
+        Some(sessions_db) => load_session_activity(sessions_db).await,
+        None => SessionActivity::none(),
+    };
     Ok(Json(json!({
         "status": scheduler_status_label(&effective, control.paused),
         "paused": control.paused,

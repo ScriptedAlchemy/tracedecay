@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::global_db::{AnalyticsEventInsert, GlobalDb};
+use crate::global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use crate::mcp::hook_events::HookEvent;
 
 pub(super) struct McpToolAnalyticsEvent<'a> {
@@ -105,7 +105,7 @@ fn bounded_lookup_identifier(value: Option<&str>) -> Option<String> {
 fn hook_route_idempotency_key(project_root: &Path, admission_seq: u64) -> String {
     hashed_cardinality_label(&format!(
         "hook_route_v1|{}|{admission_seq}",
-        GlobalDb::canonical_project_key(project_root)
+        RegisteredGlobalDb::canonical_project_key(project_root)
     ))
 }
 
@@ -157,7 +157,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
     );
     AnalyticsEventInsert {
         provider: "mcp".to_string(),
-        project_id: GlobalDb::canonical_project_key(input.project_root),
+        project_id: RegisteredGlobalDb::canonical_project_key(input.project_root),
         session_id: input.session_id,
         timestamp: input.timestamp,
         event_kind: "mcp_tool_call".to_string(),
@@ -205,7 +205,7 @@ pub(super) fn hook_route_analytics_event(
     });
     Some(AnalyticsEventInsert {
         provider: "daemon_hook".to_string(),
-        project_id: GlobalDb::canonical_project_key(project_root),
+        project_id: RegisteredGlobalDb::canonical_project_key(project_root),
         session_id,
         timestamp,
         event_kind: "hook_route".to_string(),

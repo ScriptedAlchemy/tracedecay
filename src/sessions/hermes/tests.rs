@@ -9,10 +9,11 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::global_db::GlobalDb;
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
 use crate::sessions::shared::StoredCursor;
 
+use super::coverage::{admit_rows_with_admission, drain_hermes_projections_with_admission};
 use super::*;
 
 static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
@@ -21,14 +22,13 @@ static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
 async fn initialize_owned_store_before_foreign_fixture(directory: &std::path::Path) {
     HERMES_UNIT_FIXTURE_OWNED_STORE_READY
         .get_or_init(|| async {
-            // The mixed-engine unit-test binary still contains the owned-store
-            // compatibility layer. Match production startup order before any
-            // foreign rusqlite fixture initializes SQLite.
-            let path = directory.join(".owned-store-initialization.db");
-            let db = GlobalDb::open_at_without_structured_backfill(&path)
+            // Match production startup order: initialize the owned store
+            // before any foreign rusqlite fixture initializes SQLite.
+            let profile_root = directory.join(".owned-store-initialization");
+            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
                 .await
                 .expect("initialize owned storage before foreign SQLite fixtures");
-            drop(db);
+            drop(runtime);
         })
         .await;
 }
@@ -277,12 +277,13 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
 #[tokio::test]
 async fn projection_drain_projects_v1_message_identity() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&tmp.path().join("sessions.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
         .await
-        .unwrap();
+        .expect("open registered observation runtime");
+    let facade = runtime.facade();
     let row = fixture(7);
-    let stats = admit_rows(
-        &db,
+    let stats = admit_rows_with_admission(
+        &facade,
         std::slice::from_ref(&row),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(1).unwrap(),
@@ -293,12 +294,14 @@ async fn projection_drain_projects_v1_message_identity() {
     .await
     .unwrap();
     assert_eq!(stats.messages_upserted, 1);
-    drain_hermes_projections(&db, &ObservationScopeV1::Profile)
+    drain_hermes_projections_with_admission(&facade, &ObservationScopeV1::Profile)
         .await
         .unwrap();
     assert!(
-        db.get_session_message(PROVIDER, "session-redacted:7")
+        runtime
+            .session_message_for_test(HostAdmissionScope::Profile, PROVIDER, "session-redacted:7")
             .await
+            .unwrap()
             .is_some()
     );
 }

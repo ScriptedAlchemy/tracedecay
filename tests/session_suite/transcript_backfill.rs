@@ -5,11 +5,11 @@
 //! are left untouched, and the marker makes the pass run once per store.
 
 use tempfile::TempDir;
-use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay_domain::ProjectId;
 
-const MARKER_SQL: &str =
-    "SELECT version FROM session_schema_migrations WHERE name = 'transcript_facts_backfill'";
+const TEST_PROJECT_ID: &str = "project.transcript-backfill";
 
 // 2026-06-10T09:11:00+02:00 and 2026-06-11T08:00:00+02:00.
 const DAY_ONE: i64 = 1_781_075_460;
@@ -21,6 +21,16 @@ fn init_project(tmp: &TempDir) -> std::path::PathBuf {
     std::fs::create_dir(project.join(".tracedecay")).unwrap();
     std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     project
+}
+
+async fn project_runtime(tmp: &TempDir, project: &std::path::Path) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        project,
+        ProjectId::new(TEST_PROJECT_ID).unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 /// Writes a three-line Cursor transcript with two tag days and returns the
@@ -94,38 +104,25 @@ fn legacy_message(
 /// the pass against them (a fresh store marks itself done immediately because
 /// it has nothing to backfill).
 async fn seed_legacy_rows(
-    project: &std::path::Path,
+    runtime: &HostAdmissionTestRuntimeV1,
     provider: &str,
     messages: &[SessionMessageRecord],
 ) {
-    let db = open_project_session_db(project).await.unwrap();
-    assert!(db.upsert_session(&session(provider)).await);
-    for message in messages {
-        assert!(db.upsert_session_message(message).await);
-    }
-    drop(db);
-
-    let raw = libsql::Builder::new_local(project_session_db_path(project))
-        .build()
+    runtime
+        .seed_transcript_backfill_for_test(
+            HostAdmissionScope::Project,
+            &session(provider),
+            messages,
+        )
         .await
         .unwrap();
-    let conn = raw.connect().unwrap();
-    conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name = 'transcript_facts_backfill'",
-        (),
-    )
-    .await
-    .unwrap();
 }
 
-async fn marker_version(project: &std::path::Path) -> Option<i64> {
-    let raw = libsql::Builder::new_local(project_session_db_path(project))
-        .build()
+async fn marker_version(runtime: &HostAdmissionTestRuntimeV1) -> Option<i64> {
+    runtime
+        .transcript_backfill_marker_version_for_test(HostAdmissionScope::Project)
         .await
-        .unwrap();
-    let conn = raw.connect().unwrap();
-    let mut rows = conn.query(MARKER_SQL, ()).await.unwrap();
-    rows.next().await.unwrap().and_then(|row| row.get(0).ok())
+        .unwrap()
 }
 
 fn metadata_usage(metadata_json: Option<&str>) -> Option<serde_json::Value> {
@@ -140,9 +137,10 @@ async fn backfill_dates_legacy_rows_from_source_transcripts() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (transcript, offsets) = write_tagged_transcript(&tmp);
+    let runtime = project_runtime(&tmp, &project).await;
 
     seed_legacy_rows(
-        &project,
+        &runtime,
         "cursor",
         &[
             legacy_message(
@@ -172,17 +170,19 @@ async fn backfill_dates_legacy_rows_from_source_transcripts() {
         ],
     )
     .await;
+    drop(runtime);
 
     // Re-opening the store runs the marker-guarded backfill.
-    let db = open_project_session_db(&project).await.unwrap();
+    let db = project_runtime(&tmp, &project).await;
     for (message_id, expected) in [("m-0", DAY_ONE), ("m-1", DAY_ONE), ("m-2", DAY_TWO)] {
         let projected = db
-            .get_session_message("cursor", message_id)
+            .session_message_for_test(HostAdmissionScope::Project, "cursor", message_id)
             .await
+            .unwrap()
             .unwrap_or_else(|| panic!("missing {message_id}"));
         assert_eq!(projected.timestamp, Some(expected), "{message_id}");
         let raw = db
-            .lcm_load_raw_message("cursor", message_id)
+            .lcm_load_raw_message_for_test("cursor", message_id)
             .await
             .unwrap_or_else(|| panic!("missing raw {message_id}"));
         assert_eq!(raw.timestamp, Some(expected), "raw {message_id}");
@@ -195,16 +195,21 @@ async fn backfill_dates_legacy_rows_from_source_transcripts() {
     }
 
     // Session window is derived from the freshly dated messages.
-    let session = db.get_session("cursor", "legacy-session").await.unwrap();
+    let session = db
+        .session_for_test(HostAdmissionScope::Project, "cursor", "legacy-session")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(session.started_at, Some(DAY_ONE));
     assert_eq!(session.ended_at, Some(DAY_TWO));
-    assert_eq!(marker_version(&project).await, Some(1));
+    assert_eq!(marker_version(&db).await, Some(1));
 }
 
 #[tokio::test]
 async fn backfill_adds_claude_usage_counters_from_message_usage() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
+    let runtime = project_runtime(&tmp, &project).await;
 
     // Claude transcript shape: per-line ISO timestamp, Anthropic-style
     // counters on the assistant `message.usage`.
@@ -218,7 +223,7 @@ async fn backfill_adds_claude_usage_counters_from_message_usage() {
     );
 
     seed_legacy_rows(
-        &project,
+        &runtime,
         "claude",
         &[
             legacy_message(
@@ -240,9 +245,14 @@ async fn backfill_adds_claude_usage_counters_from_message_usage() {
         ],
     )
     .await;
+    drop(runtime);
 
-    let db = open_project_session_db(&project).await.unwrap();
-    let assistant = db.get_session_message("claude", "c-1").await.unwrap();
+    let db = project_runtime(&tmp, &project).await;
+    let assistant = db
+        .session_message_for_test(HostAdmissionScope::Project, "claude", "c-1")
+        .await
+        .unwrap()
+        .unwrap();
     // One re-read populated both facts: the timestamp...
     assert_eq!(assistant.timestamp, Some(1_767_225_605));
     // ...and the usage counters under the keys the savings dashboard reads.
@@ -252,11 +262,18 @@ async fn backfill_adds_claude_usage_counters_from_message_usage() {
     assert_eq!(usage["output_tokens"], 200);
     assert_eq!(usage["cache_creation_input_tokens"], 500);
     assert_eq!(usage["cache_read_input_tokens"], 800);
-    let raw = db.lcm_load_raw_message("claude", "c-1").await.unwrap();
+    let raw = db
+        .lcm_load_raw_message_for_test("claude", "c-1")
+        .await
+        .unwrap();
     assert!(metadata_usage(raw.metadata_json.as_deref()).is_some());
 
     // The user line has no counters; no usage object is fabricated.
-    let user = db.get_session_message("claude", "c-0").await.unwrap();
+    let user = db
+        .session_message_for_test(HostAdmissionScope::Project, "claude", "c-0")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(user.timestamp, Some(1_767_225_600));
     assert!(metadata_usage(user.metadata_json.as_deref()).is_none());
 }
@@ -265,6 +282,7 @@ async fn backfill_adds_claude_usage_counters_from_message_usage() {
 async fn backfill_attaches_codex_turn_usage_to_the_assistant_line() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
+    let runtime = project_runtime(&tmp, &project).await;
 
     // Codex rollout shape: usage arrives on a separate `token_count` event
     // after the `agent_message`, with OpenAI semantics (input includes
@@ -288,10 +306,15 @@ async fn backfill_attaches_codex_turn_usage_to_the_assistant_line() {
         Some(offsets[1]),
     );
     assistant.role = "assistant".to_string();
-    seed_legacy_rows(&project, "codex", &[assistant]).await;
+    seed_legacy_rows(&runtime, "codex", &[assistant]).await;
+    drop(runtime);
 
-    let db = open_project_session_db(&project).await.unwrap();
-    let row = db.get_session_message("codex", "x-1").await.unwrap();
+    let db = project_runtime(&tmp, &project).await;
+    let row = db
+        .session_message_for_test(HostAdmissionScope::Project, "codex", "x-1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(row.timestamp, Some(1_767_225_602));
     let usage =
         metadata_usage(row.metadata_json.as_deref()).expect("codex assistant should gain usage");
@@ -307,9 +330,10 @@ async fn backfill_tolerates_missing_source_files_and_still_marks_done() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let gone = tmp.path().join("deleted-transcript.jsonl");
+    let runtime = project_runtime(&tmp, &project).await;
 
     seed_legacy_rows(
-        &project,
+        &runtime,
         "cursor",
         &[
             legacy_message(
@@ -331,12 +355,14 @@ async fn backfill_tolerates_missing_source_files_and_still_marks_done() {
         ],
     )
     .await;
+    drop(runtime);
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let db = project_runtime(&tmp, &project).await;
     for message_id in ["m-gone", "m-nopath"] {
         let projected = db
-            .get_session_message("cursor", message_id)
+            .session_message_for_test(HostAdmissionScope::Project, "cursor", message_id)
             .await
+            .unwrap()
             .unwrap_or_else(|| panic!("missing {message_id}"));
         assert_eq!(
             projected.timestamp, None,
@@ -344,7 +370,7 @@ async fn backfill_tolerates_missing_source_files_and_still_marks_done() {
         );
     }
     // The pass still completes and never re-runs.
-    assert_eq!(marker_version(&project).await, Some(1));
+    assert_eq!(marker_version(&db).await, Some(1));
 }
 
 #[tokio::test]
@@ -352,6 +378,7 @@ async fn backfill_leaves_already_dated_rows_untouched() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (transcript, offsets) = write_tagged_transcript(&tmp);
+    let runtime = project_runtime(&tmp, &project).await;
 
     // A Hermes-migrated message: already dated, pointing at line 0 whose tag
     // would re-derive a *different* value (DAY_ONE).
@@ -365,26 +392,29 @@ async fn backfill_leaves_already_dated_rows_untouched() {
         Some(offsets[0]),
     );
     migrated.timestamp = Some(migrated_at);
-    seed_legacy_rows(&project, "cursor", &[migrated]).await;
+    seed_legacy_rows(&runtime, "cursor", &[migrated]).await;
+    drop(runtime);
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let db = project_runtime(&tmp, &project).await;
     let projected = db
-        .get_session_message("cursor", "m-migrated")
+        .session_message_for_test(HostAdmissionScope::Project, "cursor", "m-migrated")
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(projected.timestamp, Some(migrated_at));
     let raw = db
-        .lcm_load_raw_message("cursor", "m-migrated")
+        .lcm_load_raw_message_for_test("cursor", "m-migrated")
         .await
         .unwrap();
     assert_eq!(raw.timestamp, Some(migrated_at));
-    assert_eq!(marker_version(&project).await, Some(1));
+    assert_eq!(marker_version(&db).await, Some(1));
 }
 
 #[tokio::test]
 async fn backfill_preserves_existing_usage_and_other_metadata_keys() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
+    let runtime = project_runtime(&tmp, &project).await;
 
     let (transcript, offsets) = write_jsonl(
         &tmp,
@@ -406,10 +436,15 @@ async fn backfill_preserves_existing_usage_and_other_metadata_keys() {
     );
     seeded.metadata_json =
         Some(r#"{"source":"migration","usage":{"input_tokens":42,"output_tokens":7}}"#.to_string());
-    seed_legacy_rows(&project, "claude", &[seeded]).await;
+    seed_legacy_rows(&runtime, "claude", &[seeded]).await;
+    drop(runtime);
 
-    let db = open_project_session_db(&project).await.unwrap();
-    let row = db.get_session_message("claude", "c-keep").await.unwrap();
+    let db = project_runtime(&tmp, &project).await;
+    let row = db
+        .session_message_for_test(HostAdmissionScope::Project, "claude", "c-keep")
+        .await
+        .unwrap()
+        .unwrap();
     let metadata: serde_json::Value =
         serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["source"], "migration");

@@ -1,8 +1,8 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::{Value, params, params_from_iter};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseEngineReadSnapshot};
 use super::rows::row_to_node;
 use super::sql::{build_qmark_placeholders, collect_rows};
 use crate::errors::{Result, TraceDecayError};
@@ -43,7 +43,7 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        let snapshot = self.begin_isolated_read_snapshot("search_nodes").await?;
+        let snapshot = self.begin_engine_read_snapshot("search_nodes").await?;
         let results = self
             .search_nodes_in_snapshot(&snapshot, query, &fts_query, limit)
             .await?;
@@ -53,7 +53,7 @@ impl Database {
 
     async fn search_nodes_in_snapshot(
         &self,
-        conn: &libsql::Connection,
+        conn: &DatabaseEngineReadSnapshot,
         query: &str,
         fts_query: &str,
         limit: usize,
@@ -111,7 +111,7 @@ impl Database {
 
     /// Validates every non-FTS table and its indexes without asking `SQLite`
     /// to inspect the known-corrupt FTS virtual table or shadow tables.
-    async fn non_fts_schema_intact(&self, conn: &libsql::Connection) -> Result<bool> {
+    async fn non_fts_schema_intact(&self, conn: &DatabaseEngineReadSnapshot) -> Result<bool> {
         let mut rows = conn
             .query(
                 "SELECT name FROM sqlite_schema
@@ -175,7 +175,7 @@ impl Database {
     /// Executes the FTS5 query and returns ranked results.
     async fn search_nodes_fts(
         &self,
-        conn: &libsql::Connection,
+        conn: &DatabaseEngineReadSnapshot,
         fts_query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
@@ -230,13 +230,10 @@ impl Database {
         let sql = format!(
             "SELECT target, COUNT(*) AS cnt FROM edges WHERE target IN ({placeholders}) AND kind = 'calls' GROUP BY target",
         );
-        let param_values: Vec<libsql::Value> = node_ids
-            .iter()
-            .map(|id| libsql::Value::Text(id.clone()))
-            .collect();
+        let param_values: Vec<Value> = node_ids.iter().map(|id| Value::Text(id.clone())).collect();
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to batch count incoming calls: {e}"),
@@ -275,15 +272,15 @@ impl Database {
              WHERE LOWER(name) IN ({placeholders})
              LIMIT ?",
         );
-        let mut param_values: Vec<libsql::Value> = names
+        let mut param_values: Vec<Value> = names
             .iter()
-            .map(|n| libsql::Value::Text(n.to_lowercase()))
+            .map(|n| Value::Text(n.to_lowercase()))
             .collect();
-        param_values.push(libsql::Value::Integer(limit as i64));
+        param_values.push(Value::Integer(limit as i64));
 
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to search by exact name: {e}"),
@@ -312,7 +309,7 @@ impl Database {
                 format!("{prefix}/")
             };
             let prefix_like = format!("{with_slash}%");
-            self.conn()
+            self.engine_conn()
                 .query(
                     "SELECT name, signature, file_path, start_line
                      FROM nodes
@@ -328,7 +325,7 @@ impl Database {
                 )
                 .await
         } else {
-            self.conn()
+            self.engine_conn()
                 .query(
                     "SELECT name, signature, file_path, start_line
                      FROM nodes

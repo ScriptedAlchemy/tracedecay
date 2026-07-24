@@ -4,22 +4,183 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use fs2::FileExt;
-#[cfg(test)]
-use libsql::Builder;
-use libsql::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params_from_iter, types::ValueRef};
 use sha2::{Digest, Sha256};
 
+use crate::db::engine::{
+    Error as EngineError, Executor, IntoParams, QueryExecutor, Row, Rows, Value,
+};
+
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
-const SQLITE_OPEN_URI: i32 = 0x0000_0040;
+
+pub(crate) struct SnapshotConnection {
+    connection: Arc<Mutex<Connection>>,
+    interrupt: rusqlite::InterruptHandle,
+}
+
+impl SnapshotConnection {
+    fn open(path: &Path, flags: OpenFlags) -> crate::db::engine::Result<Self> {
+        let connection = Connection::open_with_flags(path, flags)
+            .map_err(|error| snapshot_sqlite_error("open snapshot", error))?;
+        let interrupt = connection.get_interrupt_handle();
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            interrupt,
+        })
+    }
+
+    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: IntoParams,
+    {
+        Executor::execute(self, sql, params).await
+    }
+
+    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        QueryExecutor::query(self, sql, params).await
+    }
+
+    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        Executor::execute_batch(self, sql).await
+    }
+
+    pub(crate) fn interrupt(&self) {
+        self.interrupt.interrupt();
+    }
+}
+
+impl QueryExecutor for SnapshotConnection {
+    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let params = params.into_params()?;
+        let connection = Arc::clone(&self.connection);
+        let sql = sql.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let connection = connection
+                .lock()
+                .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(|error| snapshot_sqlite_error("prepare snapshot query", error))?;
+            let columns = statement.column_count();
+            let params = params.into_iter().map(engine_value_to_rusqlite);
+            let mut rows = statement
+                .query(params_from_iter(params))
+                .map_err(|error| snapshot_sqlite_error("query snapshot", error))?;
+            let mut collected = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|error| snapshot_sqlite_error("read snapshot row", error))?
+            {
+                let values = (0..columns)
+                    .map(|column| {
+                        row.get_ref(column)
+                            .map_err(|error| snapshot_sqlite_error("read snapshot value", error))
+                            .and_then(snapshot_value)
+                    })
+                    .collect::<crate::db::engine::Result<Vec<_>>>()?;
+                collected.push(Row::from_values(values));
+            }
+            Ok(Rows::from_rows(collected))
+        })
+        .await
+        .map_err(|error| EngineError::Runtime(format!("snapshot query task failed: {error}")))?
+    }
+}
+
+impl Executor for SnapshotConnection {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: IntoParams,
+    {
+        let params = params.into_params()?;
+        let connection = Arc::clone(&self.connection);
+        let sql = sql.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let connection = connection
+                .lock()
+                .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
+            let changed = connection
+                .execute(
+                    &sql,
+                    params_from_iter(params.into_iter().map(engine_value_to_rusqlite)),
+                )
+                .map_err(|error| snapshot_sqlite_error("execute snapshot statement", error))?;
+            u64::try_from(changed)
+                .map_err(|_| EngineError::Runtime("snapshot row count overflow".into()))
+        })
+        .await
+        .map_err(|error| EngineError::Runtime(format!("snapshot execute task failed: {error}")))?
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        let connection = Arc::clone(&self.connection);
+        let sql = sql.to_owned();
+        tokio::task::spawn_blocking(move || {
+            connection
+                .lock()
+                .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?
+                .execute_batch(&sql)
+                .map_err(|error| snapshot_sqlite_error("execute snapshot batch", error))
+        })
+        .await
+        .map_err(|error| EngineError::Runtime(format!("snapshot batch task failed: {error}")))?
+    }
+}
+
+fn engine_value_to_rusqlite(value: Value) -> rusqlite::types::Value {
+    match value {
+        Value::Null => rusqlite::types::Value::Null,
+        Value::Integer(value) => rusqlite::types::Value::Integer(value),
+        Value::Real(value) => rusqlite::types::Value::Real(value),
+        Value::Text(value) => rusqlite::types::Value::Text(value),
+        Value::Blob(value) => rusqlite::types::Value::Blob(value),
+    }
+}
+
+fn snapshot_value(value: ValueRef<'_>) -> crate::db::engine::Result<Value> {
+    Ok(match value {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(value) => Value::Integer(value),
+        ValueRef::Real(value) => Value::Real(value),
+        ValueRef::Text(value) => Value::Text(
+            std::str::from_utf8(value)
+                .map_err(|error| EngineError::Runtime(format!("invalid snapshot UTF-8: {error}")))?
+                .to_owned(),
+        ),
+        ValueRef::Blob(value) => Value::Blob(value.to_vec()),
+    })
+}
+
+fn snapshot_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
+    match error {
+        rusqlite::Error::SqliteFailure(code, message) => EngineError::Sqlite {
+            operation,
+            code: Some(code.extended_code & 0xff),
+            extended_code: Some(code.extended_code),
+            message: message.unwrap_or_else(|| code.to_string()),
+        },
+        error => EngineError::Sqlite {
+            operation,
+            code: None,
+            extended_code: None,
+            message: error.to_string(),
+        },
+    }
+}
 
 pub(crate) struct SnapshotDatabase {
-    connection: Connection,
-    _database: libsql::Database,
+    connection: SnapshotConnection,
     source: PathBuf,
     source_state: Vec<FileState>,
     path: PathBuf,
@@ -30,12 +191,21 @@ pub(crate) struct SnapshotDatabase {
 }
 
 impl SnapshotDatabase {
-    pub(crate) fn connection(&self) -> &Connection {
+    pub(crate) fn connection(&self) -> &SnapshotConnection {
         &self.connection
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn attach_token(&self) -> io::Result<SnapshotAttachToken<'_>> {
+        let file_identity = crate::sessions::source::sqlite_generation_identity(&self.path)
+            .map_err(|_| io::Error::other("could not identify immutable SQLite snapshot"))?;
+        Ok(SnapshotAttachToken {
+            snapshot: self,
+            file_identity,
+        })
     }
 
     pub(crate) fn validate_source(&self) -> io::Result<()> {
@@ -55,9 +225,63 @@ impl SnapshotDatabase {
         }
     }
 
+    /// Writes this frozen logical snapshot to one standalone SQLite file.
+    ///
+    /// The backup reads only the already-captured immutable/copy connection;
+    /// it never opens the live source authority.
+    pub(crate) async fn backup_to(&self, destination: &Path) -> io::Result<()> {
+        let source = Arc::clone(&self.connection.connection);
+        let destination = destination.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let source = source
+                .lock()
+                .map_err(|_| io::Error::other("snapshot connection lock poisoned"))?;
+            let mut destination_connection = Connection::open_with_flags(
+                &destination,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            )
+            .map_err(io::Error::other)?;
+            let backup = rusqlite::backup::Backup::new(&source, &mut destination_connection)
+                .map_err(io::Error::other)?;
+            backup
+                .run_to_completion(128, Duration::from_millis(1), None)
+                .map_err(io::Error::other)
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("snapshot backup task failed: {error}")))?
+    }
+
     #[cfg(test)]
     pub(crate) fn copied_bytes(&self) -> u64 {
         self.copied_bytes
+    }
+}
+
+pub(crate) struct SnapshotAttachToken<'snapshot> {
+    snapshot: &'snapshot SnapshotDatabase,
+    file_identity: u64,
+}
+
+impl SnapshotAttachToken<'_> {
+    pub(crate) fn verified_path(&self) -> io::Result<&Path> {
+        self.snapshot.validate_source()?;
+        let current = crate::sessions::source::sqlite_generation_identity(&self.snapshot.path)
+            .map_err(|_| io::Error::other("could not re-identify immutable SQLite snapshot"))?;
+        if current != self.file_identity {
+            return Err(io::Error::other(
+                "immutable SQLite snapshot path was replaced before ATTACH",
+            ));
+        }
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = self.snapshot.path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            if PathBuf::from(sidecar).exists() {
+                return Err(io::Error::other(
+                    "immutable SQLite snapshot has live WAL/SHM sidecars",
+                ));
+            }
+        }
+        Ok(&self.snapshot.path)
     }
 }
 
@@ -364,33 +588,33 @@ async fn finish_one(
     if family_state(&prepared.source)? != prepared.source_state {
         return Err(changed_during_snapshot(&prepared.source));
     }
-    let (open_path, flags, scratch) = if matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-        (
-            PathBuf::from(immutable_uri(&prepared.source)?),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::from_bits_retain(SQLITE_OPEN_URI),
-            None,
-        )
-    } else {
-        (
-            prepared.target.clone(),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-            Some(scratch),
-        )
-    };
-    let database = crate::db::libsql_local::open_local_database_with_flags(&open_path, flags)
-        .await
-        .map_err(io::Error::other)?;
-    let connection = database.connect().map_err(io::Error::other)?;
+    let (open_path, attach_path, flags, scratch) =
+        if matches!(prepared.mode, SnapshotMode::DirectImmutable) {
+            let uri = PathBuf::from(immutable_uri(&prepared.source)?);
+            (
+                uri.clone(),
+                uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                None,
+            )
+        } else {
+            (
+                prepared.target.clone(),
+                PathBuf::from(read_only_uri(&prepared.target)?),
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+                Some(scratch),
+            )
+        };
+    let connection = SnapshotConnection::open(&open_path, flags).map_err(io::Error::other)?;
     connection
-        .execute_batch("PRAGMA query_only = ON;")
+        .execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;")
         .await
         .map_err(io::Error::other)?;
     let snapshot = SnapshotDatabase {
         connection,
-        _database: database,
         source: prepared.source,
         source_state: prepared.source_state,
-        path: open_path,
+        path: attach_path,
         _scratch: scratch,
         _authority: prepared.authority,
         #[cfg(test)]
@@ -612,6 +836,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 pub(crate) fn immutable_uri(path: &Path) -> io::Result<String> {
+    Ok(format!("{}&immutable=1", read_only_uri(path)?))
+}
+
+fn read_only_uri(path: &Path) -> io::Result<String> {
     let raw = path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -627,7 +855,7 @@ pub(crate) fn immutable_uri(path: &Path) -> io::Result<String> {
             other => encoded.push(other),
         }
     }
-    Ok(format!("file:{encoded}?immutable=1&mode=ro"))
+    Ok(format!("file:{encoded}?mode=ro"))
 }
 
 #[cfg(test)]
@@ -639,15 +867,13 @@ mod tests {
     async fn snapshot_reads_wal_rows_without_touching_source_bytes_or_mtime() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        let connection = database.connect().unwrap();
+        let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
                  CREATE TABLE durable(value TEXT NOT NULL);
                  INSERT INTO durable(value) VALUES ('wal-resident');",
             )
-            .await
             .unwrap();
         assert!(with_suffix(&path, "-wal").metadata().unwrap().len() > 0);
         let before = family_state(&path).unwrap();
@@ -675,17 +901,14 @@ mod tests {
     async fn checkpointed_database_reads_directly_without_copy_or_metadata_change() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        let connection = database.connect().unwrap();
+        let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE durable(value TEXT NOT NULL);
                  INSERT INTO durable(value) VALUES ('checkpointed');",
             )
-            .await
             .unwrap();
         drop(connection);
-        drop(database);
         let before = family_state(&path).unwrap();
         let snapshots = SnapshotSet::capture(std::slice::from_ref(&path))
             .await
@@ -710,19 +933,81 @@ mod tests {
         assert_eq!(family_state(&path).unwrap(), before);
     }
 
+    #[tokio::test]
+    async fn snapshot_executor_cannot_mutate_main_or_attached_inputs() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.db");
+        let other = temp.path().join("other.db");
+        Connection::open(&source)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('original');",
+            )
+            .unwrap();
+        let other_writer = Connection::open(&other).unwrap();
+        other_writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('original');",
+            )
+            .unwrap();
+        assert!(with_suffix(&other, "-wal").is_file());
+        let source_before = family_state(&source).unwrap();
+        let other_before = family_state(&other).unwrap();
+        let snapshots = SnapshotSet::capture(&[source.clone(), other.clone()])
+            .await
+            .unwrap();
+        let source_snapshot = snapshots.get(&source).unwrap();
+        let other_snapshot = snapshots.get(&other).unwrap();
+        source_snapshot
+            .connection()
+            .execute(
+                "ATTACH DATABASE ?1 AS other",
+                crate::db::engine::params![other_snapshot.path().to_string_lossy().to_string()],
+            )
+            .await
+            .unwrap();
+        source_snapshot
+            .connection()
+            .execute_batch("PRAGMA query_only = OFF;")
+            .await
+            .unwrap();
+
+        assert!(
+            source_snapshot
+                .connection()
+                .execute("INSERT INTO main.durable(value) VALUES ('changed')", ())
+                .await
+                .is_err()
+        );
+        assert!(
+            source_snapshot
+                .connection()
+                .execute("INSERT INTO other.durable(value) VALUES ('changed')", ())
+                .await
+                .is_err()
+        );
+        source_snapshot
+            .connection()
+            .execute("DETACH DATABASE other", ())
+            .await
+            .unwrap();
+        assert_eq!(family_state(&source).unwrap(), source_before);
+        assert_eq!(family_state(&other).unwrap(), other_before);
+        drop(other_writer);
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn checkpointed_snapshot_does_not_lock_source_against_copying() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        database
-            .connect()
+        Connection::open(&path)
             .unwrap()
             .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
-            .await
             .unwrap();
-        drop(database);
 
         let snapshots = SnapshotSet::capture(std::slice::from_ref(&path))
             .await
@@ -751,14 +1036,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");
         let scratch_root = temp.path().join("private-scratch");
-        let database = Builder::new_local(&path).build().await.unwrap();
-        database
-            .connect()
+        Connection::open(&path)
             .unwrap()
             .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
-            .await
             .unwrap();
-        drop(database);
 
         ensure_private_root(
             &scratch_root,

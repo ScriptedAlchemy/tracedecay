@@ -1,8 +1,9 @@
 // Rust guideline compliant 2025-10-17
+use crate::db::engine::{Error, Row, Value};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
-// Helper: map a libsql row to domain types (by column index)
+// Helper: map an engine row to domain types (by column index).
 // ---------------------------------------------------------------------------
 
 /// Maps a row from the `nodes` table to a `Node`.
@@ -13,7 +14,7 @@ use crate::types::*;
 /// branches(13), loops(14), returns(15), `max_nesting(16)`,
 /// `unsafe_blocks(17)`, `unchecked_calls(18)`, assertions(19), `updated_at(20)`,
 /// `attrs_start_line(21)`.
-pub(super) fn row_to_node(row: &libsql::Row) -> std::result::Result<Node, libsql::Error> {
+pub(super) fn row_to_node(row: &Row) -> std::result::Result<Node, Error> {
     let kind_str = get_string_lossy(row, 1)?;
     let vis_str = get_string_lossy(row, 11)?;
     let is_async_int = row.get::<i64>(12)?;
@@ -68,38 +69,35 @@ pub(super) fn row_to_node(row: &libsql::Row) -> std::result::Result<Node, libsql
 /// This prevents crashes when source files with non-UTF-8 encoding (e.g. Latin-1)
 /// have their signatures or docstrings stored in the database.
 ///
-/// libsql's `get::<String>()` panics on Blob values via `unreachable!()`, so we
+/// The underlying SQLite text decoder rejects blob values, so we
 /// must read as `Value` first and convert.
-fn get_string_lossy(row: &libsql::Row, idx: i32) -> std::result::Result<String, libsql::Error> {
-    let val = row.get::<libsql::Value>(idx)?;
+fn get_string_lossy(row: &Row, idx: i32) -> std::result::Result<String, Error> {
+    let val = row.get::<Value>(idx)?;
     match val {
-        libsql::Value::Text(s) => Ok(s),
-        libsql::Value::Blob(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-        libsql::Value::Null => Ok(String::new()),
-        libsql::Value::Integer(i) => Ok(i.to_string()),
-        libsql::Value::Real(f) => Ok(f.to_string()),
+        Value::Text(s) => Ok(s),
+        Value::Blob(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Value::Null => Ok(String::new()),
+        Value::Integer(i) => Ok(i.to_string()),
+        Value::Real(f) => Ok(f.to_string()),
     }
 }
 
 /// Like `get_string_lossy` but for nullable columns.
-fn get_opt_string_lossy(
-    row: &libsql::Row,
-    idx: i32,
-) -> std::result::Result<Option<String>, libsql::Error> {
-    let val = row.get::<libsql::Value>(idx)?;
+fn get_opt_string_lossy(row: &Row, idx: i32) -> std::result::Result<Option<String>, Error> {
+    let val = row.get::<Value>(idx)?;
     match val {
-        libsql::Value::Null => Ok(None),
-        libsql::Value::Text(s) => Ok(Some(s)),
-        libsql::Value::Blob(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
-        libsql::Value::Integer(i) => Ok(Some(i.to_string())),
-        libsql::Value::Real(f) => Ok(Some(f.to_string())),
+        Value::Null => Ok(None),
+        Value::Text(s) => Ok(Some(s)),
+        Value::Blob(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+        Value::Integer(i) => Ok(Some(i.to_string())),
+        Value::Real(f) => Ok(Some(f.to_string())),
     }
 }
 
 /// Maps a row from the `edges` table to an `Edge`.
 ///
 /// Expected column order: source(0), target(1), kind(2), line(3).
-pub(super) fn row_to_edge(row: &libsql::Row) -> std::result::Result<Edge, libsql::Error> {
+pub(super) fn row_to_edge(row: &Row) -> std::result::Result<Edge, Error> {
     let kind_str = row.get::<String>(2)?;
     let line = row.get::<Option<u32>>(3)?;
 
@@ -115,7 +113,7 @@ pub(super) fn row_to_edge(row: &libsql::Row) -> std::result::Result<Edge, libsql
 ///
 /// Expected column order: path(0), `content_hash(1)`, size(2), `modified_at(3)`,
 /// `indexed_at(4)`, `node_count(5)`.
-pub(super) fn row_to_file(row: &libsql::Row) -> std::result::Result<FileRecord, libsql::Error> {
+pub(super) fn row_to_file(row: &Row) -> std::result::Result<FileRecord, Error> {
     Ok(FileRecord {
         path: row.get::<String>(0)?,
         content_hash: row.get::<String>(1)?,
@@ -130,9 +128,7 @@ pub(super) fn row_to_file(row: &libsql::Row) -> std::result::Result<FileRecord, 
 ///
 /// Expected column order: `from_node_id(0)`, `reference_name(1)`,
 /// `reference_kind(2)`, line(3), col(4), `file_path(5)`.
-pub(super) fn row_to_unresolved_ref(
-    row: &libsql::Row,
-) -> std::result::Result<UnresolvedRef, libsql::Error> {
+pub(super) fn row_to_unresolved_ref(row: &Row) -> std::result::Result<UnresolvedRef, Error> {
     let kind_str = row.get::<String>(2)?;
 
     Ok(UnresolvedRef {

@@ -3,11 +3,10 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
-use libsql::Builder;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::migrate::inventory::{
     InventoryIntegrityMode, MigrationInventory, MigrationInventoryOptions, RegistryStatus,
     StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus, build_inventory,
@@ -89,13 +88,8 @@ fn make_project_store(root: &Path) {
 async fn make_healthy_project_store(root: &Path) {
     let data_dir = root.join(".tracedecay");
     fs::create_dir_all(&data_dir).unwrap();
-    let db = Builder::new_local(data_dir.join("tracedecay.db"))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute("CREATE TABLE health_check (id INTEGER PRIMARY KEY)", ())
-        .await
+    let conn = rusqlite::Connection::open(data_dir.join("tracedecay.db")).unwrap();
+    conn.execute("CREATE TABLE health_check (id INTEGER PRIMARY KEY)", [])
         .unwrap();
 }
 
@@ -514,11 +508,11 @@ async fn inventory_reports_global_db_metadata() {
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let db_path = root.join("global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(&root).await.unwrap();
     let project = root.join("registered");
     fs::create_dir_all(&project).unwrap();
     db.upsert(&project, 42).await;
-    assert!(db.ensure_token_count_cache().await);
+    assert!(db.ensure_token_count_cache_for_test().await);
     drop(db);
 
     let report = build_inventory_with_env_lock(MigrationInventoryOptions {
@@ -556,7 +550,7 @@ async fn inventory_discovers_registered_project_outside_scan_roots() {
     let registered = root.join("registered");
     fs::create_dir_all(&registered).unwrap();
     make_project_store(&registered);
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(&root).await.unwrap();
     db.upsert(&registered, 42).await;
     drop(db);
 
@@ -589,7 +583,7 @@ fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
     make_project_store(&discovered);
     make_project_store(&unrelated);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let db = GlobalDb::open_at(&db_path).await.unwrap();
+        let db = HostAdmissionTestRuntimeV1::profile(&root).await.unwrap();
         db.upsert(&discovered, 42).await;
         db.upsert(&unrelated, 99).await;
     });
@@ -640,7 +634,7 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
     make_project_store(&discovered);
     make_project_store(&unrelated);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let db = GlobalDb::open_at(&db_path).await.unwrap();
+        let db = HostAdmissionTestRuntimeV1::profile(&root).await.unwrap();
         db.upsert(&discovered, 42).await;
         db.upsert(&unrelated, 99).await;
     });
@@ -678,7 +672,7 @@ async fn inventory_reports_registered_project_with_missing_local_store() {
     let db_path = root.join("global.db");
     let registered = root.join("registered_missing");
     fs::create_dir_all(&registered).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(&root).await.unwrap();
     db.upsert(&registered, 42).await;
     drop(db);
 

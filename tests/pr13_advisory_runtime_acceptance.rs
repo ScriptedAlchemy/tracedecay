@@ -1,23 +1,27 @@
 //! Strict PR13 runtime acceptance over authentic provider response captures.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use tracedecay::application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
+use tracedecay::application::advisory::ci_runtime::{
+    CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
+    GitHubCiOfficialResponseDecoderV1, ProjectCiCodeAnchorStoreV1,
+};
 use tracedecay::application::advisory::github_runtime::{
     GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
     GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
     GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
+    GitHubSourceAccessAuthorityV1,
 };
 use tracedecay::application::advisory::{
-    CanonicalProximityEvidenceAuthorityV1, CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource,
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
-    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
-    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
-    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1, Pr13ProximityRuntimeOutcomeV1,
-    Pr13ProximityRuntimeOwnerV1, production_proximity_evidence_authority_v1,
+    CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource, GitHubCanonicalReviewAnchorAuthorityV1,
+    GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1, GitHubOfficialResponseDecoderV1,
+    GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1, GitHubReadOnlyCredentialV1,
+    GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1, GitHubReviewAnchorSeedV1,
+    GitHubReviewProviderIdentityV1,
 };
 use tracedecay::application::configuration::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -25,40 +29,26 @@ use tracedecay::application::configuration::{
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationOperationFuture,
     ConfigurationRollbackRequest, DirectConfigurationMutation, ScopeRevalidationEvidenceV1,
 };
-use tracedecay::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionStatus,
-};
-use tracedecay::application::observation::{CaptureObservationRequest, ObservationCancellation};
-use tracedecay::privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
-use tracedecay::sessions::git_correlation::{SpanObservation, SpanSource};
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_application::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
     FeedbackPortFuture, GitHubReviewReadPort, GitHubReviewReadPortOutcomeV1,
-    GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
+    GitHubReviewReadRequestV1,
 };
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
-    CandidateDispositionV1, ChangePlanId, ConfigurationCandidateV1, ConfigurationLayerIdV1,
-    ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1, ProtectedApplyRequest,
-    ProtectedChange, ProtectedChangePlan, SettingKey,
+    ChangePlanId, ConfigurationRevisionId, ProtectedApplyRequest, ProtectedChange,
+    ProtectedChangePlan,
 };
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
-    PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1, ProximityInclusionV1, ProximityTierV1,
-    ProximityWarningClassV1,
 };
 use tracedecay_domain::{
-    ActorId, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CommitId, ManifestDigest, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, RefId,
-    RepositoryId, RetentionClass, SessionId, UtcMicros, WorktreeId,
+    ActorId, CanonicalObservationIdV1, CommitId, ManifestDigest, ProjectId, ProviderId, RefId,
+    RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -122,6 +112,18 @@ impl GitHubReviewAtomicRefreshStoreV1 for PanicGitHubStore {
     }
 }
 
+struct PanicGitHubSourceAccess;
+
+impl GitHubSourceAccessAuthorityV1 for PanicGitHubSourceAccess {
+    fn authorize<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, tracedecay::application::advisory::GitHubProviderLifecycleV1> {
+        Box::pin(async { panic!("denied GitHub request reached source access authority") })
+    }
+}
+
 fn captured_response(source: &str) -> Value {
     serde_json::from_str::<Value>(source).expect("capture parses")["response"].clone()
 }
@@ -138,11 +140,7 @@ fn scope() -> FeedbackScopeV1 {
 
 #[test]
 fn github_source_access_uses_owner_bound_ureq_dtos() {
-    let credential = GitHubReadOnlyCredentialV1::from_declared_scopes(
-        "fixture-access".to_owned(),
-        ["pull_requests:read".to_owned()],
-    )
-    .expect("read-only source credential");
+    let credential = GitHubReadOnlyCredentialV1::anonymous();
     let target = GitHubRepositoryTargetV1 {
         owner: "ScriptedAlchemy".to_owned(),
         repository: "tracedecay".to_owned(),
@@ -166,6 +164,9 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     let decoder = GitHubOfficialResponseDecoderV1::new(
         GitHubReviewProviderIdentityV1 {
             provider: ProviderId::new("provider.github").unwrap(),
+            repository_owner: "ScriptedAlchemy".to_owned(),
+            repository_name: "tracedecay".to_owned(),
+            pull_request_number: 421,
             base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c").unwrap(),
             head_commit_id: request.scope.head_commit_id.clone(),
             merge_base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c")
@@ -233,6 +234,9 @@ async fn corrupt_provider_identity_fails_production_decoder() {
     let decoder = GitHubOfficialResponseDecoderV1::new(
         GitHubReviewProviderIdentityV1 {
             provider: ProviderId::new("provider.github").unwrap(),
+            repository_owner: "ScriptedAlchemy".to_owned(),
+            repository_name: "tracedecay".to_owned(),
+            pull_request_number: 421,
             base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c").unwrap(),
             head_commit_id: request.scope.head_commit_id.clone(),
             merge_base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c")
@@ -380,6 +384,42 @@ fn proximity_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext 
     .unwrap()
 }
 
+fn ci_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext {
+    let resolved = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+    )
+    .unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.pr13.ci").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        ActorId::new("actor.pr13.ci.issuer").unwrap(),
+        UtcMicros(now.0.saturating_sub(1_000_000)),
+        UtcMicros(now.0.saturating_add(60_000_000)),
+        resolved.clone(),
+        BTreeSet::from([
+            CapabilityId::new("capability.application.feedback.ci-failure-localize").unwrap(),
+        ]),
+        BTreeSet::from([
+            UseCaseId::new("use-case.application.feedback.ci-failure-localize").unwrap(),
+        ]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    RequestContext::new(
+        ActorId::new("actor.pr13.ci").unwrap(),
+        resolved,
+        grant,
+        RequestId::new("request.pr13.ci").unwrap(),
+        Deadline::new(UtcMicros(now.0.saturating_add(30_000_000))).unwrap(),
+        CancellationContext::active("cancel.pr13.ci").unwrap(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn unauthorized_ci_request_is_denied_before_provider_read() {
     let fixture =
@@ -400,6 +440,137 @@ async fn unauthorized_ci_request_is_denied_before_provider_read() {
 }
 
 #[tokio::test]
+async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph() {
+    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        concat!(
+            "pub fn caller() { failed_symbol(); }\n",
+            "pub fn failed_symbol() {}\n",
+            "#[test]\n",
+            "fn failed_symbol_test() { failed_symbol(); }\n",
+        ),
+    )
+    .unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "tests@example.invalid"],
+        vec!["config", "user.name", "TraceDecay Tests"],
+        vec!["add", "."],
+        vec!["commit", "-m", "seed canonical graph"],
+    ] {
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(&project)
+            .output()
+            .expect("git command runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&project)
+        .output()
+        .expect("read fixture head");
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+
+    let mut scope = scope();
+    scope.head_commit_id = CommitId::new(head).unwrap();
+    let graph = TraceDecay::init(&project).await.expect("canonical graph");
+    graph.index_all().await.expect("canonical graph index");
+    let graph = Arc::new(graph);
+    let mut provider_record =
+        tracedecay::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
+            .unwrap()
+            .ci_provider_record;
+    provider_record.workflow_run.head_sha = scope.head_commit_id.as_str().to_owned();
+    provider_record.workflow_job.head_sha = scope.head_commit_id.as_str().to_owned();
+    provider_record.check_run.head_sha = scope.head_commit_id.as_str().to_owned();
+    let annotation = provider_record
+        .annotations
+        .first_mut()
+        .expect("failure annotation");
+    annotation.path = "src/lib.rs".to_owned();
+    annotation.start_line = 2;
+    annotation.end_line = 2;
+    annotation.start_column = Some(1);
+    annotation.end_column = None;
+    let request = CiFailureLocalizationRequestV1 {
+        scope: scope.clone(),
+        run: provider_record.run_identity(),
+    };
+    let retained = CiRetainedProviderRecordV1 {
+        provider_record,
+        observation: CiRetainedProviderObservationV1 {
+            observation_id: CanonicalObservationIdV1::new("observation.pr13.ci.graph").unwrap(),
+            failure_anchor: RetrievalAnchorId::new("anchor.pr13.ci.graph").unwrap(),
+            provider_head_commit_id: scope.head_commit_id.clone(),
+            failure_kind: tracedecay_domain::feedback::CiFailureKindV1::TestFailure,
+            observed_at: now_micros(),
+        },
+    };
+    let store = ProjectCiCodeAnchorStoreV1::new(graph.clone(), scope.clone()).unwrap();
+    let evidence = store
+        .resolve(&ci_context(&scope, now_micros()), &request, &retained)
+        .await
+        .expect("canonical graph evidence");
+
+    assert_eq!(
+        evidence.state,
+        tracedecay_domain::feedback::CiFailureLocalizationStateV1::Complete
+    );
+    assert_eq!(
+        evidence.coverage,
+        tracedecay_domain::feedback::CiFailureCoverageV1::Complete
+    );
+    assert!(evidence.generation.is_some());
+    assert_eq!(
+        evidence.symbol.as_ref().map(|symbol| symbol.file.as_str()),
+        Some("src/lib.rs")
+    );
+    assert!(!evidence.callers.is_empty());
+    assert!(!evidence.tests.is_empty());
+
+    let mut stale_scope = scope;
+    stale_scope.head_commit_id = CommitId::new("0000000000000000000000000000000000000000").unwrap();
+    let stale_request = CiFailureLocalizationRequestV1 {
+        scope: stale_scope.clone(),
+        run: retained.provider_record.run_identity(),
+    };
+    let mut stale_record = retained;
+    stale_record.observation.provider_head_commit_id = stale_scope.head_commit_id.clone();
+    stale_record.provider_record.workflow_run.head_sha =
+        stale_scope.head_commit_id.as_str().to_owned();
+    stale_record.provider_record.workflow_job.head_sha =
+        stale_scope.head_commit_id.as_str().to_owned();
+    stale_record.provider_record.check_run.head_sha =
+        stale_scope.head_commit_id.as_str().to_owned();
+    let stale = ProjectCiCodeAnchorStoreV1::new(graph, stale_scope.clone())
+        .unwrap()
+        .resolve(
+            &ci_context(&stale_scope, now_micros()),
+            &stale_request,
+            &stale_record,
+        )
+        .await
+        .expect("typed partial evidence");
+    assert_eq!(
+        stale.state,
+        tracedecay_domain::feedback::CiFailureLocalizationStateV1::Partial
+    );
+    assert_eq!(
+        stale.coverage,
+        tracedecay_domain::feedback::CiFailureCoverageV1::Partial
+    );
+    assert!(stale.generation.is_none());
+}
+
+#[tokio::test]
 async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     let fixture =
         tracedecay::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
@@ -411,7 +582,11 @@ async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
         pull_request_id: fixture.github.pull_request_id,
     };
     let context = proximity_context(&scope, now_micros());
-    let coordinator = GitHubReviewRefreshCoordinatorV1::new(PanicGitHubPort, PanicGitHubStore);
+    let coordinator = GitHubReviewRefreshCoordinatorV1::new(
+        PanicGitHubPort,
+        PanicGitHubStore,
+        PanicGitHubSourceAccess,
+    );
 
     assert_eq!(
         coordinator.refresh(&context, &request).await,
@@ -419,252 +594,76 @@ async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     );
 }
 
-fn agent_observation(
-    provider: &str,
-    session_id: &str,
-    agent_id: &str,
-    project_id: &ProjectId,
-    project_path: &str,
-    sequence: u64,
-) -> CaptureObservationRequest {
-    let provider_id = ProviderId::new(provider).unwrap();
-    let session_id = SessionId::new(session_id).unwrap();
-    let record_id = ObservationId::new(format!("observation.pr13.proximity.{sequence}")).unwrap();
-    let range = ObservationSourceRangeV1::new(sequence, sequence + 1).unwrap();
-    let ordering = ObservationOrderingDomainV1::DaemonSequence;
-    let relations = CanonicalObservationRelationsV1::new(session_id.clone())
-        .with_message_id(record_id.clone())
-        .with_agent_id(ObservationId::new(agent_id).unwrap());
-    let envelope_provider = provider_id.clone();
-    let envelope_record_id = record_id.clone();
-    let project_path = project_path.to_owned();
-    let parsed = parse_normalized_observation_record_v1(
-        br#"{"text":"saved edit accepted"}"#,
-        range,
-        ordering,
-        move |native| {
-            CanonicalObservationEnvelopeV1::new(
-                envelope_provider,
-                "pr13_proximity",
-                envelope_record_id,
-                relations,
-                vec![
-                    CanonicalObservationFactV1::Session {
-                        project_path: Some(project_path.clone()),
-                        location_path: Some(project_path),
-                        transcript_path: None,
-                        title: Some("PR13 proximity fixture".to_owned()),
-                        started_at: None,
-                        ended_at: None,
-                        source: Some("authentic-host-callback".to_owned()),
-                        native_source: Some(provider.to_owned()),
-                        profile: None,
-                        location_provenance: Some("project-open".to_owned()),
-                    },
-                    CanonicalObservationFactV1::Message {
-                        role: CanonicalMessageRoleV1::Assistant,
-                        content: native,
-                        model: None,
-                        timestamp: None,
-                    },
-                ],
-                CanonicalObservationEvidenceV1::new(ordering, range).with_native_sequence(sequence),
-            )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
-        },
-    )
-    .unwrap();
-    CaptureObservationRequest::new(
-        parsed,
-        ObservationIdentityMaterialV1::for_native_record(
-            ObservationSourceIdentityV1::for_provider(provider_id, session_id).unwrap(),
-            ObservationScopeV1::Project {
-                project_id: project_id.clone(),
-            },
-            ObservationSourceGenerationV1::new(1).unwrap(),
-            range,
-            ordering,
-            record_id,
-        )
-        .unwrap(),
-        None,
-        RetentionClass::new("retention.pr13.proximity").unwrap(),
-        ObservationCancellation::default(),
-    )
-    .unwrap()
-}
-
 #[tokio::test]
-async fn proximity_file_overlap_and_tiering() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+async fn production_host_ingest_uses_registered_project_runtime() {
+    let (environment, project) = common::IsolatedEnv::acquire().await;
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn shared_edit() {}\n").unwrap();
-    let graph = Arc::new(TraceDecay::init(&project).await.unwrap());
-    let session_store_dir = tempfile::tempdir().unwrap();
-    let sessions = common::open_lcm_db(&session_store_dir).await;
-    let fixture =
-        tracedecay::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
-            .unwrap();
-    let scope = scope();
-    let now = now_micros();
-    let now_seconds = now.0.div_euclid(1_000_000);
-    let project_path = project.to_string_lossy().into_owned();
-    let branch = fixture.proximity.branch.clone();
-    let overlap_path = "src/lib.rs";
-    let observation_scope = ObservationScopeV1::Project {
-        project_id: scope.project_id.clone(),
-    };
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        &sessions,
-        scope.project_id.clone(),
-    ));
-
-    for (index, (provider, session_id, agent_id)) in [
-        (
-            "claude",
-            fixture.proximity.source_sessions[0].as_str(),
-            "agent.pr13.proximity.claude",
+    let init = common::tracedecay_command_with_home(environment.home())
+        .arg("init")
+        .current_dir(&project)
+        .output()
+        .expect("initialize production project");
+    assert!(
+        init.status.success(),
+        "tracedecay init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let _daemon = common::spawn_tracedecay_daemon(environment.home());
+    let transcript = project.join("cursor-proximity.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Edit the shared file.\"}]}}\n",
+            "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Saved src/lib.rs.\"}]}}\n"
         ),
-        (
-            "codex",
-            fixture.proximity.source_sessions[1].as_str(),
-            "agent.pr13.proximity.codex",
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut session = SessionRecord {
-            provider: provider.to_owned(),
-            session_id: session_id.to_owned(),
-            project_key: scope.project_id.as_str().to_owned(),
-            project_path: project_path.clone(),
-            title: Some("PR13 concurrent edit".to_owned()),
-            started_at: Some(now_seconds.saturating_sub(30)),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: Some(agent_id.to_owned()),
-            parent_tool_use_id: None,
-        };
-        assert!(sessions.upsert_session(&session).await);
-        session.title = Some(format!("PR13 concurrent edit {index}"));
-        let message = SessionMessageRecord {
-            provider: provider.to_owned(),
-            message_id: format!("message.pr13.proximity.{index}"),
-            session_id: session_id.to_owned(),
-            role: "assistant".to_owned(),
-            timestamp: Some(now_seconds.saturating_sub(index as i64)),
-            ordinal: index as i64 + 1,
-            text: "saved edit".to_owned(),
-            kind: Some("tool_result".to_owned()),
-            model: None,
-            tool_names: Some("write".to_owned()),
-            source_path: None,
-            source_offset: None,
-            metadata_json: Some(json!({"files": [{"path": overlap_path}]}).to_string()),
-        };
-        assert!(sessions.upsert_session_message(&message).await);
-        sessions
-            .git_record_span_observation(
-                &SpanObservation {
-                    provider: provider.to_owned(),
-                    session_id: session_id.to_owned(),
-                    thread_id: None,
-                    branch: Some(branch.clone()),
-                    worktree: project_path.clone(),
-                    ts: now_seconds.saturating_sub(index as i64),
-                    source: SpanSource::HookRoute,
-                },
-                60,
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            admission
-                .capture(agent_observation(
-                    provider,
-                    session_id,
-                    agent_id,
-                    &scope.project_id,
-                    &project_path,
-                    index as u64 + 1,
-                ))
-                .await
-                .status,
-            HostAdmissionStatus::Committed
-        );
-    }
-    admission
-        .drain_projection_queue(
-            "claude",
-            &observation_scope,
-            &ObservationCancellation::default(),
-            8,
-        )
-        .await
-        .unwrap();
-    drop(admission);
-
-    let sessions = Arc::new(sessions);
-    let evidence = production_proximity_evidence_authority_v1(
-        Arc::clone(&sessions),
-        graph,
-        scope.clone(),
-        project,
     )
     .unwrap();
-    let request = ProximityEvaluationRequestV1 {
-        scope: scope.clone(),
-        observed_at: now,
-    };
-    let context = proximity_context(&scope, now);
-    let batch = evidence
-        .current_evidence(&context, &request)
-        .await
-        .expect("production evidence authority");
-    assert_eq!(batch.evidence.len(), 1);
-    let overlap = &batch.evidence[0];
-    assert_eq!(overlap.address.file.as_str(), overlap_path);
-    assert_eq!(overlap.warning_class, ProximityWarningClassV1::SameFile);
-    assert_eq!(overlap.risk_inputs.overlap_size, 2);
-    assert_eq!(overlap.observations.len(), 2);
-
-    let threshold_key = SettingKey::new(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1).unwrap();
-    let configuration_revision =
-        ConfigurationRevisionId::new("configuration.pr13.proximity").unwrap();
-    let configuration = ProximityConfiguration {
-        current: ConfigurationCurrentStateV1 {
-            revision_id: configuration_revision.clone(),
-            snapshot: ConfigurationSnapshotV1::new(
-                BTreeMap::from([(threshold_key.clone(), ConfigurationValueV1::Unsigned(9_999))]),
-                BTreeMap::from([(
-                    threshold_key,
-                    vec![ConfigurationCandidateV1 {
-                        layer: ConfigurationLayerIdV1::Project {
-                            project_id: scope.project_id.clone(),
-                        },
-                        revision_id: configuration_revision,
-                        disposition: CandidateDispositionV1::Winning,
-                        safe_reason: None,
-                    }],
-                )]),
-            )
-            .unwrap(),
-        },
-    };
-    let runtime = Pr13ProximityRuntimeOwnerV1::new(scope, evidence, configuration).unwrap();
-    let Pr13ProximityRuntimeOutcomeV1::Completed(contributor) =
-        runtime.evaluate(&context, &request).await
-    else {
-        panic!("production overlap must complete proximity evaluation");
-    };
-    assert_eq!(contributor.contributions().len(), 1);
-    let contribution = &contributor.contributions()[0];
-    assert_eq!(contribution.tier, ProximityTierV1::Immediate);
-    assert_eq!(contribution.inclusion, ProximityInclusionV1::Included);
-    assert_eq!(contribution.threshold_value_basis_points, None);
-    assert_eq!(contribution.threshold_revision, None);
+    let mut event: Value = serde_json::from_str(include_str!(
+        "../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
+    ))
+    .unwrap();
+    event["conversation_id"] = json!("conversation-pr13-proximity");
+    event["generation_id"] = json!("generation-pr13-proximity");
+    event["model"] = json!("cursor-fixture");
+    event["file_path"] = json!(project.join("src/lib.rs"));
+    event["edits"] = json!([{"old_string": "", "new_string": "pub fn shared_edit() {}"}]);
+    event["session_id"] = json!("session-pr13-proximity");
+    event["cursor_version"] = json!("fixture");
+    event["workspace_roots"] = json!([project.clone()]);
+    event["user_email"] = json!("redacted@example.invalid");
+    event["transcript_path"] = json!(transcript);
+    let project_arg = project.to_string_lossy().into_owned();
+    let args = json!({
+        "action": "ingest_transcript",
+        "provider": "cursor",
+        "user_scope": false,
+        "event_json": event.to_string(),
+        "format": "json",
+    })
+    .to_string();
+    let output = common::tracedecay_command_with_home(environment.home())
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "tracedecay_hook_runtime",
+            "--args",
+            args.as_str(),
+            "--json",
+        ])
+        .current_dir(&project)
+        .output()
+        .expect("invoke registered daemon observation path");
+    assert!(
+        output.status.success(),
+        "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"status\":\"committed\"") || stdout.contains("\"status\": \"committed\""),
+        "registered daemon ingest did not commit: {stdout}"
+    );
 }

@@ -6,8 +6,8 @@ use crate::common::sample_node;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::branch_meta::BranchMeta;
-use tracedecay::global_db::GlobalDb;
 use tracedecay::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::migrate::inventory::{
     MigrationInventory, RegistryStatus, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
@@ -582,6 +582,51 @@ async fn verify_manifest_rejects_sqlite_target_without_verified_snapshot() {
     );
 }
 
+#[test]
+fn verify_manifest_rejects_corrupt_verified_sqlite_backup() {
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let data_dir = root.join("repo/.tracedecay");
+    let source_db = data_dir.join("tracedecay.db");
+    let profile_root = root.join("profile");
+    let backup_db = profile_root.join("migration-backups/mig_corrupt/tracedecay.db");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::create_dir_all(backup_db.parent().unwrap()).unwrap();
+    let connection = rusqlite::Connection::open(&source_db).unwrap();
+    connection
+        .execute_batch("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT);")
+        .unwrap();
+    drop(connection);
+    fs::copy(&source_db, &backup_db).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&backup_db)
+        .unwrap()
+        .set_len(100)
+        .unwrap();
+    let protocol = MigrationProtocol::for_manifest(root.join("manifest.json"), "mig_corrupt");
+    let mut manifest = manifest_for(protocol, "mig_corrupt");
+    manifest.source.data_dir = Some(data_dir);
+    manifest.destination.profile_root = Some(profile_root);
+    manifest.backup_artifacts.push(MigrationArtifact {
+        kind: "graph_db".to_string(),
+        source_path: source_db,
+        target_path: Some(backup_db),
+        state: ArtifactState::Verified,
+    });
+
+    let report = verify_migration_manifest(&manifest);
+
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("quick_check")),
+        "{:?}",
+        report.issues
+    );
+}
+
 #[tokio::test]
 async fn apply_migration_manifest_stops_at_verified_before_cutover() {
     let dir = TempDir::new().unwrap();
@@ -1099,11 +1144,7 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
     let sessions_db_path = data_dir.join("sessions.db");
     fs::create_dir_all(&data_dir).unwrap();
 
-    let graph_database = libsql::Builder::new_local(&graph_db_path)
-        .build()
-        .await
-        .unwrap();
-    let graph_connection = graph_database.connect().unwrap();
+    let graph_connection = rusqlite::Connection::open(&graph_db_path).unwrap();
     graph_connection
         .execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -1115,13 +1156,8 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
                  SELECT 1 UNION ALL SELECT value + 1 FROM values_to_insert WHERE value < 50000
              ) INSERT INTO scale_probe SELECT value FROM values_to_insert;",
         )
-        .await
         .unwrap();
-    let sessions_database = libsql::Builder::new_local(&sessions_db_path)
-        .build()
-        .await
-        .unwrap();
-    let sessions_connection = sessions_database.connect().unwrap();
+    let sessions_connection = rusqlite::Connection::open(&sessions_db_path).unwrap();
     sessions_connection
         .execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -1129,7 +1165,6 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
              CREATE TABLE wal_probe (value TEXT NOT NULL);
              INSERT INTO wal_probe VALUES ('sessions-wal-row');",
         )
-        .await
         .unwrap();
     assert!(sqlite_sidecar(&graph_db_path, "-wal").is_file());
     assert!(sqlite_sidecar(&graph_db_path, "-shm").is_file());
@@ -1203,6 +1238,12 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
     .await
     .expect("SQLite migration regressed beyond the bounded snapshot/hash path")
     .unwrap();
+    assert!(
+        !destination_profile
+            .join("migration-backups/mig_wal_family/.sqlite-snapshot-scratch")
+            .exists(),
+        "migration SQLite snapshot scratch must not outlive retained snapshots"
+    );
 
     let target_root = destination_profile.join("projects/proj_123");
     let backup_root = destination_profile.join("migration-backups/mig_wal_family");
@@ -1213,17 +1254,15 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
             assert!(!root.join(format!("{database}-shm")).exists());
         }
     }
-    let target_graph = libsql::Builder::new_local(target_root.join("tracedecay.db"))
-        .build()
-        .await
-        .unwrap();
-    let target_graph = target_graph.connect().unwrap();
-    let mut rows = target_graph
-        .query("SELECT COUNT(*) FROM scale_probe", ())
-        .await
-        .unwrap();
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        rusqlite::Connection::open_with_flags(
+            target_root.join("tracedecay.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM scale_probe", (), |row| row
+            .get::<_, i64>(0))
+        .unwrap(),
         50_000
     );
     for root in [&target_root, &backup_root] {
@@ -1231,20 +1270,21 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
             ("tracedecay.db", "graph-wal-row"),
             ("sessions.db", "sessions-wal-row"),
         ] {
-            let database = libsql::Builder::new_local(root.join(database))
-                .build()
-                .await
+            let connection = rusqlite::Connection::open_with_flags(
+                root.join(database),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let quick_check = connection
+                .query_row("PRAGMA quick_check", (), |row| row.get::<_, String>(0))
                 .unwrap();
-            let connection = database.connect().unwrap();
-            let mut rows = connection.query("PRAGMA quick_check", ()).await.unwrap();
-            let row = rows.next().await.unwrap().unwrap();
-            assert_eq!(row.get::<String>(0).unwrap(), "ok");
-            let mut rows = connection
-                .query("SELECT value FROM wal_probe", ())
-                .await
+            assert_eq!(quick_check, "ok");
+            let value = connection
+                .query_row("SELECT value FROM wal_probe", (), |row| {
+                    row.get::<_, String>(0)
+                })
                 .unwrap();
-            let row = rows.next().await.unwrap().unwrap();
-            assert_eq!(row.get::<String>(0).unwrap(), expected);
+            assert_eq!(value, expected);
         }
     }
 
@@ -1269,6 +1309,12 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
     .await
     .expect("crash recovery regressed beyond the bounded verify/hash path")
     .unwrap();
+    assert!(
+        !destination_profile
+            .join("migration-backups/mig_wal_family/.sqlite-snapshot-scratch")
+            .exists(),
+        "resumed migration SQLite snapshot scratch must be revoked"
+    );
     assert!(
         manifest
             .artifacts
@@ -1426,7 +1472,7 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let resolution = runtime.block_on(async {
-        GlobalDb::open_at(&profile_global_db_path)
+        HostAdmissionTestRuntimeV1::profile(&profile_root)
             .await
             .unwrap()
             .resolve_project_store_by_alias(&project)

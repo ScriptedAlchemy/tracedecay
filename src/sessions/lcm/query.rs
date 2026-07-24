@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use libsql::{Connection, Value, params};
-
-use crate::tracedecay::current_timestamp;
+use crate::{
+    db::engine::{QueryExecutor, Value, params},
+    tracedecay::current_timestamp,
+};
 
 mod describe;
 mod expand;
@@ -72,7 +73,7 @@ fn rerank_fetch_limit(limit: usize) -> usize {
 }
 
 pub(crate) async fn expand_query(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: LcmExpandQueryRequest,
 ) -> Result<LcmExpandQueryResponse, LcmError> {
     let max_results = clamp_limit(request.max_results);
@@ -224,7 +225,7 @@ pub(crate) async fn expand_query(
 }
 
 pub(crate) async fn describe(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: LcmDescribeRequest,
 ) -> Result<LcmDescribeResponse, LcmError> {
     let provider = request.provider.as_str();
@@ -274,8 +275,62 @@ pub(crate) async fn describe(
     })
 }
 
+pub(crate) async fn describe_metadata(
+    conn: &(impl QueryExecutor + ?Sized),
+    request: LcmDescribeRequest,
+) -> Result<LcmDescribeResponse, LcmError> {
+    let provider = request.provider.as_str();
+    let session_id = request.session_id.as_str();
+    let raw_message_count = count_raw_messages(conn, provider, Some(session_id)).await?;
+    let summary_node_count = count_summary_nodes(conn, provider, Some(session_id)).await?;
+    let external_payload_count = count_external_payloads(conn, provider, Some(session_id)).await?;
+    let (first_store_id, last_store_id) = raw_store_bounds(conn, provider, session_id).await?;
+    let (target, raw_messages, summary_nodes, summary_node, external_payload) = match request.target
+    {
+        LcmDescribeTarget::Session => (
+            "session".to_string(),
+            raw_message_overviews_metadata(conn, provider, session_id).await?,
+            summary_overviews_metadata(conn, provider, session_id).await?,
+            None,
+            None,
+        ),
+        LcmDescribeTarget::SummaryNode { node_id } => (
+            "summary_node".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Some(describe_summary_node(conn, provider, session_id, &node_id).await?),
+            None,
+        ),
+        LcmDescribeTarget::ExternalPayload { payload_ref } => (
+            "external_payload".to_string(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(
+                describe_external_payload_metadata(conn, provider, session_id, &payload_ref)
+                    .await?,
+            ),
+        ),
+    };
+
+    Ok(LcmDescribeResponse {
+        target,
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        raw_message_count,
+        summary_node_count,
+        external_payload_count,
+        first_store_id,
+        last_store_id,
+        raw_messages,
+        summary_nodes,
+        summary_node,
+        external_payload,
+    })
+}
+
 pub(crate) async fn status(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -295,17 +350,23 @@ pub(crate) async fn status(
     status_for_provider(conn, storage_root, provider, session_id, deep, gc_config).await
 }
 
-async fn lcm_table_exists(conn: &Connection, table_name: &str) -> Result<bool, LcmError> {
-    Ok(util::fetch_i64(
-        conn,
-        "SELECT COUNT(*)
-         FROM sqlite_master
-         WHERE type = 'table' AND name = ?1",
-        params![table_name],
-        "LCM table existence query returned no rows",
-    )
-    .await?
-        > 0)
+async fn lcm_table_exists(
+    conn: &(impl QueryExecutor + ?Sized),
+    table_name: &str,
+) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'table' AND name = ?1",
+            params![table_name],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("LCM table existence query returned no rows".to_string()))?;
+    Ok(row.get::<i64>(0)? > 0)
 }
 
 fn slice_content_owned(
@@ -580,7 +641,7 @@ impl ExpandQueryAssembler {
 }
 
 async fn raw_store_bounds(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
 ) -> Result<(Option<i64>, Option<i64>), LcmError> {
@@ -599,7 +660,7 @@ async fn raw_store_bounds(
 }
 
 async fn count_raw_messages(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -607,7 +668,7 @@ async fn count_raw_messages(
 }
 
 async fn count_summary_nodes(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -615,7 +676,7 @@ async fn count_summary_nodes(
 }
 
 async fn count_external_payloads(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {

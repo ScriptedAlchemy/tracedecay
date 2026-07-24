@@ -199,39 +199,40 @@ fn dry_run_canonical_component_set(
     home: &Path,
     lifecycle_root: &Path,
 ) -> tracedecay::errors::Result<()> {
-    for component in &component_set.component_set.components {
-        let request = tracedecay::agents::host_bundle_v2::HostBundleExecutionRequestV1 {
-            lifecycle: tracedecay::agents::host_bundle_v2::HostBundleLifecycleRequestV1 {
-                operation: lifecycle_operation(operation),
-                expected_host: component_set.component_set.host,
-                expected_component: component.manifest.component,
-                explicit_confirmation: options.yes,
-                hermes_profile_bindings: u8::from(
-                    component_set.component_set.host
-                        == tracedecay::agents::host_bundle_v2::HostKindV1::Hermes,
-                ),
-            },
-            operation_id: [1; 16],
-        };
-        let preview = tracedecay::agents::host_bundle_v2::dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+    let request = component_set_request(component_set, operation, options.yes)?;
+    let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        agent_id,
+        home,
+        lifecycle_root,
+        request.lifecycle.operation,
+    )?;
+    let preview = tracedecay::agents::host_bundle_v2::dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
             home,
             lifecycle_root,
-            &component.manifest,
+            &component_set.component_set,
             &request,
             component_set,
-            &[],
+            &mut registration,
         )
         .map_err(host_bundle_error)?;
+    eprintln!(
+        "{} {:?}: plan={}, registration_base={}, registration_current={}, artifacts={}, confirmation={}",
+        agent_id,
+        request.lifecycle.operation,
+        hex::encode(preview.plan_digest),
+        hex::encode(preview.base_registration_revision),
+        hex::encode(preview.current_registration_revision),
+        hex::encode(preview.artifact_state_revision),
+        preview.confirmation_required
+    );
+    for plan in preview.component_plans {
         eprintln!(
-            "{} {:?} {:?}: {} mutation(s), rollback={}, confirmation={}",
-            agent_id,
-            request.lifecycle.operation,
-            component.manifest.component,
-            preview.plan.mutations.len(),
-            preview.plan.rollback_required,
-            preview.confirmation_required
+            "  {:?}: {} mutation(s), rollback={}",
+            plan.component,
+            plan.mutations.len(),
+            plan.rollback_required
         );
-        for mutation in preview.plan.mutations {
+        for mutation in plan.mutations {
             eprintln!("  {:?} {}", mutation.action, mutation.relative_path);
         }
     }
@@ -265,10 +266,19 @@ fn apply_canonical_component_set(
         lifecycle_root,
         request.lifecycle.operation,
     )?;
-    let receipt = transaction
-        .execute(
+    let preview = transaction
+        .preview(
             &component_set.component_set,
             &request,
+            component_set,
+            &mut registration,
+        )
+        .map_err(host_bundle_error)?;
+    let receipt = transaction
+        .execute_confirmed(
+            &component_set.component_set,
+            &request,
+            &preview,
             component_set,
             &mut registration,
         )
@@ -292,6 +302,8 @@ struct CompatibilityAgentRegistrationDelegate {
     project_path: Option<PathBuf>,
     operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     should_apply: bool,
+    confirmed_registration_revision: Option<[u8; 32]>,
+    registration_stage_completed: bool,
 }
 
 impl CompatibilityAgentRegistrationDelegate {
@@ -323,6 +335,8 @@ impl CompatibilityAgentRegistrationDelegate {
             project_path: None,
             operation,
             should_apply: false,
+            confirmed_registration_revision: None,
+            registration_stage_completed: false,
         })
     }
 
@@ -354,6 +368,8 @@ impl CompatibilityAgentRegistrationDelegate {
             project_path: Some(project_path.to_path_buf()),
             operation,
             should_apply: false,
+            confirmed_registration_revision: None,
+            registration_stage_completed: false,
         })
     }
 
@@ -442,13 +458,62 @@ impl CompatibilityAgentRegistrationDelegate {
         }
     }
 
+    fn current_registration_revision(
+        &self,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> Result<[u8; 32], tracedecay::agents::host_bundle_v2::HostBundleError> {
+        let mut digest = Sha256::new();
+        digest.update(b"tracedecay.host-registration.revision.v1");
+        digest.update((self.integration.id().len() as u64).to_be_bytes());
+        digest.update(self.integration.id().as_bytes());
+        if let Some(path) = &self.registration_path {
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err(
+                        tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
+                    );
+                }
+                Ok(_) => {
+                    let bytes = fs::read(path).map_err(|_| {
+                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?;
+                    digest.update(b"file");
+                    digest.update((bytes.len() as u64).to_be_bytes());
+                    digest.update(bytes);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    digest.update(b"missing");
+                }
+                Err(_) => {
+                    return Err(
+                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
+                    );
+                }
+            }
+        } else {
+            digest.update(b"typed-state");
+            let mut components = component_set
+                .components
+                .iter()
+                .map(|component| component.manifest.component)
+                .collect::<Vec<_>>();
+            components.sort_unstable();
+            for component in components {
+                digest.update([match self.registration_is_current(component) {
+                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current => 1,
+                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable => 2,
+                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing => 3,
+                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt => 4,
+                }]);
+            }
+        }
+        Ok(digest.finalize().into())
+    }
+
     fn backup_registration(
         &self,
         operation_id: [u8; 16],
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        let Some(path) = &self.registration_path else {
-            return Ok(());
-        };
         let backup_dir = self.backup_dir(operation_id);
         fs::create_dir_all(&backup_dir)
             .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
@@ -457,6 +522,9 @@ impl CompatibilityAgentRegistrationDelegate {
             if self.should_apply { b"1" } else { b"0" },
         )
         .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        let Some(path) = &self.registration_path else {
+            return Ok(());
+        };
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 Err(tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath)
@@ -533,11 +601,41 @@ impl CompatibilityAgentRegistrationDelegate {
 impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
     for CompatibilityAgentRegistrationDelegate
 {
+    fn current_revision(
+        &self,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+        _request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
+    ) -> Result<[u8; 32], tracedecay::agents::host_bundle_v2::HostBundleError> {
+        self.current_registration_revision(component_set)
+    }
+
+    fn confirm_preview(
+        &mut self,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+        request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
+        preview: &tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
+    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        if preview.operation_id != request.operation_id
+            || preview.current_registration_revision != preview.base_registration_revision
+            || self.current_registration_revision(component_set)?
+                != preview.base_registration_revision
+        {
+            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
+        }
+        self.confirmed_registration_revision = Some(preview.base_registration_revision);
+        Ok(())
+    }
+
     fn preflight(
         &mut self,
         component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         _request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        if let Some(expected) = self.confirmed_registration_revision
+            && self.current_registration_revision(component_set)? != expected
+        {
+            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
+        }
         if self.competing_opencode_analyzer_present() {
             return Err(tracedecay::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
         }
@@ -576,10 +674,17 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
 
     fn stage(
         &mut self,
-        _component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        self.backup_registration(request.operation_id)
+        if let Some(expected) = self.confirmed_registration_revision
+            && self.current_registration_revision(component_set)? != expected
+        {
+            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
+        }
+        self.backup_registration(request.operation_id)?;
+        self.registration_stage_completed = true;
+        Ok(())
     }
 
     fn apply(
@@ -654,6 +759,9 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
         _component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        if !self.registration_stage_completed && !self.backup_dir(request.operation_id).is_dir() {
+            return Ok(());
+        }
         self.should_apply |= self.should_apply_from_backup(request.operation_id);
         if !self.should_apply {
             self.restore_registration(request.operation_id)?;
@@ -802,15 +910,25 @@ fn apply_project_local_component_set(
         &lifecycle_root,
         request.lifecycle.operation,
     )?;
-    let receipt =
-        tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer)
-            .execute(
-                &component_set.component_set,
-                &request,
-                &component_set,
-                &mut registration,
-            )
-            .map_err(host_bundle_error)?;
+    let mut transaction =
+        tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
+    let preview = transaction
+        .preview(
+            &component_set.component_set,
+            &request,
+            &component_set,
+            &mut registration,
+        )
+        .map_err(host_bundle_error)?;
+    let receipt = transaction
+        .execute_confirmed(
+            &component_set.component_set,
+            &request,
+            &preview,
+            &component_set,
+            &mut registration,
+        )
+        .map_err(host_bundle_error)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m {} {:?} project-local: {} component(s), receipt {}",
         agent_id,
@@ -2186,8 +2304,9 @@ mod tests {
     use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
 
     use super::{
+        CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
         broker_codex_daemon_automation_project, canonical_host_component_set,
-        finish_legacy_hermes_migration,
+        component_set_request, finish_legacy_hermes_migration,
     };
 
     #[tokio::test]
@@ -2294,6 +2413,61 @@ mod tests {
         assert_eq!(
             hermes.component_set.components[0].manifest.component,
             tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
+        );
+    }
+
+    #[test]
+    fn stale_registration_stage_does_not_run_inverse_rollback_edit() {
+        use tracedecay::agents::host_bundle_v2::{
+            HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set("opencode", None, 0)
+            .unwrap()
+            .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "opencode",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        let revision = registration
+            .current_revision(&component_set.component_set, &request)
+            .unwrap();
+        let preview = HostComponentSetLifecyclePreviewV1 {
+            operation_id: request.operation_id,
+            plan_digest: [7; 32],
+            base_registration_revision: revision,
+            current_registration_revision: revision,
+            artifact_state_revision: [8; 32],
+            component_plans: Vec::new(),
+            confirmation_required: false,
+        };
+        registration
+            .confirm_preview(&component_set.component_set, &request, &preview)
+            .unwrap();
+
+        let registration_path = registration.registration_path.clone().unwrap();
+        std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
+        std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
+        assert_eq!(
+            registration.stage(&component_set.component_set, &request),
+            Err(HostBundleError::StalePreview)
+        );
+        registration
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(registration_path).unwrap(),
+            b"{\"external\":true}"
         );
     }
 }

@@ -641,7 +641,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::SyncLock { .. } => "sync_lock",
         TraceDecayError::Io(_) => "io",
-        TraceDecayError::Libsql(_) => "libsql",
+        TraceDecayError::Sqlite(_) => "sqlite",
         TraceDecayError::Json(_) => "json",
     }
 }

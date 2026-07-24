@@ -29,6 +29,7 @@ pub const ACCESS_RULES_SETTING_KEY: &str = "scope.access_rules.v1";
 pub const DEFAULT_COLLECTION_SETTING_KEY: &str = "query.default_collection.v1";
 pub const ANALYZER_SETTINGS_SETTING_KEY: &str = "analyzer.settings.v1";
 pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
+pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 
 /// Canonical project-scoped settings imported from the legacy `config.json`
 /// surface. These names deliberately describe behavior rather than a legacy
@@ -68,6 +69,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     DEFAULT_COLLECTION_SETTING_KEY,
     ANALYZER_SETTINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     INDEX_EXCLUDE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY,
@@ -530,7 +532,113 @@ pub enum ConfigurationValueKindV1 {
     DefaultCollection,
     AnalyzerSettings,
     WorkTopologyPolicy,
+    ContextScoutSettings,
     CredentialReference,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutConfigurationStateV1 {
+    Active,
+    Paused,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutConfigurationModeV1 {
+    Deterministic,
+    ConfiguredModel,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutConfiguredModelPathV1 {
+    CodexAppServer,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutConfigurationLimitsV1 {
+    pub max_candidates: u32,
+    pub max_evidence: u32,
+    pub max_text_bytes: u32,
+    pub max_model_input_tokens: u32,
+    pub max_model_output_tokens: u32,
+}
+
+impl ContextScoutConfigurationLimitsV1 {
+    pub const fn bounded_defaults() -> Self {
+        Self {
+            max_candidates: 32,
+            max_evidence: 16,
+            max_text_bytes: 4 * 1024,
+            max_model_input_tokens: 2_048,
+            max_model_output_tokens: 256,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        let maximum = Self::bounded_defaults();
+        if self.max_candidates == 0
+            || self.max_candidates > maximum.max_candidates
+            || self.max_evidence == 0
+            || self.max_evidence > maximum.max_evidence
+            || self.max_text_bytes == 0
+            || self.max_text_bytes > maximum.max_text_bytes
+            || self.max_model_input_tokens == 0
+            || self.max_model_input_tokens > maximum.max_model_input_tokens
+            || self.max_model_output_tokens == 0
+            || self.max_model_output_tokens > maximum.max_model_output_tokens
+        {
+            return Err(DomainError::NonCanonical {
+                field: "context scout configuration limits",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Canonical Context Scout control-plane value. Disabled is the only stock
+/// state; deterministic or configured-model execution requires an explicit
+/// configuration revision.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutSettingsV1 {
+    pub schema_version: u16,
+    pub state: ContextScoutConfigurationStateV1,
+    pub mode: ContextScoutConfigurationModeV1,
+    pub limits: ContextScoutConfigurationLimitsV1,
+    pub model_path: Option<ContextScoutConfiguredModelPathV1>,
+}
+
+impl ContextScoutSettingsV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    pub const fn disabled() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            state: ContextScoutConfigurationStateV1::Disabled,
+            mode: ContextScoutConfigurationModeV1::Deterministic,
+            limits: ContextScoutConfigurationLimitsV1::bounded_defaults(),
+            model_path: None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || matches!(
+                (self.mode, self.model_path),
+                (ContextScoutConfigurationModeV1::Deterministic, Some(_))
+                    | (ContextScoutConfigurationModeV1::ConfiguredModel, None)
+            )
+        {
+            return Err(DomainError::NonCanonical {
+                field: "context scout settings",
+            });
+        }
+        self.limits.validate()
+    }
 }
 
 /// A reference-only selector. It is convenience input, never collection
@@ -793,6 +901,7 @@ pub enum ConfigurationValueV1 {
     DefaultCollection(Option<CollectionSelectorV1>),
     AnalyzerSettings(AnalyzerSettingsV1),
     WorkTopologyPolicy(Box<WorkTopologyPolicyV1>),
+    ContextScoutSettings(ContextScoutSettingsV1),
     CredentialReference(CredentialReferenceMetadataV1),
 }
 
@@ -808,6 +917,7 @@ impl ConfigurationValueV1 {
             Self::DefaultCollection(_) => ConfigurationValueKindV1::DefaultCollection,
             Self::AnalyzerSettings(_) => ConfigurationValueKindV1::AnalyzerSettings,
             Self::WorkTopologyPolicy(_) => ConfigurationValueKindV1::WorkTopologyPolicy,
+            Self::ContextScoutSettings(_) => ConfigurationValueKindV1::ContextScoutSettings,
             Self::CredentialReference(_) => ConfigurationValueKindV1::CredentialReference,
         }
     }
@@ -844,6 +954,7 @@ impl ConfigurationValueV1 {
                 .map_or(Ok(()), CollectionSelectorV1::validate),
             Self::AnalyzerSettings(settings) => settings.validate(),
             Self::WorkTopologyPolicy(policy) => policy.validate(),
+            Self::ContextScoutSettings(settings) => settings.validate(),
             Self::CredentialReference(metadata) => metadata.validate(),
         }
     }
@@ -912,6 +1023,7 @@ pub enum SourceKindV1 {
     Claude,
     Codex,
     Cursor,
+    GitHub,
     Hermes,
     Kiro,
 }

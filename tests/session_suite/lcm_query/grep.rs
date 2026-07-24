@@ -3,11 +3,9 @@ use super::*;
 #[tokio::test]
 async fn grep_searches_raw_snippets_and_summary_nodes() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tracedecay");
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -21,8 +19,7 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
     let mut external = raw_message("cursor", "tool-secret", "session-1", 3, &external_secret);
     external.role = "tool".to_string();
     external.kind = Some("tool_result".to_string());
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&external)
+    db.lcm_ingest_raw_message(&external)
         .await
         .expect("external payload should ingest");
 
@@ -38,7 +35,7 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
     .expect("summary should insert");
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "billing migration".into(),
             scope: LcmScope::Session,
@@ -68,10 +65,9 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
 #[tokio::test]
 async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -82,7 +78,7 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "src/foo.rs".into(),
             scope: LcmScope::Session,
@@ -118,10 +114,9 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
 #[tokio::test]
 async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -142,7 +137,7 @@ async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
     .expect("summary should insert");
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "co-pilot".into(),
             scope: LcmScope::Session,
@@ -170,10 +165,9 @@ async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
 #[tokio::test]
 async fn grep_like_fallback_recalls_infix_slash_query_matches() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["the docs mention srcfoo as a fused path token".to_string()],
@@ -181,7 +175,7 @@ async fn grep_like_fallback_recalls_infix_slash_query_matches() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "src/foo".into(),
             scope: LcmScope::Session,
@@ -209,10 +203,9 @@ async fn grep_like_fallback_recalls_infix_slash_query_matches() {
 #[tokio::test]
 async fn grep_like_fallback_handles_hash_separator_queries() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &["the log references issue#123 inside a Cursor transcript".to_string()],
@@ -220,7 +213,7 @@ async fn grep_like_fallback_handles_hash_separator_queries() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "issue#123".into(),
             scope: LcmScope::Session,
@@ -244,10 +237,9 @@ async fn grep_like_fallback_handles_hash_separator_queries() {
 #[tokio::test]
 async fn grep_quotes_reserved_operator_looking_query_text() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -258,7 +250,7 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "\"OR\"".into(),
             scope: LcmScope::Session,
@@ -284,10 +276,9 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
 #[tokio::test]
 async fn grep_preserves_quoted_phrase_semantics() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -298,7 +289,7 @@ async fn grep_preserves_quoted_phrase_semantics() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "\"alpha beta\"".into(),
             scope: LcmScope::Session,
@@ -323,10 +314,9 @@ async fn grep_preserves_quoted_phrase_semantics() {
 #[tokio::test]
 async fn grep_preserves_boolean_or_semantics() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -338,7 +328,7 @@ async fn grep_preserves_boolean_or_semantics() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "apple OR banana".into(),
             scope: LcmScope::Session,
@@ -371,10 +361,9 @@ async fn grep_preserves_boolean_or_semantics() {
 #[tokio::test]
 async fn grep_cjk_query_uses_like_fallback_substring_matching() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -385,7 +374,7 @@ async fn grep_cjk_query_uses_like_fallback_substring_matching() {
     .await;
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "柠檬".into(),
             scope: LcmScope::Session,
@@ -411,7 +400,7 @@ async fn grep_cjk_query_uses_like_fallback_substring_matching() {
 #[tokio::test]
 async fn grep_filters_raw_hits_by_role_source_and_time_and_sorts() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-1").await;
 
     for message in [
@@ -456,7 +445,7 @@ async fn grep_filters_raw_hits_by_role_source_and_time_and_sorts() {
     }
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "orchard parity".into(),
             scope: LcmScope::Session,

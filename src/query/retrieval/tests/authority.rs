@@ -75,6 +75,15 @@ fn authenticated_pr9_fallback_is_byte_stable_and_carries_only_pr9_lanes() {
             .collect::<Vec<_>>(),
         RetrieverKind::PR9_FALLBACK_LANES
     );
+    assert_eq!(
+        first
+            .pr9_lanes
+            .iter()
+            .map(|lane| lane.lane)
+            .collect::<Vec<_>>(),
+        RetrieverKind::PR9_FALLBACK_LANES
+    );
+    assert_eq!(first.page_size, 8);
     first.fallback.validate().expect("canonical fallback");
     assert_eq!(
         serde_json::to_vec(first.fallback.as_ref()).expect("first bytes"),

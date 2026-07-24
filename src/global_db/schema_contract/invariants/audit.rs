@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 
-use libsql::{Connection, params};
 use tracedecay_domain::DurableObservationV1;
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
     SessionMessageProjection, WorkflowFactProjection,
 };
 
+use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db::global_db_operation_error;
 
 use super::rows::{authority_violation, decode_authority_json};
@@ -36,7 +36,9 @@ pub(super) struct AuditProgress {
     pub(super) aliases_audited: i64,
 }
 
-pub(super) async fn ensure_audit_checkpoint_schema(conn: &Connection) -> crate::errors::Result<()> {
+pub(super) async fn ensure_audit_checkpoint_schema(
+    conn: &impl Executor,
+) -> crate::errors::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS authority_audit_checkpoints (
             audit_name TEXT PRIMARY KEY,
@@ -84,7 +86,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(conn: &Connection) -> crate::
 }
 
 pub(super) async fn read_audit_checkpoint(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<Option<AuditCheckpoint>> {
     let mut rows = conn
         .query(
@@ -130,7 +132,7 @@ pub(super) async fn read_audit_checkpoint(
 }
 
 pub(super) async fn audit_checkpoint_is_plausible(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
 ) -> crate::errors::Result<bool> {
     if checkpoint.receipt_rowid < 0
@@ -203,7 +205,7 @@ struct ProjectionAuthorityState {
 }
 
 impl ProjectionAuthorityState {
-    async fn load(conn: &Connection, observation_id: &str) -> crate::errors::Result<Self> {
+    async fn load(conn: &impl QueryExecutor, observation_id: &str) -> crate::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT
@@ -283,7 +285,7 @@ struct ProjectionAliasRow {
 }
 
 impl ProjectionAliasRow {
-    async fn load(conn: &Connection, observation_id: &str) -> crate::errors::Result<Self> {
+    async fn load(conn: &impl QueryExecutor, observation_id: &str) -> crate::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT output_provider, output_message_id
@@ -320,7 +322,7 @@ struct ProjectionProvenanceRow {
 
 impl ProjectionProvenanceRow {
     async fn load(
-        conn: &Connection,
+        conn: &impl QueryExecutor,
         observation_id: &str,
         output_ordinal: i64,
     ) -> crate::errors::Result<Option<Self>> {
@@ -375,7 +377,7 @@ struct ProjectionDispositionRow {
 }
 
 impl ProjectionDispositionRow {
-    async fn load(conn: &Connection, observation_id: &str) -> crate::errors::Result<Self> {
+    async fn load(conn: &impl QueryExecutor, observation_id: &str) -> crate::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT receipt_id, reason FROM observation_projection_dispositions
@@ -406,7 +408,7 @@ struct ProjectionOutputOwnership {
 
 impl ProjectionOutputOwnership {
     async fn load(
-        conn: &Connection,
+        conn: &impl QueryExecutor,
         provider: &str,
         message_id: &str,
     ) -> crate::errors::Result<Self> {
@@ -485,7 +487,7 @@ fn validate_provenance_row(
 }
 
 async fn validate_message_projection_row(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &str,
     projection: &SessionMessageProjection,
 ) -> crate::errors::Result<bool> {
@@ -511,7 +513,7 @@ async fn validate_message_projection_row(
 }
 
 async fn validate_message_projection(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &str,
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
@@ -541,7 +543,7 @@ async fn validate_message_projection(
 }
 
 async fn validate_skipped_projection(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     state: ProjectionAuthorityState,
     reason: ProjectionSkipReason,
@@ -567,7 +569,7 @@ async fn validate_skipped_projection(
 }
 
 async fn validate_composite_projection(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &str,
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
@@ -652,7 +654,7 @@ async fn validate_composite_projection(
 }
 
 async fn validate_projection_effect(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
 ) -> crate::errors::Result<()> {
     // Derivation is disposition-aware, so an observation that converged to a
@@ -709,7 +711,7 @@ fn derive_unaliased_projection(
 }
 
 async fn observation_by_id(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &str,
 ) -> crate::errors::Result<DurableObservationV1> {
     let mut rows = conn
@@ -732,7 +734,7 @@ async fn observation_by_id(
 }
 
 async fn count_suffix_rows(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     table: &str,
     after_rowid: i64,
 ) -> crate::errors::Result<(i64, i64)> {
@@ -761,7 +763,7 @@ async fn count_suffix_rows(
 }
 
 pub(super) async fn validate_projection_authority_suffix(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
 ) -> crate::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
     let (provenance_rowid, provenance_audited) = count_suffix_rows(
@@ -843,7 +845,7 @@ pub(super) async fn validate_projection_authority_suffix(
 }
 
 pub(super) async fn write_audit_checkpoint(
-    conn: &Connection,
+    conn: &impl Executor,
     progress: AuditProgress,
 ) -> crate::errors::Result<()> {
     let checkpoint = progress.checkpoint;

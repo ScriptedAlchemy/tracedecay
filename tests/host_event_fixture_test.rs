@@ -7,15 +7,12 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus,
+    HostAdmissionStatus, HostAdmissionTestRuntimeV1,
 };
 use tracedecay::application::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay::privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay::sessions::source::TranscriptSource;
-use tracedecay::sessions::{
-    SessionProvider, claude, codex, cursor, hermes, ingest_global_sources_for_provider,
-};
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay::sessions::{claude, codex, cursor, hermes};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -29,12 +26,12 @@ use tracedecay_domain::{
     SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1, UserProfileId,
     canonical_sha256,
 };
-use tracedecay_store::{ObservationReplayRequest, ObservationStore};
+use tracedecay_store::ObservationReplayRequest;
 
 mod common;
 
 use common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK, git_program, open_lcm_db, spawn_tracedecay_daemon,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK, git_program, spawn_tracedecay_daemon,
     tracedecay_command_with_home,
 };
 
@@ -562,7 +559,34 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project_id = ProjectId::new(format!("project.host-event.{provider}")).unwrap();
-    let db = open_lcm_db(&tmp).await;
+    assert!(
+        Command::new(git_program())
+            .arg("init")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        tracedecay::storage::write_repository_identity_marker(&project, project_id.as_str())
+            .unwrap()
+    );
+    tracedecay::storage::write_enrollment_marker(
+        &project,
+        &tracedecay::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let facade = runtime.facade();
     let scope = match provider {
         "codex" => {
             let transcript = tmp.path().join("codex-golden-session.jsonl");
@@ -574,11 +598,11 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             let message =
                 include_str!("fixtures/provider_normalization/codex/agent_message.input.json");
             std::fs::write(&transcript, format!("{}\n{message}\n", meta)).unwrap();
-            codex::try_admit_codex_jsonl_observations_for_project(
+            codex::try_admit_codex_jsonl_observations_for_project_with_admission(
                 &transcript,
-                &db,
                 &project,
                 project_id.clone(),
+                &facade,
                 None,
             )
             .await
@@ -601,7 +625,13 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             .unwrap();
             let profile_root = home.join(".tracedecay");
             std::fs::create_dir_all(&profile_root).unwrap();
-            let stats = claude::ingest_user_sessions(&db, &profile_root, None, Vec::new()).await;
+            let stats = claude::ingest_user_sessions_with_admission(
+                &profile_root,
+                None,
+                Vec::new(),
+                &facade,
+            )
+            .await;
             assert!(stats.messages_upserted > 0, "Claude native fixture");
             HostAdmissionScope::Profile
         }
@@ -618,10 +648,11 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
                 "workspace_roots": [project],
                 "cwd": project,
             });
-            let stats = cursor::try_ingest_cursor_transcript_event(
+            let stats = cursor::try_ingest_cursor_transcript_event_capped_with_admission(
                 &event.to_string(),
-                &db,
                 project_id.clone(),
+                &facade,
+                None,
             )
             .await
             .unwrap();
@@ -631,39 +662,41 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         "hermes" => {
             let hermes_home = tmp.path().join("hermes-home");
             write_hermes_native_fixture(&hermes_home, &project).await;
-            let stats =
-                hermes::ingest_homes(&db, &[hermes_home], &project, project_id.clone()).await;
+            let stats = hermes::ingest_homes_capped_with_admission(
+                &[hermes_home],
+                &project,
+                project_id.clone(),
+                &facade,
+                None,
+            )
+            .await
+            .stats;
             assert!(stats.messages_upserted > 0, "Hermes native fixture");
             HostAdmissionScope::Project
         }
         "kiro" => {
-            assert!(
-                std::process::Command::new(git_program())
-                    .arg("init")
-                    .arg(&project)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-            assert!(
-                tracedecay::storage::write_repository_identity_marker(
-                    &project,
-                    project_id.as_str()
-                )
-                .unwrap()
-            );
             write_kiro_native_fixture(home, &project);
             let source = tracedecay::sessions::kiro::KiroSource::with_home(home);
             assert_eq!(source.transcript_paths(&project).len(), 1, "Kiro discovery");
-            ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Kiro)).await;
+            tracedecay::sessions::kiro::admit_kiro_snapshot_observations(
+                &facade,
+                &source,
+                &project,
+                ObservationScopeV1::Project {
+                    project_id: project_id.clone(),
+                },
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap();
             HostAdmissionScope::Project
         }
         other => panic!("unexpected provider {other}"),
     };
 
-    let store = GlobalDbObservationStore::new(&db);
-    let observations = store
-        .replay_observations(ObservationReplayRequest::new(0, 32).unwrap())
+    let observations = runtime
+        .replay_observations(scope, ObservationReplayRequest::new(0, 32).unwrap())
         .await
         .unwrap();
     assert!(
@@ -671,11 +704,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         "{provider} native parser must reach observation authority"
     );
     assert_external_source_contract(provider, &scope, &project_id, observations[0].observation());
-    let authorities = match scope {
-        HostAdmissionScope::Project => HostAdmissionAuthorities::for_project(&db, project_id),
-        HostAdmissionScope::Profile => HostAdmissionAuthorities::for_profile(&db),
-    };
-    HostAdmissionFacade::new(authorities).probe(provider, scope)
+    facade.probe(provider, scope)
 }
 
 fn encode_workspace_path(path: &Path) -> String {
@@ -720,11 +749,7 @@ async fn write_hermes_native_fixture(home: &Path, project: &Path) {
         ),
     )
     .unwrap();
-    let database = libsql::Builder::new_local(profile.join("state.db"))
-        .build()
-        .await
-        .unwrap();
-    let conn = database.connect().unwrap();
+    let conn = rusqlite::Connection::open(profile.join("state.db")).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, started_at REAL NOT NULL,
@@ -740,7 +765,6 @@ async fn write_hermes_native_fixture(home: &Path, project: &Path) {
             reasoning TEXT, observed INTEGER DEFAULT 0, active INTEGER NOT NULL DEFAULT 1
          );",
     )
-    .await
     .unwrap();
     let fixture: Value = serde_json::from_str(include_str!(
         "fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
@@ -752,7 +776,7 @@ async fn write_hermes_native_fixture(home: &Path, project: &Path) {
             id, source, model, started_at, ended_at, cwd, title,
             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens
          ) VALUES (?1, 'tui', ?2, ?3, ?3, ?4, 'Host event fixture', ?5, ?6, ?7, ?8, ?9)",
-        libsql::params![
+        rusqlite::params![
             session_id,
             fixture["session_model"].as_str(),
             fixture["timestamp"].as_f64(),
@@ -764,12 +788,11 @@ async fn write_hermes_native_fixture(home: &Path, project: &Path) {
             fixture["session_reasoning_tokens"].as_i64(),
         ],
     )
-    .await
     .unwrap();
     conn.execute(
         "INSERT INTO messages (session_id, role, content, tool_calls, timestamp, finish_reason)
          VALUES (?1, ?2, ?3, ?4, ?5, 'tool_calls')",
-        libsql::params![
+        rusqlite::params![
             session_id,
             fixture["role"].as_str(),
             fixture["content"].as_str(),
@@ -777,7 +800,6 @@ async fn write_hermes_native_fixture(home: &Path, project: &Path) {
             fixture["timestamp"].as_f64(),
         ],
     )
-    .await
     .unwrap();
 }
 
@@ -787,8 +809,11 @@ async fn write_hermes_native_fixture(home: &Path, project: &Path) {
 async fn cross_provider_host_admission_commit_before_ack_and_cancel_are_idempotent() {
     for provider in HOST_ADMISSION_PROVIDERS {
         let tmp = TempDir::new().unwrap();
-        let db = open_lcm_db(&tmp).await;
-        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let profile_root = tmp.path().join("profile");
+        let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
+        let facade = runtime.facade();
 
         let probe = facade.probe(provider, HostAdmissionScope::Profile);
         assert_eq!(probe.status, HostAdmissionStatus::Supported, "{provider}");
@@ -856,10 +881,12 @@ async fn cross_provider_host_admission_commit_before_ack_and_cancel_are_idempote
         );
 
         drop(facade);
-        drop(db);
+        drop(runtime);
 
-        let db = open_lcm_db(&tmp).await;
-        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
+        let facade = runtime.facade();
         let restarted = facade
             .capture(host_capture_request(
                 provider,
@@ -889,13 +916,38 @@ async fn cross_provider_host_admission_commit_before_ack_and_cancel_are_idempote
 async fn canonical_and_linked_worktree_events_share_retained_project_authority() {
     let project_tmp = TempDir::new().unwrap();
     let profile_tmp = TempDir::new().unwrap();
-    let project_db = open_lcm_db(&project_tmp).await;
-    let profile_db = open_lcm_db(&profile_tmp).await;
-    let project_id = ProjectId::new("project.canonical-worktree").unwrap();
-    let facade = HostAdmissionFacade::new(
-        HostAdmissionAuthorities::for_project(&project_db, project_id.clone())
-            .with_profile(&profile_db),
+    assert!(
+        Command::new(git_program())
+            .arg("init")
+            .arg(project_tmp.path())
+            .status()
+            .unwrap()
+            .success()
     );
+    let project_id = ProjectId::new("project.canonical-worktree").unwrap();
+    assert!(
+        tracedecay::storage::write_repository_identity_marker(
+            project_tmp.path(),
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    tracedecay::storage::write_enrollment_marker(
+        project_tmp.path(),
+        &tracedecay::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        profile_tmp.path().join("profile"),
+        project_tmp.path(),
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let facade = runtime.facade();
     let scope = ObservationScopeV1::Project { project_id };
 
     for (session_id, record_id) in [
@@ -920,9 +972,11 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
         );
     }
 
-    let project_store = GlobalDbObservationStore::new(&project_db);
-    let project_rows = project_store
-        .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+    let project_rows = runtime
+        .replay_observations(
+            HostAdmissionScope::Project,
+            ObservationReplayRequest::new(0, 10).unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(project_rows.len(), 2);
@@ -944,18 +998,23 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
     assert!(!mismatched.retryable);
     assert_eq!(mismatched.reason_code, Some("project_authority_mismatch"));
     assert_eq!(
-        project_store
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+        runtime
+            .replay_observations(
+                HostAdmissionScope::Project,
+                ObservationReplayRequest::new(0, 10).unwrap(),
+            )
             .await
             .unwrap(),
         project_rows,
         "mismatched project identity must write nothing"
     );
 
-    let profile_store = GlobalDbObservationStore::new(&profile_db);
     assert!(
-        profile_store
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+        runtime
+            .replay_observations(
+                HostAdmissionScope::Profile,
+                ObservationReplayRequest::new(0, 10).unwrap(),
+            )
             .await
             .unwrap()
             .is_empty(),

@@ -35,9 +35,10 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use libsql::Connection;
 use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
+
+use crate::db::engine::QueryExecutor;
 
 use super::DashboardState;
 use super::read_model::{
@@ -283,7 +284,7 @@ fn encode_event(event: &DashboardEventV1) -> Result<Event, Infallible> {
 /// Compute a stable digest of the project-registry snapshot plus its count.
 async fn registry_snapshot(state: &DashboardState) -> Option<(String, u64)> {
     let db = state.savings_db.as_ref()?;
-    let projects = db.list_code_projects(250).await;
+    let projects = db.list_code_projects(250).await.ok()?;
     let count = projects.len() as u64;
     let mut hasher = DefaultHasher::new();
     count.hash(&mut hasher);
@@ -304,20 +305,20 @@ async fn summed_store_bytes(state: &DashboardState) -> Option<u64> {
         total = total.saturating_add(bytes);
         any = true;
     }
-    if let Some(bytes) = store_total_bytes(state.mem_db.conn()).await {
+    if let Some(bytes) = store_total_bytes(&state.mem_db.engine_conn()).await {
         total = total.saturating_add(bytes);
         any = true;
     }
     any.then_some(total)
 }
 
-async fn store_total_bytes(conn: &Connection) -> Option<u64> {
+async fn store_total_bytes(conn: &(impl QueryExecutor + ?Sized)) -> Option<u64> {
     let page_size = pragma_u64(conn, "page_size").await?;
     let page_count = pragma_u64(conn, "page_count").await?;
     Some(page_size.saturating_mul(page_count))
 }
 
-async fn pragma_u64(conn: &Connection, pragma: &str) -> Option<u64> {
+async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> Option<u64> {
     let sql = format!("PRAGMA {pragma}");
     let mut rows = conn.query(&sql, ()).await.ok()?;
     let row = rows.next().await.ok()??;

@@ -1,8 +1,8 @@
 //! JSONL session parser for Claude Code transcripts.
 //!
 //! Reads `~/.claude/projects/**/*.jsonl`, extracts assistant turns with
-//! model/usage/tool data, and inserts them into the `turns` table via
-//! `GlobalDb`. Uses offset tracking for incremental re-parsing.
+//! model/usage/tool data, and inserts them into the `turns` table via the
+//! retained `RegisteredGlobalDb`. Uses offset tracking for incremental re-parsing.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::accounting::classifier;
 use crate::accounting::pricing;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::types::CostTurn;
 
 /// Find all JSONL session files under `~/.claude/projects/`.
@@ -181,7 +181,7 @@ pub struct IngestStats {
 
 /// Ingest all Claude Code session files into the global DB.
 /// Uses offset tracking to only parse new lines since the last run.
-pub async fn ingest(gdb: &GlobalDb) -> IngestStats {
+pub async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
     let files = find_session_files();
     let mut total_inserted = 0u64;
     let mut total_cost = 0.0f64;
@@ -220,6 +220,7 @@ pub async fn ingest(gdb: &GlobalDb) -> IngestStats {
         };
 
         let (project_hash, session_id) = extract_path_parts(file_path);
+        let mut turns = Vec::new();
 
         let Ok(f) = fs::File::open(file_path) else {
             continue;
@@ -245,28 +246,39 @@ pub async fn ingest(gdb: &GlobalDb) -> IngestStats {
                         continue;
                     }
                     if let Some(turn) = parse_line(trimmed, &project_hash, &session_id) {
-                        let turn_cost = turn.cost_usd;
-                        let turn_tokens = turn.input_tokens + turn.output_tokens;
-                        if gdb.insert_turn(&turn).await {
-                            total_inserted += 1;
-                            total_cost += turn_cost;
-                            total_tokens += turn_tokens;
-                        }
+                        turns.push(turn);
                     }
                 }
             }
         }
 
-        // Save the new offset (this parser tracks no file identity id).
-        gdb.set_parse_offset(
-            &path_str,
-            crate::global_db::ParseOffset {
-                byte_offset: current_offset,
-                mtime,
-                file_id: 0,
-            },
-        )
-        .await;
+        // Commit parsed turns and the new frontier together. This parser tracks
+        // no file identity, so rotation remains represented by its mtime.
+        match gdb
+            .insert_turns_with_cursor(
+                &turns,
+                &path_str,
+                crate::global_db::ParseOffset {
+                    byte_offset: current_offset,
+                    mtime,
+                    file_id: 0,
+                },
+            )
+            .await
+        {
+            Ok((inserted, cost, tokens)) => {
+                total_inserted = total_inserted.saturating_add(inserted as u64);
+                total_cost += cost;
+                total_tokens = total_tokens.saturating_add(tokens);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %file_path.display(),
+                    %error,
+                    "accounting transcript import rolled back"
+                );
+            }
+        }
     }
 
     IngestStats {

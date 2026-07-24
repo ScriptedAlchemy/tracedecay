@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::Database;
 use super::rows::row_to_node;
@@ -119,14 +119,14 @@ impl Database {
                    FROM nodes
                    WHERE name = ?1
                    LIMIT 200";
-        let mut rows =
-            self.conn()
-                .query(sql, params![name])
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query by name: {e}"),
-                    operation: "get_nodes_by_name".to_string(),
-                })?;
+        let mut rows = self
+            .engine_conn()
+            .query(sql, params![name])
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query by name: {e}"),
+                operation: "get_nodes_by_name".to_string(),
+            })?;
         collect_rows(&mut rows, row_to_node, "get_nodes_by_name").await
     }
 
@@ -139,7 +139,7 @@ impl Database {
     pub async fn get_nodes_by_qualified_name(&self, qname: &str) -> Result<Vec<Node>> {
         let lookup = CanonicalQualifiedName::new(qname);
         let snapshot = self
-            .begin_isolated_read_snapshot("get_nodes_by_qualified_name")
+            .begin_engine_read_snapshot("get_nodes_by_qualified_name")
             .await?;
 
         // Bare names retain find_exact_symbol's indexed name-lookup behavior.
@@ -255,13 +255,12 @@ impl Database {
         };
 
         let mut conditions = vec!["e.kind = ?1".to_string()];
-        let mut param_values: Vec<libsql::Value> =
-            vec![libsql::Value::Text(edge_kind.as_str().to_string())];
+        let mut param_values: Vec<Value> = vec![Value::Text(edge_kind.as_str().to_string())];
         let mut param_idx = 2;
 
         if let Some(nk) = node_kind {
             conditions.push(format!("n.kind = ?{param_idx}"));
-            param_values.push(libsql::Value::Text(nk.as_str().to_string()));
+            param_values.push(Value::Text(nk.as_str().to_string()));
             param_idx += 1;
         }
         if let Some(prefix) = path_prefix {
@@ -283,12 +282,12 @@ impl Database {
              ORDER BY cnt DESC
              LIMIT ?{param_idx}"
         );
-        param_values.push(libsql::Value::Integer(limit as i64));
+        param_values.push(Value::Integer(limit as i64));
 
         let op = "get_ranked_nodes_by_edge_kind";
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query ranked nodes: {e}"),
@@ -323,12 +322,12 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<(Node, u32)>> {
         let mut conditions: Vec<String> = Vec::new();
-        let mut param_values: Vec<libsql::Value> = Vec::new();
+        let mut param_values: Vec<Value> = Vec::new();
         let mut param_idx = 1;
 
         if let Some(nk) = node_kind {
             conditions.push(format!("kind = ?{param_idx}"));
-            param_values.push(libsql::Value::Text(nk.as_str().to_string()));
+            param_values.push(Value::Text(nk.as_str().to_string()));
             param_idx += 1;
         }
         if let Some(prefix) = path_prefix {
@@ -353,12 +352,12 @@ impl Database {
              ORDER BY lines DESC
              LIMIT ?{param_idx}"
         );
-        param_values.push(libsql::Value::Integer(limit as i64));
+        param_values.push(Value::Integer(limit as i64));
 
         let op = "get_largest_nodes";
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query largest nodes: {e}"),
@@ -406,7 +405,7 @@ impl Database {
             None => String::new(),
         };
 
-        let mut param_values = vec![libsql::Value::Integer(limit as i64)];
+        let mut param_values = vec![Value::Integer(limit as i64)];
         if let Some(prefix) = path_prefix {
             param_values.push(path_prefix_like_value(prefix));
         }
@@ -426,8 +425,8 @@ impl Database {
 
         let op = "get_file_coupling";
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query file coupling: {e}"),
@@ -470,7 +469,7 @@ impl Database {
             None => String::new(),
         };
 
-        let mut param_values = vec![libsql::Value::Integer(limit as i64)];
+        let mut param_values = vec![Value::Integer(limit as i64)];
         if let Some(prefix) = path_prefix {
             param_values.push(path_prefix_like_value(prefix));
         }
@@ -521,8 +520,8 @@ impl Database {
 
         let op = "get_inheritance_depth";
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query inheritance depth: {e}"),
@@ -556,7 +555,7 @@ impl Database {
         &self,
         path_prefix: Option<&str>,
     ) -> Result<Vec<(String, String, u64)>> {
-        let (sql, param_values): (&str, Vec<libsql::Value>) = match path_prefix {
+        let (sql, param_values): (&str, Vec<Value>) = match path_prefix {
             Some(prefix) => (
                 "SELECT file_path, kind, COUNT(*) AS cnt
                  FROM nodes
@@ -576,8 +575,8 @@ impl Database {
 
         let op = "get_node_distribution";
         let mut rows = self
-            .conn()
-            .query(sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query node distribution: {e}"),
@@ -616,7 +615,7 @@ impl Database {
     /// Returns `(source_id, target_id)` pairs for every `calls` edge.
     pub async fn get_call_edges(&self, path_prefix: Option<&str>) -> Result<Vec<(String, String)>> {
         let op = "get_call_edges";
-        let (sql, param_values): (String, Vec<libsql::Value>) = match path_prefix {
+        let (sql, param_values): (String, Vec<Value>) = match path_prefix {
             Some(prefix) => (
                 "SELECT e.source, e.target FROM edges e
                  JOIN nodes n ON e.source = n.id
@@ -630,8 +629,8 @@ impl Database {
             ),
         };
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query call edges: {e}"),
@@ -669,7 +668,7 @@ impl Database {
         path_prefix: Option<&str>,
     ) -> Result<Vec<(String, String, Option<u32>)>> {
         let op = "get_call_edges_with_lines";
-        let (sql, param_values): (String, Vec<libsql::Value>) = match path_prefix {
+        let (sql, param_values): (String, Vec<Value>) = match path_prefix {
             Some(prefix) => (
                 "SELECT e.source, e.target, e.line FROM edges e
                  JOIN nodes n ON e.source = n.id
@@ -683,8 +682,8 @@ impl Database {
             ),
         };
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query call edges with lines: {e}"),
@@ -728,13 +727,13 @@ impl Database {
     ) -> Result<Vec<(Node, u32, u64, u64, u64)>> {
         debug_assert!(limit > 0, "get_complexity_ranked limit must be positive");
         let mut conditions: Vec<String> = Vec::new();
-        let mut param_values: Vec<libsql::Value> = Vec::new();
+        let mut param_values: Vec<Value> = Vec::new();
         let mut param_idx = 1;
 
         match node_kind {
             Some(nk) => {
                 conditions.push(format!("n.kind = ?{param_idx}"));
-                param_values.push(libsql::Value::Text(nk.as_str().to_string()));
+                param_values.push(Value::Text(nk.as_str().to_string()));
                 param_idx += 1;
             }
             None => {
@@ -763,12 +762,12 @@ impl Database {
              ORDER BY score DESC
              LIMIT ?{param_idx}"
         );
-        param_values.push(libsql::Value::Integer(limit as i64));
+        param_values.push(Value::Integer(limit as i64));
 
         let op = "get_complexity_ranked";
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query complexity ranking: {e}"),
@@ -824,7 +823,7 @@ impl Database {
             'case_class', 'kotlin_object', 'inner_class', 'abstract_method', 'constructor', \
             'struct_method', 'val', 'var', 'mixin', 'extension', 'union', 'typedef'";
 
-        let (sql, param_values): (String, Vec<libsql::Value>) = match path_prefix {
+        let (sql, param_values): (String, Vec<Value>) = match path_prefix {
             Some(prefix) => (
                 format!(
                     "SELECT id, kind, name, qualified_name, file_path,
@@ -840,7 +839,7 @@ impl Database {
                 ),
                 vec![
                     path_prefix_like_value(prefix),
-                    libsql::Value::Integer(limit as i64),
+                    Value::Integer(limit as i64),
                 ],
             ),
             None => (
@@ -855,14 +854,14 @@ impl Database {
                      ORDER BY file_path, start_line
                      LIMIT ?1"
                 ),
-                vec![libsql::Value::Integer(limit as i64)],
+                vec![Value::Integer(limit as i64)],
             ),
         };
 
         let op = "get_undocumented_public_symbols";
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query undocumented symbols: {e}"),
@@ -885,7 +884,7 @@ impl Database {
             None => String::new(),
         };
 
-        let mut param_values = vec![libsql::Value::Integer(limit as i64)];
+        let mut param_values = vec![Value::Integer(limit as i64)];
         if let Some(prefix) = path_prefix {
             param_values.push(path_prefix_like_value(prefix));
         }
@@ -910,8 +909,8 @@ impl Database {
 
         let op = "get_god_classes";
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query god classes: {e}"),
@@ -970,15 +969,15 @@ impl Database {
             kind_placeholders.join(", ")
         );
 
-        let mut param_values: Vec<libsql::Value> = Vec::new();
-        param_values.push(libsql::Value::Text(dir.to_string()));
+        let mut param_values: Vec<Value> = Vec::new();
+        param_values.push(Value::Text(dir.to_string()));
         for k in kinds {
-            param_values.push(libsql::Value::Text(k.as_str().to_string()));
+            param_values.push(Value::Text(k.as_str().to_string()));
         }
 
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query nodes by dir: {e}"),

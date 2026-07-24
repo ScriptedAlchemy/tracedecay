@@ -1,9 +1,10 @@
-use libsql::{Connection, params};
 use tracedecay_domain::DurableObservationV1;
 use tracedecay_store::{
     ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
     SessionMessageProjection, SessionMessageRecord, WorkflowFactProjection, WorkflowFactRecord,
 };
+
+use crate::db::engine::{Executor, QueryExecutor, params};
 
 use super::state::{
     has_other_projector_output_owner, message_rows_compatible, protected_message_rows_compatible,
@@ -153,13 +154,14 @@ impl<'a> WorkflowFactTransition<'a> {
 
 fn optional_sequence(sequence: Option<u64>) -> ProjectionStoreResult<Option<i64>> {
     sequence
-        .map(i64::try_from)
+        .map(|value| {
+            i64::try_from(value).map_err(|_| ProjectionStoreError::SequenceOverflow(value))
+        })
         .transpose()
-        .map_err(|_| ProjectionStoreError::SequenceOverflow(u64::MAX))
 }
 
 pub(super) async fn write_workflow_fact_transition(
-    conn: &Connection,
+    conn: &impl Executor,
     target: WorkflowFactTarget<'_>,
     transition: &WorkflowFactTransition<'_>,
     semantic_kind: &str,
@@ -181,19 +183,19 @@ pub(super) async fn write_workflow_fact_transition(
             projection.session().provider.as_str(),
             projection.session().session_id.as_str(),
             semantic_kind,
-            super::opt_text(fact.provider_reference.as_deref()),
-            super::opt_text(fact.item_id.as_deref()),
-            super::opt_text(fact.parent_reference.as_deref()),
-            super::opt_text(fact.list_reference.as_deref()),
-            super::opt_text(fact.state.as_deref()),
-            super::opt_text(fact.status.as_deref()),
-            super::opt_i64(transition.item_order()),
-            super::opt_text(fact.native_revision.as_deref()),
-            super::opt_i64(transition.event_sequence()),
-            super::opt_i64(transition.source_sequence()),
-            super::opt_i64(fact.native_timestamp),
+            fact.provider_reference.as_deref(),
+            fact.item_id.as_deref(),
+            fact.parent_reference.as_deref(),
+            fact.list_reference.as_deref(),
+            fact.state.as_deref(),
+            fact.status.as_deref(),
+            transition.item_order(),
+            fact.native_revision.as_deref(),
+            transition.event_sequence(),
+            transition.source_sequence(),
+            fact.native_timestamp,
             fact.ordering_domain.as_str(),
-            super::opt_text(content_json),
+            content_json,
             fact.content_text.as_str(),
             projection.output_digest().as_str(),
         ],
@@ -203,7 +205,7 @@ pub(super) async fn write_workflow_fact_transition(
 }
 
 pub(super) async fn message_transition(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     sequence: u64,
     projection: &SessionMessageProjection,
     existing: Option<&SessionMessageRecord>,

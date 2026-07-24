@@ -9,7 +9,8 @@ use super::{
     insert_event, insert_legacy_mapping, legacy_mapping_exists, legacy_mapping_matches,
     payload_is_purged_projection, publish_current_projection, receipt_outcome,
 };
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde::Serialize;
 use tracedecay_domain::{
     FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId, FactLineageEventV1,
@@ -51,7 +52,7 @@ fn assertion_header_json(assertion: &FactAssertionV1) -> FactStoreResult<String>
 }
 
 pub(super) async fn commit_fact_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<CommitAttempt> {
     let owner = OwnerKey::new(batch.owner())?;
@@ -105,7 +106,7 @@ pub(super) async fn commit_fact_tx(
 }
 
 pub(super) async fn current_last_event(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> FactStoreResult<Option<FactEventId>> {
@@ -132,7 +133,7 @@ pub(super) async fn current_last_event(
 }
 
 async fn ensure_append_order(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
     actual_last: Option<&FactEventId>,
@@ -171,7 +172,7 @@ async fn ensure_append_order(
 }
 
 async fn batch_is_exact_replay(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
     actual_last: Option<&FactEventId>,
@@ -206,7 +207,7 @@ async fn batch_is_exact_replay(
 }
 
 async fn batch_identity_collision(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<Option<FactCommitConflict>> {
@@ -260,7 +261,7 @@ pub(super) fn collision(kind: &'static str, id: &str) -> FactCommitConflict {
     }
 }
 
-async fn fact_exists(transaction: &Transaction, fact_id: &FactId) -> FactStoreResult<bool> {
+async fn fact_exists(transaction: &Transaction<'_>, fact_id: &FactId) -> FactStoreResult<bool> {
     row_exists(
         transaction,
         "SELECT 1 FROM memory_v2_facts WHERE fact_id = ?1",
@@ -270,7 +271,7 @@ async fn fact_exists(transaction: &Transaction, fact_id: &FactId) -> FactStoreRe
 }
 
 async fn fact_identity_matches(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<bool> {
@@ -302,7 +303,7 @@ async fn fact_identity_matches(
 }
 
 async fn ensure_referenced_anchors(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<()> {
@@ -336,7 +337,7 @@ async fn ensure_referenced_anchors(
 }
 
 async fn insert_or_verify_anchor(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     anchor: &RetrievalAnchorRecordV2,
 ) -> FactStoreResult<()> {
@@ -383,7 +384,7 @@ async fn insert_or_verify_anchor(
 }
 
 async fn anchor_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     anchor_id: &RetrievalAnchorId,
 ) -> FactStoreResult<bool> {
     row_exists(
@@ -395,7 +396,7 @@ async fn anchor_exists(
 }
 
 pub(super) async fn anchor_matches(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     anchor: &RetrievalAnchorRecordV2,
 ) -> FactStoreResult<bool> {
@@ -454,7 +455,7 @@ pub(super) async fn anchor_matches(
 }
 
 async fn insert_assertion(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     assertion: &FactAssertionV1,
 ) -> FactStoreResult<()> {
@@ -618,7 +619,7 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
 }
 
 async fn assertion_exists(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     assertion_id: &FactAssertionId,
 ) -> FactStoreResult<bool> {
     row_exists(
@@ -630,7 +631,7 @@ async fn assertion_exists(
 }
 
 async fn assertion_matches(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &OwnerKey,
     assertion: &FactAssertionV1,
 ) -> FactStoreResult<bool> {

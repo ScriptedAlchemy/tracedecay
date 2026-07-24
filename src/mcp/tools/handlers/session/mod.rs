@@ -1,13 +1,12 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
 use super::super::render::{self, Md, truncated_json_envelope_with_handle};
 use super::support::{argument_error, string_arg, tool_json, tool_json_with_md};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, ParseOffset, TranscriptBatch, WorkflowScopeFilter};
+use crate::global_db::{ParseOffset, RegisteredGlobalDb, TranscriptBatch, WorkflowScopeFilter};
 use crate::mcp::response_handles::{
     RESPONSE_RETRIEVE_TOOL, observe_response_truncation, store_response_handle,
 };

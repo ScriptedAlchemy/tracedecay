@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::TranscriptSource;
 use crate::sessions::{
     SessionProvider, claude_observation, git_correlation, vibe, workflow_ingest,
 };
-use tracedecay_domain::{ObservationScopeV1, ProjectId};
+use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
+use tracedecay_store::StoreShardScopeV1;
 
 use super::failure::{ProviderRunFold, TranscriptCatchUpFailure, claude_catch_up_failure};
 use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
@@ -30,14 +31,17 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 /// Reconciles project-scoped provider evidence into the active project store.
-/// Migrated providers use daemon-owned observation admission; Vibe remains on
-/// the legacy compatibility path. Failures are isolated per provider.
-pub async fn ingest_global_sources(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
+/// Observation providers use daemon-owned admission; Vibe writes through the
+/// same exact registered ProjectSessions mount. Failures are isolated per provider.
+pub async fn ingest_global_sources(
+    db: &RegisteredGlobalDb,
+    project_root: &Path,
+) -> TranscriptIngestStats {
     ingest_global_sources_for_provider(db, project_root, None).await
 }
 
 pub async fn ingest_global_sources_for_provider(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
@@ -47,9 +51,19 @@ pub async fn ingest_global_sources_for_provider(
     let Ok(project_id) = ProjectId::new(marker.project_id) else {
         return TranscriptIngestStats::default();
     };
-    ingest_project_sources_for_provider(db, project_root, Some(project_id), provider, true)
-        .await
-        .stats
+    let brain_id = db.binding().shard_id.brain_id.clone();
+    let profile_id = db.binding().shard_id.profile_id.clone();
+    ingest_project_sources_for_provider(
+        &brain_id,
+        &profile_id,
+        db,
+        project_root,
+        Some(project_id),
+        provider,
+        true,
+    )
+    .await
+    .stats
 }
 
 /// Project-store half of catch-up. Cross-project search runs user ingestion
@@ -58,7 +72,56 @@ pub async fn ingest_global_sources_for_provider(
 ///
 /// `project_id` must already be the typed registry or repository-marker identity.
 pub(crate) async fn ingest_project_sources_for_provider(
-    db: &GlobalDb,
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &RegisteredGlobalDb,
+    project_root: &Path,
+    project_id: Option<ProjectId>,
+    provider: Option<SessionProvider>,
+    include_hermes: bool,
+) -> TranscriptIngestOutcome {
+    ingest_project_sources_for_provider_inner(
+        (brain_id, profile_id, registered),
+        project_root,
+        project_id,
+        provider,
+        include_hermes,
+    )
+    .await
+}
+
+/// Standalone callers do not own a registered runtime and therefore fail
+/// closed for observation providers. Daemon-owned callers must use
+/// [`ingest_project_sources_for_provider`] with their retained registry mount.
+#[cfg(test)]
+pub(crate) async fn ingest_project_sources_for_provider_without_registered_authority(
+    _db: &RegisteredGlobalDb,
+    _project_root: &Path,
+    project_id: Option<ProjectId>,
+    provider: Option<SessionProvider>,
+    _include_hermes: bool,
+) -> TranscriptIngestOutcome {
+    if project_id.is_none() {
+        return TranscriptIngestOutcome::new(
+            TranscriptIngestStats::default(),
+            vec![TranscriptCatchUpFailure::new(
+                provider.map_or("all", SessionProvider::id),
+                "project_identity",
+                "project_identity_missing",
+                false,
+            )],
+        );
+    }
+    TranscriptIngestOutcome::new(
+        TranscriptIngestStats::default(),
+        vec![TranscriptCatchUpFailure::registered_authority_unavailable(
+            provider.map_or("all", SessionProvider::id),
+        )],
+    )
+}
+
+async fn ingest_project_sources_for_provider_inner(
+    registered: (&BrainId, &UserProfileId, &RegisteredGlobalDb),
     project_root: &Path,
     project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
@@ -75,6 +138,25 @@ pub(crate) async fn ingest_project_sources_for_provider(
             )],
         );
     };
+    let (brain_id, profile_id, registered) = registered;
+    let shard = &registered.binding().shard_id;
+    if shard.brain_id != *brain_id
+        || shard.profile_id != *profile_id
+        || shard.scope
+            != (StoreShardScopeV1::ProjectSessions {
+                project_id: canonical_project_id.clone(),
+            })
+    {
+        return TranscriptIngestOutcome::new(
+            TranscriptIngestStats::default(),
+            vec![TranscriptCatchUpFailure::new(
+                provider.map_or("all", SessionProvider::id),
+                "project_sessions_authority",
+                "project_sessions_authority_mismatch",
+                false,
+            )],
+        );
+    }
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     match provider {
         None => {
@@ -85,7 +167,7 @@ pub(crate) async fn ingest_project_sources_for_provider(
         Some(provider) => push_file_source(&mut sources, provider),
     }
     let mut source_outcome = Box::pin(ingest_sources(
-        db,
+        registered,
         project_root,
         &canonical_project_id,
         &sources,
@@ -104,7 +186,12 @@ pub(crate) async fn ingest_project_sources_for_provider(
                 &marker,
             )
         });
-    let mut authorities = HostAdmissionAuthorities::for_project(db, canonical_project_id.clone());
+    let mut authorities = HostAdmissionAuthorities::for_project(
+        brain_id.clone(),
+        profile_id.clone(),
+        canonical_project_id.clone(),
+        registered,
+    );
     if let Some(repository_provenance) = repository_provenance {
         authorities = authorities.with_repository_provenance(repository_provenance);
     }
@@ -120,7 +207,6 @@ pub(crate) async fn ingest_project_sources_for_provider(
         }
         provider_runs.record(
             ProjectProviderRun {
-                db,
                 project_root,
                 project_id: &canonical_project_id,
                 facade: &facade,
@@ -169,13 +255,17 @@ pub(crate) async fn ingest_project_sources_for_provider(
             .failures
             .push(TranscriptCatchUpFailure::pass_backpressured());
     }
-    finalize_project_ingest(db, project_root).await;
+    finalize_project_ingest(registered, &canonical_project_id, project_root).await;
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
     source_outcome
 }
 
-pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) {
+pub(crate) async fn finalize_project_ingest(
+    db: &RegisteredGlobalDb,
+    project_id: &ProjectId,
+    project_root: &Path,
+) {
     // Now that messages have landed, attribute any commits that fell inside a
     // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
     attribute_commits_after_ingest(db).await;
@@ -183,20 +273,36 @@ pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) 
     // sessions' git spans already exist and each run inherits them. Fail-open:
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
     // Runs live in their own tables, so they do not affect `stats`.
-    let _ = workflow_ingest::ingest_workflow_runs(db, project_root).await;
+    let _ = workflow_ingest::ingest_workflow_runs(db, project_id, project_root).await;
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.
 /// For each `(branch, worktree)` pair touched since the last sweep, scans that
 /// branch's git log inside the pair's span window (widened by the merge gap)
 /// and attributes overlapping commits to their sessions. Fail-open.
-async fn attribute_commits_after_ingest(db: &GlobalDb) {
+async fn attribute_commits_after_ingest(db: &RegisteredGlobalDb) {
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let result = db
-        .git_run_commit_attribution_sweep(gap, |target| git_scan_commits(target, gap))
-        .await;
-    if let Err(err) = result {
-        tracing::debug!(error = %err, "commit attribution sweep skipped");
+    let result = async {
+        let transaction = db.begin_write_transaction().await?;
+        git_correlation::run_commit_attribution_sweep(&transaction, gap, |target| {
+            git_scan_commits(target, gap)
+        })
+        .await
+        .map_err(|error| crate::errors::TraceDecayError::Database {
+            operation: "run registered commit attribution sweep".to_string(),
+            message: error.to_string(),
+        })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "commit registered commit attribution sweep".to_string(),
+                message: error.to_string(),
+            })
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::debug!(%error, "commit attribution sweep skipped");
     }
 }
 

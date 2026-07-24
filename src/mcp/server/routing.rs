@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::project_route::HookProjectRouteCache;
 
 /// Per-connection routing and identity context, constructed once per client
@@ -36,7 +36,7 @@ impl ConnectionRouteState {
     pub(crate) async fn observe_initialize(
         &mut self,
         params: Option<&Value>,
-        registry_db: Option<&GlobalDb>,
+        registry_db: Option<&RegisteredGlobalDb>,
     ) {
         self.implicit_project_path =
             resolve_initialize_roots_project_path(params, registry_db).await;
@@ -53,14 +53,14 @@ impl ConnectionRouteState {
 
 pub(crate) async fn resolve_initialize_roots_project_path(
     params: Option<&Value>,
-    registry_db: Option<&GlobalDb>,
+    registry_db: Option<&RegisteredGlobalDb>,
 ) -> Option<PathBuf> {
     let roots = initialize_root_paths(params);
     if roots.is_empty() {
         return None;
     }
     let registry_db = registry_db?;
-    let projects = registry_db.search_code_projects("", usize::MAX).await;
+    let projects = registry_db.list_code_projects(usize::MAX).await.ok()?;
     for root in roots {
         if let Some(project_path) = match_initialize_root_to_registered_project(&root, &projects) {
             return Some(project_path);

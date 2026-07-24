@@ -8,9 +8,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::mcp::get_tool_definitions;
-use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
@@ -245,26 +244,27 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
         1,
     )
     .await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     let cron_store_id = lcm_raw_store_id(&cg, "cron-20260414-message").await;
-    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
-        provider: "cursor".to_string(),
-        conversation_id: "cron-20260414".to_string(),
-        session_id: "cron-20260414".to_string(),
-        depth: 0,
-        summary_text: "scheduled report summary".to_string(),
-        source_refs: vec![LcmSourceRef::RawMessage {
-            store_id: cron_store_id,
-        }],
-        source_token_count: 12,
-        summary_token_count: 3,
-        source_time_start: Some(1),
-        source_time_end: Some(2),
-        expand_hint: Some("test clean candidate".to_string()),
-        metadata_json: None,
-    })
+    db.lcm_insert_summary_node_for_test(
+        HostAdmissionScope::Project,
+        LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "cron-20260414".to_string(),
+            session_id: "cron-20260414".to_string(),
+            depth: 0,
+            summary_text: "scheduled report summary".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: cron_store_id,
+            }],
+            source_token_count: 12,
+            summary_token_count: 3,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("test clean candidate".to_string()),
+            metadata_json: None,
+        },
+    )
     .await
     .unwrap();
     seed_lcm_session_message(
@@ -403,11 +403,9 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
     )
     .await;
 
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     let raw = db
-        .lcm_load_raw_message("cursor", "lcm-doctor-payload-message")
+        .lcm_load_raw_message_for_test("cursor", "lcm-doctor-payload-message")
         .await
         .expect("externalized raw message should load");
     let payload_ref = raw.payload_ref.expect("external payload ref");
@@ -724,11 +722,9 @@ async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_file
     )
     .await;
 
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     let other_raw = db
-        .lcm_load_raw_message("cursor", "lcm-doctor-payload-other-message")
+        .lcm_load_raw_message_for_test("cursor", "lcm-doctor-payload-other-message")
         .await
         .expect("other externalized raw message should load");
     let other_payload_ref = other_raw.payload_ref.expect("other external payload ref");
@@ -814,15 +810,11 @@ async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
     )
     .await;
     let store_id = lcm_raw_store_id(&cg, "lcm-doctor-orphan-owner-message").await;
-    let conn = project_lcm_conn(&cg).await;
-    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
-    conn.execute(
-        "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-             VALUES ('missing-summary-owner', 'raw_message', ?1, 0)",
-        libsql::params![store_id.to_string()],
-    )
-    .await
-    .unwrap();
+    project_lcm_conn(&cg)
+        .await
+        .inject_lcm_orphan_summary_source_for_test(HostAdmissionScope::Project, store_id)
+        .await
+        .unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -854,17 +846,11 @@ async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
         1,
     )
     .await;
-    let conn = project_lcm_conn(&cg).await;
-    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
-    conn.execute(
-        "INSERT INTO lcm_maintenance_debt(
-                provider, conversation_id, debt_id, debt_kind, from_store_id, to_store_id
-             )
-             VALUES ('cursor', 'lcm-doctor-debt-other', 'orphan-debt', 'raw_backlog', 1, 2)",
-        (),
-    )
-    .await
-    .unwrap();
+    project_lcm_conn(&cg)
+        .await
+        .inject_lcm_foreign_orphan_debt_for_test(HostAdmissionScope::Project)
+        .await
+        .unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -924,10 +910,7 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
     .await;
     project_lcm_conn(&cg)
         .await
-        .execute(
-            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
-            (),
-        )
+        .clear_lcm_schema_migration_for_test(HostAdmissionScope::Project)
         .await
         .unwrap();
     assert_eq!(lcm_schema_migration_count(&cg).await, 0);
@@ -1116,39 +1099,41 @@ async fn lcm_tools_reject_invalid_storage_routing_arguments() {
 #[tokio::test]
 async fn user_scoped_lcm_preflight_ingests_without_a_project() {
     let profile = TempDir::new().unwrap();
-    let result = tracedecay::mcp::tools::handle_user_lcm_tool(
-        "tracedecay_lcm_preflight",
-        json!({
-            "storage_scope": "user",
-            "provider": "hermes",
-            "session_id": "untethered-session",
-            "messages": [{
-                "id": "untethered-message-1",
-                "role": "user",
-                "content": "Remember this general preference"
-            }],
-            "transcript_projection": true,
-            "format": "json"
-        }),
-        profile.path(),
-    )
-    .await
-    .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+        .await
+        .unwrap();
+    let result = runtime
+        .call_user_lcm_tool_for_test(
+            "tracedecay_lcm_preflight",
+            json!({
+                "storage_scope": "user",
+                "provider": "hermes",
+                "session_id": "untethered-session",
+                "messages": [{
+                    "id": "untethered-message-1",
+                    "role": "user",
+                    "content": "Remember this general preference"
+                }],
+                "transcript_projection": true,
+                "format": "json"
+            }),
+            profile.path(),
+        )
+        .await
+        .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(payload["status"], "ok");
 
-    let db =
-        GlobalDb::open_read_only_at(&tracedecay::sessions::user_sessions_db_path(profile.path()))
-            .await
-            .unwrap();
     assert!(
-        db.lcm_load_raw_message("hermes", "untethered-message-1")
+        runtime
+            .lcm_load_raw_message_for_test("hermes", "untethered-message-1")
             .await
             .is_some()
     );
-    let session = db
-        .get_session("hermes", "untethered-session")
+    let session = runtime
+        .session_for_test(HostAdmissionScope::Profile, "hermes", "untethered-session")
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(session.project_key, "user");
 }
@@ -1157,9 +1142,13 @@ async fn user_scoped_lcm_preflight_ingests_without_a_project() {
 async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
     let profile = TempDir::new().unwrap();
     let roots = json!(["/work/alpha", "/work/beta"]);
-    tracedecay::mcp::tools::handle_user_lcm_tool(
-        "tracedecay_lcm_preflight",
-        json!({
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+        .await
+        .unwrap();
+    runtime
+        .call_user_lcm_tool_for_test(
+            "tracedecay_lcm_preflight",
+            json!({
             "storage_scope": "user",
             "provider": "hermes",
             "session_id": "multi-project-session",
@@ -1171,19 +1160,20 @@ async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
             }],
             "transcript_projection": true,
             "format": "json"
-        }),
-        profile.path(),
-    )
-    .await
-    .unwrap();
-
-    let db =
-        GlobalDb::open_read_only_at(&tracedecay::sessions::user_sessions_db_path(profile.path()))
-            .await
-            .unwrap();
-    let message = db
-        .get_session_message("hermes", "multi-project-message-1")
+            }),
+            profile.path(),
+        )
         .await
+        .unwrap();
+
+    let message = runtime
+        .session_message_for_test(
+            HostAdmissionScope::Profile,
+            "hermes",
+            "multi-project-message-1",
+        )
+        .await
+        .unwrap()
         .unwrap();
     let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["associated_project_roots"], roots);
@@ -1199,11 +1189,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
     let temporal_db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&temporal_db, "lcm-session", vec![projection]).await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     let raw = db
-        .lcm_load_raw_message("cursor", "lcm-message")
+        .lcm_load_raw_message_for_test("cursor", "lcm-message")
         .await
         .expect("LCM raw message should be created by compatibility ingest");
 
@@ -1864,31 +1852,34 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
 #[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
-            session_id: "lcm-status-session".to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some("LCM status diagnostics".to_string()),
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: Some("lcm-status-session.jsonl".to_string()),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
+        db.upsert_session_for_test(
+            HostAdmissionScope::Project,
+            &SessionRecord {
+                provider: "cursor".to_string(),
+                session_id: "lcm-status-session".to_string(),
+                project_key: cg.project_root().to_string_lossy().to_string(),
+                project_path: cg.project_root().to_string_lossy().to_string(),
+                title: Some("LCM status diagnostics".to_string()),
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: Some("lcm-status-session.jsonl".to_string()),
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+        )
         .await
+        .unwrap()
     );
 
     let secret = format!("MCP_STATUS_SECRET_PAYLOAD\n{}", "Q".repeat(300_000));
-    db.lcm_store(project_data_dir(&cg))
-        .ingest_raw_message(&SessionMessageRecord {
+    db.lcm_ingest_raw_message_for_test(
+        HostAdmissionScope::Project,
+        &SessionMessageRecord {
             provider: "cursor".to_string(),
             message_id: "lcm-status-secret-message".to_string(),
             session_id: "lcm-status-session".to_string(),
@@ -1902,9 +1893,10 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
             source_path: Some("lcm-status-session.jsonl".to_string()),
             source_offset: Some(0),
             metadata_json: None,
-        })
-        .await
-        .expect("external payload should ingest");
+        },
+    )
+    .await
+    .expect("external payload should ingest");
 
     let result = handle_tool_call(
         &cg,
@@ -1950,29 +1942,30 @@ async fn lcm_status_reports_lifecycle_fields_from_active_project() {
         2,
     )
     .await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     let first = db
-        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-1")
+        .lcm_load_raw_message_for_test("cursor", "lcm-status-frontier-message-1")
         .await
         .expect("first raw message should load");
     let second = db
-        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-2")
+        .lcm_load_raw_message_for_test("cursor", "lcm-status-frontier-message-2")
         .await
         .expect("second raw message should load");
-    db.lcm_update_lifecycle(LcmLifecycleUpdate {
-        provider: "cursor".into(),
-        conversation_id: "lcm-status-frontier".into(),
-        current_session_id: "lcm-status-frontier".into(),
-        current_frontier_store_id: Some(second.store_id),
-        last_finalized_session_id: Some("lcm-status-prior".into()),
-        last_finalized_frontier_store_id: Some(first.store_id),
-        maintenance_debt: vec![LcmMaintenanceDebt::RawBacklog {
-            from_store_id: first.store_id,
-            to_store_id: second.store_id,
-        }],
-    })
+    db.lcm_update_lifecycle_for_test(
+        HostAdmissionScope::Project,
+        LcmLifecycleUpdate {
+            provider: "cursor".into(),
+            conversation_id: "lcm-status-frontier".into(),
+            current_session_id: "lcm-status-frontier".into(),
+            current_frontier_store_id: Some(second.store_id),
+            last_finalized_session_id: Some("lcm-status-prior".into()),
+            last_finalized_frontier_store_id: Some(first.store_id),
+            maintenance_debt: vec![LcmMaintenanceDebt::RawBacklog {
+                from_store_id: first.store_id,
+                to_store_id: second.store_id,
+            }],
+        },
+    )
     .await
     .expect("lifecycle state should update");
 
@@ -2031,9 +2024,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         2,
     )
     .await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(
         &db,
         "lcm-describe-targets",
@@ -2041,31 +2032,34 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     )
     .await;
     let source = db
-        .lcm_load_raw_message("cursor", "lcm-describe-source")
+        .lcm_load_raw_message_for_test("cursor", "lcm-describe-source")
         .await
         .expect("source raw message should exist");
     let external = db
-        .lcm_load_raw_message("cursor", "lcm-describe-tool")
+        .lcm_load_raw_message_for_test("cursor", "lcm-describe-tool")
         .await
         .expect("external raw message should exist");
     let payload_ref = external.payload_ref.expect("payload ref");
     let summary = db
-        .lcm_insert_summary_node(LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "conversation-1".to_string(),
-            session_id: "lcm-describe-targets".to_string(),
-            depth: 0,
-            summary_text: "summary secret body must not leak through metadata".to_string(),
-            source_refs: vec![LcmSourceRef::RawMessage {
-                store_id: source.store_id,
-            }],
-            source_token_count: 30,
-            summary_token_count: 5,
-            source_time_start: Some(1),
-            source_time_end: Some(2),
-            expand_hint: Some("describe target summary".to_string()),
-            metadata_json: None,
-        })
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                session_id: "lcm-describe-targets".to_string(),
+                depth: 0,
+                summary_text: "summary secret body must not leak through metadata".to_string(),
+                source_refs: vec![LcmSourceRef::RawMessage {
+                    store_id: source.store_id,
+                }],
+                source_token_count: 30,
+                summary_token_count: 5,
+                source_time_start: Some(1),
+                source_time_end: Some(2),
+                expand_hint: Some("describe target summary".to_string()),
+                metadata_json: None,
+            },
+        )
         .await
         .expect("summary should insert");
     let server = real_mcp_server(cg).await;
@@ -2520,9 +2514,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         1,
     )
     .await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, "lcm-large-expand-query", vec![projection]).await;
 
     let server = real_mcp_server(cg).await;
@@ -2587,31 +2579,32 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
         1,
     )
     .await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, "lcm-huge-prompt-expand-query", vec![projection]).await;
     let raw = db
-        .lcm_load_raw_message("cursor", "lcm-huge-prompt-expand-query-message")
+        .lcm_load_raw_message_for_test("cursor", "lcm-huge-prompt-expand-query-message")
         .await
         .expect("raw message should exist");
     let summary = db
-        .lcm_insert_summary_node(LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "conversation-1".to_string(),
-            session_id: "lcm-huge-prompt-expand-query".to_string(),
-            depth: 0,
-            summary_text: "summary contract overflow evidence".to_string(),
-            source_refs: vec![LcmSourceRef::RawMessage {
-                store_id: raw.store_id,
-            }],
-            source_token_count: 30,
-            summary_token_count: 5,
-            source_time_start: Some(1),
-            source_time_end: Some(2),
-            expand_hint: Some("contract overflow summary".to_string()),
-            metadata_json: None,
-        })
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                session_id: "lcm-huge-prompt-expand-query".to_string(),
+                depth: 0,
+                summary_text: "summary contract overflow evidence".to_string(),
+                source_refs: vec![LcmSourceRef::RawMessage {
+                    store_id: raw.store_id,
+                }],
+                source_token_count: 30,
+                summary_token_count: 5,
+                source_time_start: Some(1),
+                source_time_end: Some(2),
+                expand_hint: Some("contract overflow summary".to_string()),
+                metadata_json: None,
+            },
+        )
         .await
         .expect("summary should insert");
     let huge_prompt = format!(
@@ -2741,30 +2734,31 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
         );
         store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
     }
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, "lcm-page-session", projections).await;
     let summary = db
-        .lcm_insert_summary_node(LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "lcm-page-session".to_string(),
-            session_id: "lcm-page-session".to_string(),
-            depth: 0,
-            summary_text: "paged summary".to_string(),
-            source_refs: store_ids
-                .iter()
-                .map(|store_id| LcmSourceRef::RawMessage {
-                    store_id: *store_id,
-                })
-                .collect(),
-            source_token_count: 16,
-            summary_token_count: 2,
-            source_time_start: Some(1),
-            source_time_end: Some(4),
-            expand_hint: Some("pagination test".to_string()),
-            metadata_json: None,
-        })
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "lcm-page-session".to_string(),
+                session_id: "lcm-page-session".to_string(),
+                depth: 0,
+                summary_text: "paged summary".to_string(),
+                source_refs: store_ids
+                    .iter()
+                    .map(|store_id| LcmSourceRef::RawMessage {
+                        store_id: *store_id,
+                    })
+                    .collect(),
+                source_token_count: 16,
+                summary_token_count: 2,
+                source_time_start: Some(1),
+                source_time_end: Some(4),
+                expand_hint: Some("pagination test".to_string()),
+                metadata_json: None,
+            },
+        )
         .await
         .expect("summary should insert");
     let summary_id = summary.node_id.clone();
@@ -2900,23 +2894,16 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     )
     .await;
     let origin_store_id = lcm_raw_store_id(&cg, "origin-message").await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&db, "lcm-origin-session", vec![origin_projection]).await;
     activate_test_temporal_generation(&db, "lcm-active-session", vec![active_projection]).await;
-    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
-    temporal
-        .execute(
-            "UPDATE lcm_raw_messages
-             SET content = 'legacy projection poison',
-                 snippet_text = 'legacy projection poison',
-                 index_text = 'legacy projection poison'
-             WHERE store_id = ?1",
-            [origin_store_id],
-        )
-        .await
-        .unwrap();
+    db.poison_lcm_raw_projection_for_test(
+        HostAdmissionScope::Project,
+        origin_store_id,
+        "legacy projection poison",
+    )
+    .await
+    .unwrap();
     let server = real_mcp_server(cg).await;
 
     let result = handle_real_server_tool_call(
@@ -2991,9 +2978,7 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     let redacted_store_id = lcm_raw_store_id(&cg, "redacted-state-message").await;
     let locked_store_id = lcm_raw_store_id(&cg, "locked-state-message").await;
     let deleted_store_id = lcm_raw_store_id(&cg, "deleted-state-message").await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(
         &db,
         "lcm-state-session",
@@ -3011,18 +2996,16 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         .project_id
         .clone()
         .expect("test project id");
-    let registry = GlobalDb::open().await.expect("test registry");
+    let registry =
+        HostAdmissionTestRuntimeV1::profile(tracedecay::storage::default_profile_root().unwrap())
+            .await
+            .expect("test registry");
     let project = registry
         .upsert_code_project(&project_id, cg.project_root(), None, None, None)
         .await
         .expect("register test project");
-    let profile_root = registry
-        .db_path()
-        .parent()
-        .expect("test registry profile root");
-    let serving_db_relpath = cg
-        .db_path()
-        .strip_prefix(profile_root)
+    let serving_db_relpath = registry
+        .profile_relative_path_for_test(&cg.db_path())
         .expect("test graph database must be under the registry profile root")
         .to_string_lossy()
         .into_owned();
@@ -3052,6 +3035,7 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         })
         .await
         .expect("register test graph scope");
+    drop(registry);
     let server = real_mcp_server(cg).await;
     let initial = handle_real_server_tool_call(
         &server,
@@ -3133,12 +3117,11 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let origin_store_id = lcm_raw_store_id(&cg, "origin-external-message").await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     let active_session = db
-        .get_session("cursor", "lcm-active-session")
+        .session_for_test(HostAdmissionScope::Project, "cursor", "lcm-active-session")
         .await
+        .unwrap()
         .expect("canonical projection must create the active session");
     assert_eq!(
         active_session.project_key,
@@ -3150,26 +3133,29 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     );
     activate_test_temporal_generation(&db, "lcm-origin-session", vec![origin_projection]).await;
     activate_test_temporal_generation(&db, "lcm-active-session", vec![active_projection]).await;
-    db.lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
-        summary_id: "summary.lcm-origin-external".to_string(),
-        predecessor_summary_id: None,
-        draft: LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "lcm-origin-session".to_string(),
-            session_id: "lcm-origin-session".to_string(),
-            depth: 0,
-            summary_text: "external payload attestation".to_string(),
-            source_refs: vec![LcmSourceRef::RawMessage {
-                store_id: origin_store_id,
-            }],
-            source_token_count: 1,
-            summary_token_count: 1,
-            source_time_start: Some(1),
-            source_time_end: Some(1),
-            expand_hint: Some("external payload fixture".to_string()),
-            metadata_json: None,
+    db.lcm_publish_immutable_summary_for_test(
+        HostAdmissionScope::Project,
+        LcmImmutableSummaryPublication {
+            summary_id: "summary.lcm-origin-external".to_string(),
+            predecessor_summary_id: None,
+            draft: LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "lcm-origin-session".to_string(),
+                session_id: "lcm-origin-session".to_string(),
+                depth: 0,
+                summary_text: "external payload attestation".to_string(),
+                source_refs: vec![LcmSourceRef::RawMessage {
+                    store_id: origin_store_id,
+                }],
+                source_token_count: 1,
+                summary_token_count: 1,
+                source_time_start: Some(1),
+                source_time_end: Some(1),
+                expand_hint: Some("external payload fixture".to_string()),
+                metadata_json: None,
+            },
         },
-    })
+    )
     .await
     .expect("external payload must receive a canonical summary attestation");
     let project_id = cg
@@ -3178,18 +3164,16 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         .project_id
         .clone()
         .expect("test project id");
-    let registry = GlobalDb::open().await.expect("test registry");
+    let registry =
+        HostAdmissionTestRuntimeV1::profile(tracedecay::storage::default_profile_root().unwrap())
+            .await
+            .expect("test registry");
     let project = registry
         .upsert_code_project(&project_id, cg.project_root(), None, None, None)
         .await
         .expect("register test project");
-    let profile_root = registry
-        .db_path()
-        .parent()
-        .expect("test registry profile root");
-    let serving_db_relpath = cg
-        .db_path()
-        .strip_prefix(profile_root)
+    let serving_db_relpath = registry
+        .profile_relative_path_for_test(&cg.db_path())
         .expect("test graph database must be under the registry profile root")
         .to_string_lossy()
         .into_owned();
@@ -3219,6 +3203,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         })
         .await
         .expect("register test graph scope");
+    drop(registry);
     let server = real_mcp_server(cg).await;
 
     let raw_result = handle_real_server_tool_call(
@@ -3298,41 +3283,45 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
         .await;
         store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
     }
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
+    let db = open_active_project_session_db(&cg).await;
     for (index, pair) in store_ids.chunks(2).enumerate() {
-        db.lcm_insert_summary_node(LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "lcm-depth-session".to_string(),
-            session_id: "lcm-depth-session".to_string(),
-            depth: 1,
-            summary_text: format!("depth one summary {}", index + 1),
-            source_refs: pair
-                .iter()
-                .map(|store_id| LcmSourceRef::RawMessage {
-                    store_id: *store_id,
-                })
-                .collect(),
-            source_token_count: 12,
-            summary_token_count: 4,
-            source_time_start: Some(10 + index as i64),
-            source_time_end: Some(20 + index as i64),
-            expand_hint: Some("depth override test".to_string()),
-            metadata_json: None,
-        })
+        db.lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "lcm-depth-session".to_string(),
+                session_id: "lcm-depth-session".to_string(),
+                depth: 1,
+                summary_text: format!("depth one summary {}", index + 1),
+                source_refs: pair
+                    .iter()
+                    .map(|store_id| LcmSourceRef::RawMessage {
+                        store_id: *store_id,
+                    })
+                    .collect(),
+                source_token_count: 12,
+                summary_token_count: 4,
+                source_time_start: Some(10 + index as i64),
+                source_time_end: Some(20 + index as i64),
+                expand_hint: Some("depth override test".to_string()),
+                metadata_json: None,
+            },
+        )
         .await
         .expect("depth-1 summary should insert");
     }
-    db.lcm_update_lifecycle(LcmLifecycleUpdate {
-        provider: "cursor".to_string(),
-        conversation_id: "lcm-depth-session".to_string(),
-        current_session_id: "lcm-depth-session".to_string(),
-        current_frontier_store_id: store_ids.last().copied(),
-        last_finalized_session_id: None,
-        last_finalized_frontier_store_id: None,
-        maintenance_debt: Vec::new(),
-    })
+    db.lcm_update_lifecycle_for_test(
+        HostAdmissionScope::Project,
+        LcmLifecycleUpdate {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-depth-session".to_string(),
+            current_session_id: "lcm-depth-session".to_string(),
+            current_frontier_store_id: store_ids.last().copied(),
+            last_finalized_session_id: None,
+            last_finalized_frontier_store_id: None,
+            maintenance_debt: Vec::new(),
+        },
+    )
     .await
     .expect("lifecycle state should update");
 
@@ -3379,25 +3368,28 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     .await;
     let db = open_active_project_session_db(&cg).await;
     let raw = db
-        .lcm_load_raw_message("cursor", "diag-message")
+        .lcm_load_raw_message_for_test("cursor", "diag-message")
         .await
         .expect("raw message should load from the active project-local store");
     assert_eq!(raw.session_id, "lcm-diag-session");
     let store_id = raw.store_id;
-    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
-        provider: "cursor".to_string(),
-        conversation_id: "lcm-diag-session".to_string(),
-        session_id: "lcm-diag-session".to_string(),
-        depth: 0,
-        summary_text: "diag summary".to_string(),
-        source_refs: vec![LcmSourceRef::RawMessage { store_id }],
-        source_token_count: 24,
-        summary_token_count: 6,
-        source_time_start: Some(1),
-        source_time_end: Some(2),
-        expand_hint: Some("diagnostics test".to_string()),
-        metadata_json: None,
-    })
+    db.lcm_insert_summary_node_for_test(
+        HostAdmissionScope::Project,
+        LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-diag-session".to_string(),
+            session_id: "lcm-diag-session".to_string(),
+            depth: 0,
+            summary_text: "diag summary".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage { store_id }],
+            source_token_count: 24,
+            summary_token_count: 6,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("diagnostics test".to_string()),
+            metadata_json: None,
+        },
+    )
     .await
     .expect("summary should insert");
 
@@ -3541,16 +3533,11 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
         json!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION)
     );
 
-    let db_path = project_session_db_path(&cg);
-    {
-        let conn = open_test_db_connection(&db_path).await;
-        conn.execute(
-            "UPDATE session_schema_migrations SET version = 1 WHERE name = 'lcm'",
-            (),
-        )
+    let runtime = open_active_project_session_db(&cg).await;
+    runtime
+        .set_lcm_schema_migration_version_for_test(HostAdmissionScope::Project, 1)
         .await
         .unwrap();
-    }
 
     let result = handle_tool_call(&cg, "tracedecay_lcm_status", json!({}), None, None)
         .await
@@ -3567,16 +3554,11 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     );
 
     // The on-disk marker is untouched as well.
-    let conn = open_test_db_connection(&db_path).await;
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
-            (),
-        )
+    let version = runtime
+        .lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
         .await
         .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    assert_eq!(version, Some(1));
 }
 
 // ---------------------------------------------------------------------------

@@ -8,11 +8,11 @@
 //! registry map lock.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use tracedecay_domain::CodeGenerationId;
+use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
 
 use super::{
     CodeIndexBytePoolStatsV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
@@ -20,6 +20,16 @@ use super::{
 };
 
 pub(super) struct MountedCodeIndexWorktreeV1 {
+    pub(super) repository_id: RepositoryId,
+    pub(super) worktree_id: WorktreeId,
+    pub(super) pr9_query_authority: Option<(
+        ManifestDigest,
+        Arc<crate::query::retrieval::Pr9QueryAuthorityV1>,
+    )>,
+    pub(super) semantic_query_authority: Option<(
+        ManifestDigest,
+        Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>,
+    )>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
@@ -67,7 +77,20 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
         let mut mounted = self.mounted.lock().await;
-        if mounted.contains_key(&project_root) {
+        if let Some(existing) = mounted.get(&project_root) {
+            let scheduler = Arc::clone(&existing.scheduler);
+            drop(mounted);
+            let latest = {
+                let mut scheduler = scheduler
+                    .lock()
+                    .unwrap_or_else(|_| panic!("code-index scheduler lock"));
+                let latest = scheduler.latest_complete().map(|latest| latest.generation);
+                scheduler.replace_semantic_schedule_hook(semantic_schedule.clone());
+                latest
+            };
+            if let (Some(hook), Some(generation)) = (semantic_schedule, latest) {
+                let _ = hook(&generation);
+            }
             return Ok(false);
         }
         if mounted.len() >= self.max_worktrees {
@@ -83,8 +106,10 @@ impl CodeIndexSchedulerRegistryV1 {
             if let Some(latest) = opened.latest_complete() {
                 let _ = hook(&latest.generation);
             }
-            opened.set_semantic_schedule_hook(hook);
+            opened.replace_semantic_schedule_hook(Some(hook));
         }
+        let repository_id = opened.identity().repository_id().clone();
+        let worktree_id = opened.identity().worktree_id().clone();
         let scheduler = Arc::new(Mutex::new(opened));
         let (wake, shutting_down) = {
             let scheduler = scheduler
@@ -116,9 +141,120 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             }
         });
-        mounted.insert(project_root, MountedCodeIndexWorktreeV1 { scheduler, task });
+        mounted.insert(
+            project_root,
+            MountedCodeIndexWorktreeV1 {
+                repository_id,
+                worktree_id,
+                pr9_query_authority: None,
+                semantic_query_authority: None,
+                scheduler,
+                task,
+            },
+        );
         wake.notify_one();
         Ok(true)
+    }
+
+    /// Mount the accepted PR9 profile and query/cursor key owner for one exact
+    /// admitted scope. The authority cannot be inherited by another project,
+    /// repository, worktree, or ref.
+    pub async fn mount_pr9_query_authority(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        authority: Arc<crate::query::retrieval::Pr9QueryAuthorityV1>,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot mount PR9 query authority before its worktree".to_owned(),
+            )
+        })?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "PR9 query authority scope does not match the mounted worktree".to_owned(),
+            ));
+        }
+        worktree.pr9_query_authority = Some((scope.scope_digest.clone(), authority));
+        Ok(())
+    }
+
+    /// Revoke the live PR9 authority for one exact admitted scope before a
+    /// committed profile refresh. A failed replacement therefore leaves
+    /// search unavailable instead of serving the prior profile.
+    pub async fn clear_pr9_query_authority(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let mut mounted = self.mounted.lock().await;
+        let roots = mounted
+            .iter()
+            .filter(|(_, worktree)| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|(root, _)| root.clone())
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "cannot clear PR9 query authority before its worktree".to_owned(),
+            ));
+        }
+        let mut scope_mismatch = false;
+        for root in &roots {
+            let worktree = mounted.get_mut(root).ok_or_else(|| {
+                CodeIndexSchedulerErrorV1::Identity("worktree disappeared".to_owned())
+            })?;
+            scope_mismatch |= worktree
+                .pr9_query_authority
+                .as_ref()
+                .is_some_and(|(digest, _)| digest != &scope.scope_digest);
+            worktree.pr9_query_authority = None;
+        }
+        if roots.len() != 1 {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "PR9 query authority scope is ambiguous".to_owned(),
+            ));
+        }
+        if scope_mismatch {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "PR9 query authority scope does not match the mounted authority".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn pr9_query_authority_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<Arc<crate::query::retrieval::Pr9QueryAuthorityV1>> {
+        let mounted = self.mounted.lock().await;
+        let mut matched = None;
+        for worktree in mounted.values() {
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                continue;
+            }
+            let Some((scope_digest, authority)) = &worktree.pr9_query_authority else {
+                return None;
+            };
+            if scope_digest != &scope.scope_digest || matched.is_some() {
+                return None;
+            }
+            matched = Some(Arc::clone(authority));
+        }
+        matched
     }
 
     /// Whether a worktree is currently mounted for `project_root`. Read-only
@@ -218,28 +354,44 @@ impl CodeIndexSchedulerRegistryV1 {
         .flatten()
     }
 
-    /// Unpinned serving resolution: run the freshness ladder over each mounted
-    /// worktree and return the first latest complete generation. The daemon
-    /// mounts one worktree per query context, so this resolves that worktree's
-    /// freshest complete generation. This is the freshness-gated entry ordinary
-    /// (unpinned) search uses when the caller pins no explicit generation, so
-    /// out-of-band changes are reconciled at query admission with no watcher.
-    ///
-    /// Keys are cloned under a short map lock and each per-worktree freshness
-    /// reconcile then runs through [`Self::latest_complete_fresh`], which drops
-    /// the registry guard before its blocking work — one worktree's reconcile
-    /// never serializes another worktree's query on the registry map.
-    pub async fn latest_complete_fresh_any(&self) -> Option<LatestCompleteCodeIndexV1> {
-        let roots = {
+    /// Resolve one mounted root by the exact admitted repository/worktree/ref
+    /// scope, then run that root's freshness ladder. A request never inherits
+    /// whichever mounted worktree sorts first.
+    pub async fn latest_complete_fresh_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let root = {
             let mounted = self.mounted.lock().await;
-            mounted.keys().cloned().collect::<Vec<PathBuf>>()
-        };
-        for root in roots {
-            if let Some(latest) = self.latest_complete_fresh(&root).await {
-                return Some(latest);
+            let mut matched = None;
+            for (root, worktree) in mounted.iter() {
+                if worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+                {
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(root.clone());
+                }
             }
+            matched?
+        };
+        let latest = self.latest_complete_fresh(&root).await?;
+        if Self::latest_matches_scope(&latest, scope) {
+            Some(latest)
+        } else {
+            None
         }
-        None
+    }
+
+    pub(super) fn latest_matches_scope(
+        latest: &LatestCompleteCodeIndexV1,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        let snapshot = latest.generation.snapshot();
+        snapshot.repository == scope.repository_id
+            && snapshot.worktree.as_ref() == Some(&scope.worktree_id)
+            && snapshot.reference == scope.reference
     }
 
     /// The per-worktree scheduler handle, cloned out of the registry map. Test
@@ -271,4 +423,164 @@ impl CodeIndexSchedulerRegistryV1 {
             let _ = worktree.task.await;
         }
     }
+}
+
+impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentIdentityPort
+    for CodeIndexSchedulerRegistryV1
+{
+    fn resolve(
+        &self,
+        project_root: PathBuf,
+        document_uri: Option<String>,
+    ) -> crate::application::feedback::cycle_production::ProductionFeedbackDocumentIdentityFuture
+    {
+        let registry = self.clone();
+        Box::pin(async move {
+            let root = project_root.canonicalize().map_err(|_| {
+                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                    "feedback-code-index-root-unavailable",
+                )
+            })?;
+            let current = registry.latest_complete_fresh(&root).await.ok_or_else(|| {
+                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                    "feedback-code-index-generation-unavailable",
+                )
+            })?;
+            let generation = &current.generation;
+            let snapshot = generation.snapshot();
+            let file = match document_uri {
+                Some(uri) => {
+                    let logical_path = feedback_document_logical_path(&root, &uri)?;
+                    snapshot
+                        .files
+                        .iter()
+                        .find(|file| file.logical_path == logical_path)
+                        .ok_or_else(|| {
+                            crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                                "feedback-code-index-document-unavailable",
+                            )
+                        })?
+                }
+                None => snapshot
+                    .files
+                    .iter()
+                    .find(|file| {
+                        Path::new(&file.logical_path)
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            == Some("rs")
+                    })
+                    .ok_or_else(|| {
+                        crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                            "feedback-code-index-rust-document-unavailable",
+                        )
+                    })?,
+            };
+            let generation_digest =
+                ManifestDigest::new(generation.manifest().snapshot_digest.as_str().to_owned())
+                    .map_err(|_| {
+                        crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                            "feedback-code-index-generation-invalid",
+                        )
+                    })?;
+            Ok(
+                crate::application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1 {
+                    generation_id: generation.manifest().generation_id.clone(),
+                    generation_digest,
+                    file: file.file_occurrence_id.clone(),
+                    content_digest: file.content_digest.clone(),
+                },
+            )
+        })
+    }
+}
+
+impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
+    for CodeIndexSchedulerRegistryV1
+{
+    fn current_identity(
+        &self,
+        project_root: PathBuf,
+        document_relative_path: Option<String>,
+    ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
+        Result<
+            crate::application::lsp_runtime::LspCodeIndexProjectionIdentity,
+            crate::daemon::lsp_gateway::LspRuntimeFailure,
+        >,
+    > {
+        let registry = self.clone();
+        Box::pin(async move {
+            let root = project_root.canonicalize().map_err(|_| {
+                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                    "lsp-code-index-root-unavailable",
+                )
+            })?;
+            let current = registry.latest_complete_fresh(&root).await.ok_or_else(|| {
+                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                    "lsp-code-index-generation-unavailable",
+                )
+            })?;
+            let generation = &current.generation;
+            let document_content_digest = document_relative_path
+                .map(|path| path.replace('\\', "/"))
+                .map(|logical_path| {
+                    generation
+                        .snapshot()
+                        .files
+                        .iter()
+                        .find(|file| file.logical_path == logical_path)
+                        .map(|file| file.content_digest.clone())
+                        .ok_or_else(|| {
+                            crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                                "lsp-code-index-document-unavailable",
+                            )
+                        })
+                })
+                .transpose()?;
+            Ok(
+                crate::application::lsp_runtime::LspCodeIndexProjectionIdentity {
+                    code_generation_id: generation.manifest().generation_id.clone(),
+                    snapshot_digest: generation.manifest().snapshot_digest.clone(),
+                    invalidation_digest: generation.manifest().invalidation_digest.clone(),
+                    snapshot_content_digest: generation.snapshot().content_identity.clone(),
+                    document_content_digest,
+                },
+            )
+        })
+    }
+}
+
+fn feedback_document_logical_path(
+    project_root: &Path,
+    document_uri: &str,
+) -> Result<String, crate::daemon::lsp_gateway::LspRuntimeFailure> {
+    let url = url::Url::parse(document_uri).map_err(|_| {
+        crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-uri-invalid")
+    })?;
+    if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
+        return Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+            "feedback-document-uri-invalid",
+        ));
+    }
+    let path = url.to_file_path().map_err(|()| {
+        crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-uri-invalid")
+    })?;
+    let relative = path.strip_prefix(project_root).map_err(|_| {
+        crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-outside-root")
+    })?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+            "feedback-document-uri-invalid",
+        ));
+    }
+    relative
+        .to_str()
+        .map(|path| path.replace('\\', "/"))
+        .ok_or_else(|| {
+            crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-path-unavailable")
+        })
 }

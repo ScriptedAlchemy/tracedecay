@@ -4,10 +4,9 @@
 use tempfile::TempDir;
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::source::try_ingest_source;
 
 use crate::codex::{write_codex_rollout, write_codex_rollout_with_goal_context, write_jsonl};
+use crate::restart_atomicity::{open_project_session_db, try_ingest_source};
 use crate::support::setup;
 
 fn write_codex_rollout_with_non_goal_response_item(
@@ -421,15 +420,17 @@ async fn codex_custom_tool_call_exec_is_joined_into_searchable_tool_call() {
     let path_str = write_codex_rollout_with_custom_exec(&home, &project, "codex-custom-exec")
         .to_string_lossy()
         .to_string();
-    db.set_parse_offset(
-        &path_str,
-        ParseOffset {
-            byte_offset: 0,
-            mtime: 1,
-            file_id: 1,
-        },
-    )
-    .await;
+    db.runtime()
+        .set_project_parse_offset_for_test(
+            &path_str,
+            ParseOffset {
+                byte_offset: 0,
+                mtime: 1,
+                file_id: 1,
+            },
+        )
+        .await
+        .unwrap();
     try_ingest_source(&db, &source, &project, None)
         .await
         .unwrap();

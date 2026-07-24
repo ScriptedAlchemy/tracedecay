@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 
 #[cfg(unix)]
 fn non_unicode_alias_paths(root: &Path) -> (PathBuf, PathBuf) {
@@ -30,7 +30,7 @@ fn non_unicode_alias_paths(root: &Path) -> (PathBuf, PathBuf) {
 #[tokio::test]
 async fn project_alias_lookup_preserves_distinct_native_paths() {
     let dir = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("profile/global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path().join("profile"))
         .await
         .unwrap();
     let (first, second) = non_unicode_alias_paths(dir.path());
@@ -47,14 +47,22 @@ async fn project_alias_lookup_preserves_distinct_native_paths() {
         .await
         .unwrap();
 
-    let first_context = db.project_registry_context_by_alias(&first).await.unwrap();
-    let second_context = db.project_registry_context_by_alias(&second).await.unwrap();
+    let first_context = db
+        .project_registry_context_by_alias(&first)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_context = db
+        .project_registry_context_by_alias(&second)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(first_context.project.project_id, "proj_native_first");
     assert_eq!(second_context.project.project_id, "proj_native_second");
     assert_ne!(
         first_context.aliases[0].alias_path,
         second_context.aliases[0].alias_path
     );
-    db.checkpoint().await;
-    db.close();
+    db.checkpoint_profile_database_for_test().await;
+    drop(db);
 }

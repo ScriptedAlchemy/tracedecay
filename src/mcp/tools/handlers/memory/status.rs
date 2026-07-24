@@ -3,8 +3,9 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
 
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::memory::types::FeedbackRequest;
 use crate::tracedecay::TraceDecay;
@@ -37,7 +38,7 @@ pub(super) fn feedback_history_repair_payload(
 pub(in crate::mcp::tools::handlers) async fn handle_memory_status(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let target_memory =
@@ -61,6 +62,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_memory_status(
 pub async fn handle_user_memory_tool(
     tool_name: &str,
     args: Value,
+    registry: &DaemonSessionRuntimeRegistryV1,
     profile_root: &Path,
 ) -> Result<ToolResult> {
     if !requests_user_memory(&args) {
@@ -68,7 +70,7 @@ pub async fn handle_user_memory_tool(
             "projectless memory dispatch requires memory_scope=user",
         ));
     }
-    let target_memory = open_user_memory_target(profile_root).await?;
+    let target_memory = open_user_memory_target(registry, profile_root).await?;
     match tool_name {
         "tracedecay_fact_store" => {
             required_str(&args, "action")?;

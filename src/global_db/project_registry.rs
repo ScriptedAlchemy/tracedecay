@@ -1,9 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use libsql::params;
+use crate::db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params};
 
-use super::{GlobalDb, global_db_operation_error, global_db_operation_message};
+use super::{
+    CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
+    ProjectRegistryContext, ProjectStoreResolution, RegisteredGlobalDb,
+    RegisteredGlobalDbWriteTransaction, StoreArtifactRecord, StoreArtifactUpsert,
+    StoreInstanceRecord, StoreInstanceUpsert, global_db_operation_error,
+    global_db_operation_message,
+};
 
 pub(super) const NATIVE_PROJECT_PATH_ALIAS_PREFIX: &str = "tracedecay-project-path-v1";
 
@@ -166,17 +172,18 @@ fn native_project_path_alias_decode_error(error: String) -> String {
 }
 
 pub(super) async fn migrate_project_rows_to_canonical_keys(
-    db: &GlobalDb,
-) -> Result<(), libsql::Error> {
-    let transaction = db.begin_write_transaction().await?;
-    let mut rows = transaction
+    conn: &(impl Executor + QueryExecutor),
+) -> crate::db::engine::Result<()> {
+    let mut rows = conn
         .query("SELECT path, tokens_saved FROM projects", ())
         .await?;
     let mut replacements = Vec::new();
     while let Some(row) = rows.next().await? {
-        let old_path: String = row.get(0)?;
-        let tokens_saved: i64 = row.get(1)?;
-        let canonical_path = GlobalDb::canonical_project_key(Path::new(&old_path));
+        let old_path = row.get::<String>(0)?;
+        let tokens_saved = row.get::<i64>(1)?;
+        let canonical_path = canonical_project_path(Path::new(&old_path))
+            .to_string_lossy()
+            .into_owned();
         if old_path != canonical_path {
             replacements.push((old_path, canonical_path, tokens_saved));
         }
@@ -184,37 +191,120 @@ pub(super) async fn migrate_project_rows_to_canonical_keys(
     drop(rows);
 
     for (old_path, canonical_path, tokens_saved) in replacements {
-        transaction
-            .execute(
-                "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
-                 ON CONFLICT(path) DO UPDATE SET
-                    tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
-                params![canonical_path, tokens_saved],
-            )
-            .await?;
-        transaction
-            .execute("DELETE FROM projects WHERE path = ?1", params![old_path])
+        conn.execute(
+            "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET
+                tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
+            params![canonical_path, tokens_saved],
+        )
+        .await?;
+        conn.execute("DELETE FROM projects WHERE path = ?1", params![old_path])
             .await?;
     }
-    transaction.commit().await
+    Ok(())
 }
 
-pub(super) async fn list_code_project_paths(
-    db: &GlobalDb,
+#[derive(Clone, Copy)]
+struct ProjectRegistryDatabase<'db>(&'db RegisteredGlobalDb);
+
+struct ProjectRegistryReadSnapshot(crate::db::engine::ReadSnapshot);
+
+struct ProjectRegistryWriteTransaction<'db>(RegisteredGlobalDbWriteTransaction<'db>);
+
+impl<'db> ProjectRegistryDatabase<'db> {
+    async fn read_snapshot(
+        self,
+        operation: &'static str,
+    ) -> crate::errors::Result<ProjectRegistryReadSnapshot> {
+        self.0
+            .read_snapshot()
+            .await
+            .map(ProjectRegistryReadSnapshot)
+            .map_err(|error| global_db_operation_error(operation, error))
+    }
+
+    async fn begin_write_transaction(
+        self,
+        operation: &'static str,
+    ) -> crate::errors::Result<ProjectRegistryWriteTransaction<'db>> {
+        self.0
+            .begin_write_transaction()
+            .await
+            .map(ProjectRegistryWriteTransaction)
+            .map_err(|error| global_db_operation_error(operation, error))
+    }
+}
+
+impl QueryExecutor for ProjectRegistryReadSnapshot {
+    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        QueryExecutor::query(&self.0, sql, params).await
+    }
+}
+
+impl QueryExecutor for ProjectRegistryWriteTransaction<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        QueryExecutor::query(&self.0, sql, params).await
+    }
+}
+
+impl Executor for ProjectRegistryWriteTransaction<'_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: IntoParams,
+    {
+        Executor::execute(&self.0, sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        Executor::execute_batch(&self.0, sql).await
+    }
+}
+
+impl ProjectRegistryWriteTransaction<'_> {
+    async fn commit(self, operation: &'static str) -> crate::errors::Result<()> {
+        self.0
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(operation, error))
+    }
+
+    async fn rollback(self, operation: &'static str) -> crate::errors::Result<()> {
+        self.0
+            .rollback()
+            .await
+            .map_err(|error| global_db_operation_error(operation, error))
+    }
+}
+
+pub(super) async fn list_registered_code_project_paths(
+    db: &RegisteredGlobalDb,
+    limit: usize,
+) -> crate::errors::Result<Vec<PathBuf>> {
+    list_code_project_paths_from(ProjectRegistryDatabase(db), limit).await
+}
+
+async fn list_code_project_paths_from(
+    db: ProjectRegistryDatabase<'_>,
     limit: usize,
 ) -> crate::errors::Result<Vec<PathBuf>> {
     const OPERATION: &str = "list native code project paths";
 
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let mut rows = db
-        .conn
+    let read = db.read_snapshot(OPERATION).await?;
+    let mut rows = read
         .query(
             "SELECT project_id, canonical_root, display_root, primary_root_platform,
                     primary_root_bytes, primary_root_last_seen_at, last_seen_at
              FROM code_projects
              ORDER BY last_seen_at DESC, project_id
              LIMIT ?1",
-            params![limit],
+            crate::db::engine::params![limit],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -295,7 +385,7 @@ pub(super) async fn list_code_project_paths(
                 let display_evidence = path.to_string_lossy();
                 if primary_last_seen != last_seen_at
                     || (display_evidence != canonical_root && display_evidence != display_root)
-                    || !project_alias_is_current(db, &project_id, &path, last_seen_at).await?
+                    || !project_alias_is_current(&read, &project_id, &path, last_seen_at).await?
                 {
                     skip("stale primary root");
                     continue;
@@ -305,6 +395,7 @@ pub(super) async fn list_code_project_paths(
             (None, None, None) => {
                 match legacy_code_project_path(
                     db,
+                    &read,
                     &project_id,
                     &canonical_root,
                     &display_root,
@@ -334,19 +425,18 @@ pub(super) async fn list_code_project_paths(
 }
 
 async fn project_alias_is_current(
-    db: &GlobalDb,
+    read: &impl QueryExecutor,
     project_id: &str,
     path: &Path,
     last_seen_at: i64,
 ) -> crate::errors::Result<bool> {
     const OPERATION: &str = "list native code project paths";
     let alias = project_path_alias_key(path);
-    let mut rows = db
-        .conn
+    let mut rows = read
         .query(
             "SELECT 1 FROM project_aliases
              WHERE project_id = ?1 AND alias_path = ?2 AND last_seen_at = ?3",
-            params![project_id, alias, last_seen_at],
+            crate::db::engine::params![project_id, alias, last_seen_at],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -369,19 +459,19 @@ enum PathEvidenceVerdict {
 }
 
 async fn legacy_code_project_path(
-    db: &GlobalDb,
+    db: ProjectRegistryDatabase<'_>,
+    read: &impl QueryExecutor,
     project_id: &str,
     canonical_root: &str,
     display_root: &str,
     last_seen_at: i64,
 ) -> crate::errors::Result<PathEvidenceVerdict> {
     const OPERATION: &str = "list native code project paths";
-    let mut rows = db
-        .conn
+    let mut rows = read
         .query(
             "SELECT alias_path, last_seen_at FROM project_aliases
              WHERE project_id = ?1 ORDER BY alias_path",
-            params![project_id],
+            crate::db::engine::params![project_id],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -429,10 +519,7 @@ async fn legacy_code_project_path(
             "project '{project_id}' has ambiguous legacy current roots"
         )));
     }
-    let transaction = db
-        .begin_write_transaction()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let transaction = db.begin_write_transaction(OPERATION).await?;
     let updated = transaction
         .execute(
             "UPDATE code_projects
@@ -441,7 +528,7 @@ async fn legacy_code_project_path(
              WHERE project_id = ?4 AND last_seen_at = ?3
                AND primary_root_platform IS NULL AND primary_root_bytes IS NULL
                AND primary_root_last_seen_at IS NULL",
-            params![
+            crate::db::engine::params![
                 native_project_path_platform(),
                 encode_native_project_path(&path),
                 last_seen_at,
@@ -454,24 +541,34 @@ async fn legacy_code_project_path(
         // The row changed concurrently (raced with another writer); treat as
         // row-local evidence rejection rather than a hard storage failure —
         // the write itself succeeded, it just no longer applies.
+        transaction
+            .rollback("rollback raced native code project path resolution")
+            .await?;
         return Ok(PathEvidenceVerdict::Rejected(format!(
             "project '{project_id}' changed while resolving its legacy root"
         )));
     }
     transaction
-        .commit()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .commit("commit native code project path resolution")
+        .await?;
     Ok(PathEvidenceVerdict::Accepted(path))
 }
 
-pub(super) async fn list_lossless_paths(
-    db: &GlobalDb,
+pub(super) async fn list_registered_lossless_paths(
+    db: &RegisteredGlobalDb,
     sql: &str,
     operation: &'static str,
 ) -> crate::errors::Result<Vec<PathBuf>> {
-    let mut rows = db
-        .conn
+    list_lossless_paths_from(ProjectRegistryDatabase(db), sql, operation).await
+}
+
+async fn list_lossless_paths_from(
+    db: ProjectRegistryDatabase<'_>,
+    sql: &str,
+    operation: &'static str,
+) -> crate::errors::Result<Vec<PathBuf>> {
+    let read = db.read_snapshot(operation).await?;
+    let mut rows = read
         .query(sql, ())
         .await
         .map_err(|error| global_db_operation_error(operation, error))?;
@@ -508,8 +605,15 @@ pub(super) async fn list_lossless_paths(
     Ok(paths)
 }
 
-pub(super) async fn list_project_paths_compat(db: &GlobalDb) -> Vec<String> {
-    let Ok(mut rows) = db.conn.query("SELECT path FROM projects", ()).await else {
+pub(super) async fn list_registered_project_paths_compat(db: &RegisteredGlobalDb) -> Vec<String> {
+    list_project_paths_compat_from(ProjectRegistryDatabase(db)).await
+}
+
+async fn list_project_paths_compat_from(db: ProjectRegistryDatabase<'_>) -> Vec<String> {
+    let Ok(read) = db.read_snapshot("list compatibility project paths").await else {
+        return Vec::new();
+    };
+    let Ok(mut rows) = read.query("SELECT path FROM projects", ()).await else {
         return Vec::new();
     };
     let mut paths = Vec::new();
@@ -521,9 +625,20 @@ pub(super) async fn list_project_paths_compat(db: &GlobalDb) -> Vec<String> {
     paths
 }
 
-pub(super) async fn list_project_alias_paths_compat(db: &GlobalDb) -> Vec<String> {
-    let Ok(mut rows) = db
-        .conn
+pub(super) async fn list_registered_project_alias_paths_compat(
+    db: &RegisteredGlobalDb,
+) -> Vec<String> {
+    list_project_alias_paths_compat_from(ProjectRegistryDatabase(db)).await
+}
+
+async fn list_project_alias_paths_compat_from(db: ProjectRegistryDatabase<'_>) -> Vec<String> {
+    let Ok(read) = db
+        .read_snapshot("list compatibility project alias paths")
+        .await
+    else {
+        return Vec::new();
+    };
+    let Ok(mut rows) = read
         .query(
             "SELECT alias_path FROM project_aliases ORDER BY alias_path",
             (),
@@ -541,4 +656,826 @@ pub(super) async fn list_project_alias_paths_compat(db: &GlobalDb) -> Vec<String
         }
     }
     paths
+}
+
+impl RegisteredGlobalDb {
+    pub fn is_explicit_project_path_selector(selector: &str) -> bool {
+        let selector = selector.trim();
+        !selector.is_empty()
+            && (Path::new(selector).is_absolute()
+                || selector == "."
+                || selector == ".."
+                || selector.contains('/')
+                || selector.contains('\\'))
+    }
+
+    pub async fn upsert_code_project(
+        &self,
+        project_id: &str,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+        git_remote_url: Option<&str>,
+        default_branch: Option<&str>,
+    ) -> Option<CodeProjectRecord> {
+        let now = crate::tracedecay::current_timestamp();
+        let canonical_project_root = canonical_project_path(project_root);
+        let canonical_root = canonical_project_root.to_string_lossy().into_owned();
+        let current_root_alias = project_path_alias_key(&canonical_project_root);
+        let git_common_dir_text = git_common_dir.map(|path| path.to_string_lossy().into_owned());
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
+            .execute(
+                "INSERT INTO code_projects
+                 (project_id, canonical_root, display_root, primary_root_platform,
+                  primary_root_bytes, primary_root_last_seen_at, git_common_dir,
+                  git_remote_url, default_branch, created_at, last_seen_at)
+                 VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?5, ?5)
+                 ON CONFLICT(project_id) DO UPDATE SET
+                    canonical_root = excluded.canonical_root,
+                    display_root = excluded.display_root,
+                    primary_root_platform = excluded.primary_root_platform,
+                    primary_root_bytes = excluded.primary_root_bytes,
+                    primary_root_last_seen_at = excluded.primary_root_last_seen_at,
+                    git_common_dir = excluded.git_common_dir,
+                    git_remote_url = excluded.git_remote_url,
+                    default_branch = excluded.default_branch,
+                    last_seen_at = excluded.last_seen_at",
+                params![
+                    project_id,
+                    canonical_root,
+                    native_project_path_platform(),
+                    encode_native_project_path(&canonical_project_root),
+                    now,
+                    git_common_dir_text,
+                    git_remote_url,
+                    default_branch
+                ],
+            )
+            .await
+            .ok()?;
+        let mut aliases = vec![current_root_alias];
+        aliases.extend(super::repo_identity_aliases(git_common_dir));
+        if let Some(alias) = super::git_remote_search_alias(git_remote_url) {
+            aliases.push(alias);
+        }
+        for alias in aliases {
+            transaction
+                .execute(
+                    "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(alias_path) DO UPDATE SET
+                        project_id = excluded.project_id,
+                        last_seen_at = excluded.last_seen_at",
+                    params![alias, project_id, now],
+                )
+                .await
+                .ok()?;
+        }
+        transaction.commit().await.ok()?;
+        self.get_code_project(project_id).await
+    }
+
+    pub async fn upsert_project_alias(
+        &self,
+        alias_path: &Path,
+        project_id: &str,
+    ) -> Option<ProjectAliasRecord> {
+        self.upsert_project_alias_key(&project_path_alias_key(alias_path), project_id)
+            .await
+    }
+
+    async fn upsert_project_alias_key(
+        &self,
+        alias: &str,
+        project_id: &str,
+    ) -> Option<ProjectAliasRecord> {
+        let now = crate::tracedecay::current_timestamp();
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
+            .execute(
+                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(alias_path) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    last_seen_at = excluded.last_seen_at",
+                params![alias, project_id, now],
+            )
+            .await
+            .ok()?;
+        transaction.commit().await.ok()?;
+        let snapshot = self.read_snapshot().await.ok()?;
+        let mut rows = snapshot
+            .query(
+                "SELECT alias_path, project_id, last_seen_at
+                 FROM project_aliases WHERE alias_path = ?1",
+                params![alias],
+            )
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        Some(ProjectAliasRecord {
+            alias_path: row.get(0).ok()?,
+            project_id: row.get(1).ok()?,
+            last_seen_at: row.get(2).ok()?,
+        })
+    }
+
+    pub async fn upsert_store_instance(
+        &self,
+        upsert: StoreInstanceUpsert,
+    ) -> Option<StoreInstanceRecord> {
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
+            .execute(
+                "INSERT INTO store_instances
+                 (store_id, project_id, store_kind, storage_mode, store_relpath,
+                  manifest_relpath, created_at, last_verified_at, last_write_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(store_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    store_kind = excluded.store_kind,
+                    storage_mode = excluded.storage_mode,
+                    store_relpath = excluded.store_relpath,
+                    manifest_relpath = excluded.manifest_relpath,
+                    last_verified_at = excluded.last_verified_at,
+                    last_write_at = excluded.last_write_at",
+                params![
+                    upsert.store_id.as_str(),
+                    upsert.project_id.as_str(),
+                    upsert.store_kind.as_str(),
+                    upsert.storage_mode.as_str(),
+                    upsert.store_relpath.as_str(),
+                    upsert.manifest_relpath.as_deref(),
+                    crate::tracedecay::current_timestamp(),
+                    upsert.last_verified_at,
+                    upsert.last_write_at
+                ],
+            )
+            .await
+            .ok()?;
+        transaction.commit().await.ok()?;
+        self.project_registry_context_by_id(&upsert.project_id)
+            .await
+            .ok()
+            .flatten()?
+            .stores
+            .into_iter()
+            .map(|context| context.store)
+            .find(|store| store.store_id == upsert.store_id)
+    }
+
+    pub async fn upsert_graph_scope(&self, upsert: GraphScopeUpsert) -> Option<GraphScopeRecord> {
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
+            .execute(
+                "INSERT INTO graph_scopes
+                 (graph_scope_id, project_id, store_id, branch_name, db_relpath,
+                  parent_scope_id, last_synced_at, writable)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(graph_scope_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    store_id = excluded.store_id,
+                    branch_name = excluded.branch_name,
+                    db_relpath = excluded.db_relpath,
+                    parent_scope_id = excluded.parent_scope_id,
+                    last_synced_at = excluded.last_synced_at,
+                    writable = excluded.writable",
+                params![
+                    upsert.graph_scope_id.as_str(),
+                    upsert.project_id.as_str(),
+                    upsert.store_id.as_str(),
+                    upsert.branch_name.as_str(),
+                    upsert.db_relpath.as_str(),
+                    upsert.parent_scope_id.as_deref(),
+                    upsert.last_synced_at,
+                    i64::from(upsert.writable)
+                ],
+            )
+            .await
+            .ok()?;
+        transaction.commit().await.ok()?;
+        self.project_registry_context_by_id(&upsert.project_id)
+            .await
+            .ok()
+            .flatten()?
+            .stores
+            .into_iter()
+            .flat_map(|context| context.graph_scopes)
+            .find(|scope| scope.graph_scope_id == upsert.graph_scope_id)
+    }
+
+    pub async fn upsert_store_artifact(
+        &self,
+        upsert: StoreArtifactUpsert,
+    ) -> Option<StoreArtifactRecord> {
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
+            .execute(
+                "INSERT INTO store_artifacts
+                 (store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(store_id, artifact_kind, relpath) DO UPDATE SET
+                    size_bytes = excluded.size_bytes,
+                    schema_version = excluded.schema_version,
+                    updated_at = excluded.updated_at",
+                params![
+                    upsert.store_id.as_str(),
+                    upsert.artifact_kind.as_str(),
+                    upsert.relpath.as_str(),
+                    upsert.size_bytes,
+                    upsert.schema_version.as_deref(),
+                    upsert.updated_at
+                ],
+            )
+            .await
+            .ok()?;
+        transaction.commit().await.ok()?;
+        let snapshot = self.read_snapshot().await.ok()?;
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at
+                 FROM store_artifacts
+                 WHERE store_id = ?1 AND artifact_kind = ?2 AND relpath = ?3",
+                params![
+                    upsert.store_id.as_str(),
+                    upsert.artifact_kind.as_str(),
+                    upsert.relpath.as_str()
+                ],
+            )
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        Some(StoreArtifactRecord {
+            store_id: row.get(0).ok()?,
+            artifact_kind: row.get(1).ok()?,
+            relpath: row.get(2).ok()?,
+            size_bytes: row.get(3).ok()?,
+            schema_version: row.get(4).ok()?,
+            updated_at: row.get(5).ok()?,
+        })
+    }
+
+    pub async fn get_code_project(&self, project_id: &str) -> Option<CodeProjectRecord> {
+        self.project_registry_context_by_id(project_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|context| context.project)
+    }
+
+    pub async fn resolve_project_store_by_alias(
+        &self,
+        alias_path: &Path,
+    ) -> Option<ProjectStoreResolution> {
+        let project_id = self
+            .project_id_by_native_path_alias(alias_path, LegacyPathAliasKind::ProjectRoot)
+            .await
+            .ok()
+            .flatten()?;
+        self.resolve_project_store_for_project_id(&project_id).await
+    }
+
+    pub async fn resolve_unique_project_store_by_git_remote(
+        &self,
+        git_remote_url: &str,
+    ) -> Option<ProjectStoreResolution> {
+        let remote = super::normalize_git_remote_url(git_remote_url)?;
+        let projects = self.list_code_projects(usize::MAX).await.ok()?;
+        let mut matches = projects.into_iter().filter(|project| {
+            project
+                .git_remote_url
+                .as_deref()
+                .and_then(super::normalize_git_remote_url)
+                .is_some_and(|stored| stored == remote)
+        });
+        let project = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        self.resolve_project_store_for_project_id(&project.project_id)
+            .await
+    }
+
+    async fn resolve_project_store_for_project_id(
+        &self,
+        project_id: &str,
+    ) -> Option<ProjectStoreResolution> {
+        let context = self
+            .project_registry_context_by_id(project_id)
+            .await
+            .ok()
+            .flatten()?;
+        if context.stores.len() != 1 {
+            return None;
+        }
+        let store = context.stores.into_iter().next()?;
+        Some(ProjectStoreResolution {
+            project: context.project,
+            store: store.store,
+            graph_scopes: store.graph_scopes,
+            artifacts: store.artifacts,
+        })
+    }
+
+    pub async fn search_code_projects(&self, query: &str, limit: usize) -> Vec<CodeProjectRecord> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut patterns = query
+            .split_whitespace()
+            .map(super::like_pattern)
+            .collect::<Vec<_>>();
+        if patterns.is_empty() {
+            patterns.push(super::like_pattern(query));
+        }
+        let clauses = (1..=patterns.len())
+            .map(|index| {
+                format!(
+                    "(cp.project_id LIKE ?{index} ESCAPE '\\'
+                        OR cp.canonical_root LIKE ?{index} ESCAPE '\\'
+                        OR cp.display_root LIKE ?{index} ESCAPE '\\'
+                        OR COALESCE(cp.git_common_dir, '') LIKE ?{index} ESCAPE '\\'
+                        OR COALESCE(cp.default_branch, '') LIKE ?{index} ESCAPE '\\'
+                        OR COALESCE(pa.alias_path, '') LIKE ?{index} ESCAPE '\\')"
+                )
+            })
+            .collect::<Vec<_>>();
+        let limit_param = patterns.len() + 1;
+        let sql = format!(
+            "SELECT DISTINCT cp.project_id, cp.canonical_root, cp.display_root,
+                    cp.git_common_dir, cp.git_remote_url, cp.default_branch,
+                    cp.created_at, cp.last_seen_at
+             FROM code_projects cp
+             LEFT JOIN project_aliases pa ON pa.project_id = cp.project_id
+             WHERE {}
+             ORDER BY cp.last_seen_at DESC, cp.project_id
+             LIMIT ?{limit_param}",
+            clauses.join(" OR ")
+        );
+        let mut values = patterns.into_iter().map(Value::Text).collect::<Vec<_>>();
+        values.push(Value::Integer(limit));
+        let Ok(snapshot) = self.read_snapshot().await else {
+            return Vec::new();
+        };
+        let Ok(mut rows) = snapshot.query(&sql, values).await else {
+            return Vec::new();
+        };
+        let mut projects = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            let project = CodeProjectRecord {
+                project_id: match row.get(0) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                canonical_root: match row.get(1) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                display_root: match row.get(2) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                git_common_dir: match row.get(3) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                git_remote_url: match row.get(4) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                default_branch: match row.get(5) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                created_at: match row.get(6) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+                last_seen_at: match row.get(7) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                },
+            };
+            projects.push(project);
+        }
+        projects
+    }
+
+    /// Resolves the sole store for a project-path alias without hiding
+    /// ambiguity, query, or row-decoding failures.
+    pub async fn try_resolve_project_store_record_by_alias(
+        &self,
+        alias_path: &Path,
+    ) -> crate::errors::Result<Option<StoreInstanceRecord>> {
+        async fn query(
+            db: &RegisteredGlobalDb,
+            alias: &str,
+            canonical_root: Option<&str>,
+        ) -> crate::errors::Result<Option<StoreInstanceRecord>> {
+            const OPERATION: &str = "resolve project store by alias";
+
+            let mut sql = String::from(
+                "SELECT si.store_id, si.project_id, si.store_kind, si.storage_mode,
+                        si.store_relpath, si.manifest_relpath, si.created_at,
+                        si.last_verified_at, si.last_write_at
+                 FROM project_aliases pa
+                 JOIN code_projects cp ON cp.project_id = pa.project_id
+                 JOIN store_instances si ON si.project_id = cp.project_id
+                 WHERE pa.alias_path = ?1",
+            );
+            let mut values = vec![Value::Text(alias.to_string())];
+            if let Some(canonical_root) = canonical_root {
+                sql.push_str(
+                    " AND cp.canonical_root = ?2
+                      AND NOT EXISTS (
+                          SELECT 1 FROM code_projects other
+                          WHERE other.canonical_root = ?2
+                            AND other.project_id != cp.project_id
+                      )",
+                );
+                values.push(Value::Text(canonical_root.to_string()));
+            }
+            sql.push_str(" ORDER BY si.store_id");
+            let snapshot = db
+                .read_snapshot()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let mut rows = snapshot
+                .query(&sql, values)
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?
+            else {
+                return Ok(None);
+            };
+            let store = StoreInstanceRecord {
+                store_id: row
+                    .get(0)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                project_id: row
+                    .get(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                store_kind: row
+                    .get(2)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                storage_mode: row
+                    .get(3)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                store_relpath: row
+                    .get(4)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                manifest_relpath: row
+                    .get(5)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                created_at: row
+                    .get(6)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                last_verified_at: row
+                    .get(7)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                last_write_at: row
+                    .get(8)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            };
+            if rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?
+                .is_some()
+            {
+                return Err(global_db_operation_message(
+                    OPERATION,
+                    "project identity resolves to multiple stores",
+                ));
+            }
+            Ok(Some(store))
+        }
+
+        let native_alias = project_path_alias_key(alias_path);
+        if let Some(store) = query(self, &native_alias, None).await? {
+            return Ok(Some(store));
+        }
+        let legacy_alias = canonical_project_path(alias_path)
+            .to_string_lossy()
+            .into_owned();
+        if native_alias == legacy_alias {
+            return Ok(None);
+        }
+        query(self, &legacy_alias, Some(&legacy_alias)).await
+    }
+
+    /// Resolves the persisted store for a project by repository identity.
+    ///
+    /// Repository marker conflicts and registry failures propagate so callers
+    /// fail closed instead of minting a second project shard.
+    pub async fn resolve_project_store_by_identity(
+        &self,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+    ) -> crate::errors::Result<Option<ProjectStoreResolution>> {
+        let Some(project_id) = self
+            .project_id_by_identity(project_root, git_common_dir)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(context) = self.project_registry_context_by_id(&project_id).await? else {
+            return Ok(None);
+        };
+        if context.stores.len() > 1 {
+            return Err(global_db_operation_message(
+                "resolve project store by identity",
+                format!(
+                    "project '{}' resolves to multiple stores",
+                    context.project.project_id
+                ),
+            ));
+        }
+        let Some(store) = context.stores.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(ProjectStoreResolution {
+            project: context.project,
+            store: store.store,
+            graph_scopes: store.graph_scopes,
+            artifacts: store.artifacts,
+        }))
+    }
+
+    pub async fn project_registry_context_by_alias(
+        &self,
+        alias_path: &Path,
+    ) -> crate::errors::Result<Option<ProjectRegistryContext>> {
+        let Some(project_id) = self
+            .project_id_by_native_path_alias(alias_path, LegacyPathAliasKind::ProjectRoot)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.project_registry_context_by_id(&project_id).await
+    }
+
+    pub async fn project_registry_context_by_identity(
+        &self,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+    ) -> crate::errors::Result<Option<ProjectRegistryContext>> {
+        let Some(project_id) = self
+            .project_id_by_identity(project_root, git_common_dir)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.project_registry_context_by_id(&project_id).await
+    }
+
+    async fn project_id_by_identity(
+        &self,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+    ) -> crate::errors::Result<Option<String>> {
+        Ok(
+            match crate::storage::read_repository_identity_marker(project_root)? {
+                Some(marker) => Some(marker.project_id),
+                None => {
+                    if let Some(project_id) = self
+                        .project_id_by_native_path_alias(
+                            project_root,
+                            LegacyPathAliasKind::ProjectRoot,
+                        )
+                        .await?
+                    {
+                        Some(project_id)
+                    } else if let Some(git_common_dir) = git_common_dir {
+                        self.project_id_by_native_path_alias(
+                            git_common_dir,
+                            LegacyPathAliasKind::GitCommonDir,
+                        )
+                        .await?
+                    } else {
+                        None
+                    }
+                }
+            },
+        )
+    }
+
+    pub(super) async fn project_id_by_native_path_alias(
+        &self,
+        path: &Path,
+        kind: LegacyPathAliasKind,
+    ) -> crate::errors::Result<Option<String>> {
+        const OPERATION: &str = "resolve project identity alias";
+
+        async fn project_id_by_alias_key(
+            db: &RegisteredGlobalDb,
+            alias: &str,
+        ) -> crate::errors::Result<Option<String>> {
+            const OPERATION: &str = "resolve project identity alias";
+            let snapshot = db
+                .read_snapshot()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let mut rows = snapshot
+                .query(
+                    "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
+                    params![alias],
+                )
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?
+            else {
+                return Ok(None);
+            };
+            row.get(0)
+                .map(Some)
+                .map_err(|error| global_db_operation_error(OPERATION, error))
+        }
+
+        let native_path = project_path_alias_key(path);
+        let native_alias = format!("{}{native_path}", kind.prefix());
+        if let Some(project_id) = project_id_by_alias_key(self, &native_alias).await? {
+            return Ok(Some(project_id));
+        }
+
+        let legacy_path = canonical_project_path(path).to_string_lossy().into_owned();
+        if native_path == legacy_path {
+            return Ok(None);
+        }
+        let legacy_alias = format!("{}{legacy_path}", kind.prefix());
+        let Some(legacy_project_id) = project_id_by_alias_key(self, &legacy_alias).await? else {
+            return Ok(None);
+        };
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut rows = snapshot
+            .query(kind.owner_query(), params![legacy_path.as_str()])
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        else {
+            return Ok(None);
+        };
+        let owner = row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if owner != legacy_project_id
+            || rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        drop(rows);
+        drop(snapshot);
+
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        transaction
+            .execute(
+                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(alias_path) DO NOTHING",
+                params![
+                    native_alias.as_str(),
+                    legacy_project_id.as_str(),
+                    crate::tracedecay::current_timestamp()
+                ],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let migrated_project_id = project_id_by_alias_key(self, &native_alias).await?;
+        Ok(
+            (migrated_project_id.as_deref() == Some(legacy_project_id.as_str()))
+                .then_some(legacy_project_id),
+        )
+    }
+
+    pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {
+        const CHUNK: usize = 256;
+        if project_ids.is_empty() {
+            return 0;
+        }
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return 0;
+        };
+        let mut total = 0_usize;
+        for chunk in project_ids.chunks(CHUNK) {
+            let sql = format!(
+                "DELETE FROM code_projects WHERE project_id IN ({})",
+                vec!["?"; chunk.len()].join(",")
+            );
+            let values = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
+            if let Ok(deleted) = transaction.execute(&sql, values).await {
+                total = total.saturating_add(deleted as usize);
+            }
+        }
+        if transaction.commit().await.is_ok() {
+            total
+        } else {
+            0
+        }
+    }
+
+    pub async fn delete_project(&self, project_path: &Path) {
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return;
+        };
+        if transaction
+            .execute(
+                "DELETE FROM projects WHERE path = ?1",
+                params![project_path_alias_key(project_path)],
+            )
+            .await
+            .is_ok()
+        {
+            let _ = transaction.commit().await;
+        }
+    }
+
+    pub async fn delete_projects(&self, project_paths: &[String]) -> usize {
+        self.delete_project_paths(project_paths).await
+    }
+
+    pub async fn delete_project_paths<P: AsRef<Path>>(&self, project_paths: &[P]) -> usize {
+        const CHUNK: usize = 256;
+        if project_paths.is_empty() {
+            return 0;
+        }
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return 0;
+        };
+        let mut total = 0_usize;
+        for chunk in project_paths.chunks(CHUNK) {
+            let sql = format!(
+                "DELETE FROM projects WHERE path IN ({})",
+                vec!["?"; chunk.len()].join(",")
+            );
+            let values = chunk
+                .iter()
+                .map(|path| Value::Text(project_path_alias_key(path.as_ref())))
+                .collect::<Vec<_>>();
+            if let Ok(deleted) = transaction.execute(&sql, values).await {
+                total = total.saturating_add(deleted as usize);
+            }
+        }
+        if transaction.commit().await.is_ok() {
+            total
+        } else {
+            0
+        }
+    }
+
+    /// Lists registered code-project roots from one frozen runtime snapshot.
+    pub(crate) async fn try_list_code_project_paths(
+        &self,
+        limit: usize,
+    ) -> crate::errors::Result<Vec<PathBuf>> {
+        list_registered_code_project_paths(self, limit).await
+    }
+
+    /// Returns legacy project paths with native path bytes preserved.
+    pub(crate) async fn try_list_project_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+        list_registered_lossless_paths(
+            self,
+            "SELECT path FROM projects ORDER BY path",
+            "list lossless legacy project paths",
+        )
+        .await
+    }
+
+    /// Returns modern registry aliases with native path bytes preserved.
+    pub(crate) async fn try_list_project_alias_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+        list_registered_lossless_paths(
+            self,
+            "SELECT alias_path FROM project_aliases ORDER BY alias_path",
+            "list lossless project aliases",
+        )
+        .await
+    }
+
+    pub(crate) async fn list_project_paths_compat(&self) -> Vec<String> {
+        list_registered_project_paths_compat(self).await
+    }
+
+    pub(crate) async fn list_project_alias_paths_compat(&self) -> Vec<String> {
+        list_registered_project_alias_paths_compat(self).await
+    }
 }

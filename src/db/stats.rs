@@ -1,16 +1,17 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::HashMap;
 
-use libsql::params;
+use crate::db::engine::params;
 
 use super::connection::Database;
+use super::engine::QueryExecutor;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
 impl Database {
     /// Returns aggregate statistics about the code graph.
     pub async fn get_stats(&self) -> Result<GraphStats> {
-        let snapshot = self.begin_isolated_read_snapshot("get_stats").await?;
+        let snapshot = self.begin_engine_read_snapshot("get_stats").await?;
         // Single query for all scalar counts: nodes, edges, files, last_updated, total_source_bytes
         let mut counts_rows = snapshot
             .query(
@@ -125,7 +126,7 @@ impl Database {
     /// or 0 if the files table is empty.
     pub async fn last_index_time(&self) -> Result<i64> {
         query_scalar_i64(
-            self.conn(),
+            &self.engine_conn(),
             "SELECT COALESCE(MAX(indexed_at), 0) FROM files",
             "last_index_time",
         )
@@ -203,7 +204,7 @@ fn display_language_for_path(path: &str) -> &'static str {
 
 /// Executes a `SELECT label, COUNT(*) ... GROUP BY` query and returns
 /// the results as a `HashMap<String, u64>`.
-async fn query_kind_counts(conn: &libsql::Connection, sql: &str) -> Result<HashMap<String, u64>> {
+async fn query_kind_counts(conn: &impl QueryExecutor, sql: &str) -> Result<HashMap<String, u64>> {
     let mut map = HashMap::new();
     let mut rows = conn
         .query(sql, ())
@@ -232,7 +233,7 @@ async fn query_kind_counts(conn: &libsql::Connection, sql: &str) -> Result<HashM
 }
 
 /// Executes a scalar query returning a single `i64` value.
-async fn query_scalar_i64(conn: &libsql::Connection, sql: &str, operation: &str) -> Result<i64> {
+async fn query_scalar_i64(conn: &impl QueryExecutor, sql: &str, operation: &str) -> Result<i64> {
     let mut rows = conn
         .query(sql, ())
         .await
@@ -259,7 +260,7 @@ async fn query_scalar_i64(conn: &libsql::Connection, sql: &str, operation: &str)
     })
 }
 
-async fn query_metadata(conn: &libsql::Connection, key: &str) -> Result<Option<String>> {
+async fn query_metadata(conn: &impl QueryExecutor, key: &str) -> Result<Option<String>> {
     let mut rows = conn
         .query("SELECT value FROM metadata WHERE key = ?1", params![key])
         .await

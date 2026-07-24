@@ -3,21 +3,14 @@ use super::*;
 #[tokio::test]
 async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let contents = (1..=105)
         .map(|idx| format!("message-{idx:03}"))
         .collect::<Vec<_>>();
-    let store_ids = insert_raw_messages(
-        &db,
-        &isolated_db_path(&tmp),
-        "cursor",
-        "session-1",
-        &contents,
-    )
-    .await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &contents).await;
 
     let first = db
-        .lcm_load_session(LcmLoadSessionRequest {
+        .lcm_load_session_for_test(LcmLoadSessionRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             after_store_id: None,
@@ -42,7 +35,7 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
         .as_deref()
         .and_then(|cursor| cursor.parse::<i64>().ok());
     let second = db
-        .lcm_load_session(LcmLoadSessionRequest {
+        .lcm_load_session_for_test(LcmLoadSessionRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             after_store_id: next_after_store_id,
@@ -68,7 +61,7 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
     );
 
     let min_clamped = db
-        .lcm_load_session(LcmLoadSessionRequest {
+        .lcm_load_session_for_test(LcmLoadSessionRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             after_store_id: None,
@@ -90,7 +83,7 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
 #[tokio::test]
 async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-1").await;
 
     for message in [
@@ -135,7 +128,7 @@ async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
     }
 
     let page = db
-        .lcm_load_session(LcmLoadSessionRequest {
+        .lcm_load_session_for_test(LcmLoadSessionRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             after_store_id: None,
@@ -171,18 +164,11 @@ async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
 #[tokio::test]
 async fn load_session_exact_final_page_omits_next_cursor() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let contents = (1..=4)
         .map(|idx| format!("edge-message-{idx}"))
         .collect::<Vec<_>>();
-    let store_ids = insert_raw_messages(
-        &db,
-        &isolated_db_path(&tmp),
-        "cursor",
-        "session-edge",
-        &contents,
-    )
-    .await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-edge", &contents).await;
     let request = |after_store_id: Option<i64>, limit: usize| LcmLoadSessionRequest {
         provider: "cursor".into(),
         session_id: "session-edge".into(),
@@ -196,7 +182,7 @@ async fn load_session_exact_final_page_omits_next_cursor() {
 
     // The whole session in one exactly-sized page: no resume cursor.
     let exact = db
-        .lcm_load_session(request(None, 4))
+        .lcm_load_session_for_test(request(None, 4))
         .await
         .expect("exact-limit page should load");
     assert_eq!(exact.messages.len(), 4);
@@ -204,7 +190,7 @@ async fn load_session_exact_final_page_omits_next_cursor() {
 
     // A final page that exactly fills the limit also terminates the cursor.
     let first = db
-        .lcm_load_session(request(None, 2))
+        .lcm_load_session_for_test(request(None, 2))
         .await
         .expect("first page should load");
     assert_eq!(
@@ -212,7 +198,7 @@ async fn load_session_exact_final_page_omits_next_cursor() {
         Some(store_ids[1].to_string().as_str())
     );
     let last = db
-        .lcm_load_session(request(Some(store_ids[1]), 2))
+        .lcm_load_session_for_test(request(Some(store_ids[1]), 2))
         .await
         .expect("final page should load");
     assert_eq!(last.messages.len(), 2);
@@ -221,7 +207,7 @@ async fn load_session_exact_final_page_omits_next_cursor() {
 
     // Resuming from the last row returns an empty terminal page.
     let drained = db
-        .lcm_load_session(request(Some(store_ids[3]), 2))
+        .lcm_load_session_for_test(request(Some(store_ids[3]), 2))
         .await
         .expect("drained cursor should load");
     assert!(drained.messages.is_empty());
@@ -234,11 +220,11 @@ async fn load_session_exact_final_page_omits_next_cursor() {
 #[tokio::test]
 async fn empty_session_load_grep_and_describe_return_empty_results() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-empty").await;
 
     let page = db
-        .lcm_load_session(LcmLoadSessionRequest {
+        .lcm_load_session_for_test(LcmLoadSessionRequest {
             provider: "cursor".into(),
             session_id: "session-empty".into(),
             after_store_id: None,
@@ -254,7 +240,7 @@ async fn empty_session_load_grep_and_describe_return_empty_results() {
     assert_eq!(page.next_cursor, None);
 
     let hits = db
-        .lcm_grep(LcmGrepRequest {
+        .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
             query: "anything".into(),
             scope: LcmScope::Session,
@@ -274,7 +260,7 @@ async fn empty_session_load_grep_and_describe_return_empty_results() {
     assert!(hits.is_empty());
 
     let described = db
-        .lcm_describe(LcmDescribeRequest {
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "cursor".into(),
             session_id: "session-empty".into(),
             target: LcmDescribeTarget::Session,
@@ -296,22 +282,15 @@ async fn empty_session_load_grep_and_describe_return_empty_results() {
 #[tokio::test]
 async fn content_slices_use_char_offsets_for_multibyte_content() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     // 9 chars, 17 UTF-8 bytes: byte-based slicing would panic or split chars.
     let content = "αβγδε🦀abc".to_string();
     assert_eq!(content.chars().count(), 9);
     assert_eq!(content.len(), 17);
-    let store_ids = insert_raw_messages(
-        &db,
-        &isolated_db_path(&tmp),
-        "cursor",
-        "session-utf8",
-        &[content],
-    )
-    .await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-utf8", &[content]).await;
 
     let page = db
-        .lcm_load_session(LcmLoadSessionRequest {
+        .lcm_load_session_for_test(LcmLoadSessionRequest {
             provider: "cursor".into(),
             session_id: "session-utf8".into(),
             after_store_id: None,
@@ -335,7 +314,7 @@ async fn content_slices_use_char_offsets_for_multibyte_content() {
     assert!(range.truncated);
 
     let expanded = db
-        .lcm_expand(LcmExpandRequest {
+        .lcm_expand_for_test(LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-utf8".into(),
             target: LcmExpandTarget::RawMessage {
@@ -359,7 +338,7 @@ async fn content_slices_use_char_offsets_for_multibyte_content() {
 
     // An offset past the end clamps to an empty slice like Python s[99:101].
     let beyond = db
-        .lcm_expand(LcmExpandRequest {
+        .lcm_expand_for_test(LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-utf8".into(),
             target: LcmExpandTarget::RawMessage {

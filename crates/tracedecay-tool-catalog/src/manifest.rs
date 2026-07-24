@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::id::{BindingId, CapabilityId, FeatureId, ProfileId, SchemaId, UseCaseId};
 use crate::validation::CatalogValidationError;
@@ -136,7 +136,7 @@ pub enum LifecycleClass {
 ///
 /// Git index writes remain separate classes so policy cannot accidentally
 /// substitute one index mutation for another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectClass {
     Read,

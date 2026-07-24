@@ -7,18 +7,13 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
-
-    assert!(table_exists(&db_path, "session_schema_migrations").await);
-    assert!(table_exists(&db_path, "lcm_raw_messages").await);
-    assert!(table_exists(&db_path, "lcm_raw_messages_fts").await);
+    let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
-        db.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&db).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
 
-    let legacy = db
-        .lcm_load_raw_message("cursor", "legacy-message")
+    let legacy = crate::sessions::lcm::schema::load_raw_message(&*db, "cursor", "legacy-message")
         .await
         .expect("legacy message should be carried into raw store");
     assert_eq!(legacy.provider, "cursor");
@@ -29,10 +24,15 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     assert_eq!(legacy.content, "legacy text");
     assert_eq!(
         legacy.storage_kind,
-        tracedecay::sessions::lcm::LcmStorageKind::Inline
+        crate::sessions::lcm::LcmStorageKind::Inline
     );
     assert!(legacy.legacy_source);
     assert!(!legacy.legacy_truncated);
+    drop(db);
+
+    assert!(table_exists(&db_path, "session_schema_migrations").await);
+    assert!(table_exists(&db_path, "lcm_raw_messages").await);
+    assert!(table_exists(&db_path, "lcm_raw_messages_fts").await);
     assert_eq!(
         fts_legacy_message_ids(&db_path).await,
         vec!["legacy-message".to_string()]
@@ -46,9 +46,8 @@ async fn lcm_schema_marks_legacy_truncated_messages() {
     let legacy_text = "legacy text\n[truncated by tracedecay]";
     create_legacy_sessions_db_with_text(&db_path, legacy_text).await;
 
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
-    let legacy = db
-        .lcm_load_raw_message("cursor", "legacy-message")
+    let db = open_global_db(&db_path).await.expect("global db open");
+    let legacy = crate::sessions::lcm::schema::load_raw_message(&*db, "cursor", "legacy-message")
         .await
         .expect("legacy message should be carried into raw store");
 
@@ -63,21 +62,22 @@ async fn lcm_schema_migration_is_idempotent() {
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
-        db.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&db).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
-    let reopened = GlobalDb::open_at(&db_path).await.expect("global db reopen");
+    let reopened = open_global_db(&db_path).await.expect("global db reopen");
     assert_eq!(
-        reopened.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&reopened).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
+    drop(reopened);
     assert_eq!(
         schema_version(&db_path).await,
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
     assert_eq!(row_count(&db_path, "lcm_raw_messages").await, 1);
     assert_eq!(
@@ -166,11 +166,11 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
 
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let db = open_global_db(&db_path).await.expect("global db open");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_lcm_summary_nodes_codex_pending_session_order;
          DROP INDEX IF EXISTS idx_lcm_summary_nodes_codex_pending_root_order;
@@ -207,19 +207,19 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
 
     #[allow(clippy::assertions_on_constants)]
     {
-        assert!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION > 6);
+        assert!(crate::sessions::lcm::LCM_SCHEMA_VERSION > 6);
     }
-    let migrated = GlobalDb::open_at(&db_path)
+    let migrated = open_global_db(&db_path)
         .await
         .expect("v6 database should migrate");
     assert_eq!(
-        migrated.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&migrated).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(migrated);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     assert_eq!(
         index_key_columns(&conn, "idx_lcm_summary_nodes_codex_pending_session_order").await,
         vec![
@@ -282,7 +282,7 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
 
     // Establish the schema, then rewrite the FTS objects into the pre-v3
     // shape with the version marker set back to 2.
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let db = open_global_db(&db_path).await.expect("global db open");
     drop(db);
     downgrade_raw_fts_to_v2(&db_path).await;
     assert_eq!(schema_version(&db_path).await, 2);
@@ -292,10 +292,10 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
         "v2 fixture must over-match via the indexed role column"
     );
 
-    let migrated = GlobalDb::open_at(&db_path).await.expect("global db reopen");
+    let migrated = open_global_db(&db_path).await.expect("global db reopen");
     assert_eq!(
-        migrated.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&migrated).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(migrated);
 
@@ -323,12 +323,10 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
     );
 
     // Idempotent re-open: structure and results are stable.
-    let reopened = GlobalDb::open_at(&db_path)
-        .await
-        .expect("idempotent reopen");
+    let reopened = open_global_db(&db_path).await.expect("idempotent reopen");
     assert_eq!(
-        reopened.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&reopened).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(reopened);
     assert_eq!(
@@ -353,31 +351,31 @@ async fn lcm_schema_future_version_is_preserved_without_remigration() {
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
-        db.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&db).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
     // Simulate a database last touched by a newer tracedecay: bump the version
     // marker past this binary and have the newer schema relocate carried rows
     // out of lcm_raw_messages.
-    let future_version = tracedecay::sessions::lcm::LCM_SCHEMA_VERSION + 97;
+    let future_version = crate::sessions::lcm::LCM_SCHEMA_VERSION + 97;
     set_migration_version(&db_path, future_version).await;
     set_migration_applied_at(&db_path, 456).await;
     {
-        let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = raw_db.connect().unwrap();
+        let raw_db = TestConnection::open(&db_path);
+        let conn = (*raw_db).clone();
         conn.execute("DELETE FROM lcm_raw_messages", ())
             .await
             .unwrap();
     }
     assert_eq!(row_count(&db_path, "lcm_raw_messages").await, 0);
 
-    let reopened = GlobalDb::open_at(&db_path).await.expect("global db reopen");
+    let reopened = open_global_db(&db_path).await.expect("global db reopen");
     assert_eq!(
-        reopened.lcm_schema_version().await.unwrap(),
+        schema_version_on(&reopened).await,
         future_version,
         "future schema version marker must not be downgraded"
     );
@@ -397,20 +395,21 @@ async fn lcm_schema_current_version_reopen_skips_migration_update() {
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
-        db.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&db).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
     set_migration_applied_at(&db_path, 123).await;
     assert_eq!(migration_applied_at(&db_path).await, 123);
 
-    let reopened = GlobalDb::open_at(&db_path).await.expect("global db reopen");
+    let reopened = open_global_db(&db_path).await.expect("global db reopen");
     assert_eq!(
-        reopened.lcm_schema_version().await.unwrap(),
-        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
+        schema_version_on(&reopened).await,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION
     );
+    drop(reopened);
     assert_eq!(migration_applied_at(&db_path).await, 123);
 }

@@ -3,10 +3,15 @@ use super::*;
 #[tokio::test]
 async fn first_session_rebuild_bootstraps_active_generation_under_writer_authority() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let session_id = session("session.temporal.bootstrap");
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
 
     assert_eq!(
         begin_candidate(&store, &session_id, 2, 0).await,
@@ -28,17 +33,23 @@ async fn first_session_rebuild_bootstraps_active_generation_under_writer_authori
 #[tokio::test]
 async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.parity");
     let first = occurrence(
         &session_id,
-        &persist_observation(&db, &session_id, 0, "first").await,
+        &persist_observation(&observation_store, &session_id, 0, "first").await,
     );
     let second = occurrence(
         &session_id,
         &persist_observation_with_lineage(
-            &db,
+            &observation_store,
             &session_id,
             1,
             "second",
@@ -50,7 +61,9 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
     );
     let edge = parent_message_copy(&second, &first);
     let assertion = assertion(&second, &first);
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     begin_candidate(&store, &session_id, 2, 2).await;
     begin_candidate(&store, &session_id, 3, 2).await;
 
@@ -172,12 +185,20 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
 #[tokio::test]
 async fn cancelled_candidates_and_stale_source_frontiers_reject_writes() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.cancelled");
-    let first = persist_observation(&db, &session_id, 0, "within frontier").await;
-    let stale = persist_observation(&db, &session_id, 1, "past frontier").await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let first = persist_observation(&observation_store, &session_id, 0, "within frontier").await;
+    let stale = persist_observation(&observation_store, &session_id, 1, "past frontier").await;
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     begin_candidate(&store, &session_id, 2, 1).await;
 
     assert!(matches!(
@@ -194,16 +215,15 @@ async fn cancelled_candidates_and_stale_source_frontiers_reject_writes() {
         Err(SessionStoreError::FrozenWatermarkMismatch)
     ));
 
-    let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute(
-        "UPDATE session_temporal_generations
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE session_temporal_generations
          SET state = 'cancelled', completed_at = created_at
          WHERE session_id = ?1 AND generation = 2",
-        libsql::params![session_id.as_str()],
-    )
-    .await
-    .unwrap();
+            rusqlite::params![session_id.as_str()],
+        )
+        .unwrap();
     assert!(matches!(
         store
             .persist_session_temporal_projection_batch(batch(
@@ -222,7 +242,7 @@ async fn cancelled_candidates_and_stale_source_frontiers_reject_writes() {
 #[tokio::test]
 async fn restart_resumes_one_existing_candidate_instead_of_duplicating_it() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
+    let path;
     let session_id = session("session.temporal.restart");
     let request = SessionGenerationRebuildRequestV1::new(
         session_id.clone(),
@@ -231,8 +251,14 @@ async fn restart_resumes_one_existing_candidate_instead_of_duplicating_it() {
     )
     .unwrap();
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbSessionTemporalStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
+        let store = runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
+            .unwrap();
         assert_eq!(
             store
                 .begin_session_generation_rebuild(request.clone())
@@ -251,8 +277,14 @@ async fn restart_resumes_one_existing_candidate_instead_of_duplicating_it() {
             .unwrap();
     }
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbSessionTemporalStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        assert_eq!(
+            runtime.database_path(HostAdmissionScope::Profile),
+            Some(path.as_path())
+        );
+        let store = runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
+            .unwrap();
         assert_eq!(
             store
                 .begin_session_generation_rebuild(request)
@@ -295,10 +327,18 @@ async fn restart_resumes_one_existing_candidate_instead_of_duplicating_it() {
 #[tokio::test]
 async fn begin_rejects_watermark_mismatch_and_stale_pin_after_activation() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.begin-complete");
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = SessionGenerationRebuildRequestV1::new(
         session_id.clone(),
         generation(2),
@@ -334,7 +374,7 @@ async fn begin_rejects_watermark_mismatch_and_stale_pin_after_activation() {
             .disposition(),
         SessionGenerationRebuildDispositionV1::Resumed
     );
-    let observation = persist_observation(&db, &session_id, 0, "complete").await;
+    let observation = persist_observation(&observation_store, &session_id, 0, "complete").await;
     store
         .persist_session_temporal_projection_batch(batch(
             &session_id,
@@ -389,7 +429,7 @@ async fn begin_rejects_watermark_mismatch_and_stale_pin_after_activation() {
 #[tokio::test]
 async fn interrupted_rebuild_resumes_building_then_activates_ready_to_active() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
+    let path;
     let session_id = session("session.temporal.interrupted-activate");
     let request = SessionGenerationRebuildRequestV1::new(
         session_id.clone(),
@@ -398,9 +438,19 @@ async fn interrupted_rebuild_resumes_building_then_activates_ready_to_active() {
     )
     .unwrap();
     let observation = {
-        let db = open_lcm_db(&tmp).await;
-        let observation = persist_observation(&db, &session_id, 0, "resume-activate").await;
-        let store = GlobalDbSessionTemporalStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
+        let observation_store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let observation =
+            persist_observation(&observation_store, &session_id, 0, "resume-activate").await;
+        let store = runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
+            .unwrap();
         assert_eq!(
             store
                 .begin_session_generation_rebuild(request.clone())
@@ -423,8 +473,14 @@ async fn interrupted_rebuild_resumes_building_then_activates_ready_to_active() {
         observation
     };
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbSessionTemporalStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        assert_eq!(
+            runtime.database_path(HostAdmissionScope::Profile),
+            Some(path.as_path())
+        );
+        let store = runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
+            .unwrap();
         assert_eq!(
             store
                 .begin_session_generation_rebuild(request)

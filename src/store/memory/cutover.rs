@@ -5,7 +5,8 @@ use crate::db::{
 };
 use crate::memory::encoding::HolographicEncoder;
 
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
@@ -31,7 +32,7 @@ const COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE: i64 = 500;
 const COMPATIBILITY_LEGACY_CUTOVER_MAX_EMPTY_PHASE_DRAIN: usize = 8;
 
 async fn compatibility_owner_status_counts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactStoreResult<(u64, u64, u64, [u64; 4], u64, u64, u64, u64, u64, u64)> {
     let key = OwnerKey::new(owner)?;
@@ -143,7 +144,7 @@ async fn compatibility_owner_status_counts_tx(
 }
 
 async fn compatibility_owner_has_dirty_banks_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactStoreResult<bool> {
     let key = OwnerKey::new(owner)?;
@@ -172,7 +173,7 @@ async fn compatibility_owner_has_dirty_banks_tx(
 }
 
 pub(super) async fn compatibility_memory_status_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     feedback_repair: CompatibilityFeedbackRepairProgressV1,
 ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {

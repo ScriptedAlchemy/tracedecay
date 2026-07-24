@@ -4,10 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
-use libsql::{Builder, OpenFlags};
-use libsql::{Connection, params};
 use serde_json::{Value, json};
+
+use crate::db::engine::{QueryExecutor, params};
 
 use super::LcmError;
 
@@ -114,26 +113,15 @@ fn allocate_backup_directory(
 }
 
 async fn verify_sqlite_backup(path: &Path) -> Result<(), LcmError> {
-    let db = crate::db::libsql_local::open_local_database(path, true)
-        .await
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let conn = db
-        .connect()
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let mut rows = conn
-        .query("PRAGMA quick_check", ())
-        .await
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let result = rows
-        .next()
-        .await
-        .map_err(|error| LcmError::Db(error.to_string()))?
-        .ok_or_else(|| LcmError::Db("backup quick_check returned no result".to_string()))?
-        .get::<String>(0)
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    if result != "ok" {
+    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+    let mut file = fs::File::open(path).map_err(|error| LcmError::Io(error.to_string()))?;
+    let mut header = [0_u8; SQLITE_HEADER.len()];
+    use std::io::Read as _;
+    file.read_exact(&mut header)
+        .map_err(|error| LcmError::Io(error.to_string()))?;
+    if &header != SQLITE_HEADER {
         return Err(LcmError::Db(format!(
-            "backup quick_check failed for '{}': {result}",
+            "backup has invalid SQLite header: '{}'",
             path.display()
         )));
     }
@@ -169,7 +157,7 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 pub(super) async fn checkpoint_wal_for_backup(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     kind: BackupKind,
 ) -> Result<(), LcmError> {
     let mut rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE);", ()).await?;
@@ -190,7 +178,7 @@ pub(super) async fn checkpoint_wal_for_backup(
 }
 
 pub(super) async fn all_payload_metadata_refs(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<BTreeSet<String>, LcmError> {
     let mut refs = BTreeSet::new();
     let mut rows = conn
@@ -203,7 +191,7 @@ pub(super) async fn all_payload_metadata_refs(
 }
 
 pub(super) async fn payload_metadata_refs_for_scope(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
@@ -214,7 +202,7 @@ pub(super) async fn payload_metadata_refs_for_scope(
              FROM lcm_external_payloads
              WHERE (?1 = 'all' OR provider = ?1)
                AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, super::util::opt_text(session_id)],
+            params![provider, session_id],
         )
         .await?;
     while let Some(row) = rows.next().await? {
@@ -226,13 +214,13 @@ pub(super) async fn payload_metadata_refs_for_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::engine::TestConnection;
 
     #[tokio::test]
     async fn gc_backups_are_unique_verified_and_non_destructive() {
         let root = tempfile::tempdir().unwrap();
         let source_path = root.path().join("sessions.db");
-        let db = Builder::new_local(&source_path).build().await.unwrap();
-        let conn = db.connect().unwrap();
+        let conn = TestConnection::open(&source_path);
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
@@ -240,7 +228,7 @@ mod tests {
         )
         .await
         .unwrap();
-        checkpoint_wal_for_backup(&conn, BackupKind::Gc)
+        checkpoint_wal_for_backup(&*conn, BackupKind::Gc)
             .await
             .unwrap();
 
@@ -256,12 +244,7 @@ mod tests {
         assert!(first_path.is_file());
         assert!(second_path.is_file());
 
-        let backup = Builder::new_local(&first_path)
-            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
-            .unwrap();
-        let backup_conn = backup.connect().unwrap();
+        let backup_conn = TestConnection::open(&first_path);
         let count: i64 = backup_conn
             .query("SELECT COUNT(*) FROM messages", ())
             .await

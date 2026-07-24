@@ -4,18 +4,17 @@ use super::*;
 async fn temporal_schema_rejects_cross_session_and_generation_rows() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
     assert!(
         table_exists(&db_path, "session_temporal_generations").await,
         "the temporal generation owner table must exist before ownership checks"
     );
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .await
         .unwrap();
@@ -132,14 +131,13 @@ async fn temporal_schema_rejects_cross_session_and_generation_rows() {
 async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          INSERT INTO sanitization_receipts (
@@ -266,14 +264,13 @@ async fn temporal_schema_rejects_invalid_current_assertion_and_valid_time_rows()
 async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch(
         "INSERT INTO session_temporal_generations (
             session_id, generation, state, frozen_watermarks_json, created_at
@@ -1028,14 +1025,13 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
 async fn temporal_schema_enforces_generation_state_machine_and_durability() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     assert!(
         conn.execute(
             "INSERT INTO session_temporal_generations (
@@ -1130,14 +1126,13 @@ async fn temporal_schema_enforces_generation_state_machine_and_durability() {
 async fn temporal_schema_keeps_append_only_authority_immutable() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = GlobalDb::try_open_at(&db_path)
+    let db = open_global_db(&db_path)
         .await
-        .expect("temporal schema initialization should not error")
-        .expect("global database should open");
+        .expect("temporal schema initialization should not error");
     drop(db);
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
     conn.execute_batch(
         "INSERT INTO retrieval_anchors (
             anchor_id, anchor_json, owner_json, projection_generation

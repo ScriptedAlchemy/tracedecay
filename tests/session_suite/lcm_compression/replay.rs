@@ -68,63 +68,66 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
 #[tokio::test]
 async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store_ids = insert_raw_messages(&db, "cursor", "cycle-session", &["alpha"]).await;
+    let db = open_registered_lcm_runtime(&tmp).await;
+    let store_ids =
+        insert_registered_raw_messages(&db, "cursor", "cycle-session", &["alpha"]).await;
     let leaf = db
-        .lcm_insert_summary_node(summary_draft(
-            "cursor",
-            "cycle-session",
-            0,
-            "leaf summary",
-            vec![LcmSourceRef::RawMessage {
-                store_id: store_ids[0],
-            }],
-        ))
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Profile,
+            summary_draft(
+                "cursor",
+                "cycle-session",
+                0,
+                "leaf summary",
+                vec![LcmSourceRef::RawMessage {
+                    store_id: store_ids[0],
+                }],
+            ),
+        )
         .await
         .expect("leaf summary insert should succeed");
     let middle = db
-        .lcm_insert_summary_node(summary_draft(
-            "cursor",
-            "cycle-session",
-            1,
-            "middle summary",
-            vec![LcmSourceRef::SummaryNode {
-                node_id: leaf.node_id.clone(),
-            }],
-        ))
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Profile,
+            summary_draft(
+                "cursor",
+                "cycle-session",
+                1,
+                "middle summary",
+                vec![LcmSourceRef::SummaryNode {
+                    node_id: leaf.node_id.clone(),
+                }],
+            ),
+        )
         .await
         .expect("middle summary insert should succeed");
     let _root = db
-        .lcm_insert_summary_node(summary_draft(
-            "cursor",
-            "cycle-session",
-            2,
-            "root summary",
-            vec![LcmSourceRef::SummaryNode {
-                node_id: middle.node_id.clone(),
-            }],
-        ))
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Profile,
+            summary_draft(
+                "cursor",
+                "cycle-session",
+                2,
+                "root summary",
+                vec![LcmSourceRef::SummaryNode {
+                    node_id: middle.node_id.clone(),
+                }],
+            ),
+        )
         .await
         .expect("root summary insert should succeed");
 
-    let conn = open_lcm_conn(&tmp).await;
-    conn.execute(
-        "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
-        libsql::params![leaf.node_id.as_str()],
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
-         VALUES (?1, 'summary_node', ?2, 0)",
-        libsql::params![leaf.node_id.as_str(), middle.node_id.as_str()],
+    db.replace_lcm_summary_source_for_test(
+        HostAdmissionScope::Profile,
+        leaf.node_id.as_str(),
+        middle.node_id.as_str(),
     )
     .await
     .unwrap();
 
     let response = tokio::time::timeout(
         Duration::from_secs(2),
-        db.lcm_compress(LcmCompressionRequest {
+        db.lcm_compress_for_test(LcmCompressionRequest {
             provider: "cursor".into(),
             session_id: "cycle-session".into(),
             messages: vec![json!({
@@ -704,14 +707,17 @@ async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_
 
     let payload_ref = externalized_ref_from_placeholder(protected_args);
     let expanded = db
-        .lcm_store(tmp.path().join(".tracedecay"))
-        .lcm_expand_payload(
-            "cursor",
-            "session-tool-calls-protection",
-            &payload_ref,
-            0,
-            media_payload.chars().count(),
-        )
+        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-tool-calls-protection".into(),
+            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
+            content_slice: Some(tracedecay::sessions::lcm::LcmContentSlice {
+                offset: 0,
+                limit: media_payload.chars().count(),
+            }),
+            source_offset: 0,
+            source_limit: None,
+        })
         .await
         .expect("tool-calls payload should remain losslessly recoverable");
     assert_eq!(expanded.content, media_payload);
@@ -794,14 +800,17 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
 
     let payload_ref = externalized_ref_from_placeholder(&raw.content);
     let expanded = db
-        .lcm_store(tmp.path().join(".tracedecay"))
-        .lcm_expand_payload(
-            "cursor",
-            "session-media",
-            &payload_ref,
-            0,
-            media_payload.chars().count(),
-        )
+        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-media".into(),
+            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
+            content_slice: Some(tracedecay::sessions::lcm::LcmContentSlice {
+                offset: 0,
+                limit: media_payload.chars().count(),
+            }),
+            source_offset: 0,
+            source_limit: None,
+        })
         .await
         .expect("nested media payload should expand");
     assert_eq!(expanded.content, media_payload);

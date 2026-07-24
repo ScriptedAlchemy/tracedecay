@@ -2,8 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use libsql::params;
-
+use crate::db::engine::{Value, params};
 use crate::errors::Result;
 use crate::memory::diff::{
     NEAR_DUPLICATE_THRESHOLD, classify_add_diff, combined_similarity, normalized_equivalent,
@@ -31,8 +30,10 @@ impl MemoryStore<'_> {
         request: AddFactRequest,
         default_trust: f64,
     ) -> Result<AddFactOutcome> {
-        self.with_immediate_tx("add_fact", self.add_fact_inner(request, default_trust))
-            .await
+        self.with_immediate_tx("add_fact", move |store| {
+            Box::pin(store.add_fact_inner(request, default_trust))
+        })
+        .await
     }
 
     async fn add_fact_inner(
@@ -275,7 +276,7 @@ impl MemoryStore<'_> {
                 .get::<String>(1)
                 .map_err(|e| db_error("near_duplicate_diff", e))?;
             let stored_vector = row
-                .get::<libsql::Value>(2)
+                .get::<Value>(2)
                 .ok()
                 .and_then(|value| deserialize_vector_value(value, "near_duplicate_diff").ok())
                 .flatten();
@@ -344,8 +345,10 @@ impl MemoryStore<'_> {
                 format!("rejected_secret_like: content matched secret-likeness rule: {reason}"),
             ));
         }
-        self.with_immediate_tx("update_fact", self.update_fact_inner(request))
-            .await
+        self.with_immediate_tx("update_fact", move |store| {
+            Box::pin(store.update_fact_inner(request))
+        })
+        .await
     }
 
     async fn update_fact_inner(&self, request: UpdateFactRequest) -> Result<FactRecord> {
@@ -444,10 +447,9 @@ impl MemoryStore<'_> {
         loser_ids: Vec<i64>,
         merged_content: Option<String>,
     ) -> Result<(bool, Vec<i64>)> {
-        self.with_immediate_tx(
-            "merge_facts",
-            self.merge_facts_inner(winner_id, loser_ids, merged_content),
-        )
+        self.with_immediate_tx("merge_facts", move |store| {
+            Box::pin(store.merge_facts_inner(winner_id, loser_ids, merged_content))
+        })
         .await
     }
 
@@ -511,8 +513,10 @@ impl MemoryStore<'_> {
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
-        self.with_immediate_tx("remove_fact", self.remove_fact_inner(fact_id))
-            .await
+        self.with_immediate_tx("remove_fact", move |store| {
+            Box::pin(store.remove_fact_inner(fact_id))
+        })
+        .await
     }
 
     async fn remove_fact_inner(&self, fact_id: i64) -> Result<bool> {

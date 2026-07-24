@@ -277,7 +277,6 @@ fn generate_plugin_bundle() {
     }
 }
 
-
 /// The single-app dashboard (dashboard/app-dist, built by rsbuild). The build
 /// keeps a content stamp over the frontend sources; when stale (or app-dist is
 /// missing) it shells out to `npm run build` (npm ci first when node_modules

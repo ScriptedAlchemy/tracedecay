@@ -1,21 +1,20 @@
 //! Codex thread-goal and workflow-lifecycle ingestion: goal rows with dedupe,
 //! latest-status surfacing, observation projection, and secret sanitization.
 
-use std::path::Path;
-
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionScope;
+use tracedecay::sessions::SessionProvider;
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::{open_project_session_db, resolved_project_session_db_path};
-use tracedecay::sessions::source::try_ingest_source;
-use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
-use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_store::ObservationProjectionStore;
+use tracedecay_store::ObservationReplayRequest;
 
 use crate::codex::{
     write_codex_rollout_with_goal_context, write_codex_rollout_with_structured_events, write_jsonl,
 };
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
-use crate::restart_atomicity::{durable_table_count, mark_test_project};
+use crate::restart_atomicity::{
+    ProjectSessionTestRuntime, mark_test_project, open_project_session_db,
+};
 use crate::support::{init_git_repo, setup};
 
 /// Writes a Codex rollout carrying a `thread_goal_updated` lifecycle: an
@@ -60,54 +59,36 @@ fn write_codex_rollout_with_goal_events(
     path
 }
 
-async fn codex_observation_json_blobs(project: &Path) -> Vec<String> {
-    let db_path = resolved_project_session_db_path(project).await.unwrap();
-    let raw = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = raw.connect().unwrap();
-    let mut rows = conn
-        .query("SELECT observation_json FROM observations", ())
-        .await
-        .unwrap();
-    let mut values = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        values.push(row.get::<String>(0).unwrap());
-    }
-    values
-}
-
-async fn codex_workflow_fact_rows(project: &Path) -> Vec<(String, Option<String>, Option<String>)> {
-    let db_path = resolved_project_session_db_path(project).await.unwrap();
-    let raw = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = raw.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT semantic_kind, status, state
-             FROM observation_workflow_facts
-             ORDER BY observation_sequence, fact_ordinal",
-            (),
+async fn codex_observation_json_blobs(runtime: &ProjectSessionTestRuntime) -> Vec<String> {
+    runtime
+        .runtime()
+        .replay_observations(
+            HostAdmissionScope::Project,
+            ObservationReplayRequest::new(0, 1_000).unwrap(),
         )
         .await
-        .unwrap();
-    let mut values = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        values.push((
-            row.get(0).unwrap(),
-            row.get(1).unwrap(),
-            row.get(2).unwrap(),
-        ));
-    }
-    values
+        .unwrap()
+        .into_iter()
+        .map(|row| serde_json::to_string(row.observation()).unwrap())
+        .collect()
 }
 
-async fn codex_workflow_fact_count(project: &Path) -> u64 {
-    let db_path = resolved_project_session_db_path(project).await.unwrap();
-    let raw = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = raw.connect().unwrap();
-    let mut rows = conn
-        .query("SELECT COUNT(*) FROM observation_workflow_facts", ())
+async fn codex_observation_count(runtime: &ProjectSessionTestRuntime) -> u64 {
+    runtime
+        .runtime()
+        .project_observation_table_count_for_test("observations")
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get::<u64>(0).unwrap()
+        .unwrap()
+}
+
+async fn codex_workflow_fact_rows(
+    runtime: &ProjectSessionTestRuntime,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    runtime
+        .runtime()
+        .project_workflow_fact_rows_for_test()
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -116,15 +97,20 @@ async fn recent_session_goals_surfaces_latest_status_per_session() {
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_goal_events(&home, &project, "codex-goal-events");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    mark_test_project(&project);
+    let runtime = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
+    runtime
+        .runtime()
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
 
-    let goals = db
-        .recent_session_goals(Some(project.to_string_lossy().as_ref()), 10)
-        .await;
+    let goals = runtime
+        .runtime()
+        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
+        .await
+        .unwrap();
     // One row per session: the latest lifecycle state (paused).
     assert_eq!(goals.len(), 1);
     let goal = &goals[0];
@@ -140,12 +126,16 @@ async fn recent_session_goals_surfaces_latest_status_per_session() {
     assert_eq!(meta["updated_at"], 1_782_880_661i64);
 
     // Re-ingest must be idempotent (upsert keyed by message_id): still one goal.
-    try_ingest_source(&db, &source, &project, None)
+    runtime
+        .runtime()
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
-    let goals_again = db
-        .recent_session_goals(Some(project.to_string_lossy().as_ref()), 10)
-        .await;
+    let goals_again = runtime
+        .runtime()
+        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
+        .await
+        .unwrap();
     assert_eq!(goals_again.len(), 1);
 }
 #[tokio::test]
@@ -154,9 +144,12 @@ async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_goal_events(&home, &project, "codex-goal-events");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    mark_test_project(&project);
+    let runtime = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
+    let stats = runtime
+        .runtime()
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
     // user_message + agent_message + three goal transitions. The drift-only
@@ -164,7 +157,7 @@ async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
     assert_eq!(stats.messages_upserted, 5);
 
     // Both distinct goal states are searchable by their shared objective text.
-    let hits = db
+    let hits = runtime
         .search_session_messages(
             "codex",
             Some(project.to_string_lossy().as_ref()),
@@ -232,11 +225,14 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
     write_codex_rollout_with_structured_events(&home, &project, "codex-wf-structured");
     write_codex_rollout_with_goal_context(&home, &project, "codex-wf-goal-context");
 
-    let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
-    drop(db);
+    let runtime = open_project_session_db(&project).await.unwrap();
+    let _ = runtime
+        .runtime()
+        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
+        .await
+        .unwrap();
 
-    let blobs = codex_observation_json_blobs(&project).await;
+    let blobs = codex_observation_json_blobs(&runtime).await;
     assert!(
         blobs
             .iter()
@@ -288,7 +284,7 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
         "lookalike task_completed/task_failed must not appear as lifecycle facts"
     );
 
-    let workflow_rows = codex_workflow_fact_rows(&project).await;
+    let workflow_rows = codex_workflow_fact_rows(&runtime).await;
     assert!(
         workflow_rows
             .iter()
@@ -307,16 +303,26 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
     );
 
     // Exact-duplicate redelivery is a durable no-op (content-addressed ids).
-    let observations_before = durable_table_count(&project, "observations").await;
-    let workflow_before = codex_workflow_fact_count(&project).await;
-    let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
-    drop(db);
+    let observations_before = codex_observation_count(&runtime).await;
+    let workflow_before = runtime
+        .runtime()
+        .project_observation_table_count_for_test("observation_workflow_facts")
+        .await
+        .unwrap();
+    let _ = runtime
+        .runtime()
+        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
+        .await
+        .unwrap();
+    assert_eq!(codex_observation_count(&runtime).await, observations_before);
     assert_eq!(
-        durable_table_count(&project, "observations").await,
-        observations_before
+        runtime
+            .runtime()
+            .project_observation_table_count_for_test("observation_workflow_facts")
+            .await
+            .unwrap(),
+        workflow_before
     );
-    assert_eq!(codex_workflow_fact_count(&project).await, workflow_before);
 }
 
 #[tokio::test]
@@ -335,10 +341,14 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
     // transition → paused.
     write_codex_rollout_with_goal_events(&home, &project, "codex-goal-dedupe");
 
-    let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    let runtime = open_project_session_db(&project).await.unwrap();
+    let _ = runtime
+        .runtime()
+        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
+        .await
+        .unwrap();
 
-    let blobs = codex_observation_json_blobs(&project).await;
+    let blobs = codex_observation_json_blobs(&runtime).await;
     let goal_observations = blobs
         .iter()
         .filter(|blob| {
@@ -351,7 +361,7 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
         "all goal updates, including the token/time tick, must persist raw"
     );
 
-    let goal_rows: Vec<_> = codex_workflow_fact_rows(&project)
+    let goal_rows: Vec<_> = codex_workflow_fact_rows(&runtime)
         .await
         .into_iter()
         .filter(|(kind, _, _)| kind == "goal")
@@ -365,7 +375,11 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
     assert_eq!(goal_rows[1].1.as_deref(), Some("active"));
     assert_eq!(goal_rows[2].1.as_deref(), Some("paused"));
 
-    let goals = db.recent_session_goals(None, 10).await;
+    let goals = runtime
+        .runtime()
+        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
+        .await
+        .unwrap();
     assert_eq!(goals.len(), 1);
     assert_eq!(
         goals[0].message.text,
@@ -375,8 +389,15 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
         serde_json::from_str(goals[0].message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(meta["status"], "paused");
 
-    let observations = durable_table_count(&project, "observations").await;
-    let store = GlobalDbObservationStore::new(&db);
+    let observations = runtime
+        .runtime()
+        .project_observation_table_count_for_test("observations")
+        .await
+        .unwrap();
+    let store = runtime
+        .runtime()
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
     loop {
         if store
             .rebuild_projection(observations)
@@ -387,9 +408,8 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
             break;
         }
     }
-    drop(db);
 
-    let goal_rows_rebuilt: Vec<_> = codex_workflow_fact_rows(&project)
+    let goal_rows_rebuilt: Vec<_> = codex_workflow_fact_rows(&runtime)
         .await
         .into_iter()
         .filter(|(kind, _, _)| kind == "goal")
@@ -400,8 +420,14 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
     assert_eq!(goal_rows_rebuilt[2].1.as_deref(), Some("paused"));
 
     // Restart reopen: latest goal remains paused with objective text.
+    drop(store);
+    drop(runtime);
     let reopened = open_project_session_db(&project).await.unwrap();
-    let goals_again = reopened.recent_session_goals(None, 10).await;
+    let goals_again = reopened
+        .runtime()
+        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
+        .await
+        .unwrap();
     assert_eq!(goals_again.len(), 1);
     assert_eq!(
         goals_again[0].message.text,
@@ -458,11 +484,14 @@ async fn codex_workflow_lifecycle_secret_content_is_sanitized_before_persistence
         ],
     );
 
-    let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
-    drop(db);
+    let runtime = open_project_session_db(&project).await.unwrap();
+    let _ = runtime
+        .runtime()
+        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
+        .await
+        .unwrap();
 
-    let blobs = codex_observation_json_blobs(&project).await;
+    let blobs = codex_observation_json_blobs(&runtime).await;
     let joined = blobs.join("\n");
     assert!(
         joined.contains("workflow_lifecycle"),

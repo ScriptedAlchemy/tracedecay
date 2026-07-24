@@ -5,6 +5,8 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde_json::{Map, Value, json};
 
+use crate::db::engine::{QueryExecutor, Value as DbValue, params};
+
 use super::DashboardState;
 use super::lcm_queries;
 use super::util::{build_fts_match, http_detail, json_error, json_object, like_pattern};
@@ -89,7 +91,7 @@ pub(crate) fn parse_epoch(value: &str) -> Option<f64> {
     trimmed.parse::<f64>().ok()
 }
 
-async fn session_provider_count(conn: &libsql::Connection, session_id: &str) -> i64 {
+async fn session_provider_count(conn: &(impl QueryExecutor + ?Sized), session_id: &str) -> i64 {
     super::util::query_i64(
         conn,
         "SELECT COUNT(*)
@@ -98,7 +100,7 @@ async fn session_provider_count(conn: &libsql::Connection, session_id: &str) -> 
              UNION
              SELECT provider FROM lcm_summary_nodes WHERE session_id = ?1
          )",
-        libsql::params![session_id.to_string()],
+        params![session_id.to_string()],
     )
     .await
 }
@@ -114,7 +116,7 @@ fn ambiguous_session_error(session_id: &str) -> LcmErrorResponse {
 
 pub(crate) async fn ensure_valid_summary_metadata(
     state: &DashboardState,
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     context: &str,
 ) -> LcmServiceResult<()> {
     let validated = VALIDATED_METADATA_STORES.get_or_init(|| Mutex::new(HashSet::new()));
@@ -149,7 +151,7 @@ pub(crate) async fn overview_payload(
     let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
-        "exists": state.lcm_conn.is_some(),
+        "exists": state.lcm_db.is_some(),
         "overview": empty_overview(),
         "latest_sessions": [],
         "latest_summary_nodes": [],
@@ -157,9 +159,14 @@ pub(crate) async fn overview_payload(
         "query": query,
         "limit": limit,
     }));
-    let Some(conn) = state.lcm_conn.as_ref() else {
+    let Some(db) = state.lcm_db.as_ref() else {
         return Ok(payload);
     };
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| query_error("overview", &error.to_string()))?;
+    let conn = &snapshot;
     ensure_valid_summary_metadata(state, conn, "overview").await?;
 
     let messages_total =
@@ -278,7 +285,7 @@ pub(crate) async fn search_payload(
     let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
-        "exists": state.lcm_conn.is_some(),
+        "exists": state.lcm_db.is_some(),
         "query": query,
         "limit": limit,
         "offset": offset,
@@ -295,39 +302,44 @@ pub(crate) async fn search_payload(
         "matches": { "messages": [], "summary_nodes": [] },
     }));
     let trimmed_query = query.trim().to_string();
-    let Some(conn) = state.lcm_conn.as_ref() else {
+    let Some(db) = state.lcm_db.as_ref() else {
         return Ok(payload);
     };
     if trimmed_query.is_empty() {
         return Ok(payload);
     }
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| query_error("search", &error.to_string()))?;
+    let conn = &snapshot;
     ensure_valid_summary_metadata(state, conn, "search").await?;
 
     let mut facet_clauses: Vec<String> = Vec::new();
-    let mut facet_params: Vec<libsql::Value> = Vec::new();
+    let mut facet_params: Vec<DbValue> = Vec::new();
     if !role.is_empty() {
         facet_clauses.push("m.role = ?".into());
-        facet_params.push(libsql::Value::Text(role.to_string()));
+        facet_params.push(DbValue::Text(role.to_string()));
     }
     if !source.is_empty() {
         if source == "unknown" {
             facet_clauses.push("(m.provider IS NULL OR TRIM(m.provider) = '')".into());
         } else {
             facet_clauses.push("m.provider = ?".into());
-            facet_params.push(libsql::Value::Text(source.to_string()));
+            facet_params.push(DbValue::Text(source.to_string()));
         }
     }
     if !session_id.is_empty() {
         facet_clauses.push("m.session_id = ?".into());
-        facet_params.push(libsql::Value::Text(session_id.to_string()));
+        facet_params.push(DbValue::Text(session_id.to_string()));
     }
     if let Some(since) = since {
         facet_clauses.push("m.timestamp >= ?".into());
-        facet_params.push(libsql::Value::Real(since));
+        facet_params.push(DbValue::Real(since));
     }
     if let Some(until) = until {
         facet_clauses.push("m.timestamp <= ?".into());
-        facet_params.push(libsql::Value::Real(until));
+        facet_params.push(DbValue::Real(until));
     }
 
     let match_expr = build_fts_match(&trimmed_query);
@@ -378,18 +390,18 @@ pub(crate) async fn search_payload(
     parse_summary_node_ids(&mut message_matches);
 
     let mut node_clauses: Vec<String> = Vec::new();
-    let mut node_params: Vec<libsql::Value> = Vec::new();
+    let mut node_params: Vec<DbValue> = Vec::new();
     if !session_id.is_empty() {
         node_clauses.push("n.session_id = ?".into());
-        node_params.push(libsql::Value::Text(session_id.to_string()));
+        node_params.push(DbValue::Text(session_id.to_string()));
     }
     if let Some(since) = since {
         node_clauses.push("COALESCE(n.source_time_end, n.created_at) >= ?".into());
-        node_params.push(libsql::Value::Real(since));
+        node_params.push(DbValue::Real(since));
     }
     if let Some(until) = until {
         node_clauses.push("COALESCE(n.source_time_end, n.created_at) <= ?".into());
-        node_params.push(libsql::Value::Real(until));
+        node_params.push(DbValue::Real(until));
     }
 
     let mut node_engine = "like";
@@ -454,7 +466,7 @@ pub(crate) async fn session_payload(
     let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
-        "exists": state.lcm_conn.is_some(),
+        "exists": state.lcm_db.is_some(),
         "session_id": session_id,
         "limit": limit,
         "offset": offset,
@@ -472,9 +484,14 @@ pub(crate) async fn session_payload(
         "has_more_messages": false,
         "has_more_summary_nodes": false,
     }));
-    let Some(conn) = state.lcm_conn.as_ref() else {
+    let Some(db) = state.lcm_db.as_ref() else {
         return Ok(payload);
     };
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| query_error("session", &error.to_string()))?;
+    let conn = &snapshot;
     ensure_valid_summary_metadata(state, conn, "session").await?;
 
     if session_provider_count(conn, session_id).await > 1 {
@@ -484,13 +501,13 @@ pub(crate) async fn session_payload(
     let message_count = super::util::query_i64(
         conn,
         "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
-        libsql::params![session_id.to_string()],
+        params![session_id.to_string()],
     )
     .await;
     let summary_node_count = super::util::query_i64(
         conn,
         "SELECT COUNT(*) FROM lcm_summary_nodes WHERE session_id = ?1",
-        libsql::params![session_id.to_string()],
+        params![session_id.to_string()],
     )
     .await;
     if message_count == 0 && summary_node_count == 0 {
@@ -507,7 +524,7 @@ pub(crate) async fn session_payload(
              FROM lcm_raw_messages WHERE session_id = ?1",
             lcm_queries::MESSAGE_TOKEN_ESTIMATE_EXPR
         ),
-        libsql::params![session_id.to_string()],
+        params![session_id.to_string()],
     )
     .await;
     let mut messages = map_query_error(
@@ -521,13 +538,13 @@ pub(crate) async fn session_payload(
     let summary_token_count = super::util::query_i64(
         conn,
         "SELECT COALESCE(SUM(summary_token_count), 0) FROM lcm_summary_nodes WHERE session_id = ?1",
-        libsql::params![session_id.to_string()],
+        params![session_id.to_string()],
     )
     .await;
     let source_token_count = super::util::query_i64(
         conn,
         "SELECT COALESCE(SUM(source_token_count), 0) FROM lcm_summary_nodes WHERE session_id = ?1",
-        libsql::params![session_id.to_string()],
+        params![session_id.to_string()],
     )
     .await;
     let mut summary_nodes = map_query_error(
@@ -569,14 +586,19 @@ pub(crate) async fn node_payload(
     let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
-        "exists": state.lcm_conn.is_some(),
+        "exists": state.lcm_db.is_some(),
         "node_id": node_id,
         "node": null,
         "sources": { "type": null, "ids": [], "messages": [], "nodes": [] },
     }));
-    let Some(conn) = state.lcm_conn.as_ref() else {
+    let Some(db) = state.lcm_db.as_ref() else {
         return Ok(payload);
     };
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| query_error("node", &error.to_string()))?;
+    let conn = &snapshot;
     ensure_valid_summary_metadata(state, conn, "node").await?;
 
     let Some(node_row) =
@@ -669,16 +691,21 @@ pub(crate) async fn timeline_payload(
     let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
-        "exists": state.lcm_conn.is_some(),
+        "exists": state.lcm_db.is_some(),
         "bucket": if by_hour { "hour" } else { "day" },
         "session_id": if session_id.is_empty() { Value::Null } else { json!(session_id) },
         "buckets": [],
         "node_buckets": [],
         "undated": {"count": 0, "token_estimate": 0},
     }));
-    let Some(conn) = state.lcm_conn.as_ref() else {
+    let Some(db) = state.lcm_db.as_ref() else {
         return Ok(payload);
     };
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| query_error("timeline", &error.to_string()))?;
+    let conn = &snapshot;
     let session_id = if session_id.is_empty() {
         None
     } else {
@@ -716,7 +743,7 @@ pub(crate) async fn compression_payload(
     let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
-        "exists": state.lcm_conn.is_some(),
+        "exists": state.lcm_db.is_some(),
         "by": if by_node { "node" } else { "session" },
         "limit": limit,
         "overall": {
@@ -727,9 +754,14 @@ pub(crate) async fn compression_payload(
         },
         "groups": [],
     }));
-    let Some(conn) = state.lcm_conn.as_ref() else {
+    let Some(db) = state.lcm_db.as_ref() else {
         return Ok(payload);
     };
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| query_error("compression", &error.to_string()))?;
+    let conn = &snapshot;
 
     let source_token_count = super::util::query_i64(
         conn,

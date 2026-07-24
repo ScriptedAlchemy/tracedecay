@@ -11,13 +11,13 @@
 //! identifier), but the canonical 5.0 mode passes `GLOBAL_SESSION` so a single
 //! row backs all sessions on the same project.
 //!
-//! The cache lives in the same libSQL database as the code graph and is wiped
+//! The cache lives in the same SQLite database as the code graph and is wiped
 //! by the v8 schema's `sweep` helper after `MAX_AGE_SECS` of inactivity.
 
-use libsql::{Connection, params};
 use sha2::{Digest, Sha256};
 
 use crate::db::Database;
+use crate::db::engine::{QueryExecutor, params};
 use crate::errors::{Result, TraceDecayError};
 
 /// Sentinel session id used for cross-session cache rows. Picked so it cannot
@@ -83,7 +83,7 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
 /// recompute and `put` a fresh row, which replaces the stale one via the
 /// primary-key `INSERT OR REPLACE`.
 pub async fn get(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     project_id: &str,
     session_id: &str,
     file_path: &str,
@@ -208,39 +208,51 @@ pub(crate) async fn put_write(db: &Database, write: ReadCacheWrite<'_>) -> Resul
         token_count,
     } = write;
     let now = unix_seconds();
-    db.execute_write(
-        "read_cache::put",
-        "INSERT OR REPLACE INTO read_cache
+    let transaction = db.begin_write_transaction("read_cache::put").await?;
+    transaction
+        .execute_engine(
+            "INSERT OR REPLACE INTO read_cache
             (project_id, session_id, file_path, mtime_ns, mode, args_hash,
              digest, body, token_count, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            project_id,
-            session_id,
-            file_path,
-            mtime_ns,
-            mode,
-            args_hash,
-            digest,
-            body,
-            i64::from(token_count),
-            now
-        ],
-    )
-    .await?;
-    Ok(())
+            params![
+                project_id,
+                session_id,
+                file_path,
+                mtime_ns,
+                mode,
+                args_hash,
+                digest,
+                body,
+                i64::from(token_count),
+                now
+            ],
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("read_cache write failed: {error}"),
+            operation: "read_cache::put".to_owned(),
+        })?;
+    transaction.commit().await
 }
 
 /// Deletes rows older than [`MAX_AGE_SECS`]. Returns the number of rows
 /// removed. Safe to call from any context.
 pub async fn sweep(db: &Database) -> Result<u64> {
     let cutoff = unix_seconds() - MAX_AGE_SECS;
-    db.execute_write(
-        "read_cache::sweep",
-        "DELETE FROM read_cache WHERE created_at < ?1",
-        params![cutoff],
-    )
-    .await
+    let transaction = db.begin_write_transaction("read_cache::sweep").await?;
+    let changed = transaction
+        .execute_engine(
+            "DELETE FROM read_cache WHERE created_at < ?1",
+            params![cutoff],
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("read_cache sweep failed: {error}"),
+            operation: "read_cache::sweep".to_owned(),
+        })?;
+    transaction.commit().await?;
+    Ok(changed)
 }
 
 fn unix_seconds() -> i64 {

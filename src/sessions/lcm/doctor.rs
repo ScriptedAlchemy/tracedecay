@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 
-#[cfg(test)]
-use libsql::TransactionBehavior;
-use libsql::{Connection, Value as SqlValue, params};
 use serde_json::{Value, json};
 
+#[cfg(test)]
+use crate::db::engine::{Connection, TransactionBehavior};
+use crate::db::engine::{Executor, Value as SqlValue, params};
 use crate::tracedecay::current_timestamp;
 
 use super::{
@@ -38,7 +38,7 @@ pub(crate) fn request_mutates(request: &DoctorRequest<'_>) -> bool {
     request.apply && matches!(request.mode, "repair" | "clean" | "gc")
 }
 
-pub(crate) async fn prepare_apply(conn: &Connection) -> Result<(), LcmError> {
+pub(crate) async fn prepare_apply(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
     maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Clean).await
 }
 
@@ -55,7 +55,7 @@ struct RepairRequest<'a> {
 }
 
 pub(crate) async fn doctor(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     request: DoctorRequest<'_>,
 ) -> Result<Value, LcmError> {
     let diagnostics = gather_diagnostics(
@@ -108,7 +108,7 @@ pub(crate) async fn doctor(
 }
 
 async fn gather_diagnostics(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -150,7 +150,7 @@ async fn gather_diagnostics(
 }
 
 async fn plan_and_apply_repairs(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     request: RepairRequest<'_>,
 ) -> Result<Value, LcmError> {
     let RepairRequest {
@@ -335,7 +335,7 @@ fn issue_count(diagnostics: &Value) -> i64 {
 }
 
 async fn table_or_trigger_count(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     names: &[&str],
     object_type: &str,
 ) -> Result<i64, LcmError> {
@@ -360,7 +360,7 @@ async fn table_or_trigger_count(
 }
 
 async fn payload_diagnostics(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -408,7 +408,7 @@ async fn payload_diagnostics(
 
 #[allow(dead_code)]
 async fn count_unreferenced_payload_metadata(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -434,7 +434,7 @@ async fn count_unreferenced_payload_metadata(
 
 #[allow(dead_code)]
 async fn referenced_payload_refs(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
@@ -442,7 +442,7 @@ async fn referenced_payload_refs(
 }
 
 async fn fts_diagnostics(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<Value, LcmError> {
@@ -516,7 +516,7 @@ async fn fts_diagnostics(
 }
 
 async fn fts_probe_needs_rebuild(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     content_table: &str,
     fts_table: &str,
     text_column: &str,
@@ -579,7 +579,7 @@ fn first_fts_term(text: &str) -> Option<String> {
 }
 
 async fn summary_integrity(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<Value, LcmError> {
@@ -592,7 +592,7 @@ async fn summary_integrity(
 }
 
 async fn count_broken_summary_sources(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -647,7 +647,7 @@ async fn count_broken_summary_sources(
 }
 
 async fn count_summary_hash_mismatches(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -671,7 +671,7 @@ async fn count_summary_hash_mismatches(
 }
 
 async fn lifecycle_integrity(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<Value, LcmError> {
@@ -687,7 +687,7 @@ async fn lifecycle_integrity(
 }
 
 async fn count_lifecycle_states_for_session_scope(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -704,7 +704,7 @@ async fn count_lifecycle_states_for_session_scope(
 }
 
 async fn count_invalid_frontiers(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -731,7 +731,7 @@ async fn count_invalid_frontiers(
 }
 
 async fn count_orphan_debt(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -756,7 +756,7 @@ async fn count_orphan_debt(
 }
 
 async fn retention_candidates(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<Value, LcmError> {
@@ -843,7 +843,7 @@ struct CleanupSessionCandidate {
 }
 
 async fn cleanup_candidates(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
@@ -979,7 +979,7 @@ async fn cleanup_candidates(
 }
 
 async fn backup_and_delete_clean_candidates_in_transaction(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     db_path: &Path,
     storage_root: &Path,
     provider: &str,
@@ -1028,7 +1028,7 @@ where
 }
 
 async fn backup_and_delete_clean_candidates_in_transaction_with_backup<F, Fut>(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
@@ -1048,7 +1048,7 @@ where
 }
 
 async fn collect_clean_delete_targets(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
@@ -1102,7 +1102,7 @@ async fn collect_clean_delete_targets(
 }
 
 async fn delete_clean_candidates_in_transaction(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_ids: &[String],
     message_store_ids: &[i64],
@@ -1212,7 +1212,7 @@ async fn delete_clean_candidates_in_transaction(
 }
 
 async fn summary_counts_by_session(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeMap<String, i64>, LcmError> {
@@ -1235,7 +1235,7 @@ async fn summary_counts_by_session(
 }
 
 async fn raw_store_ids_with_summary_sources(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<i64>, LcmError> {
@@ -1260,7 +1260,7 @@ async fn raw_store_ids_with_summary_sources(
 }
 
 async fn message_ids_for_store_ids(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     store_ids: &[i64],
 ) -> Result<BTreeSet<String>, LcmError> {
     let mut message_ids = BTreeSet::new();
@@ -1291,10 +1291,9 @@ async fn message_ids_for_store_ids(
 mod tests {
     #![allow(dead_code)]
 
-    use std::path::Path;
-    use std::time::Duration;
-
     use super::*;
+    use crate::db::engine::TestConnection;
+    use std::path::Path;
 
     async fn insert_test_clean_candidate(
         conn: &Connection,
@@ -1354,18 +1353,42 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
         let project_root = temp.path().to_path_buf();
         let db_path = project_root.join("sessions.db");
-        let _global = crate::global_db::GlobalDb::open_at(&db_path)
+        let conn = TestConnection::open(&db_path);
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                title TEXT,
+                started_at INTEGER,
+                ended_at INTEGER,
+                transcript_path TEXT,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                tool_names TEXT,
+                source_path TEXT,
+                source_offset INTEGER,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id)
+            );",
+        )
+        .await
+        .map_err(|err| format!("create test schema prerequisites: {err}"))?;
+        schema::ensure_lcm_schema(&*conn)
             .await
-            .ok_or_else(|| "test session database should open".to_string())?;
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
-            .await
-            .map_err(|err| format!("build test database: {err}"))?;
-        let conn = db
-            .connect()
-            .map_err(|err| format!("connect to test database: {err}"))?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|err| format!("set test database busy timeout: {err}"))?;
+            .map_err(|err| format!("create LCM test schema: {err}"))?;
         insert_test_clean_candidate(
             &conn,
             &project_root,
@@ -1374,16 +1397,7 @@ mod tests {
         )
         .await?;
 
-        let writer_db = libsql::Builder::new_local(&db_path)
-            .build()
-            .await
-            .map_err(|err| format!("build writer database: {err}"))?;
-        let writer_conn = writer_db
-            .connect()
-            .map_err(|err| format!("connect to writer database: {err}"))?;
-        writer_conn
-            .busy_timeout(Duration::from_millis(25))
-            .map_err(|err| format!("set writer database busy timeout: {err}"))?;
+        let writer_conn = TestConnection::open(&db_path);
         let writer_project_root = project_root.clone();
         let backup_path = project_root.join("backup.db");
         let backup_path_for_callback = backup_path.clone();

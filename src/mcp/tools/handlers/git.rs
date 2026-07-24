@@ -7,11 +7,18 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde_json::{Value, json};
+use tracedecay_domain::ManifestDigest;
+use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 
 use super::super::ToolResult;
 use super::super::render;
+use super::rendered_tool_json;
 use super::support::unique_file_paths;
+use crate::application::git_reads::{GitReadOutcomeV1, GitReadRequestV1};
 use crate::errors::{Result, TraceDecayError};
+use crate::git_query::{
+    GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES, GitQueryBounds,
+};
 use crate::tracedecay::TraceDecay;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +67,209 @@ fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
         })
 }
 
+fn required_string_arg(args: &Value, name: &str) -> Result<String> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.trim() == *value)
+        .map(str::to_owned)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("missing or invalid required parameter: {name}"),
+        })
+}
+
+fn git_read_bounds(args: &Value) -> GitQueryBounds {
+    GitQueryBounds {
+        max_entries: args
+            .get("max_entries")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::from(GIT_QUERY_DEFAULT_MAX_ENTRIES))
+            .clamp(1, u64::from(GIT_QUERY_DEFAULT_MAX_ENTRIES)) as u32,
+        max_bytes: args
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(GIT_QUERY_DEFAULT_MAX_BYTES)
+            .clamp(1, GIT_QUERY_DEFAULT_MAX_BYTES),
+        deadline: None,
+        cancel: None,
+    }
+}
+
+fn git_diff_scope(args: &Value, allow_commit_range: bool) -> Result<GitDiffScopeV1> {
+    match args
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("working_tree")
+    {
+        "working_tree" => Ok(GitDiffScopeV1::WorkingTree),
+        "staged" => Ok(GitDiffScopeV1::Staged),
+        "commit_range" if allow_commit_range => Ok(GitDiffScopeV1::CommitRange {
+            base: GitOidV1::new(required_string_arg(args, "base")?).map_err(|_| {
+                TraceDecayError::Config {
+                    message: "base must be an exact lowercase SHA-1 or SHA-256 object id"
+                        .to_owned(),
+                }
+            })?,
+            head: GitOidV1::new(required_string_arg(args, "head")?).map_err(|_| {
+                TraceDecayError::Config {
+                    message: "head must be an exact lowercase SHA-1 or SHA-256 object id"
+                        .to_owned(),
+                }
+            })?,
+        }),
+        _ => Err(TraceDecayError::Config {
+            message: if allow_commit_range {
+                "scope must be working_tree, staged, or commit_range".to_owned()
+            } else {
+                "scope must be working_tree or staged".to_owned()
+            },
+        }),
+    }
+}
+
+async fn handle_typed_git_read(
+    cg: &TraceDecay,
+    args: &Value,
+    request: GitReadRequestV1,
+    executor: Option<&crate::mcp::server::GitReadExecutor>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    let outcome = if let Some(executor) = executor {
+        executor(crate::mcp::server::GitReadInvocationV1 {
+            project_root: cg.project_root().to_path_buf(),
+            request,
+            bounds: git_read_bounds(args),
+            deadline,
+            cancellation,
+        })
+        .await
+    } else {
+        GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+        }
+    };
+    let value = serde_json::to_value(outcome)?;
+    Ok(rendered_tool_json(Some(cg.project_root()), args, &value))
+}
+
+pub(super) async fn handle_git_status(
+    cg: &TraceDecay,
+    args: &Value,
+    executor: Option<&crate::mcp::server::GitReadExecutor>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    handle_typed_git_read(
+        cg,
+        args,
+        GitReadRequestV1::Status,
+        executor,
+        deadline,
+        cancellation,
+    )
+    .await
+}
+
+pub(super) async fn handle_git_diff(
+    cg: &TraceDecay,
+    args: &Value,
+    executor: Option<&crate::mcp::server::GitReadExecutor>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    handle_typed_git_read(
+        cg,
+        args,
+        GitReadRequestV1::Diff {
+            scope: git_diff_scope(args, true)?,
+        },
+        executor,
+        deadline,
+        cancellation,
+    )
+    .await
+}
+
+pub(super) async fn handle_git_history(
+    cg: &TraceDecay,
+    args: &Value,
+    executor: Option<&crate::mcp::server::GitReadExecutor>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    handle_typed_git_read(
+        cg,
+        args,
+        GitReadRequestV1::History {
+            max_count: args
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or(100)
+                .clamp(1, 1_000) as u32,
+            path: args.get("path").and_then(Value::as_str).map(str::to_owned),
+            follow: args.get("follow").and_then(Value::as_bool).unwrap_or(false),
+            first_parent: args
+                .get("first_parent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        executor,
+        deadline,
+        cancellation,
+    )
+    .await
+}
+
+pub(super) async fn handle_git_blame(
+    cg: &TraceDecay,
+    args: &Value,
+    executor: Option<&crate::mcp::server::GitReadExecutor>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    handle_typed_git_read(
+        cg,
+        args,
+        GitReadRequestV1::Blame {
+            path: required_string_arg(args, "path")?,
+            follow_renames: args
+                .get("follow_renames")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        executor,
+        deadline,
+        cancellation,
+    )
+    .await
+}
+
+pub(super) async fn handle_git_hunks(
+    cg: &TraceDecay,
+    args: &Value,
+    executor: Option<&crate::mcp::server::GitReadExecutor>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    let snapshot_digest = ManifestDigest::new(required_string_arg(args, "snapshot_digest")?)
+        .map_err(|_| TraceDecayError::Config {
+            message: "snapshot_digest must be an exact supported digest".to_owned(),
+        })?;
+    handle_typed_git_read(
+        cg,
+        args,
+        GitReadRequestV1::Hunks {
+            scope: git_diff_scope(args, false)?,
+            preview_id: required_string_arg(args, "preview_id")?,
+            snapshot_digest,
+        },
+        executor,
+        deadline,
+        cancellation,
+    )
+    .await
+}
+
 fn clamped_depth_arg(args: &Value, name: &str, default: usize, max: usize) -> usize {
     args.get(name)
         .and_then(serde_json::Value::as_u64)
@@ -93,52 +303,9 @@ impl AffectedTestDependents for TraceDecay {
         files: &'a [String],
     ) -> AffectedDependentsFuture<'a> {
         Box::pin(async move {
-            if files.is_empty() {
-                return Ok(HashMap::new());
-            }
-
-            let placeholders = (1..=files.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "SELECT DISTINCT target.file_path, source.file_path \
-                 FROM nodes target \
-                 JOIN edges edge ON edge.target = target.id \
-                    AND edge.kind IN ('uses', 'calls') \
-                 JOIN nodes source ON source.id = edge.source \
-                 WHERE target.file_path IN ({placeholders}) \
-                    AND source.file_path != target.file_path \
-                 ORDER BY target.file_path, source.file_path"
-            );
-            let params = files
-                .iter()
-                .cloned()
-                .map(libsql::Value::Text)
-                .collect::<Vec<_>>();
-            let mut rows = self
-                .db()
-                .conn()
-                .query(&sql, libsql::params_from_iter(params))
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to query affected-test frontier: {error}"),
-                    operation: "collect_affected_test_files".to_string(),
-                })?;
             let mut dependents: FileDependentsByFile = HashMap::new();
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to read affected-test frontier: {error}"),
-                    operation: "collect_affected_test_files".to_string(),
-                })?
-            {
-                if let (Ok(target_file), Ok(source_file)) =
-                    (row.get::<String>(0), row.get::<String>(1))
-                {
-                    dependents.entry(target_file).or_default().push(source_file);
-                }
+            for file in files {
+                dependents.insert(file.clone(), self.get_file_dependents(file).await?);
             }
             Ok(dependents)
         })
@@ -1179,7 +1346,16 @@ pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
         .and_then(serde_json::Value::as_u64)
         .map_or(10, |v| v.min(500) as usize);
 
-    let branch_cg = TraceDecay::open_branch(cg.project_root(), branch).await?;
+    let branch_cg = TraceDecay::open_branch_with_registered_configuration(
+        cg.project_root(),
+        branch,
+        crate::tracedecay::TraceDecayOpenOptions::default(),
+        cg.store_layout().clone(),
+        cg.configuration_runtime().registered_database(),
+        cg.profile_database().clone(),
+        cg.store_runtime_registry().clone(),
+    )
+    .await?;
     let results = branch_cg.search(query, limit).await?;
 
     let items: Vec<Value> = results
@@ -1265,11 +1441,31 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     let file_filter = args.get("file").and_then(|v| v.as_str());
     let kind_filter = args.get("kind").and_then(|v| v.as_str());
 
-    let base_cg = TraceDecay::open_branch(project_root, base_name).await?;
+    let base_cg = TraceDecay::open_branch_with_registered_configuration(
+        project_root,
+        base_name,
+        crate::tracedecay::TraceDecayOpenOptions::default(),
+        cg.store_layout().clone(),
+        cg.configuration_runtime().registered_database(),
+        cg.profile_database().clone(),
+        cg.store_runtime_registry().clone(),
+    )
+    .await?;
     let head_cg = if cg.active_branch() == Some(head_name) && !cg.is_fallback() {
         None // use the already-open cg
     } else {
-        Some(TraceDecay::open_branch(project_root, head_name).await?)
+        Some(
+            TraceDecay::open_branch_with_registered_configuration(
+                project_root,
+                head_name,
+                crate::tracedecay::TraceDecayOpenOptions::default(),
+                cg.store_layout().clone(),
+                cg.configuration_runtime().registered_database(),
+                cg.profile_database().clone(),
+                cg.store_runtime_registry().clone(),
+            )
+            .await?,
+        )
     };
     let head_ref = head_cg.as_ref().unwrap_or(cg);
 

@@ -32,12 +32,15 @@ fn log_startup_transcript_ingest_failure(
 }
 
 pub(super) async fn run_startup_session_catch_up(
-    session_db: Option<Arc<GlobalDb>>,
-    user_session_db: Option<Arc<GlobalDb>>,
-    registry_db: Option<Arc<GlobalDb>>,
+    session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    user_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    registry_db: Option<Arc<RegisteredGlobalDb>>,
+    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     project_root: &Path,
     project_id: Option<&str>,
-) -> Option<Arc<GlobalDb>> {
+) -> Option<Arc<RegisteredGlobalDb>> {
     let Some(db) = session_db else {
         tracing::warn!(
             project_root = %project_root.display(),
@@ -45,9 +48,25 @@ pub(super) async fn run_startup_session_catch_up(
         );
         return None;
     };
+    let Some(registered) = registered_session_db else {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            "startup project transcript ingest skipped because registered session authority is unavailable"
+        );
+        return None;
+    };
+    let Some(profile_identity) = profile_identity else {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            "startup transcript ingest skipped because durable profile identity is unavailable"
+        );
+        return None;
+    };
     let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
     let project_outcome = crate::sessions::ingest_project_sources_for_provider(
-        db.as_ref(),
+        profile_identity.brain_id(),
+        profile_identity.profile_id(),
+        registered.as_ref(),
         project_root,
         project_id,
         None,
@@ -57,10 +76,14 @@ pub(super) async fn run_startup_session_catch_up(
     for failure in &project_outcome.failures {
         log_startup_transcript_ingest_failure("project", failure);
     }
-    if let (Some(user_db), Some(registry_db)) = (user_session_db, registry_db) {
+    if let (Some(user_db), Some(user_registered), Some(registry_db)) =
+        (user_session_db, registered_user_session_db, registry_db)
+    {
         if let Some(profile_root) = user_db.db_path().parent() {
             let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
-                user_db.as_ref(),
+                profile_identity.brain_id(),
+                profile_identity.profile_id(),
+                user_registered.as_ref(),
                 registry_db.as_ref(),
                 profile_root,
             )
@@ -180,8 +203,8 @@ impl McpServer {
         let cg = self.cg_snapshot().await;
         let refresh = Arc::clone(&self.background_refresh_writer);
         let request = BackgroundRefreshRequest {
+            graph: Arc::clone(&cg),
             project_root: cg.project_root().to_path_buf(),
-            open_options: cg.open_options(),
             full_sync_escalation_files: 0,
         };
         match refresh(request).await {
@@ -218,18 +241,27 @@ impl McpServer {
             let project_root = cg.project_root().to_path_buf();
             let project_id = cg.store_layout().identity.project_id.clone();
             let session_db = self.session_db.clone();
+            let registered_session_db = self.registered_session_db.clone();
             let user_session_db = self.user_session_db.clone();
+            let registered_user_session_db = self.registered_user_session_db.clone();
             let registry_db = self.registry_db.clone();
-            let user_ingest_requested = user_session_db.is_some() && registry_db.is_some();
+            let profile_identity = self.profile_identity.clone();
+            let user_ingest_requested = user_session_db.is_some()
+                && registered_user_session_db.is_some()
+                && registry_db.is_some()
+                && profile_identity.is_some();
             let project_session_refresh_wake = self.project_session_refresh_wake.clone();
             let user_session_refresh_wake = self.user_session_refresh_wake.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
-            let analytics_db = self.global_db.clone();
+            let analytics_db = self.accounting_db.clone();
             tokio::spawn(async move {
                 if let Some(db) = run_startup_session_catch_up(
                     session_db,
+                    registered_session_db,
                     user_session_db,
+                    registered_user_session_db,
                     registry_db,
+                    profile_identity,
                     &project_root,
                     project_id.as_deref(),
                 )
@@ -265,7 +297,7 @@ impl McpServer {
                         let _ =
                             crate::analytics_bridge::import_hook_analytics(analytics_db, &sources)
                                 .await;
-                        let project_id = GlobalDb::canonical_project_key(&project_root);
+                        let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
                         let now = crate::tracedecay::current_timestamp();
                         let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
                             analytics_db,
@@ -441,8 +473,8 @@ impl McpServer {
         let token_map = Arc::clone(&self.file_token_map);
         let refresh = Arc::clone(&self.background_refresh_writer);
         let request = BackgroundRefreshRequest {
+            graph: Arc::clone(cg),
             project_root: cg.project_root().to_path_buf(),
-            open_options: cg.open_options(),
             full_sync_escalation_files: escalation,
         };
         tokio::spawn(async move {

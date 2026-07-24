@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use crate::memory::entities::normalize_entity;
 
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::{Value, json};
 
 use tracedecay_domain::{Confidence, FactCategoryV1, FactId, FactOwnerV1, UtcMicros};
@@ -70,7 +71,7 @@ fn compatibility_search_scores(
 }
 
 async fn compatibility_available_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     category: Option<FactCategoryV1>,
     min_trust: Option<Confidence>,
@@ -104,7 +105,7 @@ fn compatibility_matches_all_entities(fact: &CompatibilityFactV1, entities: &[St
 }
 
 async fn compatibility_rank_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactSearchQuery,
 ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
     let min_trust = query
@@ -253,21 +254,21 @@ async fn compatibility_rank_facts_tx(
 }
 
 pub(super) async fn search_compatibility_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactSearchQuery,
 ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
     compatibility_rank_facts_tx(transaction, query).await
 }
 
 pub(super) async fn probe_compatibility_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactSearchQuery,
 ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
     compatibility_rank_facts_tx(transaction, query).await
 }
 
 pub(super) async fn related_compatibility_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactSearchQuery,
 ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
     let CompatibilityFactSearchKindV1::Related { entity } = query.kind() else {
@@ -328,15 +329,17 @@ pub(super) async fn related_compatibility_facts_tx(
         .collect::<Vec<_>>()
         .join(",");
     let mut values = Vec::with_capacity(source_entity_ids.len() + 4);
-    values.push(libsql::Value::Text(key.kind.to_string()));
-    values.push(libsql::Value::Text(key.project_id.clone()));
-    values.push(libsql::Value::Text(key.json.clone()));
-    values.push(libsql::Value::Text(source_store_id.as_str().to_owned()));
+    values.push(crate::db::engine::Value::Text(key.kind.to_string()));
+    values.push(crate::db::engine::Value::Text(key.project_id.clone()));
+    values.push(crate::db::engine::Value::Text(key.json.clone()));
+    values.push(crate::db::engine::Value::Text(
+        source_store_id.as_str().to_owned(),
+    ));
     values.extend(
         source_entity_ids
             .iter()
             .copied()
-            .map(libsql::Value::Integer),
+            .map(crate::db::engine::Value::Integer),
     );
     let sql = format!(
         "SELECT DISTINCT co_entities.entity_id, co_entities.name
@@ -358,9 +361,9 @@ pub(super) async fn related_compatibility_facts_tx(
         source_entity_ids
             .iter()
             .copied()
-            .map(libsql::Value::Integer),
+            .map(crate::db::engine::Value::Integer),
     );
-    co_values.push(libsql::Value::Integer(query.limit() as i64));
+    co_values.push(crate::db::engine::Value::Integer(query.limit() as i64));
     let mut co_rows = transaction
         .query(&sql, co_values)
         .await
@@ -498,14 +501,14 @@ pub(super) async fn related_compatibility_facts_tx(
 }
 
 pub(super) async fn reason_compatibility_facts_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactSearchQuery,
 ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
     compatibility_rank_facts_tx(transaction, query).await
 }
 
 pub(super) async fn find_compatibility_contradictions_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     query: &CompatibilityFactContradictionQueryV1,
 ) -> FactCompatibilityResult<CompatibilityFactContradictionPageV1> {
     let mut facts = compatibility_available_facts_tx(
@@ -583,7 +586,7 @@ pub(super) async fn find_compatibility_contradictions_tx(
 }
 
 async fn compatibility_update_retrieval_projection_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
     recall: bool,
@@ -641,7 +644,7 @@ async fn compatibility_update_retrieval_projection_tx(
 }
 
 async fn compatibility_replay_retrieval_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>> {
@@ -678,7 +681,7 @@ async fn compatibility_replay_retrieval_tx(
 }
 
 pub(super) async fn record_compatibility_fact_retrieval_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactRetrievalCommandV1,
 ) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>> {
     let request_digest = compatibility_digest(json!({

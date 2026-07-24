@@ -6,7 +6,6 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{TranscriptDiscoveryBounds, TranscriptSource};
 use crate::sessions::{
@@ -31,7 +30,6 @@ pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
 ];
 
 pub(super) struct ProjectProviderRun<'a> {
-    pub(super) db: &'a GlobalDb,
     pub(super) project_root: &'a Path,
     pub(super) project_id: &'a ProjectId,
     pub(super) facade: &'a HostAdmissionFacade<'a>,
@@ -171,7 +169,6 @@ impl<'a> ProjectProviderRun<'a> {
 
     async fn run_claude(self) -> ProviderRunOutcome {
         match ingest_project_claude_observations(
-            self.db,
             self.project_root,
             self.project_id.clone(),
             self.facade,
@@ -207,11 +204,10 @@ impl<'a> ProjectProviderRun<'a> {
     async fn run_cursor(self) -> ProviderRunOutcome {
         let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
             source
-                .ingest_capped_with_admission(
-                    self.db,
+                .ingest_capped(
+                    self.facade,
                     self.project_root,
                     self.project_id.clone(),
-                    self.facade,
                     cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                     Some(self.max_new_bytes),
                 )
@@ -275,7 +271,6 @@ impl<'a> ProjectProviderRun<'a> {
 }
 
 async fn ingest_project_claude_observations(
-    db: &GlobalDb,
     project_root: &Path,
     project_id: ProjectId,
     admission: &HostAdmissionFacade<'_>,
@@ -288,7 +283,6 @@ async fn ingest_project_claude_observations(
         return Ok(claude_observation::ClaudeObservationIngestStats::default());
     };
     claude_observation::ingest_source_with_observations_with_admission(
-        db,
         &source,
         project_root,
         ObservationScopeV1::Project { project_id },

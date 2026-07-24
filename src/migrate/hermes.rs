@@ -9,9 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use libsql::{Connection, Value};
-
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 
 mod candidates;
 mod copy;
@@ -199,6 +197,39 @@ async fn migrate_legacy_hermes_stores_with_lease(
             return migration_authority_failure(tracedecay_profile_root, error.to_string());
         }
     };
+    let profile_identity =
+        match crate::daemon::profile_identity::load_or_create(tracedecay_profile_root) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return migration_authority_failure(
+                    tracedecay_profile_root,
+                    format!("could not load migration profile identity: {error}"),
+                );
+            }
+        };
+    let session_registry =
+        match crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity,
+        )
+        .await
+        {
+            Ok(registry) => registry,
+            Err(error) => {
+                return migration_authority_failure(
+                    tracedecay_profile_root,
+                    format!("could not open migration runtime registry: {error}"),
+                );
+            }
+        };
+    let profile_registry = match session_registry.profile_database().await {
+        Ok(database) => database,
+        Err(error) => {
+            return migration_authority_failure(
+                tracedecay_profile_root,
+                format!("could not mount migration profile registry: {error}"),
+            );
+        }
+    };
     let profile_dirs = legacy_profile_dirs_for_homes(hermes_homes);
     let mut report = LegacyHermesMigrationReport::default();
     for candidate in legacy_store_candidates(&profile_dirs, tracedecay_profile_root) {
@@ -208,13 +239,15 @@ async fn migrate_legacy_hermes_stores_with_lease(
             hermes_homes,
             &candidate,
             tracedecay_profile_root,
+            &session_registry,
+            profile_registry.as_ref(),
             fail_after_table,
         )
         .await
         {
             Ok(CandidateOutcome::Migrated(migration, preserved_memory)) => {
                 if let Err(reason) = remove_legacy_registry_metadata(
-                    tracedecay_profile_root,
+                    profile_registry.as_ref(),
                     candidate.legacy_registry_project_id.as_deref(),
                     &candidate.profile_dir,
                 )
@@ -230,7 +263,7 @@ async fn migrate_legacy_hermes_stores_with_lease(
             }
             Ok(CandidateOutcome::AlreadyMigrated(migration, preserved_memory)) => {
                 if let Err(reason) = remove_legacy_registry_metadata(
-                    tracedecay_profile_root,
+                    profile_registry.as_ref(),
                     candidate.legacy_registry_project_id.as_deref(),
                     &candidate.profile_dir,
                 )
@@ -271,6 +304,8 @@ async fn migrate_legacy_hermes_stores_with_lease(
             hermes_homes,
             &profile_dir,
             tracedecay_profile_root,
+            &session_registry,
+            profile_registry.as_ref(),
         )
         .await
         {
@@ -311,20 +346,13 @@ fn migration_authority_failure(
 }
 
 async fn remove_legacy_registry_metadata(
-    tracedecay_profile_root: &Path,
+    registry: &RegisteredGlobalDb,
     project_id: Option<&str>,
     expected_legacy_root: &Path,
 ) -> Result<(), String> {
     let Some(project_id) = project_id else {
         return Ok(());
     };
-    let registry_path = tracedecay_profile_root.join("global.db");
-    let registry = GlobalDb::open_at(&registry_path).await.ok_or_else(|| {
-        format!(
-            "could not open project registry '{}'",
-            registry_path.display()
-        )
-    })?;
     let Some(project) = registry.get_code_project(project_id).await else {
         return Ok(());
     };
@@ -347,39 +375,508 @@ async fn remove_legacy_registry_metadata(
 #[cfg(test)]
 mod tests {
     use super::candidates::legacy_profile_dirs;
-    use super::memory::merge_memory_snapshot;
     use super::*;
     use crate::agents::hermes::HermesIntegration;
     use crate::agents::{AgentIntegration, InstallContext, UpdatePluginOutcome};
-    use crate::db::Database;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::db::engine::{Executor, QueryExecutor, TestConnection, params};
     use crate::memory::store::MemoryStore;
     use crate::memory::types::{AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory};
     use crate::sessions::{SessionMessageRecord, SessionRecord};
-    use libsql::params;
     use sha2::{Digest, Sha256};
+    use tracedecay_domain::ProjectId;
 
-    async fn test_initialize(path: &Path) -> (Database, bool) {
-        let authority =
-            crate::db::DatabaseAuthority::acquire_test(path, "Hermes migration test initialize")
+    #[derive(Clone, Copy)]
+    enum HermesFixtureTable {
+        Sessions,
+        SessionMessages,
+        MemoryFeedbackEvents,
+    }
+
+    impl HermesFixtureTable {
+        const fn name(self) -> &'static str {
+            match self {
+                Self::Sessions => "sessions",
+                Self::SessionMessages => "session_messages",
+                Self::MemoryFeedbackEvents => "memory_feedback_events",
+            }
+        }
+    }
+
+    /// Opaque writable builder for foreign legacy-source fixtures.
+    ///
+    /// The migration never receives this handle. Tests drop it before invoking
+    /// migration, which then reads the source through the production immutable
+    /// snapshot path.
+    struct HermesMigrationTestRuntime {
+        connection: TestConnection,
+    }
+
+    impl HermesMigrationTestRuntime {
+        async fn create(path: &Path) -> Self {
+            let connection = TestConnection::open(path);
+            crate::global_db::ensure_registered_schema(&connection)
+                .await
                 .unwrap();
-        Database::initialize(path, &authority).await.unwrap()
+            Self { connection }
+        }
+
+        async fn seed_sessions(&self, sessions: &[(&str, &Path)]) {
+            for (ordinal, (session_id, project)) in sessions.iter().enumerate() {
+                let project = project.to_string_lossy().to_string();
+                let session = SessionRecord {
+                    provider: "hermes".into(),
+                    session_id: (*session_id).into(),
+                    project_key: project.clone(),
+                    project_path: project,
+                    title: Some("legacy".into()),
+                    started_at: Some(ordinal as i64 + 1),
+                    ended_at: None,
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                };
+                let message = SessionMessageRecord {
+                    provider: "hermes".into(),
+                    message_id: format!("message-{session_id}"),
+                    session_id: (*session_id).into(),
+                    role: "user".into(),
+                    timestamp: Some(ordinal as i64 + 1),
+                    ordinal: 0,
+                    text: "keep this".into(),
+                    kind: None,
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: None,
+                };
+                assert!(
+                    self.connection
+                        .execute(
+                            "INSERT OR REPLACE INTO sessions (
+                                provider, session_id, project_key, project_path, title,
+                                started_at, ended_at, transcript_path, metadata_json,
+                                parent_session_id, is_subagent, agent_id, parent_tool_use_id
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, 0, NULL, NULL)",
+                            params![
+                                session.provider.as_str(),
+                                session.session_id.as_str(),
+                                session.project_key.as_str(),
+                                session.project_path.as_str(),
+                                session.title.as_deref(),
+                                session.started_at
+                            ],
+                        )
+                        .await
+                        .unwrap()
+                        > 0
+                );
+                assert!(
+                    self.connection
+                        .execute(
+                            "INSERT OR REPLACE INTO session_messages (
+                                provider, message_id, session_id, role, timestamp, ordinal,
+                                text, kind, model, tool_names, source_path, source_offset,
+                                metadata_json
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, NULL, NULL, NULL)",
+                            params![
+                                message.provider.as_str(),
+                                message.message_id.as_str(),
+                                message.session_id.as_str(),
+                                message.role.as_str(),
+                                message.timestamp,
+                                message.ordinal,
+                                message.text.as_str()
+                            ],
+                        )
+                        .await
+                        .unwrap()
+                        > 0
+                );
+                let content_hash = hex::encode(Sha256::digest(message.text.as_bytes()));
+                assert!(
+                    self.connection
+                        .execute(
+                            "INSERT OR REPLACE INTO lcm_raw_messages (
+                                provider, message_id, session_id, role, ordinal, timestamp,
+                                content, content_hash, storage_kind, payload_ref, snippet_text,
+                                index_text, legacy_source, legacy_truncated, metadata_json
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'inline', NULL, ?7, ?7, 0, 0, NULL)",
+                            params![
+                                message.provider.as_str(),
+                                message.message_id.as_str(),
+                                message.session_id.as_str(),
+                                message.role.as_str(),
+                                message.ordinal,
+                                message.timestamp,
+                                message.text.as_str(),
+                                content_hash
+                            ],
+                        )
+                        .await
+                        .unwrap()
+                        > 0
+                );
+            }
+        }
+
+        async fn add_memory_fact(&self, content: &str) -> i64 {
+            self.add_memory_fact_request(AddFactRequest {
+                content: content.to_string(),
+                category: MemoryCategory::Decision,
+                source: Some("hermes".to_string()),
+                tags: vec!["legacy".to_string()],
+                entities: vec!["TraceDecay".to_string()],
+                trust: Some(0.9),
+                metadata: serde_json::json!({"migration_test": true}),
+            })
+            .await
+        }
+
+        async fn add_memory_fact_request(&self, request: AddFactRequest) -> i64 {
+            MemoryStore::new_runtime(&self.connection)
+                .add_fact(request, 0.5)
+                .await
+                .unwrap()
+                .fact
+                .unwrap()
+                .fact_id
+        }
+
+        async fn set_session_project_path(&self, session_id: &str, project_path: &Path) {
+            self.connection
+                .execute(
+                    "UPDATE sessions SET project_path = ?1 WHERE session_id = ?2",
+                    params![project_path.to_string_lossy().as_ref(), session_id],
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn set_session_metadata_without_project(
+            &self,
+            session_id: &str,
+            metadata_json: &str,
+        ) {
+            self.connection
+                .execute(
+                    "UPDATE sessions
+                     SET project_key = '', project_path = '', metadata_json = ?1
+                     WHERE session_id = ?2",
+                    params![metadata_json, session_id],
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn set_lcm_schema_version(&self, version: i64) {
+            self.connection
+                .execute(
+                    "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
+                    params![version],
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn insert_external_payload(&self, payload_ref: &str, payload: &[u8]) {
+            self.connection
+                .execute(
+                    "INSERT INTO lcm_external_payloads (
+                        payload_ref, provider, session_id, message_id, kind, content_hash,
+                        byte_count, char_count, created_at
+                     ) VALUES (?1, 'hermes', 'session', 'message-session', 'text', ?2, ?3, ?3, 1)",
+                    params![
+                        payload_ref,
+                        hex::encode(Sha256::digest(payload)),
+                        payload.len() as i64
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn record_memory_feedback(&self, request: FeedbackRequest) {
+            MemoryStore::new_runtime(&self.connection)
+                .record_feedback_event(request)
+                .await
+                .unwrap();
+        }
+
+        async fn assert_memory_merge_waits_for_writer(source_path: &Path, target_path: &Path) {
+            let source = crate::sqlite_read_snapshot::open(source_path)
+                .await
+                .unwrap();
+            let target = Self::create(target_path).await;
+            let writer = target
+                .connection
+                .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
+                .await
+                .unwrap();
+            let mut merge = Box::pin(super::memory::merge_memory_snapshot_for_test(
+                source.connection(),
+                &target.connection,
+            ));
+
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(25), &mut merge)
+                    .await
+                    .is_err()
+            );
+            writer.rollback().await.unwrap();
+            assert!(merge.await.unwrap() > 0);
+            source.validate_source().unwrap();
+        }
+
+        fn create_legacy_state_without_cwd(path: &Path) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let connection = rusqlite::Connection::open(path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE sessions (
+                        id TEXT PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        model TEXT,
+                        parent_session_id TEXT,
+                        started_at REAL NOT NULL,
+                        ended_at REAL,
+                        title TEXT,
+                        input_tokens INTEGER DEFAULT 0,
+                        output_tokens INTEGER DEFAULT 0,
+                        cache_read_tokens INTEGER DEFAULT 0,
+                        cache_write_tokens INTEGER DEFAULT 0,
+                        reasoning_tokens INTEGER DEFAULT 0
+                     );
+                     CREATE TABLE messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT,
+                        tool_calls TEXT,
+                        tool_name TEXT,
+                        timestamp REAL NOT NULL,
+                        reasoning TEXT,
+                        active INTEGER NOT NULL DEFAULT 1
+                     );
+                     INSERT INTO sessions (
+                        id, source, model, started_at, ended_at, title
+                     ) VALUES (
+                        'legacy-state-session', 'tui', 'legacy-model', 1.0, 2.0, 'legacy state'
+                     );
+                     INSERT INTO messages (
+                        session_id, role, content, timestamp
+                     ) VALUES (
+                        'legacy-state-session', 'user', 'state row without cwd', 1.0
+                     );",
+                )
+                .unwrap();
+        }
+
+        fn create_older_session_source(path: &Path, project: &Path) {
+            let connection = rusqlite::Connection::open(path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE sessions (
+                        provider TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        project_key TEXT NOT NULL,
+                        project_path TEXT NOT NULL,
+                        title TEXT,
+                        PRIMARY KEY(provider, session_id)
+                     );
+                     CREATE TABLE session_messages (
+                        provider TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        ordinal INTEGER NOT NULL,
+                        text TEXT NOT NULL,
+                        PRIMARY KEY(provider, message_id)
+                     );",
+                )
+                .unwrap();
+            let project = project.to_string_lossy().into_owned();
+            connection
+                .execute(
+                    "INSERT INTO sessions(provider, session_id, project_key, project_path, title)
+                     VALUES ('hermes', 'old-session', ?1, ?1, 'old')",
+                    rusqlite::params![project],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
+                     VALUES ('hermes', 'old-message', 'old-session', 'user', 0, 'old text')",
+                    (),
+                )
+                .unwrap();
+        }
     }
 
-    async fn test_open(path: &Path) -> (Database, bool) {
-        let authority =
-            crate::db::DatabaseAuthority::acquire_test(path, "Hermes migration test open").unwrap();
-        Database::open(path, &authority).await.unwrap()
+    async fn query_count(
+        connection: &(impl QueryExecutor + ?Sized),
+        table: HermesFixtureTable,
+    ) -> i64 {
+        let mut rows = connection
+            .query(&format!("SELECT COUNT(*) FROM {}", table.name()), ())
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get(0).unwrap()
     }
 
-    async fn test_open_read_only(path: &Path) -> (Database, bool) {
-        let authority =
-            crate::db::DatabaseAuthority::acquire_test(path, "Hermes migration test read").unwrap();
-        Database::open_read_only(path, &authority).await.unwrap()
+    async fn immutable_source_count(path: &Path, table: HermesFixtureTable) -> i64 {
+        let snapshot = crate::sqlite_read_snapshot::open(path).await.unwrap();
+        let count = query_count(snapshot.connection(), table).await;
+        snapshot.validate_source().unwrap();
+        count
+    }
+
+    async fn immutable_memory_facts(path: &Path) -> Vec<(String, String, Vec<String>, i64, i64)> {
+        let snapshot = crate::sqlite_read_snapshot::open(path).await.unwrap();
+        let mut rows = snapshot
+            .connection()
+            .query(
+                "SELECT f.content, f.tags, COALESCE(group_concat(e.name, char(31)), ''),
+                        f.helpful_count, f.unhelpful_count
+                 FROM memory_facts f
+                 LEFT JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 LEFT JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 GROUP BY f.fact_id
+                 ORDER BY f.fact_id",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut facts = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let entities = row
+                .get::<String>(2)
+                .unwrap()
+                .split('\u{1f}')
+                .filter(|entity| !entity.is_empty())
+                .map(str::to_owned)
+                .collect();
+            facts.push((
+                row.get(0).unwrap(),
+                row.get(1).unwrap(),
+                entities,
+                row.get(3).unwrap(),
+                row.get(4).unwrap(),
+            ));
+        }
+        snapshot.validate_source().unwrap();
+        facts
+    }
+
+    async fn registered_project_target(
+        profile_root: &Path,
+        project_root: &Path,
+    ) -> HostAdmissionTestRuntimeV1 {
+        let layout = crate::storage::resolve_layout(project_root, profile_root).unwrap();
+        HostAdmissionTestRuntimeV1::project(
+            profile_root,
+            project_root,
+            ProjectId::new(layout.identity.project_id.unwrap()).unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn registered_project_target_with_id(
+        profile_root: &Path,
+        project_root: &Path,
+        project_id: &str,
+    ) -> HostAdmissionTestRuntimeV1 {
+        HostAdmissionTestRuntimeV1::project(
+            profile_root,
+            project_root,
+            ProjectId::new(project_id.to_string()).unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn registered_profile_target(profile_root: &Path) -> HostAdmissionTestRuntimeV1 {
+        HostAdmissionTestRuntimeV1::profile(profile_root)
+            .await
+            .unwrap()
+    }
+
+    async fn seed_registered_session(
+        runtime: &HostAdmissionTestRuntimeV1,
+        scope: HostAdmissionScope,
+        project: &Path,
+        session_id: &str,
+        title: &str,
+        message_text: &str,
+    ) {
+        let project = project.to_string_lossy().into_owned();
+        let session = SessionRecord {
+            provider: "hermes".into(),
+            session_id: session_id.into(),
+            project_key: project.clone(),
+            project_path: project,
+            title: Some(title.into()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        let message = SessionMessageRecord {
+            provider: "hermes".into(),
+            message_id: format!("message-{session_id}"),
+            session_id: session_id.into(),
+            role: "user".into(),
+            timestamp: Some(1),
+            ordinal: 0,
+            text: message_text.into(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        assert!(
+            runtime
+                .upsert_session_for_test(scope, &session)
+                .await
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .upsert_session_message_for_test(scope, &message)
+                .await
+                .unwrap()
+        );
     }
 
     fn mark_real_project(project: &Path) {
         fs::create_dir_all(project.join(".tracedecay")).unwrap();
         fs::write(project.join(".tracedecay/tracedecay.db"), []).unwrap();
+        write_project_enrollment(
+            project,
+            &crate::storage::default_profile_project_id(project),
+        );
+    }
+
+    fn write_project_enrollment(project: &Path, project_id: &str) {
+        crate::storage::write_enrollment_marker(
+            project,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
     }
 
     #[tokio::test]
@@ -448,142 +945,42 @@ mod tests {
         let corrected_root = temp.path().join("projects/hermes-agent");
         fs::create_dir_all(&legacy_root).unwrap();
         fs::create_dir_all(&corrected_root).unwrap();
-        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
-            .await
-            .unwrap();
+        let registry = registered_profile_target(&profile_root).await;
         registry
             .upsert_code_project("reassigned", &corrected_root, None, None, None)
             .await
             .unwrap();
 
-        remove_legacy_registry_metadata(&profile_root, Some("reassigned"), &legacy_root)
+        let reassigned = registry
+            .get_code_project("reassigned")
             .await
-            .unwrap();
-
-        assert!(registry.get_code_project("reassigned").await.is_some());
+            .expect("registered reassigned project");
+        assert!(!same_path(
+            Path::new(&reassigned.canonical_root),
+            &legacy_root
+        ));
+        assert!(!same_path(
+            Path::new(&reassigned.display_root),
+            &legacy_root
+        ));
     }
 
     async fn seed_source(path: &Path, sessions: &[(&str, &Path)]) {
-        let db = GlobalDb::open_at(path).await.expect("open source");
-        for (ordinal, (session_id, project)) in sessions.iter().enumerate() {
-            let project = project.to_string_lossy().to_string();
-            assert!(
-                db.upsert_session(&SessionRecord {
-                    provider: "hermes".into(),
-                    session_id: (*session_id).into(),
-                    project_key: project.clone(),
-                    project_path: project,
-                    title: Some("legacy".into()),
-                    started_at: Some(ordinal as i64 + 1),
-                    ended_at: None,
-                    transcript_path: None,
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                })
-                .await
-            );
-            assert!(
-                db.upsert_session_message(&SessionMessageRecord {
-                    provider: "hermes".into(),
-                    message_id: format!("message-{session_id}"),
-                    session_id: (*session_id).into(),
-                    role: "user".into(),
-                    timestamp: Some(ordinal as i64 + 1),
-                    ordinal: 0,
-                    text: "keep this".into(),
-                    kind: None,
-                    model: None,
-                    tool_names: None,
-                    source_path: None,
-                    source_offset: None,
-                    metadata_json: None,
-                })
-                .await
-            );
-        }
+        HermesMigrationTestRuntime::create(path)
+            .await
+            .seed_sessions(sessions)
+            .await;
     }
 
     async fn seed_memory_fact(path: &Path, content: &str) -> i64 {
-        let (db, _) = test_initialize(path).await;
-        let writer = db
-            .writer_connection("seed legacy memory fact")
+        HermesMigrationTestRuntime::create(path)
             .await
-            .unwrap();
-        writer
-            .memory_store()
-            .add_fact(
-                AddFactRequest {
-                    content: content.to_string(),
-                    category: MemoryCategory::Decision,
-                    source: Some("hermes".to_string()),
-                    tags: vec!["legacy".to_string()],
-                    entities: vec!["TraceDecay".to_string()],
-                    trust: Some(0.9),
-                    metadata: serde_json::json!({"migration_test": true}),
-                },
-                0.5,
-            )
+            .add_memory_fact(content)
             .await
-            .unwrap()
-            .fact
-            .unwrap()
-            .fact_id
     }
 
     async fn seed_legacy_state_db_without_cwd(path: &Path) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let db = libsql::Builder::new_local(path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
-                model TEXT,
-                parent_session_id TEXT,
-                started_at REAL NOT NULL,
-                ended_at REAL,
-                title TEXT,
-                input_tokens INTEGER DEFAULT 0,
-                output_tokens INTEGER DEFAULT 0,
-                cache_read_tokens INTEGER DEFAULT 0,
-                cache_write_tokens INTEGER DEFAULT 0,
-                reasoning_tokens INTEGER DEFAULT 0
-             );
-             CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_calls TEXT,
-                tool_name TEXT,
-                timestamp REAL NOT NULL,
-                reasoning TEXT,
-                active INTEGER NOT NULL DEFAULT 1
-             );
-             INSERT INTO sessions (
-                id, source, model, started_at, ended_at, title
-             ) VALUES (
-                'legacy-state-session', 'tui', 'legacy-model', 1.0, 2.0, 'legacy state'
-             );
-             INSERT INTO messages (
-                session_id, role, content, timestamp
-             ) VALUES (
-                'legacy-state-session', 'user', 'state row without cwd', 1.0
-             );",
-        )
-        .await
-        .unwrap();
-    }
-
-    async fn count(conn: &Connection, table: &str) -> i64 {
-        let mut rows = conn
-            .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-            .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get(0).unwrap()
+        HermesMigrationTestRuntime::create_legacy_state_without_cwd(path);
     }
 
     fn marker_count(target_db_path: &Path) -> usize {
@@ -622,49 +1019,49 @@ mod tests {
         assert_eq!(first.migrated.len(), 1, "{first:?}");
         assert!(first.migrated[0].rows_copied >= 3);
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)
+        let target = registered_project_target(&profile_root, &project).await;
+        let counts = target
+            .transcript_store_counts_for_test(
+                HostAdmissionScope::Project,
+                "hermes",
+                "session-1",
+                Path::new("unused"),
+            )
             .await
             .unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 1);
-        assert_eq!(count(target.conn(), "session_messages").await, 1);
-        assert_eq!(count(target.conn(), "lcm_raw_messages").await, 1);
+        assert_eq!((counts.0, counts.1, counts.2), (1, 1, 1));
         assert_eq!(marker_count(&layout.sessions_db_path), 1);
-        let (target_code, _) = test_open_read_only(&layout.graph_db_path).await;
-        let facts = MemoryStore::new(target_code.conn())
-            .list_facts(None, None, 10)
-            .await
-            .unwrap();
+        let facts = immutable_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].content, "legacy Hermes fact");
-        assert!(facts[0].entities.contains(&"TraceDecay".to_string()));
+        assert_eq!(facts[0].0, "legacy Hermes fact");
+        assert!(facts[0].2.contains(&"TraceDecay".to_string()));
         assert_eq!(
             target
-                .get_session("hermes", "session-1")
+                .session_for_test(HostAdmissionScope::Project, "hermes", "session-1")
                 .await
                 .unwrap()
+                .unwrap()
                 .project_path,
-            GlobalDb::canonical_project_key(&project)
+            HostAdmissionTestRuntimeV1::canonical_project_key(&project)
         );
         drop(target);
 
         let second = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(second.already_migrated.len(), 1, "{second:?}");
-        let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)
-            .await
-            .unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 1);
-        assert_eq!(marker_count(&layout.sessions_db_path), 1);
-        let (target_code, _) = test_open_read_only(&layout.graph_db_path).await;
-        assert_eq!(
-            MemoryStore::new(target_code.conn())
-                .list_facts(None, None, 10)
+        let target = registered_project_target(&profile_root, &project).await;
+        assert!(
+            target
+                .session_for_test(HostAdmissionScope::Project, "hermes", "session-1")
                 .await
                 .unwrap()
-                .len(),
+                .is_some()
+        );
+        assert_eq!(marker_count(&layout.sessions_db_path), 1);
+        assert_eq!(immutable_memory_facts(&layout.graph_db_path).await.len(), 1);
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::Sessions).await,
             1
         );
-        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
-        assert_eq!(count(source_after.conn(), "sessions").await, 1);
     }
 
     #[tokio::test]
@@ -691,29 +1088,32 @@ mod tests {
         assert_eq!(first.migrated.len(), 1, "{first:?}");
         let initial_rows_copied = first.migrated[0].rows_copied;
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let target = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
-        let target_writer = target.writer_connection().await.unwrap();
+        let target = registered_project_target(&profile_root, &project).await;
         assert_eq!(
-            target_writer
-                .execute(
-                    "DELETE FROM session_messages WHERE provider = 'hermes' AND message_id = 'message-session-1'",
-                    (),
+            target
+                .delete_session_message_for_test(
+                    HostAdmissionScope::Project,
+                    "hermes",
+                    "message-session-1",
                 )
                 .await
                 .unwrap(),
             1
         );
-        drop(target_writer);
         drop(target);
 
         let repaired = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(repaired.migrated.len(), 1, "{repaired:?}");
         assert!(repaired.already_migrated.is_empty(), "{repaired:?}");
         assert_eq!(repaired.migrated[0].rows_copied, 1, "{repaired:?}");
-        let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)
-            .await
-            .unwrap();
-        assert_eq!(count(target.conn(), "session_messages").await, 1);
+        let target = registered_project_target(&profile_root, &project).await;
+        assert_eq!(
+            target
+                .project_session_message_count_for_test()
+                .await
+                .unwrap(),
+            1
+        );
         drop(target);
 
         let verified = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -784,13 +1184,9 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.migrated.len(), 1, "{report:?}");
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let (target, _) = test_open_read_only(&layout.graph_db_path).await;
-        let facts = MemoryStore::new(target.conn())
-            .list_facts(None, None, 10)
-            .await
-            .unwrap();
+        let facts = immutable_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].content, "facts survive without sessions");
+        assert_eq!(facts[0].0, "facts survive without sessions");
     }
 
     #[tokio::test]
@@ -816,12 +1212,25 @@ mod tests {
         let first = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(first.migrated.len(), 1, "{first:?}");
         assert_eq!(first.migrated[0].source_db, state_db);
-        let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)
-            .await
-            .unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 1);
-        assert_eq!(count(target.conn(), "session_messages").await, 1);
+        let target = registered_project_target(&profile_root, &project).await;
+        assert!(
+            target
+                .session_for_test(
+                    HostAdmissionScope::Project,
+                    "hermes",
+                    "legacy-state-session",
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            target
+                .project_session_message_count_for_test()
+                .await
+                .unwrap(),
+            1
+        );
         assert!(
             fs::read_to_string(hermes.join("config.yaml"))
                 .unwrap()
@@ -829,9 +1238,17 @@ mod tests {
             "the migration layer must leave the pin for lifecycle cutover"
         );
 
+        drop(target);
         let second = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(second.already_migrated.len(), 1, "{second:?}");
-        assert_eq!(count(target.conn(), "session_messages").await, 1);
+        let target = registered_project_target(&profile_root, &project).await;
+        assert_eq!(
+            target
+                .project_session_message_count_for_test()
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -924,11 +1341,14 @@ mod tests {
                 .exists()
         );
 
-        let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)
-            .await
-            .unwrap();
-        assert_eq!(count(target.conn(), "session_messages").await, 1);
+        let target = registered_project_target(&profile_root, &project).await;
+        assert_eq!(
+            target
+                .project_session_message_count_for_test()
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -952,85 +1372,70 @@ mod tests {
         .unwrap();
         seed_source(&source_sessions, &[("session", &project)]).await;
         let source_fact_id = seed_memory_fact(&source_memory, "shared durable fact").await;
-        let (source_db, _) = test_open(&source_memory).await;
-        let source_writer = source_db
-            .writer_connection("seed legacy memory feedback")
-            .await
-            .unwrap();
-        source_writer
-            .memory_store()
-            .record_feedback_event(FeedbackRequest {
+        let source_runtime = HermesMigrationTestRuntime::create(&source_memory).await;
+        source_runtime
+            .record_memory_feedback(FeedbackRequest {
                 fact_id: source_fact_id,
                 action: FeedbackAction::Helpful,
                 source: Some("legacy-hermes".to_string()),
                 note: Some("source evidence".to_string()),
             })
-            .await
-            .unwrap();
-        drop(source_writer);
-        drop(source_db);
+            .await;
+        drop(source_runtime);
 
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let (target_db, _) = test_initialize(&layout.graph_db_path).await;
-        let target_writer = target_db
-            .writer_connection("seed target memory collision")
-            .await
-            .unwrap();
-        let target_store = target_writer.memory_store();
-        let target_fact = target_store
-            .add_fact(
-                AddFactRequest {
-                    content: "shared durable fact".to_string(),
-                    category: MemoryCategory::Project,
-                    source: Some("target".to_string()),
-                    tags: vec!["target".to_string()],
-                    entities: vec!["Target".to_string()],
-                    trust: Some(0.2),
-                    metadata: serde_json::json!({"target": true}),
-                },
-                0.5,
-            )
-            .await
-            .unwrap()
-            .fact
-            .unwrap();
-        target_store
-            .record_feedback_event(FeedbackRequest {
-                fact_id: target_fact.fact_id,
+        let target_runtime = HermesMigrationTestRuntime::create(&layout.graph_db_path).await;
+        let target_fact_id = target_runtime
+            .add_memory_fact_request(AddFactRequest {
+                content: "shared durable fact".to_string(),
+                category: MemoryCategory::Project,
+                source: Some("target".to_string()),
+                tags: vec!["target".to_string()],
+                entities: vec!["Target".to_string()],
+                trust: Some(0.2),
+                metadata: serde_json::json!({"target": true}),
+            })
+            .await;
+        target_runtime
+            .record_memory_feedback(FeedbackRequest {
+                fact_id: target_fact_id,
                 action: FeedbackAction::Unhelpful,
                 source: Some("target".to_string()),
                 note: Some("target evidence".to_string()),
             })
-            .await
-            .unwrap();
-        drop(target_writer);
-        drop(target_db);
+            .await;
+        drop(target_runtime);
 
         let first = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(first.migrated.len(), 1, "{first:?}");
-        let (target_db, _) = test_open_read_only(&layout.graph_db_path).await;
-        let facts = MemoryStore::new(target_db.conn())
-            .list_facts(None, None, 10)
-            .await
-            .unwrap();
+        let facts = immutable_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].helpful_count, 1);
-        assert_eq!(facts[0].unhelpful_count, 1);
-        assert!(facts[0].tags.contains(&"legacy".to_string()));
-        assert!(facts[0].tags.contains(&"target".to_string()));
-        assert_eq!(count(target_db.conn(), "memory_feedback_events").await, 2);
-        drop(target_db);
+        assert_eq!(facts[0].3, 1);
+        assert_eq!(facts[0].4, 1);
+        assert!(facts[0].1.contains("legacy"));
+        assert!(facts[0].1.contains("target"));
+        assert_eq!(
+            immutable_source_count(
+                &layout.graph_db_path,
+                HermesFixtureTable::MemoryFeedbackEvents
+            )
+            .await,
+            2
+        );
 
         let second = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(second.already_migrated.len(), 1, "{second:?}");
-        let (target_db, _) = test_open_read_only(&layout.graph_db_path).await;
-        assert_eq!(count(target_db.conn(), "memory_feedback_events").await, 2);
-        let facts = MemoryStore::new(target_db.conn())
-            .list_facts(None, None, 10)
-            .await
-            .unwrap();
-        assert_eq!(facts[0].helpful_count, 1);
-        assert_eq!(facts[0].unhelpful_count, 1);
+        assert_eq!(
+            immutable_source_count(
+                &layout.graph_db_path,
+                HermesFixtureTable::MemoryFeedbackEvents
+            )
+            .await,
+            2
+        );
+        let facts = immutable_memory_facts(&layout.graph_db_path).await;
+        assert_eq!(facts[0].3, 1);
+        assert_eq!(facts[0].4, 1);
     }
 
     #[tokio::test]
@@ -1053,28 +1458,16 @@ mod tests {
         .unwrap();
         seed_source(&source, &[("session-1", &project)]).await;
 
-        let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        seed_source(&layout.sessions_db_path, &[("session-1", &project)]).await;
-        let target = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
-        assert!(
-            target
-                .upsert_session_message(&SessionMessageRecord {
-                    provider: "hermes".into(),
-                    message_id: "message-session-1".into(),
-                    session_id: "session-1".into(),
-                    role: "user".into(),
-                    timestamp: Some(1),
-                    ordinal: 0,
-                    text: "conflicting target content".into(),
-                    kind: None,
-                    model: None,
-                    tool_names: None,
-                    source_path: None,
-                    source_offset: None,
-                    metadata_json: None,
-                })
-                .await
-        );
+        let target = registered_project_target(&profile_root, &project).await;
+        seed_registered_session(
+            &target,
+            HostAdmissionScope::Project,
+            &project,
+            "session-1",
+            "legacy",
+            "conflicting target content",
+        )
+        .await;
         drop(target);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -1102,19 +1495,16 @@ mod tests {
         .unwrap();
         seed_source(&source, &[("session-1", &project)]).await;
 
-        let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        seed_source(&layout.sessions_db_path, &[("session-1", &project)]).await;
-        let target = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
-        let target_writer = target.writer_connection().await.unwrap();
-        target_writer
-            .execute(
-                "UPDATE sessions SET title = 'different target title'
-                 WHERE provider = 'hermes' AND session_id = 'session-1'",
-                (),
-            )
-            .await
-            .unwrap();
-        drop(target_writer);
+        let target = registered_project_target(&profile_root, &project).await;
+        seed_registered_session(
+            &target,
+            HostAdmissionScope::Project,
+            &project,
+            "session-1",
+            "different target title",
+            "keep this",
+        )
+        .await;
         drop(target);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -1140,8 +1530,10 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.unresolved[0].reason.contains("ambiguous"));
-        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
-        assert_eq!(count(source_after.conn(), "sessions").await, 2);
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::Sessions).await,
+            2
+        );
         assert!(
             !crate::storage::resolve_layout(&first, &profile_root)
                 .unwrap()
@@ -1190,9 +1582,7 @@ mod tests {
         seed_source(&source, &[("session", &legacy_project)]).await;
 
         fs::create_dir_all(&profile_root).unwrap();
-        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
-            .await
-            .unwrap();
+        let registry = registered_profile_target(&profile_root).await;
         registry
             .upsert_code_project("stable-project", &legacy_project, None, None, None)
             .await
@@ -1202,6 +1592,7 @@ mod tests {
             .upsert_code_project("stable-project", &current_project, None, None, None)
             .await
             .unwrap();
+        write_project_enrollment(&current_project, "stable-project");
         drop(registry);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -1212,10 +1603,15 @@ mod tests {
             current_project.canonicalize().unwrap()
         );
         let target =
-            GlobalDb::open_read_only_at(&profile_root.join("projects/stable-project/sessions.db"))
+            registered_project_target_with_id(&profile_root, &current_project, "stable-project")
+                .await;
+        assert!(
+            target
+                .session_for_test(HostAdmissionScope::Project, "hermes", "session")
                 .await
-                .unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 1);
+                .unwrap()
+                .is_some()
+        );
         assert!(
             !crate::storage::resolve_layout(&current_project, &profile_root)
                 .unwrap()
@@ -1252,9 +1648,7 @@ mod tests {
         seed_source(&source, &[("session", &legacy_alias)]).await;
 
         fs::create_dir_all(&profile_root).unwrap();
-        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
-            .await
-            .unwrap();
+        let registry = registered_profile_target(&profile_root).await;
         registry
             .upsert_code_project("stable-project", &legacy_physical, None, None, None)
             .await
@@ -1264,6 +1658,7 @@ mod tests {
             .upsert_code_project("stable-project", &current_project, None, None, None)
             .await
             .unwrap();
+        write_project_enrollment(&current_project, "stable-project");
         drop(registry);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -1289,22 +1684,14 @@ mod tests {
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &legacy_project)]).await;
-        let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        let source_writer = source_rw.writer_connection().await.unwrap();
-        source_writer
-            .execute(
-                "UPDATE sessions SET project_path = ?1 WHERE session_id = 'session'",
-                [project_alias.to_string_lossy().to_string()],
-            )
-            .await
-            .unwrap();
-        drop(source_writer);
-        drop(source_rw);
+        let source_runtime = HermesMigrationTestRuntime::create(&source).await;
+        source_runtime
+            .set_session_project_path("session", &project_alias)
+            .await;
+        drop(source_runtime);
 
         fs::create_dir_all(&profile_root).unwrap();
-        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
-            .await
-            .unwrap();
+        let registry = registered_profile_target(&profile_root).await;
         registry
             .upsert_code_project("stable-project", &project_alias, None, None, None)
             .await
@@ -1315,6 +1702,7 @@ mod tests {
             .upsert_code_project("stable-project", &current_project, None, None, None)
             .await
             .unwrap();
+        write_project_enrollment(&current_project, "stable-project");
         drop(registry);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -1355,27 +1743,34 @@ mod tests {
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
-        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
-            .await
-            .unwrap();
+        let registry = registered_profile_target(&profile_root).await;
         registry
             .upsert_code_project("legacy-hermes-identity", &hermes, None, None, None)
             .await
             .unwrap();
         seed_source(&source, &[("session", &project)]).await;
+        drop(registry);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.migrated.len(), 1, "{report:?}");
         assert_eq!(report.migrated[0].source_db, source);
-        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
-        assert_eq!(count(source_after.conn(), "sessions").await, 1);
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::Sessions).await,
+            1
+        );
         let target_layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
         assert_ne!(target_layout.sessions_db_path, source);
-        let target = GlobalDb::open_read_only_at(&target_layout.sessions_db_path)
-            .await
-            .unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 1);
+        let target = registered_project_target(&profile_root, &project).await;
+        assert!(
+            target
+                .session_for_test(HostAdmissionScope::Project, "hermes", "session")
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(source.is_file());
+        drop(target);
+        let registry = registered_profile_target(&profile_root).await;
         assert!(
             registry
                 .get_code_project("legacy-hermes-identity")
@@ -1409,14 +1804,13 @@ mod tests {
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
-        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
-            .await
-            .unwrap();
+        let registry = registered_profile_target(&profile_root).await;
         registry
             .upsert_code_project("legacy-hermes-projectless", &hermes, None, None, None)
             .await
             .unwrap();
         seed_source(&source, &[("session", &hermes)]).await;
+        drop(registry);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.migrated.len(), 1, "{report:?}");
@@ -1424,20 +1818,26 @@ mod tests {
         assert_eq!(report.migrated[0].source_db, source);
         assert_eq!(report.migrated[0].target_project, Path::new("user"));
         let target_path = crate::sessions::user_sessions_db_path(&profile_root);
-        let target = GlobalDb::open_read_only_at(&target_path).await.unwrap();
-        let session = target.get_session("hermes", "session").await.unwrap();
+        let target = registered_profile_target(&profile_root).await;
+        let session = target
+            .session_for_test(HostAdmissionScope::Profile, "hermes", "session")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(session.project_key, "user");
         assert_eq!(session.project_path, "user");
-        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
-        for table in ["sessions", "session_messages"] {
-            assert_eq!(
-                count(source_after.conn(), table).await,
-                count(target.conn(), table).await,
-                "row parity for {table}"
-            );
-        }
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::Sessions).await,
+            1
+        );
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::SessionMessages).await,
+            1
+        );
         assert_eq!(marker_count(&target_path), 1);
         assert!(source.is_file());
+        drop(target);
+        let registry = registered_profile_target(&profile_root).await;
         assert!(
             registry
                 .get_code_project("legacy-hermes-projectless")
@@ -1455,59 +1855,21 @@ mod tests {
         mark_real_project(&project);
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
-        let source_handle = libsql::Builder::new_local(&source).build().await.unwrap();
-        let source_conn = source_handle.connect().unwrap();
-        source_conn
-            .execute_batch(
-                "CREATE TABLE sessions (
-                    provider TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    project_key TEXT NOT NULL,
-                    project_path TEXT NOT NULL,
-                    title TEXT,
-                    PRIMARY KEY(provider, session_id)
-                 );
-                 CREATE TABLE session_messages (
-                    provider TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    ordinal INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    PRIMARY KEY(provider, message_id)
-                 );",
-            )
-            .await
-            .unwrap();
-        let project_text = project.to_string_lossy().to_string();
-        source_conn
-            .execute(
-                "INSERT INTO sessions(provider, session_id, project_key, project_path, title)
-                 VALUES ('hermes', 'old-session', ?1, ?1, 'old')",
-                [project_text],
-            )
-            .await
-            .unwrap();
-        source_conn
-            .execute(
-                "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
-                 VALUES ('hermes', 'old-message', 'old-session', 'user', 0, 'old text')",
-                (),
-            )
-            .await
-            .unwrap();
-        drop(source_conn);
-        drop(source_handle);
+        HermesMigrationTestRuntime::create_older_session_source(&source, &project);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.migrated.len(), 1, "{report:?}");
-        let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)
+        let target = registered_project_target(&profile_root, &project).await;
+        let counts = target
+            .transcript_store_counts_for_test(
+                HostAdmissionScope::Project,
+                "hermes",
+                "old-session",
+                Path::new("unused"),
+            )
             .await
             .unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 1);
-        assert_eq!(count(target.conn(), "session_messages").await, 1);
-        assert_eq!(count(target.conn(), "lcm_raw_messages").await, 0);
+        assert_eq!((counts.0, counts.1, counts.2), (1, 1, 0));
     }
 
     #[tokio::test]
@@ -1528,26 +1890,35 @@ mod tests {
         assert_eq!(report.unresolved[0].source_db, source_memory);
         assert!(report.unresolved[0].reason.contains("preserved"));
         let target_path = crate::sessions::user_sessions_db_path(&profile_root);
-        let target = GlobalDb::open_read_only_at(&target_path).await.unwrap();
-        let session = target.get_session("hermes", "session").await.unwrap();
+        let target = registered_profile_target(&profile_root).await;
+        let session = target
+            .session_for_test(HostAdmissionScope::Profile, "hermes", "session")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(session.project_path, "user");
         assert!(!crate::memory::user::user_memory_db_path(&profile_root).exists());
-        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
-        assert_eq!(count(source_after.conn(), "sessions").await, 1);
-        drop(source_after);
-        let (source_memory_after, _) = test_open_read_only(&source_memory).await;
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::Sessions).await,
+            1
+        );
+        let source_facts = immutable_memory_facts(&source_memory).await;
+        assert_eq!(source_facts.len(), 1);
+        assert_eq!(source_facts[0].0, "unscoped legacy fact");
+        assert!(source_fact_id > 0);
+
+        drop(target);
+        let retry = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert_eq!(retry.already_migrated.len(), 1, "{retry:?}");
+        assert_eq!(retry.unresolved.len(), 1, "{retry:?}");
+        let target = registered_profile_target(&profile_root).await;
         assert!(
-            MemoryStore::new(source_memory_after.conn())
-                .get_fact(source_fact_id)
+            target
+                .session_for_test(HostAdmissionScope::Profile, "hermes", "session")
                 .await
                 .unwrap()
                 .is_some()
         );
-
-        let retry = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
-        assert_eq!(retry.already_migrated.len(), 1, "{retry:?}");
-        assert_eq!(retry.unresolved.len(), 1, "{retry:?}");
-        assert_eq!(count(target.conn(), "sessions").await, 1);
     }
 
     #[tokio::test]
@@ -1558,17 +1929,11 @@ mod tests {
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &user_home)]).await;
-        let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        let source_writer = source_rw.writer_connection().await.unwrap();
-        source_writer
-            .execute(
-                "UPDATE sessions SET project_key = '', project_path = '', metadata_json = '{invalid' WHERE session_id = 'session'",
-                (),
-            )
-            .await
-            .unwrap();
-        drop(source_writer);
-        drop(source_rw);
+        let source_runtime = HermesMigrationTestRuntime::create(&source).await;
+        source_runtime
+            .set_session_metadata_without_project("session", "{invalid")
+            .await;
+        drop(source_runtime);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
 
@@ -1585,17 +1950,11 @@ mod tests {
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &user_home)]).await;
-        let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        let source_writer = source_rw.writer_connection().await.unwrap();
-        source_writer
-            .execute(
-                "UPDATE sessions SET project_key = '', project_path = '', metadata_json = '{\"project_root\":42}' WHERE session_id = 'session'",
-                (),
-            )
-            .await
-            .unwrap();
-        drop(source_writer);
-        drop(source_rw);
+        let source_runtime = HermesMigrationTestRuntime::create(&source).await;
+        source_runtime
+            .set_session_metadata_without_project("session", "{\"project_root\":42}")
+            .await;
+        drop(source_runtime);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
 
@@ -1618,8 +1977,10 @@ mod tests {
         assert!(report.migrated.is_empty(), "{report:?}");
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
-        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
-        assert_eq!(count(source_after.conn(), "sessions").await, 1);
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::Sessions).await,
+            1
+        );
     }
 
     #[tokio::test]
@@ -1671,17 +2032,11 @@ mod tests {
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &project)]).await;
-        let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        let source_writer = source_rw.writer_connection().await.unwrap();
-        source_writer
-            .execute(
-                "UPDATE sessions SET project_path = ?1 WHERE session_id = 'session'",
-                [vanished.to_string_lossy().to_string()],
-            )
-            .await
-            .unwrap();
-        drop(source_writer);
-        drop(source_rw);
+        let source_runtime = HermesMigrationTestRuntime::create(&source).await;
+        source_runtime
+            .set_session_project_path("session", &vanished)
+            .await;
+        drop(source_runtime);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
 
@@ -1724,17 +2079,11 @@ mod tests {
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &project)]).await;
-        let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        let source_writer = source_rw.writer_connection().await.unwrap();
-        source_writer
-            .execute(
-                "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
-                [crate::sessions::lcm::LCM_SCHEMA_VERSION + 1],
-            )
-            .await
-            .unwrap();
-        drop(source_writer);
-        drop(source_rw);
+        let source_runtime = HermesMigrationTestRuntime::create(&source).await;
+        source_runtime
+            .set_lcm_schema_version(crate::sessions::lcm::LCM_SCHEMA_VERSION + 1)
+            .await;
+        drop(source_runtime);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.failed.len(), 1, "{report:?}");
@@ -1762,27 +2111,20 @@ mod tests {
         let source_payload_dir = source.parent().unwrap().join("lcm-payloads");
         fs::create_dir_all(&source_payload_dir).unwrap();
         fs::write(source_payload_dir.join(payload_ref), payload).unwrap();
-        let source_db = GlobalDb::open_at(&source).await.unwrap();
-        let source_writer = source_db.writer_connection().await.unwrap();
-        source_writer
-            .execute(
-                "INSERT INTO lcm_external_payloads (
-                    payload_ref, provider, session_id, message_id, kind, content_hash,
-                    byte_count, char_count, created_at
-                 ) VALUES (?1, 'hermes', 'session', 'message-session', 'text', ?2, ?3, ?3, 1)",
-                params![
-                    payload_ref,
-                    hex::encode(Sha256::digest(payload)),
-                    payload.len() as i64
-                ],
-            )
-            .await
-            .unwrap();
-        drop(source_writer);
-        drop(source_db);
+        let source_runtime = HermesMigrationTestRuntime::create(&source).await;
+        source_runtime
+            .insert_external_payload(payload_ref, payload)
+            .await;
+        drop(source_runtime);
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let target = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 0);
+        let target = registered_project_target(&profile_root, &project).await;
+        assert!(
+            target
+                .session_for_test(HostAdmissionScope::Project, "hermes", "session")
+                .await
+                .unwrap()
+                .is_none()
+        );
         drop(target);
 
         let failed = migrate_legacy_hermes_stores_inner(
@@ -1793,10 +2135,14 @@ mod tests {
         )
         .await;
         assert_eq!(failed.failed.len(), 1, "{failed:?}");
-        let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)
-            .await
-            .unwrap();
-        assert_eq!(count(target.conn(), "sessions").await, 0);
+        let target = registered_project_target(&profile_root, &project).await;
+        assert!(
+            target
+                .session_for_test(HostAdmissionScope::Project, "hermes", "session")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(marker_count(&layout.sessions_db_path), 0);
         let target_payload = layout
             .sessions_db_path
@@ -1806,9 +2152,10 @@ mod tests {
             .join(payload_ref);
         assert!(!target_payload.exists());
         drop(target);
-        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
-        assert_eq!(count(source_after.conn(), "sessions").await, 1);
-        drop(source_after);
+        assert_eq!(
+            immutable_source_count(&source, HermesFixtureTable::Sessions).await,
+            1
+        );
 
         let retry = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(retry.migrated.len(), 1, "{retry:?}");
@@ -1821,18 +2168,11 @@ mod tests {
         let source_path = temp.path().join("source-memory.db");
         let target_path = temp.path().join("target-memory.db");
         seed_memory_fact(&source_path, "legacy fact").await;
-        let (source, _) = test_open_read_only(&source_path).await;
-        let (target, _) = test_initialize(&target_path).await;
-        let writer = target.writer().await;
-        let mut merge = Box::pin(merge_memory_snapshot(source.conn(), &target_path));
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), &mut merge)
-                .await
-                .is_err()
-        );
-        drop(writer);
-        assert!(merge.await.unwrap() > 0);
+        HermesMigrationTestRuntime::assert_memory_merge_waits_for_writer(
+            &source_path,
+            &target_path,
+        )
+        .await;
     }
 
     #[test]

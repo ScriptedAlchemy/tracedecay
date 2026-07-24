@@ -812,7 +812,7 @@ mod tests {
             fact(2, MemoryCategory::General, 0.80, "Shared fact"),
         ];
         let project = vec![
-            fact(1, MemoryCategory::Decision, 0.90, "Use libsql"),
+            fact(1, MemoryCategory::Decision, 0.90, "Use SQLite"),
             fact(3, MemoryCategory::General, 0.70, "Shared fact"),
         ];
         let selected = select_scoped_facts(user, project, 8);
@@ -820,7 +820,7 @@ mod tests {
             render_scoped_fact_block(COMBINED_DIGEST_HEADER, &selected, 300).unwrap();
 
         assert!(text.contains("[user user_pref #1 trust 0.95] Prefer concise answers"));
-        assert!(text.contains("[project decision #1 trust 0.90] Use libsql"));
+        assert!(text.contains("[project decision #1 trust 0.90] Use SQLite"));
         assert_eq!(text.matches("Shared fact").count(), 1);
         assert!(text.chars().count() <= 300);
         assert_eq!(user_ids, vec![1, 2]);

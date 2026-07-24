@@ -1,6 +1,6 @@
 use tracedecay_domain::{FactOwnerV1, SourceStoreId};
 
-use crate::db::engine::{Executor, params};
+use crate::db::engine::params;
 use crate::errors::Result;
 
 use super::super::types::{LegacyOplog, MemoryV2BackfillBatchOutcome, OwnerKey, Progress};

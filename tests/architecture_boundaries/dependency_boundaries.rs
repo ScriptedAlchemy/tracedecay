@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const FORBIDDEN_LIBSQL_CRATE: &str = "libsql";
+
 fn path_matches_forbidden_prefix(path: &[String], prefixes: &[&[&str]]) -> Option<String> {
     for prefix in prefixes {
         if path.len() >= prefix.len()
@@ -89,7 +91,7 @@ fn application_session_depends_on_ports_not_adapters() {
         &["crate", "daemon"],
         &["crate", "mcp"],
         &["crate", "sessions"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["tokio"],
@@ -123,7 +125,7 @@ fn pr8_temporal_read_surfaces_cannot_import_refresh_or_writer_authorities() {
         &["crate", "daemon"],
         &["crate", "mcp"],
         &["crate", "sessions", "ingest"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
     ];
@@ -163,7 +165,7 @@ fn domain_session_contracts_are_runtime_and_store_free() {
     let forbidden: &[&[&str]] = &[
         &["tracedecay_store"],
         &["tracedecay"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["tokio"],
@@ -198,7 +200,7 @@ fn tool_catalog_is_application_transport_runtime_and_store_free() {
         &["tracedecay"],
         &["tracedecay_domain"],
         &["tracedecay_store"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["tokio"],
@@ -234,7 +236,7 @@ fn store_session_contracts_are_adapter_free() {
 
     let forbidden: &[&[&str]] = &[
         &["tracedecay"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["tokio"],
@@ -264,7 +266,7 @@ fn store_runtime_contracts_are_driver_executor_and_platform_authority_free() {
     assert!(!sources.is_empty(), "store runtime sources must exist");
 
     let forbidden: &[&[&str]] = &[
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["diesel"],
@@ -307,7 +309,7 @@ fn git_index_transaction_store_contracts_are_adapter_and_runtime_free() {
     .collect::<BTreeSet<_>>();
     let forbidden: &[&[&str]] = &[
         &["tracedecay"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["tokio"],
@@ -346,8 +348,8 @@ fn git_index_transaction_daemon_adapter_has_no_side_file_authority() {
         );
     }
     assert!(
-        source.contains("GlobalDb"),
-        "{} must bridge the canonical GlobalDb adapter",
+        source.contains("ActorDatabase::Registered"),
+        "{} must bridge the canonical registered runtime adapter",
         path.display()
     );
 }
@@ -370,7 +372,7 @@ fn code_index_is_filesystem_store_model_and_transport_free() {
         &["crate", "store"],
         &["tracedecay_store"],
         &["fastembed"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["axum"],
@@ -406,7 +408,7 @@ fn pr12_lsp_bridge_and_gateway_do_not_duplicate_store_or_transport_authority() {
         &["crate", "db"],
         &["crate", "global_db"],
         &["crate", "store"],
-        &["libsql"],
+        &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
         &["sqlx"],
         &["std", "fs"],

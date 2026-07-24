@@ -12,6 +12,10 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::git::{GitBlameV1, GitDiffScopeV1, GitDiffV1, GitHistoryV1, HunkRefV1};
 
+use crate::code_index::historical_query::{
+    HistoricalGitQueryAdapter, HistoricalQueryError, HistoricalQueryRequestV1,
+    HistoricalQueryResultV1, HistoricalSourceAuthorizationV1,
+};
 use crate::git_intelligence::{GitBlameRequest, GitHistoryRequest, NativeGitIntelligence};
 use crate::git_query::{
     GitQueryBounds, GitQueryEngine, GitQueryEnvelopeV1, GitQueryError, GitStatusSummaryV1,
@@ -70,6 +74,27 @@ pub enum GitReadOutcomeV1 {
     },
     Unavailable {
         reason: GitReadUnavailableReasonV1,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoricalGitReadUnavailableReasonV1 {
+    AuthorityAbsent,
+    ScopeMismatch,
+    NotAuthorized,
+    ReadFailed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HistoricalGitReadOutcomeV1 {
+    Complete {
+        scope: ResolvedScope,
+        result: HistoricalQueryResultV1,
+    },
+    Unavailable {
+        reason: HistoricalGitReadUnavailableReasonV1,
     },
 }
 
@@ -163,6 +188,72 @@ impl GitReadAuthorityV1 {
             },
         }
     }
+
+    /// Mount the historical code-index join on this exact admitted checkout.
+    pub fn read_historical(
+        &self,
+        selected_scope: &ResolvedScope,
+        authorization: Option<&HistoricalSourceAuthorizationV1>,
+        request: &HistoricalQueryRequestV1,
+    ) -> HistoricalGitReadOutcomeV1 {
+        if selected_scope != &self.scope {
+            return HistoricalGitReadOutcomeV1::Unavailable {
+                reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
+            };
+        }
+        let identity_matches = crate::storage::read_repository_identity_marker(&self.project_root)
+            .ok()
+            .flatten()
+            .and_then(|marker| {
+                crate::repository_provenance::RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+                    &self.project_root,
+                    &self.scope.project_id,
+                    &marker,
+                )
+            })
+            .is_some_and(|identity| {
+                identity.matches_admitted_identity(
+                    &self.scope.project_id,
+                    &self.scope.repository_id,
+                    &self.scope.worktree_id,
+                )
+            });
+        if !identity_matches {
+            return HistoricalGitReadOutcomeV1::Unavailable {
+                reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
+            };
+        }
+        let adapter = NativeGitIntelligence::new(
+            self.project_root.clone(),
+            self.scope.repository_id.clone(),
+            self.scope.worktree_id.clone(),
+        );
+        match HistoricalGitQueryAdapter::new(&adapter, self.scope.clone())
+            .query(authorization, request)
+        {
+            Ok(result) => HistoricalGitReadOutcomeV1::Complete {
+                scope: self.scope.clone(),
+                result,
+            },
+            Err(HistoricalQueryError::MissingAuthorization)
+            | Err(HistoricalQueryError::InvalidAuthorization)
+            | Err(HistoricalQueryError::UnauthorizedCommit(_))
+            | Err(HistoricalQueryError::UnauthorizedPath(_)) => {
+                HistoricalGitReadOutcomeV1::Unavailable {
+                    reason: HistoricalGitReadUnavailableReasonV1::NotAuthorized,
+                }
+            }
+            Err(HistoricalQueryError::ScopeMismatch)
+            | Err(HistoricalQueryError::ProviderScopeMismatch) => {
+                HistoricalGitReadOutcomeV1::Unavailable {
+                    reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
+                }
+            }
+            Err(_) => HistoricalGitReadOutcomeV1::Unavailable {
+                reason: HistoricalGitReadUnavailableReasonV1::ReadFailed,
+            },
+        }
+    }
 }
 
 pub fn execute_git_read(
@@ -175,6 +266,20 @@ pub fn execute_git_read(
         Some(authority) => authority.read(selected_scope, request, bounds),
         None => GitReadOutcomeV1::Unavailable {
             reason: GitReadUnavailableReasonV1::AuthorityAbsent,
+        },
+    }
+}
+
+pub fn execute_historical_git_read(
+    authority: Option<&GitReadAuthorityV1>,
+    selected_scope: &ResolvedScope,
+    source_authorization: Option<&HistoricalSourceAuthorizationV1>,
+    request: &HistoricalQueryRequestV1,
+) -> HistoricalGitReadOutcomeV1 {
+    match authority {
+        Some(authority) => authority.read_historical(selected_scope, source_authorization, request),
+        None => HistoricalGitReadOutcomeV1::Unavailable {
+            reason: HistoricalGitReadUnavailableReasonV1::AuthorityAbsent,
         },
     }
 }

@@ -3,8 +3,7 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
-use tracedecay::store::{GlobalDbObservationStore, GlobalDbSessionTemporalStore};
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
@@ -28,7 +27,11 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::common::{isolated_lcm_db_path, open_lcm_db};
+pub(crate) async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
 
 pub(crate) fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -207,14 +210,16 @@ pub(crate) fn anchored_write_with_lineage(
     AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
 }
 
-pub(crate) async fn persist_observation(
-    db: &GlobalDb,
+pub(crate) async fn persist_observation<S>(
+    store: &S,
     session_id: &SessionId,
     ordinal: u64,
     text: &str,
-) -> DurableObservationV1 {
+) -> DurableObservationV1
+where
+    S: ObservationStore + ObservationProjectionStore,
+{
     let observation = observation(session_id, ordinal, text);
-    let store = GlobalDbObservationStore::new(db);
     store
         .persist_observation(anchored_write(observation.clone()))
         .await
@@ -226,11 +231,13 @@ pub(crate) async fn persist_observation(
     observation
 }
 
-pub(crate) async fn persist_custom_observation(
-    db: &GlobalDb,
+pub(crate) async fn persist_custom_observation<S>(
+    store: &S,
     observation: DurableObservationV1,
-) -> DurableObservationV1 {
-    let store = GlobalDbObservationStore::new(db);
+) -> DurableObservationV1
+where
+    S: ObservationStore + ObservationProjectionStore,
+{
     store
         .persist_observation(anchored_write(observation.clone()))
         .await
@@ -242,13 +249,15 @@ pub(crate) async fn persist_custom_observation(
     observation
 }
 
-async fn persist_custom_observation_with_lineage(
-    db: &GlobalDb,
+async fn persist_custom_observation_with_lineage<S>(
+    store: &S,
     observation: DurableObservationV1,
     relation: AnchorProvenanceRelationV2,
     object_anchor_id: RetrievalAnchorId,
-) -> DurableObservationV1 {
-    let store = GlobalDbObservationStore::new(db);
+) -> DurableObservationV1
+where
+    S: ObservationStore + ObservationProjectionStore,
+{
     store
         .persist_observation(anchored_write_with_lineage(
             observation.clone(),
@@ -264,17 +273,19 @@ async fn persist_custom_observation_with_lineage(
     observation
 }
 
-pub(crate) async fn persist_observation_with_lineage(
-    db: &GlobalDb,
+pub(crate) async fn persist_observation_with_lineage<S>(
+    store: &S,
     session_id: &SessionId,
     ordinal: u64,
     text: &str,
     relation: AnchorProvenanceRelationV2,
     object_anchor_id: RetrievalAnchorId,
     valid_at: Option<i64>,
-) -> DurableObservationV1 {
+) -> DurableObservationV1
+where
+    S: ObservationStore + ObservationProjectionStore,
+{
     let observation = observation(session_id, ordinal, text);
-    let store = GlobalDbObservationStore::new(db);
     store
         .persist_observation(anchored_write_with_lineage(
             observation.clone(),
@@ -439,29 +450,48 @@ pub(crate) fn batch(
 }
 
 pub(crate) async fn scalar(path: &std::path::Path, sql: &str) -> i64 {
-    let raw_db = libsql::Builder::new_local(path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn.query(sql, ()).await.unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(sql, (), |row| row.get(0))
+        .unwrap()
 }
 
 pub(crate) async fn rows(path: &std::path::Path, sql: &str) -> Vec<String> {
-    let raw_db = libsql::Builder::new_local(path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut result = Vec::new();
-    let mut rows = conn.query(sql, ()).await.unwrap();
-    while let Some(row) = rows.next().await.unwrap() {
-        result.push(row.get(0).unwrap());
-    }
-    result
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn.prepare(sql).unwrap();
+    let mapped = statement.query_map((), |row| row.get(0)).unwrap();
+    mapped.collect::<Result<Vec<_>, _>>().unwrap()
 }
 
-pub(crate) async fn begin_candidate(
-    store: &GlobalDbSessionTemporalStore<'_>,
+pub(crate) async fn scalar_runtime(runtime: &HostAdmissionTestRuntimeV1, sql: &str) -> i64 {
+    let snapshot = TempDir::new().unwrap();
+    let path = snapshot.path().join("sessions.db");
+    runtime
+        .snapshot_session_database_for_test(HostAdmissionScope::Profile, &path)
+        .await
+        .unwrap();
+    scalar(&path, sql).await
+}
+
+pub(crate) async fn rows_runtime(runtime: &HostAdmissionTestRuntimeV1, sql: &str) -> Vec<String> {
+    let snapshot = TempDir::new().unwrap();
+    let path = snapshot.path().join("sessions.db");
+    runtime
+        .snapshot_session_database_for_test(HostAdmissionScope::Profile, &path)
+        .await
+        .unwrap();
+    rows(&path, sql).await
+}
+
+pub(crate) async fn begin_candidate<S>(
+    store: &S,
     session_id: &SessionId,
     candidate_generation: u64,
     source_frontier: u64,
-) -> SessionGenerationRebuildDispositionV1 {
+) -> SessionGenerationRebuildDispositionV1
+where
+    S: SessionTemporalProjectionStore,
+{
     store
         .begin_session_generation_rebuild(
             SessionGenerationRebuildRequestV1::new(

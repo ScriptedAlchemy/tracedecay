@@ -32,7 +32,8 @@ use super::{
     compatibility_sanitized_relation_metadata, compatibility_upsert_legacy_relation_tx,
 };
 use crate::db::Database;
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tracedecay_domain::{
@@ -47,7 +48,7 @@ use tracedecay_store::{
 };
 pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactCurationBatchV1,
 ) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1> {
     let request_digest = compatibility_digest(json!({
@@ -261,7 +262,7 @@ fn compatibility_merge_removal_batch(
 }
 
 async fn compatibility_mirror_category_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     legacy_fact_id: i64,
 ) -> FactStoreResult<FactCategoryV1> {
     let mut rows = transaction
@@ -285,7 +286,7 @@ async fn compatibility_mirror_category_tx(
 }
 
 async fn compatibility_replay_merge_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1> {
@@ -348,7 +349,7 @@ async fn compatibility_replay_merge_tx(
 }
 
 async fn compatibility_rewire_merge_relations_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     winner_fact_id: &FactId,
     winner_legacy_fact_id: i64,
@@ -375,13 +376,13 @@ async fn compatibility_rewire_merge_relations_tx(
         loser_legacy_fact_ids
             .iter()
             .copied()
-            .map(libsql::Value::Integer),
+            .map(crate::db::engine::Value::Integer),
     );
     legacy_values.extend(
         loser_legacy_fact_ids
             .iter()
             .copied()
-            .map(libsql::Value::Integer),
+            .map(crate::db::engine::Value::Integer),
     );
     let mut legacy_rows = transaction
         .query(&legacy_sql, legacy_values)
@@ -442,13 +443,13 @@ async fn compatibility_rewire_merge_relations_tx(
                     loser_legacy_fact_ids
                         .iter()
                         .copied()
-                        .map(libsql::Value::Integer),
+                        .map(crate::db::engine::Value::Integer),
                 );
                 values.extend(
                     loser_legacy_fact_ids
                         .iter()
                         .copied()
-                        .map(libsql::Value::Integer),
+                        .map(crate::db::engine::Value::Integer),
                 );
                 values
             },
@@ -509,13 +510,13 @@ async fn compatibility_rewire_merge_relations_tx(
          LIMIT 257"
     );
     let mut canonical_values = Vec::with_capacity(loser_fact_ids.len() * 2 + 2);
-    canonical_values.push(libsql::Value::Text(key.kind.to_string()));
-    canonical_values.push(libsql::Value::Text(key.project_id.clone()));
+    canonical_values.push(crate::db::engine::Value::Text(key.kind.to_string()));
+    canonical_values.push(crate::db::engine::Value::Text(key.project_id.clone()));
     for _ in 0..2 {
         canonical_values.extend(
             loser_fact_ids
                 .iter()
-                .map(|fact_id| libsql::Value::Text(fact_id.as_str().to_owned())),
+                .map(|fact_id| crate::db::engine::Value::Text(fact_id.as_str().to_owned())),
         );
     }
     let mut canonical_rows = transaction
@@ -557,14 +558,12 @@ async fn compatibility_rewire_merge_relations_tx(
             ),
             {
                 let mut values = Vec::with_capacity(loser_fact_ids.len() * 2 + 2);
-                values.push(libsql::Value::Text(key.kind.to_string()));
-                values.push(libsql::Value::Text(key.project_id.clone()));
+                values.push(crate::db::engine::Value::Text(key.kind.to_string()));
+                values.push(crate::db::engine::Value::Text(key.project_id.clone()));
                 for _ in 0..2 {
-                    values.extend(
-                        loser_fact_ids
-                            .iter()
-                            .map(|fact_id| libsql::Value::Text(fact_id.as_str().to_owned())),
-                    );
+                    values.extend(loser_fact_ids.iter().map(|fact_id| {
+                        crate::db::engine::Value::Text(fact_id.as_str().to_owned())
+                    }));
                 }
                 values
             },
@@ -630,7 +629,7 @@ async fn compatibility_rewire_merge_relations_tx(
 
 pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
     db: &Database,
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactMergeCommandV1,
 ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1> {
     let request_digest = compatibility_digest(json!({

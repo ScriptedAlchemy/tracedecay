@@ -10,7 +10,7 @@
 //! The runtime `ConcreteRepositoryReadExecutor` rejects
 //! [`RepositoryReadOperationV1::Code`](tracedecay_store::RepositoryReadOperationV1)
 //! ("repository attachment does not own code reads") because the git-index
-//! transaction tables live in the daemon `GlobalDb`, not in the runtime crate's
+//! transaction tables live in the daemon `RegisteredGlobalDb`, not in the runtime crate's
 //! writer ledger. This executor answers that family here — the mirror image of
 //! how [`EffectsLedgerReadExecutor`](tracedecay_rusqlite_runtime) answers the
 //! effects family in the runtime crate, where those tables happen to live.
@@ -32,7 +32,7 @@ use tracedecay_store::{
 use super::store::GlobalDbGitIndexTransactionStore;
 
 /// Answers the code family of the repository read port over one already-open
-/// canonical `GlobalDb` transaction store.
+/// canonical `RegisteredGlobalDb` transaction store.
 pub(crate) struct GitIndexReadExecutor<'store, 'db> {
     store: &'store GlobalDbGitIndexTransactionStore<'db>,
 }

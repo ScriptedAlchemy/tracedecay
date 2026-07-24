@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 
-use crate::db::engine::{Executor, params};
+use crate::db::engine::params;
 use crate::errors::Result;
 
 use super::super::{

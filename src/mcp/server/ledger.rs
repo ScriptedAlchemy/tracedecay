@@ -61,7 +61,9 @@ impl McpServer {
         // Also increment the resettable local counter
         let _ = cg.add_local_counter(delta).await;
         // Best-effort update to global DB
-        if let Some(ref gdb) = self.global_db {
+        if let Some(ref gdb) = self.accounting_db {
+            gdb.upsert(cg.project_root(), new_total).await;
+        } else if let Some(ref gdb) = self.global_db {
             gdb.upsert(cg.project_root(), new_total).await;
         }
     }
@@ -171,7 +173,7 @@ impl McpServer {
         }
         let delta = current - last_flushed;
 
-        if self.global_db.is_none() {
+        if self.accounting_db.is_none() && self.global_db.is_none() {
             return;
         }
 
@@ -216,9 +218,11 @@ impl McpServer {
             duration_us,
             error,
         } = request;
-        let Some(gdb) = self.global_db.clone() else {
+        let registered = self.accounting_db.clone();
+        let legacy = self.global_db.clone();
+        if registered.is_none() && legacy.is_none() {
             return;
-        };
+        }
         let client_name = self.client_name();
         // `TraceDecayError`'s `Display` (via `thiserror`) already carries a
         // variant-classified, human-readable message (e.g. "config error:
@@ -243,7 +247,14 @@ impl McpServer {
             failure_reason: Some(&failure_reason),
         });
         self.spawn_observed_ledger_write(async move {
-            if let Err(e) = gdb.append_analytics_event(&event).await {
+            let result = if let Some(gdb) = registered {
+                gdb.append_analytics_event(&event).await
+            } else if let Some(gdb) = legacy {
+                gdb.append_analytics_event(&event).await
+            } else {
+                return;
+            };
+            if let Err(e) = result {
                 tracing::warn!(error = %e, "MCP error analytics event insert failed");
             }
         });
@@ -271,11 +282,20 @@ impl McpServer {
         ) else {
             return;
         };
-        let Some(gdb) = self.global_db.clone() else {
+        let registered = self.accounting_db.clone();
+        let legacy = self.global_db.clone();
+        if registered.is_none() && legacy.is_none() {
             return;
-        };
+        }
         self.spawn_observed_ledger_write(async move {
-            if let Err(e) = gdb.append_analytics_event(&event).await {
+            let result = if let Some(gdb) = registered {
+                gdb.append_analytics_event(&event).await
+            } else if let Some(gdb) = legacy {
+                gdb.append_analytics_event(&event).await
+            } else {
+                return;
+            };
+            if let Err(e) = result {
                 // Deliberate fail-open: admission already committed; telemetry
                 // loss is preferred over blocking or rewriting host outcomes.
                 tracing::warn!(error = %e, "hook route analytics insert failed");
@@ -292,8 +312,8 @@ impl McpServer {
     /// Mid-session branch/worktree switches are handled by the span table
     /// itself — the observation always carries the *current* branch.
     ///
-    /// Fail-open like [`Self::update_hook_workspace_route`]: any resolution or
-    /// DB error is dropped. An in-process debounce keyed by
+    /// This analytics side write is intentionally fail-open: any resolution
+    /// or DB error is dropped. An in-process debounce keyed by
     /// `(provider, session, branch, worktree)` collapses a burst of tool-use
     /// events to one write per
     /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
@@ -327,13 +347,13 @@ impl McpServer {
         let Some(cwd) = route_cwd else {
             return;
         };
-        let Some(project_root) = self.registered_project_for_route_cwd(cwd).await else {
+        let Ok(Some(project_root)) = self.registered_project_for_route_cwd(cwd).await else {
             return;
         };
         let project_root = PathBuf::from(project_root);
         let active_project_root = self.cg_snapshot().await.project_root().to_path_buf();
-        if GlobalDb::canonical_project_key(&project_root)
-            != GlobalDb::canonical_project_key(&active_project_root)
+        if RegisteredGlobalDb::canonical_project_key(&project_root)
+            != RegisteredGlobalDb::canonical_project_key(&active_project_root)
         {
             return;
         }

@@ -454,9 +454,26 @@ pub(super) fn coordinated_dashboard_automation_writer(
 pub(super) fn coordinated_background_refresh_writer(
     administration: StoreAdministration,
 ) -> crate::mcp::server::BackgroundRefreshWriter {
-    Arc::new(move |request| {
+    Arc::new(move |mut request| {
         let administration = administration.clone();
         Box::pin(async move {
+            let canonical_root = request
+                .project_root
+                .canonicalize()
+                .unwrap_or_else(|_| request.project_root.clone());
+            let active_branch = crate::branch::current_branch(&canonical_root);
+            let graph = administration
+                .mounted_project_graphs()
+                .await
+                .into_iter()
+                .find(|graph| {
+                    graph.project_root() == canonical_root
+                        && graph.active_branch() == active_branch.as_deref()
+                })
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "retained background refresh graph is unavailable".to_string(),
+                })?;
+            request.graph = graph;
             administration
                 .with_writer(|| async move {
                     crate::mcp::server::execute_background_refresh_direct(request).await

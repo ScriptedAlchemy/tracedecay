@@ -1,4 +1,3 @@
-use libsql::{Connection, params};
 use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_domain::{
     DurableObservationV1, ObservationScopeV1, ObservationSourceCursorV1,
@@ -6,6 +5,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
+use crate::db::engine::{QueryExecutor, params};
 use crate::global_db::session_temporal_operations::{
     FrozenPublicationReceipt, SANITIZER_VERSION as SUMMARY_PUBLICATION_SANITIZER_VERSION,
     receipt_id as summary_receipt_id,
@@ -71,7 +71,10 @@ fn bounded_row_audit_invariants() -> impl Iterator<Item = &'static Invariant> {
     })
 }
 
-pub(super) async fn query_has_rows(conn: &Connection, query: &str) -> crate::errors::Result<bool> {
+pub(super) async fn query_has_rows(
+    conn: &impl QueryExecutor,
+    query: &str,
+) -> crate::errors::Result<bool> {
     let mut rows = conn
         .query(query, ())
         .await
@@ -103,7 +106,7 @@ pub(super) fn encode_authority_json<T: Serialize>(
 }
 
 pub(super) async fn validate_receipt_authority_rows(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     after_rowid: i64,
 ) -> crate::errors::Result<(i64, i64)> {
     let mut rows = conn
@@ -182,7 +185,7 @@ pub(super) async fn validate_receipt_authority_rows(
 }
 
 pub(super) async fn validate_observation_authority_rows(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     after_sequence: i64,
 ) -> crate::errors::Result<(i64, i64)> {
     let mut rows = conn
@@ -265,7 +268,7 @@ pub(super) async fn validate_observation_authority_rows(
 }
 
 pub(super) async fn validate_source_cursor_authority_rows(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     let mut rows = conn
         .query(
@@ -379,7 +382,7 @@ pub(super) async fn validate_source_cursor_authority_rows(
 }
 
 pub(super) async fn validate_mutable_invariant_rows(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     for invariant in bounded_row_audit_invariants() {
         if let Some(query) = invariant.audit_query
@@ -394,8 +397,7 @@ pub(super) async fn validate_mutable_invariant_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::global_db::GlobalDb;
-    use tempfile::TempDir;
+    use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
     fn session_temporal_bounded_violations() -> &'static [&'static str] {
         &[
@@ -465,16 +467,11 @@ mod tests {
         }
     }
 
-    async fn open_db() -> (TempDir, GlobalDb) {
-        let dir = TempDir::new().expect("tempdir");
-        let db = GlobalDb::try_open_at(&dir.path().join("global.db"))
-            .await
-            .expect("open should not error")
-            .expect("database should be available");
-        (dir, db)
+    async fn open_db() -> RegisteredGlobalDbHarness {
+        RegisteredGlobalDbHarness::open("schema-invariant-rows").await
     }
 
-    async fn assert_bounded_and_exhaustive_reject(conn: &Connection, violation: &str) {
+    async fn assert_bounded_and_exhaustive_reject(conn: &impl QueryExecutor, violation: &str) {
         let bounded = validate_mutable_invariant_rows(conn)
             .await
             .expect_err("bounded validation must reject corruption");
@@ -496,8 +493,13 @@ mod tests {
     /// corruption — the freshness fast path must be invisible on reopen.
     #[tokio::test]
     async fn fresh_open_skips_row_audits_but_reopen_audits_exhaustively() {
-        let (_dir, db) = open_db().await;
-        let conn = db.conn();
+        let harness = open_db().await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin invariant fixture transaction");
+        let conn = &transaction;
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
@@ -531,8 +533,13 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_cursor_keys() {
-        let (_dir, db) = open_db().await;
-        let conn = db.conn();
+        let harness = open_db().await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin invariant fixture transaction");
+        let conn = &transaction;
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
@@ -551,8 +558,13 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_refresh_rows() {
-        let (_dir, db) = open_db().await;
-        let conn = db.conn();
+        let harness = open_db().await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin invariant fixture transaction");
+        let conn = &transaction;
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS session_refresh_operations_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_refresh_operations_state_guard_v1;
@@ -573,8 +585,13 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_generation_rows() {
-        let (_dir, db) = open_db().await;
-        let conn = db.conn();
+        let harness = open_db().await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin invariant fixture transaction");
+        let conn = &transaction;
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS session_temporal_generations_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
@@ -596,8 +613,13 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_ownership_rows() {
-        let (_dir, db) = open_db().await;
-        let conn = db.conn();
+        let harness = open_db().await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin invariant fixture transaction");
+        let conn = &transaction;
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS session_summary_availability_owner_insert_v1;
              INSERT INTO retrieval_anchors (

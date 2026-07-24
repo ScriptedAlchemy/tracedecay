@@ -1,5 +1,6 @@
 use tempfile::TempDir;
-use tracedecay::global_db::{GlobalDb, ParseOffset};
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
@@ -9,9 +10,92 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
-use crate::common::{
-    self, isolated_lcm_db_path as isolated_db_path, lcm_dag_message as raw_message, open_lcm_db,
-};
+use crate::common::{self, lcm_dag_message as raw_message};
+
+async fn registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("registered LCM test runtime")
+}
+
+trait ProfileLcmFixture {
+    async fn upsert_session(&self, session: &SessionRecord) -> bool;
+
+    async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool;
+
+    async fn upsert_transcript_batch(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        source: &str,
+        offset: ParseOffset,
+    ) -> bool;
+
+    async fn lcm_insert_summary_node(
+        &self,
+        draft: LcmSummaryNodeDraft,
+    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError>;
+
+    async fn lcm_ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError>;
+
+    async fn lcm_update_lifecycle(
+        &self,
+        update: LcmLifecycleUpdate,
+    ) -> Result<tracedecay::sessions::lcm::LcmLifecycleState, LcmError>;
+}
+
+impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
+    async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.upsert_session_for_test(HostAdmissionScope::Profile, session)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
+        self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn upsert_transcript_batch(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        source: &str,
+        offset: ParseOffset,
+    ) -> bool {
+        self.upsert_transcript_batch_for_test(
+            HostAdmissionScope::Profile,
+            session,
+            messages,
+            source,
+            offset,
+        )
+        .await
+        .is_ok()
+    }
+
+    async fn lcm_insert_summary_node(
+        &self,
+        draft: LcmSummaryNodeDraft,
+    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError> {
+        self.lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
+            .await
+    }
+
+    async fn lcm_ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
+        self.lcm_ingest_raw_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+    }
+
+    async fn lcm_update_lifecycle(
+        &self,
+        update: LcmLifecycleUpdate,
+    ) -> Result<tracedecay::sessions::lcm::LcmLifecycleState, LcmError> {
+        self.lcm_update_lifecycle_for_test(HostAdmissionScope::Profile, update)
+            .await
+    }
+}
 
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
     common::session_record(
@@ -45,16 +129,19 @@ fn raw_message_with_role_source_timestamp(
     message
 }
 
-async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
+async fn insert_session(db: &HostAdmissionTestRuntimeV1, provider: &str, session_id: &str) {
     assert!(
-        db.upsert_session(&sample_session(provider, session_id))
-            .await
+        db.upsert_session_for_test(
+            HostAdmissionScope::Profile,
+            &sample_session(provider, session_id),
+        )
+        .await
+        .expect("session fixture should write")
     );
 }
 
 async fn insert_raw_messages(
-    db: &GlobalDb,
-    db_path: &std::path::Path,
+    db: &HostAdmissionTestRuntimeV1,
     provider: &str,
     session_id: &str,
     contents: &[String],
@@ -68,70 +155,15 @@ async fn insert_raw_messages(
             raw_message(provider, &message_id, session_id, (idx + 1) as i64, content)
         })
         .collect();
-    assert!(
-        db.upsert_transcript_batch(
-            &session,
-            &messages,
-            &format!("session-lcm-query-{provider}-{session_id}.jsonl"),
-            ParseOffset::default(),
-        )
-        .await
-    );
-    let message_ids: Vec<_> = messages
-        .iter()
-        .map(|message| message.message_id.clone())
-        .collect();
-
-    if message_ids.is_empty() {
-        return Vec::new();
-    }
-
-    let mut store_ids_by_message_id = std::collections::BTreeMap::new();
-    let raw_db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let placeholders = std::iter::repeat_n("?", message_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT message_id, store_id
-         FROM lcm_raw_messages
-         WHERE provider = ?
-           AND session_id = ?
-           AND message_id IN ({placeholders})
-         ORDER BY message_id"
-    );
-    let mut values = vec![
-        libsql::Value::Text(provider.to_string()),
-        libsql::Value::Text(session_id.to_string()),
-    ];
-    values.extend(message_ids.iter().cloned().map(libsql::Value::Text));
-    let mut rows = conn
-        .query(&sql, libsql::params_from_iter(values))
-        .await
-        .expect("raw message store ids should query after insert");
-    while let Some(row) = rows
-        .next()
-        .await
-        .expect("raw message store id row should read")
-    {
-        let message_id = row
-            .get::<String>(0)
-            .expect("raw message message_id should decode");
-        let store_id = row
-            .get::<i64>(1)
-            .expect("raw message store_id should decode");
-        store_ids_by_message_id.insert(message_id, store_id);
-    }
-
-    assert_eq!(store_ids_by_message_id.len(), message_ids.len());
-    message_ids
-        .into_iter()
-        .map(|message_id| {
-            *store_ids_by_message_id
-                .get(&message_id)
-                .unwrap_or_else(|| panic!("raw message {message_id} should exist"))
-        })
-        .collect()
+    db.upsert_transcript_batch_for_test(
+        HostAdmissionScope::Profile,
+        &session,
+        &messages,
+        &format!("session-lcm-query-{provider}-{session_id}.jsonl"),
+        ParseOffset::default(),
+    )
+    .await
+    .expect("registered transcript fixture should write")
 }
 
 fn summary_draft(

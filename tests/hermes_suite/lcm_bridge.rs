@@ -337,6 +337,7 @@ assert "role" not in load_params["properties"]
 assert "start_time" not in load_params["properties"]
 assert "end_time" not in load_params["properties"]
 assert "content_limit" not in load_params["properties"]
+assert "after_store_id" not in load_params["properties"]
 assert load_params["required"] == ["session_id"]
 
 describe_params = schemas_by_name["lcm_describe"]["parameters"]

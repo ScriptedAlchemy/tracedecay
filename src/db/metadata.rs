@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
@@ -8,7 +8,7 @@ impl Database {
     /// Reads a metadata value by key, returning `None` if not set.
     pub async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query("SELECT value FROM metadata WHERE key = ?1", params![key])
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -40,7 +40,7 @@ impl Database {
         key: &str,
     ) -> Result<Option<String>> {
         let mut rows = transaction
-            .query("SELECT value FROM metadata WHERE key = ?1", params![key])
+            .query_engine("SELECT value FROM metadata WHERE key = ?1", params![key])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query transactional metadata: {e}"),
@@ -77,7 +77,7 @@ impl Database {
         value: &str,
     ) -> Result<()> {
         transaction
-            .execute(
+            .execute_engine(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
                 params![key, value],
             )

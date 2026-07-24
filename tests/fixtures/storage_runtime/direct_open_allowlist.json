@@ -100,19 +100,16 @@
       "disposition": "test-only S11 evidence fixture"
     },
     {
-      "path": "src/migrate/hermes/memory.rs",
-      "callee": "Database::initialize",
-      "disposition": "temporary Hermes memory migration path"
+      "path": "src/sqlite_read_snapshot.rs",
+      "scope": "SnapshotConnection::open",
+      "callee": "Connection::open_with_flags",
+      "disposition": "immutable or private-copy snapshot source opened read-only outside the live store authority"
     },
     {
-      "path": "src/migrate/hermes/memory.rs",
-      "callee": "Database::open",
-      "disposition": "temporary Hermes memory migration path"
-    },
-    {
-      "path": "src/migrate/manifest.rs",
-      "callee": "crate::db::Database::open_read_only",
-      "disposition": "temporary migration manifest inspection"
+      "path": "src/sqlite_read_snapshot.rs",
+      "scope": "SnapshotDatabase::backup_to",
+      "callee": "Connection::open_with_flags",
+      "disposition": "new private standalone backup destination populated from an already-frozen snapshot"
     }
   ]
 }

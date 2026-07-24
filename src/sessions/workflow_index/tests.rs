@@ -1,15 +1,35 @@
 use super::*;
 use crate::global_db::WorkflowScopeFilter;
 use crate::sessions::git_correlation::{
-    SpanObservation, SpanSource, ensure_git_correlation_schema, record_span_observation,
+    SpanObservation, SpanSource, ensure_git_correlation_schema_in_transaction,
+    record_span_observation_in_transaction,
 };
 
-async fn mem_conn() -> Connection {
-    let db = libsql::Builder::new_local(":memory:")
-        .build()
+fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+    (directory, connection)
+}
+
+async fn ensure_git_scope_fixture(conn: &impl Executor, session_id: &str, branch: &str) {
+    ensure_git_correlation_schema_in_transaction(conn)
         .await
         .unwrap();
-    db.connect().unwrap()
+    record_span_observation_in_transaction(
+        conn,
+        &SpanObservation {
+            provider: "claude".to_string(),
+            session_id: session_id.to_string(),
+            thread_id: None,
+            branch: Some(branch.to_string()),
+            worktree: "/repo".to_string(),
+            ts: 1_700_000_100,
+            source: SpanSource::Ingest,
+        },
+        super::super::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+    )
+    .await
+    .unwrap();
 }
 
 fn sample_run(run_id: &str, parent: &str) -> WorkflowRun {
@@ -48,7 +68,7 @@ fn status_from_disk_folds_known_and_unknown() {
 
 #[tokio::test]
 async fn queries_are_empty_before_schema_exists() {
-    let conn = mem_conn().await;
+    let (_directory, conn) = test_conn();
     // No tables yet: readers must fail-open to empty/None.
     assert!(!tables_present(&conn).await.unwrap());
     assert!(
@@ -63,7 +83,7 @@ async fn queries_are_empty_before_schema_exists() {
 
 #[tokio::test]
 async fn upsert_is_idempotent_and_updates_mutable_columns() {
-    let conn = mem_conn().await;
+    let (_directory, conn) = test_conn();
     ensure_workflow_index_schema(&conn).await.unwrap();
     assert!(tables_present(&conn).await.unwrap());
 
@@ -91,7 +111,7 @@ async fn upsert_is_idempotent_and_updates_mutable_columns() {
 
 #[tokio::test]
 async fn empty_run_id_is_rejected() {
-    let conn = mem_conn().await;
+    let (_directory, conn) = test_conn();
     ensure_workflow_index_schema(&conn).await.unwrap();
     let mut run = sample_run("   ", "sess");
     run.run_id = "   ".to_string();
@@ -101,7 +121,7 @@ async fn empty_run_id_is_rejected() {
 
 #[tokio::test]
 async fn runs_for_session_orders_newest_first_and_scopes_by_parent() {
-    let conn = mem_conn().await;
+    let (_directory, conn) = test_conn();
     ensure_workflow_index_schema(&conn).await.unwrap();
 
     let mut old = sample_run("wf_old", "sess-1");
@@ -124,7 +144,7 @@ async fn runs_for_session_orders_newest_first_and_scopes_by_parent() {
 
 #[tokio::test]
 async fn agents_upsert_and_order_within_run() {
-    let conn = mem_conn().await;
+    let (_directory, conn) = test_conn();
     ensure_workflow_index_schema(&conn).await.unwrap();
     upsert_run(&conn, &sample_run("wf_a", "sess"))
         .await
@@ -175,7 +195,7 @@ fn workflow_scope_exists_predicate_includes_run_and_optional_label() {
     assert!(sql.contains("wa.agent_session_id = m.session_id"));
     assert!(!sql.contains("agent_label"));
     assert_eq!(params.len(), 1);
-    assert!(matches!(&params[0], libsql::Value::Text(id) if id == "wf_alpha"));
+    assert!(matches!(&params[0], Value::Text(id) if id == "wf_alpha"));
 
     let narrowed = WorkflowScopeFilter {
         run_id: "wf_beta".to_string(),
@@ -185,13 +205,12 @@ fn workflow_scope_exists_predicate_includes_run_and_optional_label() {
     assert!(sql.contains("workflow_agents"));
     assert!(sql.contains("wa.agent_label = ?2"));
     assert_eq!(params.len(), 2);
-    assert!(matches!(&params[1], libsql::Value::Text(label) if label == "mine:claude"));
+    assert!(matches!(&params[1], Value::Text(label) if label == "mine:claude"));
 }
 
 #[tokio::test]
 async fn runs_for_git_scope_joins_through_parent_session_spans() {
-    let conn = mem_conn().await;
-    ensure_git_correlation_schema(&conn).await.unwrap();
+    let (_directory, conn) = test_conn();
     ensure_workflow_index_schema(&conn).await.unwrap();
 
     // A run owned by sess-branch, another owned by sess-other.
@@ -208,21 +227,7 @@ async fn runs_for_git_scope_joins_through_parent_session_spans() {
         .unwrap();
 
     // Record a span placing sess-branch on branch `feat/x`.
-    record_span_observation(
-        &conn,
-        &SpanObservation {
-            provider: "claude".to_string(),
-            session_id: "sess-branch".to_string(),
-            thread_id: None,
-            branch: Some("feat/x".to_string()),
-            worktree: "/repo".to_string(),
-            ts: 1_700_000_100,
-            source: SpanSource::Ingest,
-        },
-        super::super::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-    )
-    .await
-    .unwrap();
+    ensure_git_scope_fixture(&conn, "sess-branch", "feat/x").await;
 
     let filter = GitScopeFilter::from_args(Some("feat/x"), None, None).unwrap();
     let hits = runs_for_git_scope(&conn, &filter, 10).await.unwrap();
@@ -244,4 +249,67 @@ async fn runs_for_git_scope_joins_through_parent_session_spans() {
         runs_for_git_scope(&conn, &empty, 10).await,
         Err(WorkflowIndexError::InvalidArgument(_))
     ));
+}
+
+#[tokio::test]
+async fn registered_snapshot_preserves_workflow_query_semantics() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.db");
+    let conn = crate::db::engine::TestConnection::open(&path);
+    ensure_workflow_index_schema(&conn).await.unwrap();
+
+    let mut older = sample_run("wf_old", "sess-branch");
+    older.started_ts = Some(1_000);
+    let mut newer = sample_run("wf_new", "sess-branch");
+    newer.started_ts = Some(2_000);
+    upsert_run(&conn, &older).await.unwrap();
+    upsert_run(&conn, &newer).await.unwrap();
+    upsert_agent(
+        &conn,
+        &WorkflowAgent {
+            run_id: "wf_new".to_string(),
+            agent_label: "implement".to_string(),
+            agent_id: "agent-1".to_string(),
+            phase: Some("Build".to_string()),
+            transcript_path: None,
+            agent_session_id: Some("agent-session".to_string()),
+            status: WorkflowStatus::Running,
+            model: Some("test-model".to_string()),
+            tokens: 41,
+            started_ts: Some(2_001),
+            ended_ts: None,
+        },
+    )
+    .await
+    .unwrap();
+    ensure_git_scope_fixture(&conn, "sess-branch", "feat/registered").await;
+
+    let reader = RegisteredWorkflowIndexSnapshot {
+        snapshot: conn.read_snapshot().await.unwrap(),
+    };
+
+    let runs = reader.runs_for_session("sess-branch", 10).await.unwrap();
+    assert_eq!(
+        runs.iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wf_new", "wf_old"]
+    );
+    assert_eq!(
+        reader.run_for_id("wf_new").await.unwrap(),
+        Some(newer.clone())
+    );
+    let agents = reader.agents_for_run("wf_new", 10).await.unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].agent_label, "implement");
+
+    let filter = GitScopeFilter::from_args(Some("feat/registered"), None, None).unwrap();
+    let scoped = reader.runs_for_git_scope(&filter, 10).await.unwrap();
+    assert_eq!(
+        scoped
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wf_new", "wf_old"]
+    );
 }

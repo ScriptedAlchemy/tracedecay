@@ -1,4 +1,3 @@
-use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
     HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
@@ -6,8 +5,9 @@ use crate::application::host_admission::{
 use crate::application::observation::ObservationCancellation;
 use crate::automation::config_error;
 use crate::automation::run_ledger::AutomationRunStatus;
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::sessions::claude_observation::ClaudeObservationIngestError;
 use crate::sessions::source::TranscriptSource;
@@ -15,12 +15,11 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracedecay_domain::{ObservationScopeV1, ProjectId, UtcMicros};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId, UtcMicros};
 
 use super::{SessionAuthorities, rendered_tool_json};
-
-const CONTEXT_SCOUT_MODEL_DEADLINE: Duration = Duration::from_secs(5);
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -32,7 +31,8 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 pub async fn handle_hook_runtime(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
+    accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
@@ -41,7 +41,7 @@ pub async fn handle_hook_runtime(
             cg.reset_local_counter().await?;
             json!({ "action": action, "reset": true })
         }
-        "accounting_receipt" => accounting_receipt(cg, global_db).await?,
+        "accounting_receipt" => accounting_receipt(cg, accounting_db).await?,
         "hook_v2_admit" | "hook_v2_guidance_lookup" => hook_v2_admit(cg, &args, action).await?,
         "hook_v2_scout_prepare" => hook_v2_scout_prepare(cg, &args).await?,
         "hook_v2_delivery_receipt" => hook_v2_delivery_receipt(cg, &args).await?,
@@ -61,12 +61,8 @@ pub async fn handle_hook_runtime(
                 "hook action `{action}` requires projectless daemon routing"
             )));
         }
-        "codex_compact" => {
-            codex_compact(cg, &args, required_project_db(session_authorities)?).await?
-        }
-        "cursor_compact" => {
-            cursor_compact(cg, &args, required_project_db(session_authorities)?).await?
-        }
+        "codex_compact" => codex_compact(cg, &args, session_authorities).await?,
+        "cursor_compact" => cursor_compact(cg, &args, session_authorities).await?,
         other => {
             return Err(config_error(format!(
                 "unknown hook runtime action: {other}"
@@ -76,10 +72,11 @@ pub async fn handle_hook_runtime(
     Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
 }
 
-pub async fn handle_projectless_hook_runtime(
+pub(crate) async fn handle_projectless_hook_runtime(
     args: Value,
     profile_root: &Path,
-    global_db: &GlobalDb,
+    session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    global_db: &RegisteredGlobalDb,
     session_authorities: SessionAuthorities<'_>,
     host_admission_broker: std::result::Result<&SharedHostAdmissionBroker, HostAdmissionOutcome>,
 ) -> Result<ToolResult> {
@@ -100,13 +97,14 @@ pub async fn handle_projectless_hook_runtime(
             )
             .await?
         }
-        "user_review" => user_review(&args, profile_root).await?,
+        "user_review" => user_review(&args, profile_root, &session_runtime_registry).await?,
         "hermes_receipt" => {
             let host_admission_broker =
                 host_admission_broker.map_err(map_host_admission_outcome)?;
             hermes_receipt(
                 &args,
                 profile_root,
+                Some(&session_runtime_registry),
                 required_user_db(session_authorities)?,
                 host_admission_broker,
             )
@@ -145,137 +143,163 @@ fn hook_v2_envelope(args: &Value, action: &str) -> Result<tracedecay_hooks::Hook
     Ok(envelope)
 }
 
-fn hook_v2_binding_snapshot(
+fn hook_v2_native_session_id(
+    args: &Value,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> Option<SessionId> {
+    let session = SessionId::new(args.get("native_session_id")?.as_str()?.to_owned()).ok()?;
+    (crate::hooks::hook_v2_protected_session_id_for_native(session.as_str())
+        == envelope.protected_session_id)
+        .then_some(session)
+}
+
+async fn hook_v2_context_scout_lifecycle(
+    args: &Value,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
+    let session_id = hook_v2_native_session_id(args, envelope)?;
+    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+        envelope.project_id,
+        envelope.worktree_id,
+        &session_id,
+    )
+    .await
+}
+
+enum HookV2BindingAdmission {
+    Bound(tracedecay_hooks::HookConfigurationSnapshotV1),
+    Unavailable,
+    CatchupRequired,
+}
+
+fn classify_hook_v2_binding(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    outcome: tracedecay_hooks::HookConfigurationReadOutcomeV1,
+) -> HookV2BindingAdmission {
+    let tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(snapshot) = outcome else {
+        return HookV2BindingAdmission::Unavailable;
+    };
+    if envelope.validate(&snapshot.binding).is_err() {
+        return HookV2BindingAdmission::CatchupRequired;
+    }
+    HookV2BindingAdmission::Bound(snapshot)
+}
+
+fn hook_v2_binding_admission(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     now: UtcMicros,
-) -> Result<Option<tracedecay_hooks::HookConfigurationSnapshotV1>> {
+) -> HookV2BindingAdmission {
     let layout = cg.hook_store_layout();
     let subscriber = tracedecay_hooks::HookConfigurationSubscriberV1::new(
         tracedecay_hooks::HookConfigurationFileReaderV1::new(
             tracedecay_hooks::hook_configuration_path(&layout.data_root, envelope.producer),
         ),
     );
-    let tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(snapshot) =
-        subscriber.load_current(envelope.producer, now)
-    else {
-        return Ok(None);
-    };
-    envelope
-        .validate(&snapshot.binding)
-        .map_err(|error| config_error(format!("Hook V2 scope rejected: {error}")))?;
-    Ok(Some(snapshot))
+    classify_hook_v2_binding(envelope, subscriber.load_current(envelope.producer, now))
+}
+
+fn hook_v2_catchup_response(action: &str) -> Value {
+    json!({
+        "action": action,
+        "status": "rejected",
+        "disposition": tracedecay_hooks::HookTransportDispositionV1::CatchupRequired,
+    })
 }
 
 async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Value> {
     let envelope = hook_v2_envelope(args, action)?;
     let now = hook_now();
-    let Some(snapshot) = hook_v2_binding_snapshot(cg, &envelope, now)? else {
-        return Ok(json!({
-            "action": action,
-            "status": "unavailable",
-        }));
-    };
-    let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({
-            "action": action,
-            "status": "unavailable",
-            "ready_guidance": Value::Null,
-        }));
-    };
-    let ready = owner
-        .claim_ready_guidance(&envelope, snapshot.revision, now)
-        .await;
-    let ready_guidance = match ready {
-        Some((guidance, claim)) => {
-            let _ = owner.requeue(claim).await;
-            serde_json::to_value(guidance).unwrap_or(Value::Null)
+    let snapshot = match hook_v2_binding_admission(cg, &envelope, now) {
+        HookV2BindingAdmission::Bound(snapshot) => snapshot,
+        HookV2BindingAdmission::Unavailable => {
+            return Ok(json!({
+                "action": action,
+                "status": "unavailable",
+            }));
         }
+        HookV2BindingAdmission::CatchupRequired => {
+            return Ok(hook_v2_catchup_response(action));
+        }
+    };
+    let ready_guidance = match cg.context_scout_owner() {
+        Some(owner) => match owner
+            .claim_ready_guidance(&envelope, snapshot.revision, now)
+            .await
+        {
+            Some((guidance, claim)) => {
+                let _ = owner.requeue(claim).await;
+                serde_json::to_value(guidance).unwrap_or(Value::Null)
+            }
+            None => Value::Null,
+        },
         None => Value::Null,
     };
+    let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
+    let orchestration = crate::daemon::admit_registered_pr13_hook_orchestration(
+        envelope.clone(),
+        snapshot.binding.clone(),
+        lifecycle,
+        snapshot.revision,
+        false,
+    );
+    let feedback_notice = crate::application::advisory::claim_pr13_advisory_hook_notice(
+        envelope.project_id,
+        envelope.worktree_id,
+    )
+    .and_then(|notice| serde_json::to_value(notice).ok())
+    .unwrap_or(Value::Null);
     Ok(json!({
         "action": action,
         "status": "accepted",
+        "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+        "orchestration": orchestration,
         "ready_guidance": ready_guidance,
+        "feedback_notice": feedback_notice,
     }))
 }
 
 async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let envelope = hook_v2_envelope(args, "hook_v2_scout_prepare")?;
-    let input = serde_json::from_value::<
-        crate::agents::context_scout_v2::ContextScoutSelectionInputV1,
-    >(required_value(args, "input")?)
-    .map_err(|error| config_error(format!("invalid Context Scout input: {error}")))?;
-    let control = serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutControlV1>(
-        required_value(args, "control")?,
-    )
-    .map_err(|error| config_error(format!("invalid Context Scout control: {error}")))?;
     let now = hook_now();
-    if hook_v2_binding_snapshot(cg, &envelope, now)?.is_none() {
-        return Ok(json!({
-            "action": "hook_v2_scout_prepare",
-            "status": "unavailable",
-        }));
-    }
-    validate_scout_prepare_scope(&input, envelope.project_id, envelope.protected_session_id)?;
-    let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({
-            "action": "hook_v2_scout_prepare",
-            "status": "unavailable",
-        }));
-    };
-    let execution = crate::agents::context_scout_v2::ContextScoutModelExecutionV1::new(
-        MonotonicDeadline::at(Instant::now() + CONTEXT_SCOUT_MODEL_DEADLINE),
-        CancellationToken::new(),
-        control.limits,
-    )
-    .map_err(|error| config_error(format!("invalid Context Scout execution: {error}")))?;
-    let outcome = owner
-        .runtime()
-        .await
-        .prepare_controlled(&input, control, execution)
-        .await
-        .map_err(|error| config_error(format!("Context Scout preparation failed: {error}")))?;
-    Ok(scout_prepare_response(outcome))
-}
-
-fn validate_scout_prepare_scope(
-    input: &crate::agents::context_scout_v2::ContextScoutSelectionInputV1,
-    project_id: [u8; 16],
-    protected_session_id: [u8; 32],
-) -> Result<()> {
-    if input.address.project_id != project_id
-        || input.address.protected_session_id != protected_session_id
-    {
-        return Err(config_error(
-            "Context Scout input scope does not match the Hook V2 envelope",
-        ));
-    }
-    Ok(())
-}
-
-fn scout_prepare_response(
-    outcome: crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1,
-) -> Value {
-    match outcome {
-        crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Enqueued {
-            entry,
-            store_outcome,
-        } => json!({
-            "action": "hook_v2_scout_prepare",
-            "status": scout_store_outcome(store_outcome),
-            "route": entry.route,
-        }),
-        crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Suppressed { reason } => {
-            json!({
+    let snapshot = match hook_v2_binding_admission(cg, &envelope, now) {
+        HookV2BindingAdmission::Bound(snapshot) => snapshot,
+        HookV2BindingAdmission::Unavailable => {
+            return Ok(json!({
                 "action": "hook_v2_scout_prepare",
-                "status": "suppressed",
-                "reason": reason,
-            })
+                "status": "unavailable",
+            }));
         }
-        crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Unavailable => json!({
-            "action": "hook_v2_scout_prepare",
+        HookV2BindingAdmission::CatchupRequired => {
+            return Ok(hook_v2_catchup_response("hook_v2_scout_prepare"));
+        }
+    };
+    let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
+    Ok(orchestration_response(
+        "hook_v2_scout_prepare",
+        crate::daemon::admit_registered_pr13_hook_orchestration(
+            envelope.clone(),
+            snapshot.binding,
+            lifecycle,
+            snapshot.revision,
+            true,
+        ),
+    ))
+}
+
+fn orchestration_response(
+    action: &str,
+    outcome: crate::daemon::Pr13HookOrchestrationAdmissionV1,
+) -> Value {
+    use crate::daemon::Pr13HookOrchestrationAdmissionV1 as Admission;
+    match outcome {
+        Admission::Enqueued => json!({ "action": action, "status": "accepted" }),
+        Admission::Backpressured => json!({ "action": action, "status": "deferred" }),
+        Admission::UnsupportedTrigger => json!({ "action": action, "status": "unsupported" }),
+        Admission::Unavailable => json!({
+            "action": action,
             "status": "unavailable",
+            "reason": "orchestration_unavailable",
         }),
     }
 }
@@ -373,32 +397,61 @@ fn host_admission_facade<'a>(
     authorities: SessionAuthorities<'a>,
 ) -> Result<HostAdmissionFacade<'a>> {
     let authority = match scope {
-        HostAdmissionScope::Project => match authorities.project {
-            Some(db) => HostAdmissionAuthorities::for_project(
-                db.as_ref(),
-                project_observation_id(
-                    cg.ok_or_else(|| config_error("project admission requires a project"))?,
-                )?,
+        HostAdmissionScope::Project => {
+            let project_id = project_observation_id(
+                cg.ok_or_else(|| config_error("project admission requires a project"))?,
+            )?;
+            match (
+                authorities.project,
+                authorities.profile_identity,
+                authorities.project_registered,
+            ) {
+                (Some(_), Some(identity), Some(registered)) => {
+                    HostAdmissionAuthorities::for_project(
+                        identity.brain_id().clone(),
+                        identity.profile_id().clone(),
+                        project_id,
+                        registered,
+                    )
+                }
+                (Some(_), Some(identity), None) => {
+                    HostAdmissionAuthorities::unavailable_for_project(
+                        identity.brain_id().clone(),
+                        identity.profile_id().clone(),
+                        project_id,
+                    )
+                }
+                (Some(_), None, _) | (None, _, _) => HostAdmissionAuthorities::default(),
+            }
+        }
+        HostAdmissionScope::Profile => match (
+            authorities.user,
+            authorities.profile_identity,
+            authorities.profile_registered,
+        ) {
+            (Some(_), Some(identity), Some(registered)) => HostAdmissionAuthorities::for_profile(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+                registered,
             ),
-            None => HostAdmissionAuthorities::default(),
+            (Some(_), Some(identity), None) => HostAdmissionAuthorities::unavailable_for_profile(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+            ),
+            (Some(_), None, _) | (None, _, _) => HostAdmissionAuthorities::default(),
         },
-        HostAdmissionScope::Profile => authorities
-            .user
-            .map_or_else(HostAdmissionAuthorities::default, |db| {
-                HostAdmissionAuthorities::for_profile(db.as_ref())
-            }),
     };
     Ok(HostAdmissionFacade::new(authority))
 }
 
-fn required_project_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
+fn required_project_db(authorities: SessionAuthorities<'_>) -> Result<&RegisteredGlobalDb> {
     authorities
         .project
         .map(AsRef::as_ref)
         .ok_or_else(|| config_error("daemon project session database is unavailable"))
 }
 
-fn required_user_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
+fn required_user_db(authorities: SessionAuthorities<'_>) -> Result<&RegisteredGlobalDb> {
     authorities
         .user
         .map(AsRef::as_ref)
@@ -428,23 +481,26 @@ async fn drain_host_observation_projections(
     Ok(stats.transcript.messages_upserted)
 }
 
-async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<Value> {
+async fn codex_compact(
+    cg: &TraceDecay,
+    args: &Value,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
+    let db = required_project_db(session_authorities)?;
     if let Some(source) = crate::sessions::codex::CodexSource::new() {
         let project_id = project_observation_id(cg)?;
         let scope = ObservationScopeV1::Project {
             project_id: project_id.clone(),
         };
-        let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-            db,
-            project_id.clone(),
-        ));
+        let admission =
+            host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
         for path in source.transcript_paths(cg.project_root()) {
-            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project(
+            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project_with_admission(
                 &path,
-                db,
                 cg.project_root(),
                 project_id.clone(),
+                &admission,
                 None,
             )
             .await
@@ -496,19 +552,24 @@ async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<V
     }))
 }
 
-async fn cursor_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<Value> {
+async fn cursor_compact(
+    cg: &TraceDecay,
+    args: &Value,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
+    let db = required_project_db(session_authorities)?;
+    let project_id = project_observation_id(cg)?;
+    let admission =
+        host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
     let parsed: Value = serde_json::from_str(event_json)?;
     let session_id = ["session_id", "conversation_id", "chat_id"]
         .iter()
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
-    let ingest = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped(
-        event_json,
-        db,
-        project_observation_id(cg)?,
-        None,
+    let ingest = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
+        event_json, project_id, &admission, None,
     )
     .await
     .map_err(|error| map_transcript_ingest_error(&error))?;
@@ -622,7 +683,10 @@ fn cursor_lcm_request(
     }
 }
 
-async fn accounting_receipt(cg: &TraceDecay, global_db: Option<&GlobalDb>) -> Result<Value> {
+async fn accounting_receipt(
+    cg: &TraceDecay,
+    global_db: Option<&RegisteredGlobalDb>,
+) -> Result<Value> {
     let global_db = global_db.ok_or_else(|| {
         config_error("daemon accounting database is unavailable; local fallback is forbidden")
     })?;
@@ -647,7 +711,7 @@ async fn ingest_transcript(
     cg: Option<&TraceDecay>,
     args: &Value,
     profile_root: Option<&Path>,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
     let provider = required_str(args, "provider")?;
@@ -661,8 +725,8 @@ async fn ingest_transcript(
     } else {
         HostAdmissionScope::Project
     };
-    let admission = host_admission_facade(cg, admission_scope, session_authorities)?
-        .accept_replay(provider, admission_scope);
+    let facade = host_admission_facade(cg, admission_scope, session_authorities)?;
+    let admission = facade.accept_replay(provider, admission_scope);
     match admission.status {
         HostAdmissionStatus::Unavailable => {
             return Err(TraceDecayError::hook_runtime(
@@ -689,15 +753,15 @@ async fn ingest_transcript(
                 profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let session_id = required_str(args, "session_id")?.to_string();
-            let db = required_user_db(session_authorities)?;
+            required_user_db(session_authorities)?;
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            let stats = crate::sessions::claude_observation::ingest_user_sessions(
-                db,
+            let stats = crate::sessions::claude_observation::ingest_user_sessions_with_admission(
                 profile_root,
                 Some(session_id),
                 roots,
+                &facade,
                 Some(
                     max_new_bytes
                         .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
@@ -718,11 +782,11 @@ async fn ingest_transcript(
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::try_ingest_user_codex_sessions_with_db(
-                required_user_db(session_authorities)?,
+            crate::sessions::try_ingest_user_codex_sessions_with_db_and_admission(
                 profile_root,
                 Some(session_id),
                 roots,
+                &facade,
             )
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?
@@ -732,13 +796,12 @@ async fn ingest_transcript(
             profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let event_json = required_str(args, "event_json")?;
-            let db = required_user_db(session_authorities)?;
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::cursor::try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
+            crate::sessions::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
                 event_json,
-                db,
+                &facade,
                 max_new_bytes,
                 &roots,
             )
@@ -750,11 +813,10 @@ async fn ingest_transcript(
             let cg =
                 cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
             let event_json = required_str(args, "event_json")?;
-            let db = required_project_db(session_authorities)?;
-            crate::sessions::cursor::try_ingest_cursor_transcript_event_capped(
+            crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
                 event_json,
-                db,
                 project_observation_id(cg)?,
+                &facade,
                 max_new_bytes,
             )
             .await
@@ -765,14 +827,12 @@ async fn ingest_transcript(
             let profile_root =
                 profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
-            let db = required_user_db(session_authorities)?;
             let source = crate::sessions::kiro::KiroSource::new()
                 .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             let source = source.for_user_scope(roots);
-            let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
             let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
                 &facade,
                 &source,
@@ -790,15 +850,12 @@ async fn ingest_transcript(
         ("kiro", false) => {
             let cg =
                 cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
-            let db = required_project_db(session_authorities)?;
             let source = crate::sessions::kiro::KiroSource::new()
                 .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
             let project_id = project_observation_id(cg)?;
             let scope = ObservationScopeV1::Project {
                 project_id: project_id.clone(),
             };
-            let facade =
-                HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(db, project_id));
             let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
                 &facade,
                 &source,
@@ -923,7 +980,11 @@ fn hook_admission_error_status(reason_code: &str) -> HostAdmissionStatus {
     }
 }
 
-async fn user_review(args: &Value, profile_root: &Path) -> Result<Value> {
+async fn user_review(
+    args: &Value,
+    profile_root: &Path,
+    session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
+) -> Result<Value> {
     use crate::automation::run_ledger::AutomationTrigger;
 
     let provider = required_str(args, "provider")?;
@@ -946,6 +1007,7 @@ async fn user_review(args: &Value, profile_root: &Path) -> Result<Value> {
     }
     let run = run_user_review(
         profile_root,
+        Arc::clone(session_runtime_registry),
         provider,
         session_id,
         run_id,
@@ -963,6 +1025,7 @@ async fn user_review(args: &Value, profile_root: &Path) -> Result<Value> {
 
 async fn run_user_review(
     profile_root: &std::path::Path,
+    session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     provider: &str,
     session_id: Option<String>,
     run_id: Option<String>,
@@ -985,6 +1048,7 @@ async fn run_user_review(
     let backend = CodexAppServerBackend::from_automation_config(&config);
     run_user_session_automation_with_backend(
         profile_root,
+        session_runtime_registry,
         &config,
         &backend,
         UserSessionAutomationOptions {
@@ -1166,7 +1230,8 @@ pub(crate) async fn replay_projectless_hermes_host_admission(
 
 async fn continue_projectless_hermes_review(
     profile_root: &Path,
-    session_db: &GlobalDb,
+    session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
+    session_db: &RegisteredGlobalDb,
 ) -> Result<Value> {
     let dashboard_root = crate::automation::runner::user_automation_root(profile_root);
     let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
@@ -1192,6 +1257,7 @@ async fn continue_projectless_hermes_review(
         .and_then(|route| route.session_id.clone());
     let run = run_user_review(
         profile_root,
+        Arc::clone(session_runtime_registry),
         "hermes",
         session_id,
         Some(format!("user_host_receipt_{}", ready.pending.generation)),
@@ -1215,7 +1281,8 @@ async fn continue_projectless_hermes_review(
 async fn hermes_receipt(
     args: &Value,
     profile_root: &Path,
-    session_db: &GlobalDb,
+    session_runtime_registry: Option<&Arc<DaemonSessionRuntimeRegistryV1>>,
+    session_db: &RegisteredGlobalDb,
     broker: &SharedHostAdmissionBroker,
 ) -> Result<Value> {
     let event_value = args
@@ -1272,7 +1339,15 @@ async fn hermes_receipt(
         return Err(map_host_admission_outcome(outcome));
     }
     if is_turn_ingested {
-        return continue_projectless_hermes_review(profile_root, session_db).await;
+        let session_runtime_registry = session_runtime_registry.ok_or_else(|| {
+            config_error("Hermes review requires retained profile runtime registry authority")
+        })?;
+        return continue_projectless_hermes_review(
+            profile_root,
+            session_runtime_registry,
+            session_db,
+        )
+        .await;
     }
     Ok(json!({ "action": "hermes_receipt", "status": "recorded" }))
 }
@@ -1280,7 +1355,6 @@ async fn hermes_receipt(
 #[cfg(test)]
 mod tests {
     use std::io;
-    use std::sync::Arc;
 
     use tracedecay_domain::{
         CanonicalObservationIdV1, ObservationCollisionOutcomeV1, PayloadDigestV1,
@@ -1288,6 +1362,7 @@ mod tests {
     use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
 
     use super::*;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::application::observation::{
         CaptureClaudeObservationRequestError, ObservationApplicationError,
     };
@@ -1354,63 +1429,139 @@ mod tests {
     }
 
     #[test]
-    fn hook_v2_scout_prepare_is_scope_bound_and_content_free() {
-        let mut input = crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
-            address: crate::agents::context_scout_v2::ContextScoutAddressV1 {
-                profile_id: [1; 16],
-                provider_id: [2; 16],
-                protected_session_id: [3; 32],
-                thread_id: [4; 16],
-                turn_id: [5; 16],
-                agent_id: [6; 16],
-                logical_message_id: [7; 16],
-                project_id: [8; 16],
-            },
-            input_watermark: [9; 32],
-            configuration_revision: [10; 32],
-            envelope_id: [11; 16],
-            now: tracedecay_domain::UtcMicros(1),
-            delivery_window:
-                crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::Immediate,
-            delivered_dedupe_keys: std::collections::BTreeSet::new(),
-            candidates: Vec::new(),
-        };
-        assert!(validate_scout_prepare_scope(&input, [8; 16], [3; 32]).is_ok());
-
-        input.address.project_id = [12; 16];
-        assert!(validate_scout_prepare_scope(&input, [8; 16], [3; 32]).is_err());
-        input.address.project_id = [8; 16];
-        input.address.protected_session_id = [13; 32];
-        assert!(validate_scout_prepare_scope(&input, [8; 16], [3; 32]).is_err());
-
-        let response = scout_prepare_response(
-            crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Suppressed {
-                reason: crate::agents::context_scout_v2::ContextScoutSuppressionV1::DirtyOverlay,
-            },
+    fn hook_v2_scout_prepare_accepts_no_caller_candidates() {
+        let response = orchestration_response(
+            "hook_v2_scout_prepare",
+            crate::daemon::Pr13HookOrchestrationAdmissionV1::Unavailable,
         );
-        assert_eq!(response["action"], "hook_v2_scout_prepare");
-        assert_eq!(response["status"], "suppressed");
-        assert_eq!(response["reason"], "dirty_overlay");
-        assert!(!response.to_string().contains("suggestion_text"));
+        assert_eq!(response["status"], "unavailable");
+        assert_eq!(response["reason"], "orchestration_unavailable");
+        assert!(!response.to_string().contains("candidate"));
+        assert!(!response.to_string().contains("control"));
+    }
+
+    #[test]
+    fn hook_v2_native_session_requires_exact_protected_locator() {
+        let session_id = "native-session-1";
+        let mut envelope = hook_v2_envelope_for_test();
+        envelope.protected_session_id =
+            crate::hooks::hook_v2_protected_session_id_for_native(session_id);
+        assert_eq!(
+            hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope)
+                .as_ref()
+                .map(SessionId::as_str),
+            Some(session_id)
+        );
+
+        envelope.protected_session_id = [9; 32];
+        assert!(
+            hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope)
+                .is_none()
+        );
+    }
+
+    fn hook_v2_snapshot() -> tracedecay_hooks::HookConfigurationSnapshotV1 {
+        tracedecay_hooks::HookConfigurationSnapshotV1 {
+            schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
+            revision: 1,
+            published_at: UtcMicros(1),
+            expires_at: UtcMicros(100),
+            binding: tracedecay_hooks::HookScopeBindingV1 {
+                host: tracedecay_hooks::HookHostV1::ClaudeCode,
+                project_id: [1; 16],
+                repository_id: [2; 16],
+                worktree_id: [3; 16],
+                worktree_epoch: 4,
+                binding_token: [5; 32],
+                capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+                    family: tracedecay_hooks::HookEventFamily::SessionBoundary,
+                    support: tracedecay_hooks::HookEventSupportV1::Native,
+                }],
+            },
+        }
+    }
+
+    fn hook_v2_envelope_for_test() -> tracedecay_hooks::HookEventEnvelopeV2 {
+        tracedecay_hooks::HookEventEnvelopeV2 {
+            schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+            event_id: [6; 16],
+            producer: tracedecay_hooks::HookHostV1::ClaudeCode,
+            protected_session_id: [7; 32],
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: 4,
+            binding_token: [5; 32],
+            ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+            observed_at: UtcMicros(2),
+            event: tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::Start,
+            },
+        }
+    }
+
+    #[test]
+    fn hook_v2_binding_epoch_mismatch_requires_authoritative_catchup() {
+        let mut envelope = hook_v2_envelope_for_test();
+        envelope.worktree_epoch += 1;
+
+        assert!(matches!(
+            classify_hook_v2_binding(
+                &envelope,
+                tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(hook_v2_snapshot()),
+            ),
+            HookV2BindingAdmission::CatchupRequired
+        ));
+    }
+
+    #[test]
+    fn hook_v2_binding_capability_rejection_requires_authoritative_catchup() {
+        let mut envelope = hook_v2_envelope_for_test();
+        envelope.event = tracedecay_hooks::HookEventV2::PromptBoundary;
+
+        assert!(matches!(
+            classify_hook_v2_binding(
+                &envelope,
+                tracedecay_hooks::HookConfigurationReadOutcomeV1::Bound(hook_v2_snapshot()),
+            ),
+            HookV2BindingAdmission::CatchupRequired
+        ));
+    }
+
+    #[test]
+    fn hook_v2_missing_configuration_remains_transiently_unavailable() {
+        assert!(matches!(
+            classify_hook_v2_binding(
+                &hook_v2_envelope_for_test(),
+                tracedecay_hooks::HookConfigurationReadOutcomeV1::Missing,
+            ),
+            HookV2BindingAdmission::Unavailable
+        ));
+    }
+
+    #[test]
+    fn hook_v2_catchup_response_propagates_transport_disposition() {
+        let response = hook_v2_catchup_response("hook_v2_admit");
+        assert_eq!(response["status"], "rejected");
+        assert_eq!(response["disposition"], "catchup_required");
     }
 
     #[tokio::test]
-    async fn replayable_profile_ingest_admission_does_not_require_host_spool() {
+    async fn daemon_profile_ingest_rejects_an_unregistered_database() {
         let temp = tempfile::TempDir::new().unwrap();
-        let db = std::sync::Arc::new(
-            GlobalDb::open_at(&temp.path().join("user-sessions.db"))
-                .await
-                .unwrap(),
-        );
+        let fixture = HostAdmissionTestRuntimeV1::profile(temp.path())
+            .await
+            .unwrap();
         let admission = host_admission_facade(
             None,
             HostAdmissionScope::Profile,
-            SessionAuthorities::new(None, Some(&db)),
+            fixture.unregistered_mcp_session_authorities_for_test(HostAdmissionScope::Profile),
         )
         .unwrap()
         .accept_replay("cursor", HostAdmissionScope::Profile);
 
-        assert_eq!(admission.status, HostAdmissionStatus::AcceptedForReplay);
+        assert_eq!(admission.status, HostAdmissionStatus::Unavailable);
+        assert_eq!(admission.reason_code, Some("authority_unavailable"));
     }
 
     #[tokio::test]
@@ -1664,15 +1815,6 @@ mod tests {
         })
     }
 
-    fn user_profile_broker(user_sessions_db: &Path) -> SharedHostAdmissionBroker {
-        let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(
-                user_sessions_db,
-            )
-            .expect("open user-profile host admission spool");
-        Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime))
-    }
-
     #[tokio::test]
     async fn projectless_hermes_receipt_uses_user_profile_without_local_writer() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -1681,9 +1823,12 @@ mod tests {
         let hermes_profile = hermes_home.join("profiles/test");
         std::fs::create_dir_all(&hermes_profile).unwrap();
         std::fs::create_dir_all(&profile_root).unwrap();
-        let user_sessions_db = profile_root.join("user-sessions.db");
-        let db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
-        let broker = user_profile_broker(&user_sessions_db);
+        let fixture = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
+        let broker = fixture
+            .host_admission_broker_for_test(HostAdmissionScope::Profile)
+            .unwrap();
 
         let result = hermes_receipt(
             &json!({
@@ -1691,7 +1836,8 @@ mod tests {
                 "event": hermes_turn_completed_event("session-local-writer", "wm-local-1"),
             }),
             &profile_root,
-            &db,
+            None,
+            required_user_db(fixture.mcp_session_authorities()).unwrap(),
             &broker,
         )
         .await
@@ -1725,20 +1871,24 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("tracedecay-profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let user_sessions_db = profile_root.join("user-sessions.db");
-        let db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
+        let fixture = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
         let automation_root = crate::automation::runner::user_automation_root(&profile_root);
         // Block canonical apply so admission can prove durability-before-attempt.
         std::fs::write(&automation_root, "not-a-directory").unwrap();
 
-        let broker = user_profile_broker(&user_sessions_db);
+        let broker = fixture
+            .host_admission_broker_for_test(HostAdmissionScope::Profile)
+            .unwrap();
         let err = hermes_receipt(
             &json!({
                 "action": "hermes_receipt",
                 "event": hermes_turn_completed_event("session-restart", "wm-restart-1"),
             }),
             &profile_root,
-            &db,
+            None,
+            required_user_db(fixture.mcp_session_authorities()).unwrap(),
             &broker,
         )
         .await
@@ -1750,7 +1900,9 @@ mod tests {
         drop(broker);
 
         std::fs::remove_file(&automation_root).unwrap();
-        let recovered = user_profile_broker(&user_sessions_db);
+        let recovered = fixture
+            .host_admission_broker_for_test(HostAdmissionScope::Profile)
+            .unwrap();
         let outcome = replay_projectless_hermes_host_admission(&recovered, &profile_root).await;
         // A full drain with no target seq reports accepted_for_replay once the
         // retained prefix is committed; the durable watermark is the authority.
@@ -1790,9 +1942,12 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("tracedecay-profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let user_sessions_db = profile_root.join("user-sessions.db");
-        let _db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
-        let broker = user_profile_broker(&user_sessions_db);
+        let fixture = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
+        let broker = fixture
+            .host_admission_broker_for_test(HostAdmissionScope::Profile)
+            .unwrap();
         let valid_payload =
             valid_hermes_terminal_receipt_payload("session-sibling", "wm-sibling-1");
 
@@ -1841,9 +1996,12 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("tracedecay-profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let user_sessions_db = profile_root.join("user-sessions.db");
-        let _db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
-        let broker = user_profile_broker(&user_sessions_db);
+        let fixture = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
+        let broker = fixture
+            .host_admission_broker_for_test(HostAdmissionScope::Profile)
+            .unwrap();
         let admitted = broker
             .admit(
                 "hermes:invalid-plan-fixture",
@@ -1867,7 +2025,9 @@ mod tests {
         assert!(!rendered.contains("\"branch\":\"\""));
         drop(broker);
 
-        let recovered = user_profile_broker(&user_sessions_db);
+        let recovered = fixture
+            .host_admission_broker_for_test(HostAdmissionScope::Profile)
+            .unwrap();
         assert_eq!(recovered.pending_count().await, 0);
         assert_eq!(recovered.quarantine_count().await, 1);
         let reopen = replay_projectless_hermes_host_admission(&recovered, &profile_root).await;
@@ -1881,9 +2041,12 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("tracedecay-profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let user_sessions_db = profile_root.join("user-sessions.db");
-        let _db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
-        let broker = user_profile_broker(&user_sessions_db);
+        let fixture = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
+        let broker = fixture
+            .host_admission_broker_for_test(HostAdmissionScope::Profile)
+            .unwrap();
         let admitted = broker
             .admit(
                 "hermes:future-plan-fixture",

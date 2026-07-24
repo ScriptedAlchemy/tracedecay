@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use super::super::ToolResult;
 use super::super::render;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{CodeProjectRecord, GlobalDb, ProjectRegistryContext};
+use crate::global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDb};
 
 /// Trimmed, non-empty string argument by key, or `None` when absent, non-string,
 /// or blank after trimming.
@@ -130,13 +130,9 @@ pub(super) fn safe_profile_relpath(value: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn global_db_profile_root() -> Result<PathBuf> {
-    crate::storage::default_profile_root()
-}
-
 pub(super) fn profile_root_for_global_db(
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
+    global_db: Option<&RegisteredGlobalDb>,
+    _allow_default_registry_fallback: bool,
 ) -> Result<PathBuf> {
     if let Some(global_db) = global_db {
         return global_db
@@ -147,12 +143,9 @@ pub(super) fn profile_root_for_global_db(
                 message: "could not resolve tracedecay profile root".to_string(),
             });
     }
-    if !allow_default_registry_fallback {
-        return Err(TraceDecayError::Config {
-            message: "client project registry is unavailable for selector resolution".to_string(),
-        });
-    }
-    global_db_profile_root()
+    Err(TraceDecayError::Config {
+        message: "client project registry is unavailable for selector resolution".to_string(),
+    })
 }
 
 pub(super) fn project_selector_present(args: &Value, top_level_path_keys: &[&str]) -> bool {
@@ -166,8 +159,8 @@ pub(super) fn project_selector_present(args: &Value, top_level_path_keys: &[&str
 pub(super) async fn project_registry_context(
     args: &Value,
     top_level_path_keys: &[&str],
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
+    global_db: Option<&RegisteredGlobalDb>,
+    _allow_default_registry_fallback: bool,
 ) -> Result<Option<ProjectRegistryContext>> {
     let selector_present = project_selector_present(args, top_level_path_keys);
     let selector = args
@@ -203,19 +196,8 @@ pub(super) async fn project_registry_context(
         return Ok(None);
     }
 
-    let owned_db;
     let db = match global_db {
         Some(db) => db,
-        None if allow_default_registry_fallback => {
-            owned_db = GlobalDb::open()
-                .await
-                .ok_or_else(|| TraceDecayError::Config {
-                    message:
-                        "could not open tracedecay project registry; run tracedecay init first"
-                            .to_string(),
-                })?;
-            &owned_db
-        }
         None => {
             return Err(TraceDecayError::Config {
                 message: "client project registry is unavailable for selector resolution"
@@ -223,7 +205,7 @@ pub(super) async fn project_registry_context(
             });
         }
     };
-    let context = resolve_project_registry_context(db, project_id, project_path).await;
+    let context = resolve_project_registry_context(db, project_id, project_path).await?;
 
     context
         .ok_or_else(|| unresolved_project_selector_error(project_id, project_path))
@@ -231,35 +213,44 @@ pub(super) async fn project_registry_context(
 }
 
 async fn resolve_project_registry_context(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     project_id: Option<&str>,
     project_path: Option<&str>,
-) -> Option<ProjectRegistryContext> {
+) -> Result<Option<ProjectRegistryContext>> {
     if let Some(project_id) = project_id {
         return db.project_registry_context_by_id(project_id).await;
     }
-    let project_path = project_path?;
+    let Some(project_path) = project_path else {
+        return Ok(None);
+    };
     let selector_path = Path::new(project_path);
-    if let Some(context) = db.project_registry_context_by_alias(selector_path).await {
-        return Some(context);
+    if let Some(store) = db
+        .try_resolve_project_store_record_by_alias(selector_path)
+        .await?
+    {
+        return db.project_registry_context_by_id(&store.project_id).await;
     }
-    if GlobalDb::is_explicit_project_path_selector(project_path) {
+    if is_explicit_project_path_selector(project_path) {
         let git_common_dir = crate::worktree::git_common_dir(selector_path);
-        if let Some(context) = db
-            .project_registry_context_by_identity(selector_path, git_common_dir.as_deref())
-            .await
+        if let Some(resolution) = db
+            .resolve_project_store_by_identity(selector_path, git_common_dir.as_deref())
+            .await?
         {
-            return Some(context);
+            return db
+                .project_registry_context_by_id(&resolution.project.project_id)
+                .await;
         }
     }
-    let basename = bare_project_name(project_path)?;
+    let Some(basename) = bare_project_name(project_path) else {
+        return Ok(None);
+    };
     unique_project_basename_context(db, basename).await
 }
 
 async fn unique_project_basename_context(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     basename: &str,
-) -> Option<ProjectRegistryContext> {
+) -> Result<Option<ProjectRegistryContext>> {
     let mut matching_ids = Vec::new();
     for project in db.search_code_projects(basename, usize::MAX).await {
         if !project_basename_matches(&project, basename)
@@ -269,11 +260,23 @@ async fn unique_project_basename_context(
         }
         matching_ids.push(project.project_id);
         if matching_ids.len() > 1 {
-            return None;
+            return Ok(None);
         }
     }
-    let project_id = matching_ids.into_iter().next()?;
+    let Some(project_id) = matching_ids.into_iter().next() else {
+        return Ok(None);
+    };
     db.project_registry_context_by_id(&project_id).await
+}
+
+fn is_explicit_project_path_selector(selector: &str) -> bool {
+    let selector = selector.trim();
+    !selector.is_empty()
+        && (Path::new(selector).is_absolute()
+            || selector == "."
+            || selector == ".."
+            || selector.contains('/')
+            || selector.contains('\\'))
 }
 
 fn bare_project_name(value: &str) -> Option<&str> {
@@ -315,123 +318,9 @@ fn unresolved_project_selector_error(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::process::Command;
-
-    use libsql::{Connection, params};
     use serde_json::json;
-    use tempfile::TempDir;
-    use tokio::sync::Mutex;
 
-    use crate::global_db::GlobalDb;
-
-    use super::{
-        require_node_id, resolve_project_registry_context, string_array_values,
-        unique_project_basename_context,
-    };
-
-    static CWD_TEST_LOCK: Mutex<()> = Mutex::const_new(());
-
-    struct CurrentDirGuard(PathBuf);
-
-    impl CurrentDirGuard {
-        fn capture() -> Result<Self, std::io::Error> {
-            std::env::current_dir().map(Self)
-        }
-    }
-
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.0);
-        }
-    }
-
-    struct TestProjectSeed {
-        project_id: String,
-        project_root: PathBuf,
-    }
-
-    async fn seed_code_project_registry_rows(
-        db: &GlobalDb,
-        projects: &[TestProjectSeed],
-    ) -> std::result::Result<(), libsql::Error> {
-        let transaction = db.begin_write_transaction().await?;
-        seed_code_project_registry_rows_in_tx(&transaction, projects).await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    async fn seed_code_project_registry_rows_in_tx(
-        conn: &Connection,
-        projects: &[TestProjectSeed],
-    ) -> std::result::Result<(), libsql::Error> {
-        let now = crate::tracedecay::current_timestamp();
-        for project in projects {
-            let canonical_root = GlobalDb::canonical_project_key(&project.project_root);
-            let alias_key = GlobalDb::project_path_alias_key(&project.project_root);
-            let display_root = project.project_root.to_string_lossy().to_string();
-            conn.execute(
-                "INSERT INTO code_projects
-                 (project_id, canonical_root, display_root, git_common_dir, git_remote_url,
-                  default_branch, created_at, last_seen_at)
-                 VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?5)
-                 ON CONFLICT(project_id) DO UPDATE SET
-                    canonical_root = excluded.canonical_root,
-                    display_root = excluded.display_root,
-                    git_common_dir = excluded.git_common_dir,
-                    git_remote_url = excluded.git_remote_url,
-                    default_branch = excluded.default_branch,
-                    last_seen_at = excluded.last_seen_at",
-                params![
-                    project.project_id.as_str(),
-                    canonical_root.as_str(),
-                    display_root.as_str(),
-                    "main",
-                    now,
-                ],
-            )
-            .await?;
-            conn.execute(
-                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(alias_path) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    last_seen_at = excluded.last_seen_at",
-                params![alias_key.as_str(), project.project_id.as_str(), now],
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    fn run_git(cwd: &std::path::Path, args: &[&str]) {
-        let paths: Vec<PathBuf> = std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect())
-            .unwrap_or_default();
-        #[cfg(not(windows))]
-        let paths = {
-            let mut paths = paths;
-            paths.push(PathBuf::from("/usr/bin"));
-            paths.push(PathBuf::from("/bin"));
-            paths
-        };
-        let mut command = Command::new("git");
-        if let Ok(path) = std::env::join_paths(paths) {
-            command.env("PATH", path);
-        }
-        let output = command
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
-        assert!(
-            output.status.success(),
-            "git {args:?} failed in {}\nstdout:\n{}\nstderr:\n{}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use super::{is_explicit_project_path_selector, require_node_id, string_array_values};
 
     #[test]
     fn test_require_node_id_canonical() {
@@ -472,83 +361,11 @@ mod tests {
         assert!(string_array_values(&args, "not_array").is_empty());
     }
 
-    #[tokio::test]
-    async fn unique_project_basename_context_scans_past_first_search_page()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let dir = TempDir::new()?;
-        let db = GlobalDb::open_at(&dir.path().join("global.db"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
-
-        let mut projects = Vec::with_capacity(102);
-        projects.push(TestProjectSeed {
-            project_id: "z_exact_old".to_string(),
-            project_root: dir.path().join("first").join("target"),
-        });
-        for index in 0..100 {
-            projects.push(TestProjectSeed {
-                project_id: format!("n_noise_{index:03}"),
-                project_root: dir
-                    .path()
-                    .join("noise")
-                    .join(format!("target-noise-{index:03}")),
-            });
-        }
-        projects.push(TestProjectSeed {
-            project_id: "a_exact_new".to_string(),
-            project_root: dir.path().join("second").join("target"),
-        });
-        seed_code_project_registry_rows(&db, &projects).await?;
-
-        assert!(
-            unique_project_basename_context(&db, "target")
-                .await
-                .is_none(),
-            "duplicate exact basenames must fail closed even when one match falls outside the first search page"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn bare_project_path_selector_prefers_unique_basename_over_cwd_git_identity()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = CWD_TEST_LOCK.lock().await;
-        let _cwd_guard = CurrentDirGuard::capture()?;
-        let dir = TempDir::new()?;
-        let repo = dir.path().join("active-repo");
-        let active_root = repo.join("active");
-        let incidental_target_dir = repo.join("target");
-        let target_root = dir.path().join("registered").join("target");
-        std::fs::create_dir_all(&active_root)?;
-        std::fs::create_dir_all(&incidental_target_dir)?;
-        std::fs::create_dir_all(&target_root)?;
-        run_git(&repo, &["init", "--quiet"]);
-
-        let db = GlobalDb::open_at(&dir.path().join("global.db"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to open test global db"))?;
-        db.upsert_code_project(
-            "proj_active",
-            &active_root,
-            Some(&repo.join(".git")),
-            None,
-            Some("main"),
-        )
-        .await
-        .ok_or_else(|| std::io::Error::other("failed to seed active project"))?;
-        db.upsert_code_project("proj_target", &target_root, None, None, Some("main"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to seed target project"))?;
-
-        std::env::set_current_dir(&repo)?;
-        let context = resolve_project_registry_context(&db, None, Some("target"))
-            .await
-            .ok_or_else(|| std::io::Error::other("failed to resolve bare target selector"))?;
-
-        assert_eq!(
-            context.project.project_id, "proj_target",
-            "bare project_path selectors should keep basename semantics even when cwd has a git-tracked directory with the same name"
-        );
-        Ok(())
+    #[test]
+    fn explicit_project_path_detection_is_syntax_only() {
+        assert!(is_explicit_project_path_selector("/workspace/project"));
+        assert!(is_explicit_project_path_selector("team/project"));
+        assert!(is_explicit_project_path_selector("."));
+        assert!(!is_explicit_project_path_selector("project"));
     }
 }

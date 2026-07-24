@@ -525,11 +525,13 @@ async fn full_file_read_credits_zero_net_savings() {
         total.saved_tokens, 0,
         "ledger must not count a full-file read as savings"
     );
-    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
-        .await
-        .expect("global db opens at isolated path");
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        db_path.parent().expect("global db has a profile root"),
+    )
+    .await
+    .expect("registered profile runtime opens at isolated path");
     assert_eq!(
-        db.get_project_tokens(&project_path).await,
+        runtime.get_project_tokens(&project_path).await,
         0,
         "lifetime counter must not be credited with the gross before estimate"
     );
@@ -586,11 +588,13 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         before - after,
         "ledger net saving must match the metrics line"
     );
-    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
-        .await
-        .expect("global db opens at isolated path");
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        db_path.parent().expect("global db has a profile root"),
+    )
+    .await
+    .expect("registered profile runtime opens at isolated path");
     assert_eq!(
-        db.get_project_tokens(&project_path).await,
+        runtime.get_project_tokens(&project_path).await,
         total.saved_tokens,
         "lifetime counter must equal the ledger's net saving, not the gross before"
     );

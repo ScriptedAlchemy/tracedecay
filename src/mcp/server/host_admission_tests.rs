@@ -13,13 +13,13 @@ use super::{
     McpServerConstructionContext,
 };
 use crate::application::host_admission::{
-    HostAdmissionBroker, HostAdmissionOutcome, HostAdmissionRuntime, HostAdmissionStatus,
-    SharedHostAdmissionBroker, SpoolBounds,
+    HostAdmissionBroker, HostAdmissionOutcome, HostAdmissionRuntime, HostAdmissionScope,
+    HostAdmissionStatus, HostAdmissionTestRuntimeV1, SharedHostAdmissionBroker, SpoolBounds,
 };
 use crate::daemon::{DaemonHookEvent, HookAgent, HookRouteMetadata, HookTerminalReceipt};
 use crate::errors::TraceDecayError;
 use crate::mcp::project_route::HookProjectRouteCache;
-use crate::sessions::git_correlation::{GitRefFilter, SessionsForQuery};
+use crate::sessions::git_correlation::{CommitRelationFilter, GitRefFilter, SessionsForQuery};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 fn session_start(root: PathBuf) -> Value {
@@ -1118,15 +1118,34 @@ fn session_start_with_route(root: PathBuf) -> Value {
     .unwrap()
 }
 
+async fn registered_runtime(cg: &crate::tracedecay::TraceDecay) -> HostAdmissionTestRuntimeV1 {
+    let project_id = tracedecay_domain::ProjectId::new(
+        cg.store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .expect("project identity"),
+    )
+    .expect("typed project identity");
+    HostAdmissionTestRuntimeV1::project(
+        crate::config::user_data_dir().expect("isolated profile root"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .expect("registered host-admission runtime")
+}
+
 fn context_with_broker_and_analytics(
     cg: crate::tracedecay::TraceDecay,
     broker: SharedHostAdmissionBroker,
     writer: HookBranchWriter,
-    global_db: Arc<crate::global_db::GlobalDb>,
+    runtime: HostAdmissionTestRuntimeV1,
 ) -> McpServerConstructionContext {
-    let mut context = McpServerConstructionContext::direct(cg, None)
-        .with_hook_branch_writer(writer)
-        .with_direct_databases(Some(global_db), None, None, None, false);
+    let mut context = runtime
+        .into_mcp_server_context_for_test(cg, None)
+        .expect("registered MCP server context")
+        .with_hook_branch_writer(writer);
     context.host_admission_broker = Some(broker);
     context
 }
@@ -1135,30 +1154,15 @@ fn context_with_broker_analytics_and_registry(
     cg: crate::tracedecay::TraceDecay,
     broker: SharedHostAdmissionBroker,
     writer: HookBranchWriter,
-    global_db: Arc<crate::global_db::GlobalDb>,
+    runtime: HostAdmissionTestRuntimeV1,
 ) -> McpServerConstructionContext {
-    let mut context = McpServerConstructionContext::direct(cg, None)
-        .with_hook_branch_writer(writer)
-        .with_direct_databases(
-            Some(Arc::clone(&global_db)),
-            Some(Arc::clone(&global_db)),
-            Some(global_db),
-            None,
-            false,
-        );
-    context.host_admission_broker = Some(broker);
-    context
+    context_with_broker_and_analytics(cg, broker, writer, runtime)
 }
 
 #[tokio::test]
 async fn failed_admission_does_not_emit_hook_route_analytics() {
     let (cg, project, _pin) = init_indexed_repo().await;
-    let analytics_dir = TempDir::new().unwrap();
-    let global_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&analytics_dir.path().join("analytics.db"))
-            .await
-            .expect("open analytics db"),
-    );
+    let test_runtime = registered_runtime(&cg).await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -1175,7 +1179,7 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
         cg,
         Arc::clone(&broker),
         writer,
-        Arc::clone(&global_db),
+        test_runtime,
     ))
     .await;
     let mut routes = HookProjectRouteCache::default();
@@ -1188,8 +1192,10 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     server.ledger_writes_settled().await;
-    let rows = global_db
-        .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
+    let rows = server
+        .host_admission_test_runtime_for_test()
+        .expect("host-admission test runtime")
+        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: None,
@@ -1209,14 +1215,9 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
 #[tokio::test]
 async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
     let (cg, project, _pin) = init_indexed_repo().await;
-    let state_dir = TempDir::new().unwrap();
-    let global_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&state_dir.path().join("routing.db"))
-            .await
-            .expect("open routing db"),
-    );
+    let test_runtime = registered_runtime(&cg).await;
     let git_dir = project.path().join(".git");
-    let registered = global_db
+    let registered = test_runtime
         .upsert_code_project(
             "proj_route_admission",
             project.path(),
@@ -1226,7 +1227,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
         )
         .await
         .expect("register route project");
-    global_db
+    test_runtime
         .upsert_project_alias(project.path(), &registered.project_id)
         .await
         .expect("register route alias");
@@ -1258,7 +1259,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
         cg,
         Arc::clone(&broker),
         writer,
-        Arc::clone(&global_db),
+        test_runtime,
     ))
     .await;
     let raw_session = ["AKIA", "SYNTHETIC", "CANARY", "3"].concat();
@@ -1283,7 +1284,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
     let mut tool_arguments = json!({"query": "needle", "session_id": raw_session});
     crate::mcp::project_route::protect_tool_structural_ids(&mut tool_arguments)
         .expect("protect routed tool identities");
-    let routed = routes.apply_to_tool_arguments("tracedecay_search", tool_arguments);
+    let routed = routes.apply_to_tool_arguments("tracedecay_grep", tool_arguments);
     assert_eq!(
         routed["project_selector"]["path"], registered.canonical_root,
         "the same connection must route tools after durable append"
@@ -1301,8 +1302,11 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
             .contains(event["route"]["session_id"].as_str().expect("raw session"))
     );
     server.ledger_writes_settled().await;
-    let rows = global_db
-        .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
+    let test_runtime = server
+        .host_admission_test_runtime_for_test()
+        .expect("host-admission test runtime");
+    let rows = test_runtime
+        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: None,
@@ -1313,13 +1317,16 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
         .await
         .expect("query pre-commit analytics");
     assert!(rows.is_empty(), "retained effects must not leak analytics");
-    let spans = global_db
-        .git_sessions_for(&SessionsForQuery {
-            git_ref: GitRefFilter::Branch("main".to_string()),
-            since: None,
-            until: None,
-            limit: 16,
-        })
+    let spans = test_runtime
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("main".to_string()),
+                since: None,
+                until: None,
+                limit: 16,
+            },
+            CommitRelationFilter::Produced,
+        )
         .await
         .expect("query pre-commit hook spans");
     assert!(spans.is_empty(), "retained effects must not leak git spans");
@@ -1344,12 +1351,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
 #[tokio::test]
 async fn committed_admissions_emit_post_commit_private_route_analytics() {
     let (cg, project, _pin) = init_indexed_repo().await;
-    let analytics_dir = TempDir::new().unwrap();
-    let global_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&analytics_dir.path().join("analytics.db"))
-            .await
-            .expect("open analytics db"),
-    );
+    let test_runtime = registered_runtime(&cg).await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -1367,7 +1369,7 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
         cg,
         Arc::clone(&broker),
         writer,
-        Arc::clone(&global_db),
+        test_runtime,
     ))
     .await;
     let mut routes = HookProjectRouteCache::default();
@@ -1387,8 +1389,10 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
     ));
     server.ledger_writes_settled().await;
 
-    let rows = global_db
-        .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
+    let rows = server
+        .host_admission_test_runtime_for_test()
+        .expect("host-admission test runtime")
+        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: None,
@@ -1421,15 +1425,21 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
 async fn credential_canary_receipt_analytics_and_git_span_survive_database_reopen() {
     let (cg, project, _pin) = init_indexed_repo().await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let state_dir = TempDir::new().unwrap();
-    let database_path = state_dir.path().join("identity.db");
-    let global_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&database_path)
+    let profile_root = crate::config::user_data_dir().expect("isolated profile root");
+    let project_id = tracedecay_domain::ProjectId::new(
+        cg.store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .expect("project identity"),
+    )
+    .expect("typed project identity");
+    let test_runtime =
+        HostAdmissionTestRuntimeV1::project(&profile_root, project.path(), project_id.clone())
             .await
-            .expect("open identity db"),
-    );
+            .expect("registered host-admission runtime");
     let git_dir = project.path().join(".git");
-    let registered = global_db
+    let registered = test_runtime
         .upsert_code_project(
             "proj_hook_identity",
             project.path(),
@@ -1439,7 +1449,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         )
         .await
         .expect("register identity project");
-    global_db
+    test_runtime
         .upsert_project_alias(project.path(), &registered.project_id)
         .await
         .expect("register identity alias");
@@ -1453,33 +1463,40 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         cg,
         Arc::clone(&broker),
         success_writer(),
-        Arc::clone(&global_db),
+        test_runtime,
     ))
     .await;
     let raw = ["AKIA", "SYNTHETIC", "CANARY", "4"].concat();
     let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
+    let session = SessionRecord {
+        provider: "hermes".to_string(),
+        session_id: protected.clone(),
+        project_key: registered.canonical_root.clone(),
+        project_path: registered.canonical_root.clone(),
+        title: None,
+        started_at: Some(1),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    let test_runtime = server
+        .host_admission_test_runtime_for_test()
+        .expect("host-admission test runtime");
     assert!(
-        global_db
-            .upsert_session(&SessionRecord {
-                provider: "hermes".to_string(),
-                session_id: protected.clone(),
-                project_key: registered.canonical_root.clone(),
-                project_path: registered.canonical_root.clone(),
-                title: None,
-                started_at: Some(1),
-                ended_at: None,
-                transcript_path: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
+        test_runtime
+            .upsert_session_for_test(HostAdmissionScope::Project, &session)
             .await
+            .expect("seed protected session")
     );
-    assert!(
-        global_db
-            .upsert_session_message(&SessionMessageRecord {
+    test_runtime
+        .upsert_transcript_batch_for_test(
+            HostAdmissionScope::Project,
+            &session,
+            std::slice::from_ref(&SessionMessageRecord {
                 provider: "hermes".to_string(),
                 message_id: protected.clone(),
                 session_id: protected.clone(),
@@ -1493,9 +1510,12 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
                 source_path: None,
                 source_offset: None,
                 metadata_json: None,
-            })
-            .await
-    );
+            }),
+            &format!("host-admission-test-message:hermes:{protected}"),
+            crate::global_db::ParseOffset::default(),
+        )
+        .await
+        .expect("seed protected transcript");
     let route = HookRouteMetadata {
         session_id: Some(raw.clone()),
         thread_id: Some(raw.clone()),
@@ -1538,22 +1558,20 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     assert_eq!(ready.pending.session_key, protected);
     assert_eq!(ready.transcript_watermark, protected);
     assert!(
-        global_db
-            .lcm_load_raw_message("hermes", &ready.transcript_watermark)
+        test_runtime
+            .project_lcm_raw_message_exists_for_test("hermes", &ready.transcript_watermark)
             .await
-            .is_some(),
+            .expect("query protected LCM message"),
         "receipt watermark must join the protected LCM message"
     );
 
     server.shutdown().await;
     drop(server);
-    drop(global_db);
-
-    let reopened = crate::global_db::GlobalDb::open_at(&database_path)
+    let reopened = HostAdmissionTestRuntimeV1::project(&profile_root, project.path(), project_id)
         .await
-        .expect("reopen identity db");
+        .expect("reopen registered host-admission runtime");
     let analytics = reopened
-        .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
+        .query_profile_analytics_events_for_test(&crate::global_db::AnalyticsEventQuery {
             provider: Some("daemon_hook".to_string()),
             project_id: None,
             session_id: Some(protected.clone()),
@@ -1574,19 +1592,22 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     }));
     assert!(
         reopened
-            .lcm_load_raw_message("hermes", &protected)
+            .project_lcm_raw_message_exists_for_test("hermes", &protected)
             .await
-            .is_some(),
+            .expect("query reopened protected LCM message"),
         "protected LCM join must survive database reopen"
     );
 
     let spans = reopened
-        .git_sessions_for(&SessionsForQuery {
-            git_ref: GitRefFilter::Branch("main".to_string()),
-            since: None,
-            until: None,
-            limit: 16,
-        })
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("main".to_string()),
+                since: None,
+                until: None,
+                limit: 16,
+            },
+            CommitRelationFilter::Produced,
+        )
         .await
         .expect("query protected hook spans after reopen");
     assert!(

@@ -260,12 +260,9 @@ async fn lineage(
 }
 
 async fn scalar_i64(db: &Database, sql: &str, fact_id: &FactId) -> i64 {
-    let mut rows = db
-        .conn()
-        .query(sql, libsql::params![fact_id.as_str()])
+    db.query_scalar_i64_with_text("inspect anchor tombstone fixture", sql, fact_id.as_str())
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+        .unwrap()
 }
 
 fn assert_no_payload_bytes(markers: &[&str], rendered: &[String]) {

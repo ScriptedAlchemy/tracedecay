@@ -1,6 +1,6 @@
 use tracedecay_domain::{FactOwnerV1, SourceStoreId};
 
-use crate::db::engine::{self, Executor, params};
+use crate::db::engine::{self, params};
 use crate::errors::Result;
 
 use super::backfill::{backfill_fact_batch, backfill_feedback_batch, backfill_oplog_batch};

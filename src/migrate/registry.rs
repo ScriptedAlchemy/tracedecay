@@ -2,16 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use libsql::{Connection, params, params::IntoParams};
 use serde::Serialize;
 
 use crate::branch_meta;
+use crate::db::engine::{Executor, IntoParams, QueryExecutor, params};
 use crate::global_db::{
-    CodeProjectRecord, GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert,
+    CodeProjectRecord, GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert,
+    StoreInstanceUpsert,
 };
 use crate::storage::{
-    ProjectStorageStatus, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
+    ProjectStorageLocation, ProjectStorageStatus, STORE_MANIFEST_FILENAME,
+    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, read_enrollment_marker,
+    read_repository_identity_marker, read_store_manifest,
     try_classify_project_storage_with_registry, validate_project_id,
 };
 
@@ -103,8 +105,150 @@ pub struct RegistryReconstructionDiffReport {
     pub issues: Vec<String>,
 }
 
+/// Opaque retained runtime for offline migration commands.
+///
+/// The command crate can request exact registry/session operations without
+/// receiving database handles or reopening owned paths.
+pub struct MigrationRegistryRuntime {
+    registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    profile_database: std::sync::Arc<RegisteredGlobalDb>,
+}
+
+impl MigrationRegistryRuntime {
+    /// Mounts an existing profile registry without creating a database.
+    ///
+    /// Callers hold the profile's exclusive maintenance lease, so this
+    /// existence check cannot race another authorized lifecycle mutation.
+    pub async fn try_open_existing(profile_root: &Path) -> crate::errors::Result<Option<Self>> {
+        if !profile_root
+            .try_exists()
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "inspect existing profile root".to_string(),
+                message: error.to_string(),
+            })?
+        {
+            return Ok(None);
+        }
+        let profile_root = profile_root.canonicalize().map_err(|error| {
+            crate::errors::TraceDecayError::Database {
+                operation: "resolve existing profile registry".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        if !profile_root
+            .join("global.db")
+            .try_exists()
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "inspect existing profile registry".to_string(),
+                message: error.to_string(),
+            })?
+        {
+            return Ok(None);
+        }
+        Self::open(&profile_root).await.map(Some)
+    }
+
+    pub async fn open(profile_root: &Path) -> crate::errors::Result<Self> {
+        let identity = crate::daemon::profile_identity::load_or_create(profile_root)?;
+        let registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await?;
+        let profile_database = registry.profile_database().await?;
+        Ok(Self {
+            registry,
+            profile_database,
+        })
+    }
+
+    pub async fn registered_project_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+        self.profile_database
+            .try_list_code_project_paths(usize::MAX)
+            .await
+    }
+
+    pub async fn classify_project_storage(
+        &self,
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> crate::errors::Result<ProjectStorageLocation> {
+        try_classify_project_storage_with_registry(
+            project_root,
+            self.profile_database.as_ref(),
+            profile_root,
+        )
+        .await
+    }
+
+    pub fn canonical_project_key(project_root: &Path) -> String {
+        RegisteredGlobalDb::canonical_project_key(project_root)
+    }
+
+    pub async fn delete_project_paths(
+        &self,
+        project_paths: &[PathBuf],
+    ) -> crate::errors::Result<usize> {
+        let transaction = self.profile_database.begin_write_transaction().await?;
+        let (_, deleted) =
+            delete_registry_gc_candidates_in_transaction(&transaction, &[], project_paths).await?;
+        transaction.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn apply_reconstruction(
+        &self,
+        report: &RegistryReconstructionReport,
+    ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
+        apply_registry_reconstruction_report(self.profile_database.as_ref(), report).await
+    }
+
+    pub async fn apply_single_reconstruction(
+        &self,
+        report: &RegistryReconstructionReport,
+    ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
+        apply_single_registry_reconstruction_report(self.profile_database.as_ref(), report).await
+    }
+
+    pub async fn registry_gc(
+        &self,
+        profile_root: &Path,
+        prefix: Option<String>,
+        apply: bool,
+    ) -> crate::errors::Result<RegistryGcReport> {
+        if apply {
+            apply_registry_gc(self.profile_database.as_ref(), profile_root, prefix).await
+        } else {
+            registry_gc_report(self.profile_database.as_ref(), profile_root, prefix).await
+        }
+    }
+
+    pub async fn repair_project_sessions(
+        &self,
+        project_id: &str,
+        project_root: &Path,
+        expected_database_path: &Path,
+    ) -> crate::errors::Result<()> {
+        let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
+            crate::errors::TraceDecayError::Config {
+                message: format!("invalid project identity '{project_id}': {error}"),
+            }
+        })?;
+        let database = self
+            .registry
+            .project_sessions(project_id, [project_root.to_path_buf()])
+            .await?;
+        if database.db_path() != expected_database_path {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "registered session database does not match repair manifest".to_string(),
+            });
+        }
+        crate::global_db::repair_session_temporal_store(database.as_ref()).await
+    }
+}
+
 pub async fn diff_registry_reconstruction_report(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     report: &RegistryReconstructionReport,
 ) -> RegistryReconstructionDiffReport {
     let mut diff = RegistryReconstructionDiffReport {
@@ -112,6 +256,15 @@ pub async fn diff_registry_reconstruction_report(
         ..RegistryReconstructionDiffReport::default()
     };
     let mut eligible = Vec::new();
+    let snapshot = match db.read_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            diff.issues.push(format!(
+                "could not snapshot registry reconstruction state: {error}"
+            ));
+            return diff;
+        }
+    };
 
     for plan in report
         .plans
@@ -122,7 +275,7 @@ pub async fn diff_registry_reconstruction_report(
             plans: vec![plan.clone()],
             issues: Vec::new(),
         };
-        let issues = preflight_registry_reconstruction(db.read_connection(), &single).await;
+        let issues = preflight_registry_reconstruction(&snapshot, &single).await;
         if !issues.is_empty() {
             diff.issues.extend(issues);
             continue;
@@ -137,7 +290,7 @@ pub async fn diff_registry_reconstruction_report(
                 plans: vec![eligible[left].clone(), eligible[right].clone()],
                 issues: Vec::new(),
             };
-            let issues = preflight_registry_reconstruction(db.read_connection(), &pair).await;
+            let issues = preflight_registry_reconstruction(&snapshot, &pair).await;
             if issues.is_empty() {
                 continue;
             }
@@ -155,7 +308,7 @@ pub async fn diff_registry_reconstruction_report(
         if conflicts[index] {
             continue;
         }
-        match registry_plan_has_missing_rows(db.read_connection(), plan).await {
+        match registry_plan_has_missing_rows(&snapshot, plan).await {
             Ok(true) => diff.missing_plans += 1,
             Ok(false) => {}
             Err(issue) => diff.issues.push(issue),
@@ -164,12 +317,15 @@ pub async fn diff_registry_reconstruction_report(
     diff
 }
 
-async fn registry_plan_has_missing_rows(
-    conn: &Connection,
+async fn registry_plan_has_missing_rows<Q>(
+    conn: &Q,
     plan: &RegistryReconstructionPlan,
-) -> std::result::Result<bool, String> {
+) -> std::result::Result<bool, String>
+where
+    Q: QueryExecutor + ?Sized,
+{
     let project = &plan.project;
-    let root = GlobalDb::canonical_project_key(&project.project_root);
+    let root = RegisteredGlobalDb::canonical_project_key(&project.project_root);
     if query_optional_text(
         conn,
         "SELECT canonical_root FROM code_projects WHERE project_id=?1",
@@ -185,7 +341,7 @@ async fn registry_plan_has_missing_rows(
         if query_optional_text(
             conn,
             "SELECT project_id FROM project_aliases WHERE alias_path=?1",
-            params![GlobalDb::project_path_alias_key(alias)],
+            params![RegisteredGlobalDb::project_path_alias_key(alias)],
         )
         .await?
         .as_deref()
@@ -259,7 +415,7 @@ async fn registry_plan_has_missing_rows(
 }
 
 pub async fn apply_registry_reconstruction_report(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
     let transaction = db.begin_write_transaction().await.map_err(|error| {
@@ -283,7 +439,7 @@ pub async fn apply_registry_reconstruction_report(
 }
 
 pub async fn apply_single_registry_reconstruction_report(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
     let [plan] = report.plans.as_slice() else {
@@ -303,10 +459,13 @@ pub async fn apply_single_registry_reconstruction_report(
     apply_registry_reconstruction_report(db, report).await
 }
 
-async fn preflight_registry_reconstruction(
-    conn: &Connection,
+async fn preflight_registry_reconstruction<Q>(
+    conn: &Q,
     report: &RegistryReconstructionReport,
-) -> Vec<String> {
+) -> Vec<String>
+where
+    Q: QueryExecutor + ?Sized,
+{
     let mut issues = report.issues.clone();
     let mut project_roots = BTreeMap::<String, String>::new();
     let mut aliases = BTreeMap::<String, String>::new();
@@ -332,8 +491,8 @@ async fn preflight_registry_reconstruction(
             }
         }
         let project = &plan.project;
-        let root = GlobalDb::canonical_project_key(&project.project_root);
-        let root_alias = GlobalDb::project_path_alias_key(&project.project_root);
+        let root = RegisteredGlobalDb::canonical_project_key(&project.project_root);
+        let root_alias = RegisteredGlobalDb::project_path_alias_key(&project.project_root);
         record_batch_owner(
             &mut project_roots,
             &root_alias,
@@ -374,7 +533,7 @@ async fn preflight_registry_reconstruction(
             Err(error) => issues.push(error),
         }
         for alias in &project.aliases {
-            let alias = GlobalDb::project_path_alias_key(alias);
+            let alias = RegisteredGlobalDb::project_path_alias_key(alias);
             record_batch_owner(
                 &mut aliases,
                 &alias,
@@ -536,11 +695,15 @@ fn record_batch_owner(
     }
 }
 
-async fn query_optional_text(
-    conn: &Connection,
+async fn query_optional_text<Q, P>(
+    conn: &Q,
     sql: &str,
-    params: impl IntoParams,
-) -> std::result::Result<Option<String>, String> {
+    params: P,
+) -> std::result::Result<Option<String>, String>
+where
+    Q: QueryExecutor + ?Sized,
+    P: IntoParams,
+{
     let mut rows = conn
         .query(sql, params)
         .await
@@ -555,11 +718,15 @@ async fn query_optional_text(
         .transpose()
 }
 
-async fn query_all_text(
-    conn: &Connection,
+async fn query_all_text<Q, P>(
+    conn: &Q,
     sql: &str,
-    params: impl IntoParams,
-) -> std::result::Result<Vec<String>, String> {
+    params: P,
+) -> std::result::Result<Vec<String>, String>
+where
+    Q: QueryExecutor + ?Sized,
+    P: IntoParams,
+{
     let mut rows = conn
         .query(sql, params)
         .await
@@ -579,10 +746,13 @@ async fn query_all_text(
     Ok(values)
 }
 
-async fn insert_missing_registry_rows(
-    conn: &Connection,
+async fn insert_missing_registry_rows<E>(
+    conn: &E,
     report: &RegistryReconstructionReport,
-) -> std::result::Result<RegistryReconstructionApplyReport, String> {
+) -> std::result::Result<RegistryReconstructionApplyReport, String>
+where
+    E: Executor + ?Sized,
+{
     let mut applied = RegistryReconstructionApplyReport::default();
     let now = crate::tracedecay::current_timestamp();
     for plan in &report.plans {
@@ -590,7 +760,7 @@ async fn insert_missing_registry_rows(
             continue;
         }
         let project = &plan.project;
-        let canonical_root = GlobalDb::canonical_project_key(&project.project_root);
+        let canonical_root = RegisteredGlobalDb::canonical_project_key(&project.project_root);
         applied.projects += usize::try_from(
             conn.execute(
                 "INSERT OR IGNORE INTO code_projects(
@@ -615,7 +785,7 @@ async fn insert_missing_registry_rows(
                     "INSERT OR IGNORE INTO project_aliases(alias_path, project_id, last_seen_at)
                      VALUES(?1, ?2, ?3)",
                     params![
-                        GlobalDb::project_path_alias_key(alias),
+                        RegisteredGlobalDb::project_path_alias_key(alias),
                         project.project_id.as_str(),
                         now,
                     ],
@@ -741,12 +911,12 @@ pub fn stale_code_projects<'a>(
 /// Both daemon-owned and offline maintenance paths must hold their mutation
 /// authority before applying this plan.
 pub async fn registry_gc_report(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     profile_root: &Path,
     prefix: Option<String>,
 ) -> crate::errors::Result<RegistryGcReport> {
     let prefixes = prefix.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let projects = db.try_list_code_projects(usize::MAX).await?;
+    let projects = db.list_code_projects(usize::MAX).await?;
     let candidates =
         stale_code_projects(&projects, &prefixes, StaleRootScope::CanonicalRootMissing)
             .into_iter()
@@ -773,11 +943,13 @@ pub async fn registry_gc_report(
 
     let candidate_paths = candidates
         .iter()
-        .map(|project| GlobalDb::canonical_project_key(Path::new(&project.canonical_root)))
+        .map(|project| {
+            RegisteredGlobalDb::canonical_project_key(Path::new(&project.canonical_root))
+        })
         .chain(
             storage_project_candidates
                 .iter()
-                .map(|path| GlobalDb::canonical_project_key(path)),
+                .map(|path| RegisteredGlobalDb::canonical_project_key(path)),
         )
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -799,7 +971,7 @@ pub async fn registry_gc_report(
 }
 
 pub async fn apply_registry_gc(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     profile_root: &Path,
     prefix: Option<String>,
 ) -> crate::errors::Result<RegistryGcReport> {
@@ -835,7 +1007,7 @@ pub async fn apply_registry_gc(
         .map(|project| project.project_id.clone())
         .collect::<Vec<_>>();
     let (deleted_code_projects, deleted_storage_projects) =
-        GlobalDb::delete_registry_gc_candidates_in_transaction(
+        delete_registry_gc_candidates_in_transaction(
             &transaction,
             &project_ids,
             &report.storage_project_candidates,
@@ -844,6 +1016,45 @@ pub async fn apply_registry_gc(
     transaction.commit().await?;
     report.record_deletions(deleted_code_projects, deleted_storage_projects);
     Ok(report)
+}
+
+async fn delete_registry_gc_candidates_in_transaction(
+    transaction: &crate::global_db::RegisteredGlobalDbWriteTransaction<'_>,
+    project_ids: &[String],
+    project_paths: &[PathBuf],
+) -> crate::errors::Result<(usize, usize)> {
+    const CHUNK: usize = 256;
+    let mut code_projects = 0_usize;
+    for chunk in project_ids.chunks(CHUNK) {
+        let sql = format!(
+            "DELETE FROM code_projects WHERE project_id IN ({})",
+            vec!["?"; chunk.len()].join(",")
+        );
+        let values = chunk
+            .iter()
+            .cloned()
+            .map(crate::db::engine::Value::Text)
+            .collect::<Vec<_>>();
+        code_projects =
+            code_projects.saturating_add(transaction.execute(&sql, values).await? as usize);
+    }
+
+    let mut storage_projects = 0_usize;
+    for chunk in project_paths.chunks(CHUNK) {
+        let sql = format!(
+            "DELETE FROM projects WHERE path IN ({})",
+            vec!["?"; chunk.len()].join(",")
+        );
+        let values = chunk
+            .iter()
+            .map(|path| {
+                crate::db::engine::Value::Text(RegisteredGlobalDb::project_path_alias_key(path))
+            })
+            .collect::<Vec<_>>();
+        storage_projects =
+            storage_projects.saturating_add(transaction.execute(&sql, values).await? as usize);
+    }
+    Ok((code_projects, storage_projects))
 }
 
 pub fn scan_profile_store_manifests(

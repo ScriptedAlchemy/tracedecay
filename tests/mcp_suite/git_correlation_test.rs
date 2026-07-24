@@ -7,12 +7,13 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_domain::ProjectId;
 
 use crate::common;
 
@@ -101,8 +102,9 @@ fn span(session_id: &str, branch: Option<&str>, worktree: &str, ts: i64) -> Span
     }
 }
 
-async fn record_span(db: &GlobalDb, observation: &SpanObservation) {
-    db.git_record_span_observation(observation, DEFAULT_SPAN_MERGE_GAP_SECS)
+async fn record_span(runtime: &HostAdmissionTestRuntimeV1, observation: &SpanObservation) {
+    runtime
+        .record_project_span_for_test(observation, DEFAULT_SPAN_MERGE_GAP_SECS)
         .await
         .unwrap_or_else(|e| panic!("record span: {e}"));
 }
@@ -146,7 +148,7 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     let cg = TraceDecay::init_with_options(
         &project_root,
         TraceDecayOpenOptions {
-            profile_root: Some(profile_root),
+            profile_root: Some(profile_root.clone()),
             global_db_path: Some(base.join("global.db")),
         },
     )
@@ -157,14 +159,33 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
 
     // Seed sessions and messages but record NO git spans: the correlation
     // index exists (schema is ensured on open) yet holds nothing.
-    let db_path = cg.store_layout().sessions_db_path.clone();
-    let db = GlobalDb::open_at(&db_path)
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|project_id| ProjectId::new(project_id.to_string()).ok())
+        .expect("active project identity should be available");
+    let runtime = HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
         .await
-        .unwrap_or_else(|| panic!("open sessions.db"));
-    assert!(db.upsert_session(&session("s1", &project_key, 1_000)).await);
+        .unwrap_or_else(|e| panic!("open registered project session runtime: {e}"));
     assert!(
-        db.upsert_session_message(&message("s1", "s1-m1", 1_050, "work on main"))
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &session("s1", &project_key, 1_000),
+            )
             .await
+            .unwrap_or_else(|e| panic!("seed session: {e}"))
+    );
+    assert!(
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &message("s1", "s1-m1", 1_050, "work on main"),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("seed session message: {e}"))
     );
 
     // sessions_for on an empty index: no results, explicitly flagged empty.
@@ -196,7 +217,7 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     );
 
     // Record one span on main; the index is no longer empty.
-    record_span(&db, &span("s1", Some("main"), &main_worktree, 1_000)).await;
+    record_span(&runtime, &span("s1", Some("main"), &main_worktree, 1_000)).await;
 
     // A ref with no matching span now reads as "no match", not "empty index".
     let no_match = call(

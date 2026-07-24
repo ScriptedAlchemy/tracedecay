@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -21,13 +20,13 @@ use tracedecay_application::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
     FEEDBACK_GET_CAPABILITY_ID_V1, FEEDBACK_GET_USE_CASE_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
-    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackCompletedPublicationV1, FeedbackCycleDedupePort,
-    FeedbackCycleDedupePublicationState, FeedbackCycleDedupeState,
-    FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1,
-    FeedbackExpandResultV1, FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1,
-    FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort, FeedbackPortFuture,
-    FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService, FeedbackRouteAdmission,
-    FeedbackRouteAuthorizationPort,
+    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackCompletedPublicationReadPort,
+    FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
+    FeedbackCycleDedupeState, FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1,
+    FeedbackExpandRequestV1, FeedbackExpandResultV1, FeedbackFindingReadV1, FeedbackGetRequestV1,
+    FeedbackGetResultV1, FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort,
+    FeedbackPortFuture, FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService,
+    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, feedback_surface_operation,
 };
 use tracedecay_application::{
     ApplicationContractError, ApplicationOperation, ApplicationProblem, AuthorityReceipt,
@@ -55,6 +54,7 @@ use super::owner::{
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::db::Database;
+use crate::db::engine::params;
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
@@ -639,6 +639,34 @@ impl FeedbackCycleDedupePort for ProjectFeedbackStore {
     }
 }
 
+impl FeedbackCompletedPublicationReadPort for Pr12FeedbackRuntime {
+    fn latest_committed<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        observed_at: UtcMicros,
+    ) -> FeedbackPortFuture<'a, Option<FeedbackCompletedPublicationV1>> {
+        if context.admission_at(observed_at) != RequestAdmission::Admitted {
+            return Box::pin(async { None });
+        }
+        let Ok(Some(operation)) = feedback_surface_operation("feedback_list") else {
+            return Box::pin(async { None });
+        };
+        let authorization = self.route_authorization();
+        let store = self.publication_store();
+        Box::pin(async move {
+            if !authorization.allows(context, &operation, observed_at) {
+                return None;
+            }
+            store
+                .scoped_publications(context)
+                .await
+                .ok()?
+                .into_iter()
+                .max_by(publication_order)
+        })
+    }
+}
+
 impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
     fn diagnostics<'a>(
         &'a self,
@@ -1023,7 +1051,7 @@ impl ProjectFeedbackStore {
             .await
             .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
         let mut rows = transaction
-            .query(
+            .query_engine(
                 "SELECT value FROM metadata WHERE key = ?1",
                 params![PUBLICATION_LEDGER_METADATA_KEY],
             )
@@ -1282,7 +1310,7 @@ async fn persist_feedback_observation(
         .await
         .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
     let mut rows = transaction
-        .query(
+        .query_engine(
             "SELECT value FROM metadata WHERE key = ?1",
             params![OBSERVATION_LEDGER_METADATA_KEY],
         )
@@ -1444,4 +1472,110 @@ fn now_micros() -> UtcMicros {
 
 fn micros_to_seconds(micros: UtcMicros) -> i64 {
     micros.0.div_euclid(1_000_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_application::{
+        CancellationContext, CapabilityGrantSnapshot, Deadline, RequestId,
+    };
+    use tracedecay_domain::configuration::{
+        AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+    };
+    use tracedecay_domain::{
+        LocatorDigest, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
+    };
+
+    fn id<T: TryFrom<String>>(value: &str) -> T
+    where
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
+    }
+
+    fn scope() -> ResolvedScope {
+        ResolvedScope::new(
+            id::<ProjectId>("project.feedback-reader.fixture"),
+            id::<RepositoryId>("repository.feedback-reader.fixture"),
+            id::<WorktreeId>("worktree.feedback-reader.fixture"),
+            Some(id::<RefId>("refs/heads/main")),
+        )
+        .unwrap()
+    }
+
+    fn context(operation: &ApplicationOperation, actor: &str) -> RequestContext {
+        let scope = scope();
+        let requester = id::<ActorId>(actor);
+        let grant = CapabilityGrantSnapshot::new(
+            id("grant.feedback-reader.fixture"),
+            1,
+            canonical_sha256(&"feedback-reader-grant").unwrap(),
+            id("actor.feedback-reader.issuer"),
+            UtcMicros(1),
+            UtcMicros(100),
+            scope.clone(),
+            [operation.capability_id().clone()].into_iter().collect(),
+            [operation.use_case_id().clone()].into_iter().collect(),
+            DisclosureClass::Evidence,
+        )
+        .unwrap();
+        RequestContext::new(
+            requester,
+            scope,
+            grant,
+            RequestId::new(format!("request.feedback-reader.{actor}")).unwrap(),
+            Deadline::new(UtcMicros(100)).unwrap(),
+            CancellationContext::active(format!("cancel.feedback-reader.{actor}")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn source_access(
+        operation: &ApplicationOperation,
+        context: &RequestContext,
+    ) -> ProjectSourceAccessSnapshot {
+        let locator = LocatorDigest::new(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        ProjectSourceAccessSnapshot {
+            scope: context.scope().clone(),
+            requester: context.actor().clone(),
+            binding: ScopeSourceBinding::new(
+                SourceBindingId::new("binding.feedback-reader.fixture").unwrap(),
+                SourceKindV1::Cursor,
+                locator,
+                AuthorityRef::Project(context.scope().project_id.clone()),
+            )
+            .unwrap(),
+            configuration_revision: ConfigurationRevisionId::new(
+                "revision.feedback-reader.fixture",
+            )
+            .unwrap(),
+            configuration_digest: canonical_sha256(&"feedback-reader-configuration").unwrap(),
+            configuration_provenance_digest: canonical_sha256(
+                &"feedback-reader-configuration-provenance",
+            )
+            .unwrap(),
+            effective_capabilities: [operation.capability_id().clone()].into_iter().collect(),
+            grant_expires_at: UtcMicros(100),
+        }
+    }
+
+    #[test]
+    fn latest_publication_route_authorization_is_exact_and_fails_closed() {
+        let operation = feedback_surface_operation("feedback_list")
+            .unwrap()
+            .unwrap();
+        let admitted = context(&operation, "actor.feedback-reader.requester");
+        let authorization = ProjectFeedbackRouteAuthorization {
+            access: source_access(&operation, &admitted),
+        };
+        assert!(authorization.allows(&admitted, &operation, UtcMicros(10)));
+
+        let wrong_actor = context(&operation, "actor.feedback-reader.other");
+        assert!(!authorization.allows(&wrong_actor, &operation, UtcMicros(10)));
+        assert!(!authorization.allows(&admitted, &operation, UtcMicros(100)));
+    }
 }

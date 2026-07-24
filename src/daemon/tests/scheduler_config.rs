@@ -140,7 +140,7 @@ async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
     };
 
     let tick_secs = Box::pin(super::super::automation_scheduler_tick_secs_for_project(
-        &project, &handshake,
+        &cg, &handshake,
     ))
     .await;
 
@@ -585,9 +585,7 @@ async fn daemon_memory_repair_tick_runs_without_automation_configuration() {
     let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
         .await
         .expect("project init");
-    drop(cg);
-
-    let decision = super::super::run_memory_repair_scheduler_tick(&project, &handshake)
+    let decision = super::super::run_memory_repair_scheduler_tick(&project, &cg)
         .await
         .expect("memory repair tick must not depend on automation configuration");
 
@@ -1136,7 +1134,10 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     };
 
     Box::pin(super::super::run_automation_scheduler_tick(
-        &project, &handshake,
+        &project,
+        &cg,
+        &handshake,
+        &super::super::DaemonEngine::default(),
     ))
     .await
     .expect("paused scheduler tick should exit cleanly");

@@ -177,6 +177,17 @@ impl Drop for ReadFlightLeader {
 }
 
 pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
+    if matches!(
+        tool_name,
+        "tracedecay_search"
+            | "tracedecay_git_status"
+            | "tracedecay_git_diff"
+            | "tracedecay_git_history"
+            | "tracedecay_git_blame"
+            | "tracedecay_git_hunks"
+    ) {
+        return false;
+    }
     static READ_ONLY_TOOLS: OnceLock<HashSet<String>> = OnceLock::new();
     READ_ONLY_TOOLS
         .get_or_init(|| {
@@ -368,7 +379,20 @@ mod tests {
 
     #[test]
     fn canonical_tool_annotations_gate_coalescing() {
-        assert!(tool_allows_identical_read_coalescing("tracedecay_search"));
+        for controlled_read in [
+            "tracedecay_search",
+            "tracedecay_git_status",
+            "tracedecay_git_diff",
+            "tracedecay_git_history",
+            "tracedecay_git_blame",
+            "tracedecay_git_hunks",
+        ] {
+            assert!(
+                !tool_allows_identical_read_coalescing(controlled_read),
+                "{controlled_read} has caller-specific cancellation and deadline controls"
+            );
+        }
+        assert!(tool_allows_identical_read_coalescing("tracedecay_outline"));
         assert!(!tool_allows_identical_read_coalescing(
             "tracedecay_str_replace"
         ));

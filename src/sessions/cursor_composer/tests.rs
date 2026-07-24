@@ -473,8 +473,7 @@ fn composer_is_compacted_true_promotes_compaction_fact() {
     )));
 }
 
-// Foreign-store fixtures use the same SQLite engine as the production reader;
-// initializing libsql after an immutable rusqlite open is process-global misuse.
+// Foreign-store fixtures use the same immutable SQLite reader as production.
 async fn open_temp_kv_db_with_rows(rows: &[(&str, &str)]) -> (tempfile::TempDir, ReadOnlyDb) {
     let tmp = tempfile::TempDir::new().unwrap();
     let path = tmp.path().join("state.vscdb");

@@ -263,9 +263,14 @@ impl Drop for RetirementReaperRegistrationBarrier {
 /// daemon state.
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
+    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    session_runtime_registry: Arc<
+        tokio::sync::OnceCell<
+            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+        >,
+    >,
     gate: Arc<tokio::sync::Mutex<()>>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
-    global_databases: Arc<tokio::sync::Mutex<HashMap<PathBuf, Arc<crate::global_db::GlobalDb>>>>,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
             HashMap<PathBuf, crate::application::host_admission::SharedHostAdmissionBroker>,
@@ -290,9 +295,10 @@ pub(super) struct StoreAdministration {
 impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
+            profile_identity: None,
+            session_runtime_registry: Arc::new(tokio::sync::OnceCell::new()),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
-            global_databases: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
@@ -315,6 +321,112 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
+    pub(super) fn with_profile_identity(
+        mut self,
+        profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    ) -> Self {
+        self.profile_identity = Some(profile_identity);
+        self
+    }
+
+    pub(super) fn profile_identity(
+        &self,
+    ) -> Result<&crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1> {
+        self.profile_identity
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon profile identity authority is unavailable".to_string(),
+            })
+    }
+
+    async fn session_runtime_registry(
+        &self,
+    ) -> Result<&Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
+    {
+        let identity = self.profile_identity()?.clone();
+        self.session_runtime_registry
+            .get_or_try_init(|| async move {
+                crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                    identity,
+                )
+                .await
+                .map(Arc::new)
+            })
+            .await
+    }
+
+    pub(super) async fn retained_runtime_registry(
+        &self,
+    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
+    {
+        self.session_runtime_registry().await.map(Arc::clone)
+    }
+
+    pub(super) async fn registered_runtime_registry(
+        &self,
+    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
+    {
+        Ok(Arc::clone(self.session_runtime_registry().await?))
+    }
+
+    pub(super) async fn registered_profile_session_database(
+        &self,
+    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+        self.session_runtime_registry()
+            .await?
+            .profile_sessions()
+            .await
+    }
+
+    pub(super) async fn registered_profile_database(
+        &self,
+    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+        self.session_runtime_registry()
+            .await?
+            .profile_database()
+            .await
+    }
+
+    pub(super) async fn mounted_registered_session_databases(
+        &self,
+    ) -> Vec<Arc<crate::global_db::RegisteredGlobalDb>> {
+        let Some(registry) = self.session_runtime_registry.get() else {
+            return Vec::new();
+        };
+        registry.mounted_session_databases().await
+    }
+
+    pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {
+        let servers = {
+            let servers = self.project_servers.lock().await;
+            servers.values().cloned().collect::<Vec<_>>()
+        };
+        let mut graphs = Vec::with_capacity(servers.len());
+        for server in servers {
+            graphs.push(server.cg().await);
+        }
+        graphs
+    }
+
+    pub(super) async fn registered_project_session_database(
+        &self,
+        project_id: &str,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+        let project_id =
+            tracedecay_store::ProjectId::new(project_id.to_owned()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "invalid authoritative project identity for session runtime: {error}"
+                    ),
+                }
+            })?;
+        self.session_runtime_registry()
+            .await?
+            .project_sessions(project_id, enrollment_roots)
+            .await
+    }
+
     #[cfg(test)]
     pub(super) fn with_project_servers(
         project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
@@ -339,54 +451,19 @@ impl StoreAdministration {
         &self.project_servers
     }
 
-    pub(super) async fn global_database(
+    pub(super) async fn host_admission_broker(
         &self,
-        path: &Path,
-    ) -> Result<Arc<crate::global_db::GlobalDb>> {
-        let path = authority::canonical_identity_path(path)?;
-        let mut global_databases = self.global_databases.lock().await;
-        if let Some(database) = global_databases.get(&path) {
-            return Ok(Arc::clone(database));
-        }
-        let mut database = None;
-        for attempt in 0..40 {
-            match crate::global_db::GlobalDb::try_open_at(&path).await? {
-                Some(opened) => {
-                    database = Some(opened);
-                    break;
-                }
-                None if attempt < 39 => {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-                None => break,
-            }
-        }
-        let database = database.ok_or_else(|| TraceDecayError::Config {
-            message: format!("daemon global database '{}' is unavailable", path.display()),
-        })?;
-        let database = Arc::new(database);
-        global_databases.insert(path, Arc::clone(&database));
-        Ok(database)
-    }
-
-    pub(super) async fn user_session_database(
-        &self,
-        global_db_path: &Path,
-    ) -> Result<Arc<crate::global_db::GlobalDb>> {
-        let profile_root = global_db_path
-            .parent()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "could not resolve daemon profile root".to_string(),
-            })?;
-        self.global_database(&crate::sessions::user_sessions_db_path(profile_root))
+        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+    ) -> Result<HostAdmissionBrokerState> {
+        self.host_admission_broker_for_path(database.db_path())
             .await
     }
 
-    pub(super) async fn host_admission_broker(
+    async fn host_admission_broker_for_path(
         &self,
-        database: &Arc<crate::global_db::GlobalDb>,
+        database_path: &Path,
     ) -> Result<HostAdmissionBrokerState> {
-        let path = authority::canonical_identity_path(database.db_path())?;
+        let path = authority::canonical_identity_path(database_path)?;
         if let Some(broker) = self.host_admission_brokers.lock().await.get(&path).cloned() {
             self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
                 .await;
@@ -725,8 +802,27 @@ impl StoreAdministration {
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "branch administration requires a project path".to_string(),
                 })?;
-        let layout =
-            crate::storage::resolve_layout(project_root, &handshake.client_identity.profile_root)?;
+        let layout = crate::storage::resolve_persisted_layout(
+            project_root,
+            &handshake.client_identity.profile_root,
+        )?
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "branch administration requires an enrolled project session authority"
+                .to_owned(),
+        })?;
+        let Some(project_id) = layout.identity.project_id.as_deref() else {
+            return Err(TraceDecayError::Config {
+                message:
+                    "branch administration requires an authoritative registered project identity"
+                        .to_owned(),
+            });
+        };
+        let configuration_database = self
+            .registered_project_session_database(
+                project_id,
+                [project_root.to_path_buf(), layout.project_root.clone()],
+            )
+            .await?;
         // Branch administration runs inside the daemon, which owns the durable
         // configuration store. Resolve the pinned snapshot on demand when this
         // process has not yet opened the project (first operation, or the first
@@ -734,10 +830,14 @@ impl StoreAdministration {
         // only durable authority; it never consults legacy config input and a
         // genuinely unresolvable store still fails before any destructive store
         // action.
-        let config = crate::config::resolve_runtime_configuration_for_layout(project_root, &layout)
-            .await?
-            .config
-            .sync;
+        let config = crate::config::resolve_runtime_configuration_for_registered_database(
+            project_root,
+            &layout,
+            configuration_database,
+        )
+        .await?
+        .config
+        .sync;
         self.execute_branch_admin_in_layout(
             project_root,
             &layout.data_root,
@@ -1054,9 +1154,9 @@ mod tests {
     #[tokio::test]
     async fn unavailable_spool_does_not_block_unrelated_database_authority() {
         let temp = tempfile::tempdir().unwrap();
-        let administration = StoreAdministration::default();
         let blocked_path = temp.path().join("blocked.db");
-        let blocked_database = administration.global_database(&blocked_path).await.unwrap();
+        std::fs::File::create(&blocked_path).unwrap();
+        let administration = StoreAdministration::default();
         std::fs::write(
             temp.path().join(".blocked.db.host-admission"),
             "not a directory",
@@ -1064,7 +1164,7 @@ mod tests {
         .unwrap();
 
         let blocked = administration
-            .host_admission_broker(&blocked_database)
+            .host_admission_broker_for_path(&blocked_path)
             .await
             .unwrap();
         let outcome = blocked
@@ -1076,12 +1176,10 @@ mod tests {
         );
         assert!(blocked.broker().is_none());
 
-        let healthy_database = administration
-            .global_database(&temp.path().join("healthy.db"))
-            .await
-            .unwrap();
+        let healthy_path = temp.path().join("healthy.db");
+        std::fs::File::create(&healthy_path).unwrap();
         let healthy = administration
-            .host_admission_broker(&healthy_database)
+            .host_admission_broker_for_path(&healthy_path)
             .await
             .unwrap();
         assert!(healthy.broker().is_some());

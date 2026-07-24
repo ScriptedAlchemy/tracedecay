@@ -4,7 +4,7 @@
 //! Split out of the former single-file `schema` module as a pure mechanical
 //! move; contents are unchanged.
 
-use crate::db::engine::{Executor, params};
+use crate::db::engine::params;
 use crate::errors::Result;
 
 use super::super::{

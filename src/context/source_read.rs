@@ -62,8 +62,9 @@ pub(crate) async fn read_source(
         "last_sync_at": last_sync_at,
     }));
 
+    let cache_connection = graph.db().engine_conn();
     if let Some(cached) = read_cache::get(
-        graph.db().conn(),
+        &cache_connection,
         project_id,
         GLOBAL_SESSION,
         &display_file,

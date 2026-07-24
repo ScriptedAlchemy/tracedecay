@@ -12,6 +12,7 @@ pub mod cline;
 pub mod codex;
 pub mod context_scout_model;
 pub mod context_scout_owner;
+pub mod context_scout_ports;
 pub mod context_scout_v2;
 pub mod copilot;
 pub mod cursor;

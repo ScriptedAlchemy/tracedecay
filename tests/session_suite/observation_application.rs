@@ -1,5 +1,6 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::application::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
     CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
@@ -11,7 +12,6 @@ use tracedecay::privacy::{
     PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
-use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1,
@@ -26,8 +26,6 @@ use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ProjectionPersistOutcome,
 };
-
-use crate::common::{isolated_lcm_db_path, open_lcm_db};
 
 const GENERATION: u64 = 17;
 const OBSERVATION_TABLES: &[&str] = &[
@@ -84,31 +82,41 @@ fn nested_value(mut value: Value, depth: usize) -> Value {
     value
 }
 
-async fn table_counts(tmp: &TempDir) -> Vec<i64> {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
         .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut counts = Vec::with_capacity(OBSERVATION_TABLES.len());
-    for table in OBSERVATION_TABLES {
-        let mut rows = conn
-            .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-            .await
-            .unwrap();
-        counts.push(rows.next().await.unwrap().unwrap().get(0).unwrap());
-    }
-    counts
+        .unwrap()
 }
 
-async fn durable_text(tmp: &TempDir) -> Vec<String> {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
+async fn table_counts(runtime: &HostAdmissionTestRuntimeV1) -> Vec<i64> {
+    let snapshot = TempDir::new().unwrap();
+    let database_path = snapshot.path().join("sessions.db");
+    runtime
+        .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
         .await
         .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    OBSERVATION_TABLES
+        .iter()
+        .map(|table| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), (), |row| {
+                row.get(0)
+            })
+            .unwrap()
+        })
+        .collect()
+}
+
+async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
+    let snapshot = TempDir::new().unwrap();
+    let database_path = snapshot.path().join("sessions.db");
+    runtime
+        .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
+        .await
+        .unwrap();
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT observation_json FROM observations
              UNION ALL SELECT receipt_json FROM sanitization_receipts
              UNION ALL SELECT source_json || scope_json || cursor_json FROM source_cursors
@@ -127,15 +135,31 @@ async fn durable_text(tmp: &TempDir) -> Vec<String> {
                  COALESCE(metadata_json, '') FROM session_messages
              UNION ALL SELECT text || role || COALESCE(kind, '') || COALESCE(model, '') ||
                  COALESCE(tool_names, '') FROM session_messages_fts",
-            (),
+        )
+        .unwrap();
+    statement
+        .query_map((), |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+async fn session_message_search_count(
+    runtime: &HostAdmissionTestRuntimeV1,
+    provider: &str,
+    query: &str,
+) -> usize {
+    runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Profile,
+            provider,
+            None,
+            query,
+            OBSERVATION_TABLES.len(),
         )
         .await
-        .unwrap();
-    let mut values = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        values.push(row.get(0).unwrap());
-    }
-    values
+        .unwrap()
+        .len()
 }
 
 fn conversational_record(message_id: &str, text: &str, secret: &str) -> Value {
@@ -155,9 +179,11 @@ fn conversational_record(message_id: &str, text: &str, secret: &str) -> Value {
 #[tokio::test]
 async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representation() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
     let application = ObservationApplication::new(
-        GlobalDbObservationStore::new(&db),
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap(),
         ClaudeRecordSanitizerV1::claude_v1().unwrap(),
     );
     let session_id = "session.observation-privacy";
@@ -177,7 +203,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
         }
         other => panic!("sanitized record must persist, got {other:?}"),
     };
-    let counts_after_commit = table_counts(&tmp).await;
+    let counts_after_commit = table_counts(&runtime).await;
 
     // Simulate a lost acknowledgement: retry the exact request after commit.
     let retry = application
@@ -194,10 +220,12 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
         other => panic!("exact retry must return the committed receipt, got {other:?}"),
     }
     assert_eq!(retry.sanitization_receipt(), &first_receipt);
-    assert_eq!(table_counts(&tmp).await, counts_after_commit);
+    assert_eq!(table_counts(&runtime).await, counts_after_commit);
     assert!(!format!("{retry:?}").contains(secret));
 
-    let projected = GlobalDbObservationStore::new(&db)
+    let projected = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap()
         .project_observation(&observation_id)
         .await
         .unwrap();
@@ -221,18 +249,15 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
     assert!(point.observation().is_some());
     assert_eq!(replay.observations().len(), 1);
     assert!(!format!("{point:?}{replay:?}").contains(secret));
-    assert!(
-        db.search_session_messages("claude", None, secret, 10)
-            .await
-            .is_empty()
+    assert_eq!(
+        session_message_search_count(&runtime, "claude", secret).await,
+        0
     );
     assert_eq!(
-        db.search_session_messages("claude", None, "safe projected content", 10)
-            .await
-            .len(),
+        session_message_search_count(&runtime, "claude", "safe projected content").await,
         1
     );
-    for value in durable_text(&tmp).await {
+    for value in durable_text(&runtime).await {
         assert!(
             !value.contains(secret),
             "secret leaked into durable text: {value}"
@@ -258,7 +283,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
     let safe_error = format!("{collision:?}\n{collision}");
     assert!(!safe_error.contains(secret));
     assert!(!safe_error.contains(collision_secret));
-    for value in durable_text(&tmp).await {
+    for value in durable_text(&runtime).await {
         assert!(!value.contains(secret));
         assert!(!value.contains(collision_secret));
     }
@@ -267,9 +292,11 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
 #[tokio::test]
 async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchanged() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
     let application = ObservationApplication::new(
-        GlobalDbObservationStore::new(&db),
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap(),
         ClaudeRecordSanitizerV1::new(
             ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
@@ -278,7 +305,9 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         ),
     );
     let quarantine_application = ObservationApplication::new(
-        GlobalDbObservationStore::new(&db),
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap(),
         ClaudeRecordSanitizerV1::new(
             ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
@@ -289,7 +318,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     let session_id = "session.observation-nondurable";
     let rejected_secret = "sk-proj-rejected-canary-1234567890";
     let quarantined_secret = "sk-proj-quarantined-canary-1234567890";
-    let before = table_counts(&tmp).await;
+    let before = table_counts(&runtime).await;
 
     let rejected = application
         .capture_claude_observation(request(
@@ -319,16 +348,20 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     ));
     assert!(!format!("{quarantined:?}").contains(quarantined_secret));
 
-    assert_eq!(table_counts(&tmp).await, before);
+    assert_eq!(table_counts(&runtime).await, before);
     assert!(
-        GlobalDbObservationStore::new(&db)
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap()
             .get_source_cursor(&source(session_id), &ObservationScopeV1::Profile)
             .await
             .unwrap()
             .is_none()
     );
     assert_eq!(
-        GlobalDbObservationStore::new(&db)
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap()
             .projection_checkpoint()
             .await
             .unwrap()
@@ -351,10 +384,14 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
 #[tokio::test]
 async fn native_ordering_domain_survives_authoritative_capture() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let application = ObservationApplication::new(
-        GlobalDbObservationStore::new(&db),
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap(),
         RecordSanitizerV1::observation_v1().unwrap(),
     );
     let source = ObservationSourceIdentityV1::for_provider(
@@ -526,9 +563,11 @@ fn provider_capture_request_with_canonical_provider(
 #[tokio::test]
 async fn missing_and_conflicting_canonical_identity_leave_authoritative_state_empty() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
     let application = ObservationApplication::new(
-        GlobalDbObservationStore::new(&db),
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap(),
         RecordSanitizerV1::observation_v1().unwrap(),
     );
     let range = ObservationSourceRangeV1::new(0, 1).unwrap();
@@ -560,7 +599,10 @@ async fn missing_and_conflicting_canonical_identity_leave_authoritative_state_em
         missing_error,
         ObservationApplicationError::Privacy(PrivacySanitizerError::CanonicalEnvelopeRequired)
     ));
-    assert_eq!(table_counts(&tmp).await, vec![0; OBSERVATION_TABLES.len()]);
+    assert_eq!(
+        table_counts(&runtime).await,
+        vec![0; OBSERVATION_TABLES.len()]
+    );
 
     let conflicting = provider_capture_request_with_canonical_provider(
         "codex",
@@ -579,7 +621,10 @@ async fn missing_and_conflicting_canonical_identity_leave_authoritative_state_em
         conflicting_error,
         ObservationApplicationError::Privacy(PrivacySanitizerError::CanonicalProviderMismatch)
     ));
-    assert_eq!(table_counts(&tmp).await, vec![0; OBSERVATION_TABLES.len()]);
+    assert_eq!(
+        table_counts(&runtime).await,
+        vec![0; OBSERVATION_TABLES.len()]
+    );
 }
 
 // These contract cases construct normalized canonical provider-tagged records directly.
@@ -589,12 +634,16 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
  {
     for provider in CROSS_PROVIDERS {
         let tmp = TempDir::new().unwrap();
-        let db = open_lcm_db(&tmp).await;
+        let runtime = profile_runtime(&tmp).await;
         let application = ObservationApplication::new(
-            GlobalDbObservationStore::new(&db),
+            runtime
+                .observation_store(HostAdmissionScope::Profile)
+                .unwrap(),
             RecordSanitizerV1::observation_v1().unwrap(),
         );
-        let store = GlobalDbObservationStore::new(&db);
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         let source = provider_source(provider);
         let record_id = format!("{provider}.message.app-cross");
 
@@ -626,7 +675,10 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
                 .is_none(),
             "{provider}"
         );
-        assert_eq!(table_counts(&tmp).await, vec![0; OBSERVATION_TABLES.len()]);
+        assert_eq!(
+            table_counts(&runtime).await,
+            vec![0; OBSERVATION_TABLES.len()]
+        );
 
         let first = application
             .capture_observation(provider_capture_request(
@@ -648,7 +700,7 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             }
             other => panic!("{provider}: first capture must persist, got {other:?}"),
         };
-        let counts_after_commit = table_counts(&tmp).await;
+        let counts_after_commit = table_counts(&runtime).await;
         let cursor_after_commit = store
             .get_source_cursor(&source, &ObservationScopeV1::Profile)
             .await
@@ -680,7 +732,11 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             &first_receipt,
             "{provider}"
         );
-        assert_eq!(table_counts(&tmp).await, counts_after_commit, "{provider}");
+        assert_eq!(
+            table_counts(&runtime).await,
+            counts_after_commit,
+            "{provider}"
+        );
 
         let conflict = application
             .capture_observation(provider_capture_request(
@@ -703,7 +759,11 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             ),
             "{provider}: expected ObservationCollision, got {conflict:?}"
         );
-        assert_eq!(table_counts(&tmp).await, counts_after_commit, "{provider}");
+        assert_eq!(
+            table_counts(&runtime).await,
+            counts_after_commit,
+            "{provider}"
+        );
         assert_eq!(
             store
                 .get_source_cursor(&source, &ObservationScopeV1::Profile)
@@ -807,14 +867,17 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             .await
             .unwrap();
         assert_eq!(replay_before_restart.observations().len(), 2, "{provider}");
-        let counts_before_restart = table_counts(&tmp).await;
+        let counts_before_restart = table_counts(&runtime).await;
         drop(application);
-        drop(db);
+        drop(store);
+        drop(runtime);
 
         // Commit-before-ack / crash-restart: reopen and retry the original capture.
-        let db = open_lcm_db(&tmp).await;
+        let runtime = profile_runtime(&tmp).await;
         let application = ObservationApplication::new(
-            GlobalDbObservationStore::new(&db),
+            runtime
+                .observation_store(HostAdmissionScope::Profile)
+                .unwrap(),
             RecordSanitizerV1::observation_v1().unwrap(),
         );
         let restarted = application
@@ -844,7 +907,7 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             other => panic!("{provider}: restart retry must persist duplicate, got {other:?}"),
         }
         assert_eq!(
-            table_counts(&tmp).await,
+            table_counts(&runtime).await,
             counts_before_restart,
             "{provider}"
         );

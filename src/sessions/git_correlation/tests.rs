@@ -1,6 +1,58 @@
-use libsql::Builder;
+use std::ops::Deref;
+
+use crate::db::engine::TestConnection;
 
 use super::*;
+
+struct GitCorrelationTestDb {
+    _directory: tempfile::TempDir,
+    connection: TestConnection,
+}
+
+impl GitCorrelationTestDb {
+    fn uninitialized() -> Self {
+        let directory = tempfile::tempdir().expect("temporary engine test database");
+        let connection = TestConnection::open(&directory.path().join("sessions.db"));
+        Self {
+            _directory: directory,
+            connection,
+        }
+    }
+}
+
+impl Deref for GitCorrelationTestDb {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl QueryExecutor for GitCorrelationTestDb {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.connection.query(sql, params).await
+    }
+}
+
+impl Executor for GitCorrelationTestDb {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.connection.execute(sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.connection.execute_batch(sql).await
+    }
+}
 
 fn observation(session_id: &str, branch: Option<&str>, worktree: &str, ts: i64) -> SpanObservation {
     SpanObservation {
@@ -14,12 +66,8 @@ fn observation(session_id: &str, branch: Option<&str>, worktree: &str, ts: i64) 
     }
 }
 
-async fn test_conn() -> Connection {
-    let db = Builder::new_local(":memory:")
-        .build()
-        .await
-        .expect("in-memory db");
-    let conn = db.connect().expect("connect");
+async fn test_conn() -> GitCorrelationTestDb {
+    let conn = GitCorrelationTestDb::uninitialized();
     ensure_git_correlation_schema(&conn)
         .await
         .expect("schema should apply");
@@ -177,8 +225,7 @@ async fn schema_is_idempotent() {
 
 #[tokio::test]
 async fn schema_v2_commit_rows_migrate_to_observed_without_becoming_producers() {
-    let db = Builder::new_local(":memory:").build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = GitCorrelationTestDb::uninitialized();
     conn.execute_batch(
         "CREATE TABLE session_schema_migrations (
             name TEXT PRIMARY KEY,
@@ -287,8 +334,7 @@ async fn schema_v2_commit_rows_migrate_to_observed_without_becoming_producers() 
 
 #[tokio::test]
 async fn future_git_correlation_schema_is_rejected_without_rewrite() {
-    let db = Builder::new_local(":memory:").build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = GitCorrelationTestDb::uninitialized();
     conn.execute_batch(
         "CREATE TABLE session_schema_migrations (
             name TEXT PRIMARY KEY,
@@ -1117,7 +1163,7 @@ async fn attribution_sweep_writes_one_row_for_mixed_provider_session() {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM commit_sessions WHERE commit_sha = ?1",
-            libsql::params![sha],
+            params![sha],
         )
         .await
         .unwrap();
@@ -1307,8 +1353,7 @@ async fn correlation_index_health_reports_empty_then_populated() {
 async fn correlation_index_health_without_tables_is_empty() {
     // A store predating the correlation schema (no DDL run) must report an
     // absent, empty index rather than erroring on missing tables.
-    let db = Builder::new_local(":memory:").build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = GitCorrelationTestDb::uninitialized();
     let health = correlation_index_health(&conn).await.unwrap();
     assert!(!health.tables_present);
     assert!(health.is_empty());

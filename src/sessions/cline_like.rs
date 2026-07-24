@@ -21,9 +21,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::application::host_admission::HostAdmissionFacade;
 #[cfg(test)]
-use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionOutcome, HostAdmissionStatus,
-};
+use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::application::observation::ObservationCancellation;
 #[cfg(test)]
 use crate::privacy::parse_normalized_observation_record_v1;
@@ -991,10 +989,12 @@ mod observation_tests {
         let first_bytes = snapshot_input_bytes("cline", &paths[0]).unwrap();
         let second_bytes = snapshot_input_bytes("cline", &paths[1]).unwrap();
 
-        let db = crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .expect("open observation db");
-        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+            temp.path().join("profile"),
+        )
+        .await
+        .expect("open registered observation runtime");
+        let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
 
         let deferred = capture_cline_like_snapshot_observations(
@@ -1057,10 +1057,12 @@ mod observation_tests {
             storage_roots: vec![temp.path().join("tasks")],
             user_registered_roots: None,
         };
-        let db = crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .expect("open observation db");
-        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+            temp.path().join("profile"),
+        )
+        .await
+        .expect("open registered observation runtime");
+        let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 

@@ -9,10 +9,9 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-#[cfg(test)]
-use libsql::TransactionBehavior;
-use libsql::{Connection, Value, params};
 use serde::{Deserialize, Serialize};
+
+use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, Value, params};
 
 use super::SessionMessageRecord;
 
@@ -67,8 +66,8 @@ impl std::fmt::Display for GitCorrelationError {
 
 impl std::error::Error for GitCorrelationError {}
 
-impl From<libsql::Error> for GitCorrelationError {
-    fn from(err: libsql::Error) -> Self {
+impl From<crate::db::engine::Error> for GitCorrelationError {
+    fn from(err: crate::db::engine::Error) -> Self {
         Self::Db(err.to_string())
     }
 }
@@ -534,27 +533,19 @@ pub fn span_debounce_key(
 
 /// Creates the correlation tables when missing. Version-gated via
 /// `session_schema_migrations` like the LCM schema; idempotent.
-#[derive(Clone, Copy)]
-enum SchemaTransaction {
-    Managed,
-    CallerOwned,
-}
-
 pub(crate) async fn ensure_git_correlation_schema(
     conn: &Connection,
 ) -> Result<(), GitCorrelationError> {
-    ensure_git_correlation_schema_with_transaction(conn, SchemaTransaction::Managed).await
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    ensure_git_correlation_schema_in_transaction(&transaction).await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub(crate) async fn ensure_git_correlation_schema_in_transaction(
-    conn: &Connection,
-) -> Result<(), GitCorrelationError> {
-    ensure_git_correlation_schema_with_transaction(conn, SchemaTransaction::CallerOwned).await
-}
-
-async fn ensure_git_correlation_schema_with_transaction(
-    conn: &Connection,
-    transaction: SchemaTransaction,
+    conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_schema_migrations (
@@ -577,12 +568,8 @@ async fn ensure_git_correlation_schema_with_transaction(
     }
     let rebuild_commit_table = table_exists(conn, "commit_sessions").await?;
 
-    if matches!(transaction, SchemaTransaction::Managed) {
-        conn.execute("BEGIN IMMEDIATE", ()).await?;
-    }
-    let migration = async {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS session_git_spans (
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_git_spans (
             span_id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL DEFAULT '',
             session_id TEXT NOT NULL,
@@ -608,17 +595,17 @@ async fn ensure_git_correlation_schema_with_transaction(
             value INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );",
+    )
+    .await?;
+    if rebuild_commit_table {
+        conn.execute(
+            "ALTER TABLE commit_sessions RENAME TO commit_sessions_legacy_v3",
+            (),
         )
         .await?;
-        if rebuild_commit_table {
-            conn.execute(
-                "ALTER TABLE commit_sessions RENAME TO commit_sessions_legacy_v3",
-                (),
-            )
-            .await?;
-        }
-        conn.execute_batch(
-            "CREATE TABLE commit_sessions (
+    }
+    conn.execute_batch(
+        "CREATE TABLE commit_sessions (
             commit_sha TEXT NOT NULL,
             provider TEXT NOT NULL DEFAULT '',
             session_id TEXT NOT NULL,
@@ -638,11 +625,11 @@ async fn ensure_git_correlation_schema_with_transaction(
             created_at INTEGER NOT NULL DEFAULT (unixepoch()),
             PRIMARY KEY(commit_sha, provider, session_id)
         );",
-        )
-        .await?;
-        if rebuild_commit_table {
-            conn.execute(
-                "INSERT INTO commit_sessions (
+    )
+    .await?;
+    if rebuild_commit_table {
+        conn.execute(
+            "INSERT INTO commit_sessions (
                     commit_sha, provider, session_id, branch, worktree,
                     committed_at, span_overlap_kind, span_id,
                     relation, evidence, confidence, evidence_message_id, created_at
@@ -655,51 +642,34 @@ async fn ensure_git_correlation_schema_with_transaction(
                     CASE WHEN span_overlap_kind = 'reflog' THEN 30 ELSE 20 END,
                     NULL, created_at
                  FROM commit_sessions_legacy_v3",
-                (),
-            )
+            (),
+        )
+        .await?;
+        conn.execute("DROP TABLE commit_sessions_legacy_v3", ())
             .await?;
-            conn.execute("DROP TABLE commit_sessions_legacy_v3", ())
-                .await?;
-        }
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_commit_sessions_session
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_commit_sessions_session
                 ON commit_sessions(provider, session_id, committed_at);
              CREATE INDEX IF NOT EXISTS idx_commit_sessions_branch
                 ON commit_sessions(branch, committed_at);",
-        )
-        .await?;
-        conn.execute(
-            "INSERT INTO session_schema_migrations(name, version)
+    )
+    .await?;
+    conn.execute(
+        "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
          ON CONFLICT(name) DO UPDATE SET
             version = excluded.version,
             applied_at = unixepoch()",
-            params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
-        )
-        .await?;
-        Ok::<(), GitCorrelationError>(())
-    }
-    .await;
-    if matches!(transaction, SchemaTransaction::CallerOwned) {
-        return migration;
-    }
-    match migration {
-        Ok(()) => {
-            if let Err(err) = conn.execute("COMMIT", ()).await {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err.into())
-            } else {
-                Ok(())
-            }
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
-        }
-    }
+        params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
+    )
+    .await?;
+    Ok(())
 }
 
-async fn schema_version(conn: &Connection) -> Result<Option<i64>, GitCorrelationError> {
+async fn schema_version(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Option<i64>, GitCorrelationError> {
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
@@ -712,7 +682,10 @@ async fn schema_version(conn: &Connection) -> Result<Option<i64>, GitCorrelation
         .transpose()
 }
 
-async fn table_exists(conn: &Connection, table: &str) -> Result<bool, GitCorrelationError> {
+async fn table_exists(
+    conn: &(impl QueryExecutor + ?Sized),
+    table: &str,
+) -> Result<bool, GitCorrelationError> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -941,7 +914,7 @@ pub(crate) async fn record_span_observation(
 }
 
 pub(crate) async fn record_span_observation_in_transaction(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     observation: &SpanObservation,
     merge_gap_secs: i64,
 ) -> Result<i64, GitCorrelationError> {
@@ -1004,14 +977,19 @@ pub(crate) async fn record_span_observation_in_transaction(
         ],
     )
     .await?;
-    Ok(conn.last_insert_rowid())
+    let mut rows = conn.query("SELECT last_insert_rowid()", ()).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| GitCorrelationError::Db("missing inserted span id".to_string()))?;
+    Ok(row.get(0)?)
 }
 
 /// Inserts one commit attribution row. Stronger evidence replaces weaker
 /// evidence; identical or weaker replays are no-ops. Returns `true` when the
 /// row was inserted or strengthened.
 pub(crate) async fn upsert_commit_session(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     record: &CommitSessionRecord,
 ) -> Result<bool, GitCorrelationError> {
     let worktree = record.worktree.as_deref().map(normalize_worktree);
@@ -1067,14 +1045,14 @@ pub(crate) use attribution::{read_meta_value, run_commit_attribution_sweep, writ
 /// by prefix). `since`/`until` bound span overlap (branch/worktree) or
 /// commit time (commit).
 pub(crate) async fn sessions_for(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     query: &SessionsForQuery,
 ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
     sessions_for_with_relation(conn, query, CommitRelationFilter::Produced).await
 }
 
 pub(crate) async fn sessions_for_with_relation(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     query: &SessionsForQuery,
     relation: CommitRelationFilter,
 ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
@@ -1112,7 +1090,7 @@ pub(crate) async fn sessions_for_with_relation(
 
 /// Resolves the `(provider, session_id)` pairs matching all present git filters.
 pub(crate) async fn session_ids_for_scope(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     filter: &GitScopeFilter,
 ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
     if filter.is_empty() {
@@ -1154,7 +1132,7 @@ fn intersect_session_ids(
 }
 
 async fn span_session_ids(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     ref_predicate: &str,
     ref_value: Value,
 ) -> Result<Vec<(String, String)>, GitCorrelationError> {
@@ -1174,7 +1152,7 @@ async fn span_session_ids(
 }
 
 async fn commit_session_ids(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     sha: &str,
 ) -> Result<Vec<(String, String)>, GitCorrelationError> {
     // Prefer producer evidence, but fall back to every session correlated with
@@ -1285,11 +1263,15 @@ pub(crate) fn git_scope_exists_predicate(
 /// paths use this to short-circuit git-scoped queries against stores predating
 /// the git-correlation schema (returning empty rather than a `no such table`
 /// error).
-pub(crate) async fn tables_present(conn: &Connection) -> Result<bool, GitCorrelationError> {
+pub(crate) async fn tables_present(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<bool, GitCorrelationError> {
     correlation_tables_present(conn).await
 }
 
-async fn correlation_tables_present(conn: &Connection) -> Result<bool, GitCorrelationError> {
+async fn correlation_tables_present(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<bool, GitCorrelationError> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM sqlite_master
@@ -1343,7 +1325,7 @@ impl CorrelationIndexHealth {
 /// plus a metadata lookup. Never runs DDL, so a store predating the schema
 /// reports `tables_present = false` with zero counts rather than erroring.
 pub(crate) async fn correlation_index_health(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
     if !correlation_tables_present(conn).await? {
         return Ok(CorrelationIndexHealth {
@@ -1382,7 +1364,7 @@ pub(crate) async fn correlation_index_health(
 }
 
 async fn span_hits(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     ref_predicate: &str,
     ref_value: Value,
     query: &SessionsForQuery,
@@ -1461,7 +1443,7 @@ fn single_concat_value(joined: Option<&str>) -> Option<String> {
 }
 
 async fn commit_hits(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     sha: &str,
     query: &SessionsForQuery,
     relation: CommitRelationFilter,
@@ -1573,10 +1555,9 @@ mod backfill;
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry,
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
-    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, run_backfill,
-    run_incremental_backfill, window_branch_segments,
+    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
 };
-pub(crate) use backfill::{session_activity_rows, session_activity_rows_since};
+pub(crate) use backfill::{run_backfill, run_incremental_backfill};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

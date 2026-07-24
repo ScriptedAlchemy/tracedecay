@@ -810,7 +810,10 @@ mod tests {
     async fn session_root_uses_shared_identity_resolver_for_global_only_project() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+        let gdb =
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .unwrap();
 
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
@@ -883,7 +886,11 @@ mod tests {
     async fn session_context_reports_initialized_and_preserves_nudge() {
         let _profile = crate::config::PinnedUserDataDir::new();
 
-        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+        let profile_root = crate::storage::default_profile_root().unwrap();
+        let gdb =
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .unwrap();
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
         gdb.upsert(&project_root, 0).await;

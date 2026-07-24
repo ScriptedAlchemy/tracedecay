@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
+    ObservationScopeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, RetentionClass,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
@@ -25,13 +25,15 @@ use tracedecay_store::{
 };
 
 use super::*;
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::db::engine::{QueryExecutor, params};
 use crate::db::{Database, DatabaseAuthority};
+use crate::global_db::RegisteredGlobalDb;
 use crate::memory::store::MemoryStore;
 use crate::memory::types::{
     AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::store::GlobalDbObservationStore;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 mod lifecycle;
@@ -43,17 +45,35 @@ mod temporal;
 
 async fn test_initialize(path: &Path) -> (Database, bool) {
     let authority = DatabaseAuthority::acquire_test(path, "consolidation test initialize").unwrap();
-    Database::initialize(path, &authority).await.unwrap()
+    Database::publish_test_runtime(
+        path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap()
 }
 
 async fn test_open(path: &Path) -> (Database, bool) {
     let authority = DatabaseAuthority::acquire_test(path, "consolidation test open").unwrap();
-    Database::open(path, &authority).await.unwrap()
+    Database::publish_test_runtime(
+        path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Existing,
+    )
+    .await
+    .unwrap()
 }
 
 async fn test_open_read_only(path: &Path) -> (Database, bool) {
     let authority = DatabaseAuthority::acquire_test(path, "consolidation test read").unwrap();
-    Database::open_read_only(path, &authority).await.unwrap()
+    Database::publish_test_runtime(
+        path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::ReadOnly,
+    )
+    .await
+    .unwrap()
 }
 
 struct Fixture {
@@ -358,7 +378,7 @@ fn migration_observation_range_generation(
 }
 
 async fn persist_migration_observation(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
 ) {
@@ -387,7 +407,7 @@ async fn persist_migration_observation(
     let write =
         AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation).unwrap();
     assert!(matches!(
-        GlobalDbObservationStore::new(db)
+        db.observation_store()
             .persist_observation(write)
             .await
             .unwrap(),
@@ -395,8 +415,8 @@ async fn persist_migration_observation(
     ));
 }
 
-async fn project_all_migration_observations(db: &GlobalDb) -> usize {
-    let store = GlobalDbObservationStore::new(db);
+async fn project_all_migration_observations(db: &RegisteredGlobalDb) -> usize {
+    let store = db.observation_store();
     let mut projected = 0;
     while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
         store.project_observation(&observation_id).await.unwrap();
@@ -405,55 +425,53 @@ async fn project_all_migration_observations(db: &GlobalDb) -> usize {
     projected
 }
 
-async fn assert_observation_authority(path: &Path) {
+async fn registered_count_rows(db: &RegisteredGlobalDb, table: &str) -> i64 {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+async fn assert_observation_authority(db: &RegisteredGlobalDb) {
     for (table, expected) in [
         ("sanitization_receipts", 2),
         ("observations", 2),
         ("source_cursors", 1),
     ] {
-        assert_eq!(sqlite::count_rows(path, table).await.unwrap(), expected);
+        assert_eq!(registered_count_rows(db, table).await, expected);
     }
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    let cursor = GlobalDbObservationStore::new(&db)
+    let cursor = db
+        .observation_store()
         .get_source_cursor(&migration_source(), &ObservationScopeV1::Profile)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(cursor.byte_offset(), 20);
-    db.close();
 }
 
-async fn assert_pending_projection_replay(path: &Path) {
+async fn assert_pending_projection_replay(db: &RegisteredGlobalDb) {
     assert_eq!(
-        sqlite::count_rows(path, "observation_projection_checkpoints")
-            .await
-            .unwrap(),
+        registered_count_rows(db, "observation_projection_checkpoints").await,
         0
     );
     assert_eq!(
-        sqlite::count_rows(path, "observation_projection_dispositions")
-            .await
-            .unwrap(),
+        registered_count_rows(db, "observation_projection_dispositions").await,
         0
     );
     assert_eq!(
-        sqlite::count_rows(path, "observation_projection_provenance")
-            .await
-            .unwrap(),
+        registered_count_rows(db, "observation_projection_provenance").await,
         2
     );
-    assert_eq!(
-        sqlite::count_rows(path, "projection_queue").await.unwrap(),
-        2
-    );
+    assert_eq!(registered_count_rows(db, "projection_queue").await, 2);
 }
 
-async fn assert_projection_output(path: &Path, observation_id: &str, output_message_id: &str) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
+async fn assert_projection_output(
+    db: &RegisteredGlobalDb,
+    observation_id: &str,
+    output_message_id: &str,
+) {
     for table in [
         "observation_projection_aliases",
         "observation_projection_provenance",
@@ -462,11 +480,8 @@ async fn assert_projection_output(path: &Path, observation_id: &str, output_mess
             "SELECT output_message_id FROM {table}
              WHERE observation_id=?1"
         );
-        let mut rows = db
-            .conn()
-            .query(&sql, libsql::params![observation_id])
-            .await
-            .unwrap();
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot.query(&sql, params![observation_id]).await.unwrap();
         assert_eq!(
             rows.next()
                 .await
@@ -477,19 +492,19 @@ async fn assert_projection_output(path: &Path, observation_id: &str, output_mess
             output_message_id
         );
     }
-    db.close();
 }
 
-async fn assert_projection_alias(path: &Path, observation_id: &str, output_message_id: &str) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn()
+async fn assert_projection_alias(
+    db: &RegisteredGlobalDb,
+    observation_id: &str,
+    output_message_id: &str,
+) {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT output_message_id FROM observation_projection_aliases
              WHERE observation_id=?1",
-            libsql::params![observation_id],
+            params![observation_id],
         )
         .await
         .unwrap();
@@ -502,18 +517,15 @@ async fn assert_projection_alias(path: &Path, observation_id: &str, output_messa
             .unwrap(),
         output_message_id
     );
-    db.close();
+    drop(snapshot);
 }
 
-async fn assert_no_projection_alias(path: &Path, observation_id: &str) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn()
+async fn assert_no_projection_alias(db: &RegisteredGlobalDb, observation_id: &str) {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT COUNT(*) FROM observation_projection_aliases WHERE observation_id=?1",
-            libsql::params![observation_id],
+            params![observation_id],
         )
         .await
         .unwrap();
@@ -521,66 +533,55 @@ async fn assert_no_projection_alias(path: &Path, observation_id: &str) {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
     );
-    db.close();
+    drop(snapshot);
 }
 
 async fn assert_projection_ownership(
-    path: &Path,
+    db: &RegisteredGlobalDb,
     output_message_id: &str,
     created: i64,
     retained: i64,
 ) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn()
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT SUM(message_created), SUM(1-message_created)
              FROM observation_projection_provenance WHERE output_message_id=?1",
-            libsql::params![output_message_id],
+            params![output_message_id],
         )
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     assert_eq!(row.get::<i64>(0).unwrap(), created);
     assert_eq!(row.get::<i64>(1).unwrap(), retained);
-    db.close();
+    drop(snapshot);
 }
 
 async fn assert_shared_projection_predrain(
-    path: &Path,
+    db: &RegisteredGlobalDb,
     shared_observation_id: &str,
     newer_observation_id: &str,
     original_message_id: &str,
     remapped_message_id: &str,
 ) {
-    assert_no_projection_alias(path, shared_observation_id).await;
-    assert_projection_alias(path, newer_observation_id, remapped_message_id).await;
-    assert_message_text(path, original_message_id, "older target body").await;
-    assert_message_absent(path, remapped_message_id).await;
+    assert_no_projection_alias(db, shared_observation_id).await;
+    assert_projection_alias(db, newer_observation_id, remapped_message_id).await;
+    assert_message_text(db, original_message_id, "older target body").await;
+    assert_message_absent(db, remapped_message_id).await;
     assert_eq!(
-        sqlite::count_rows(path, "observation_projection_provenance")
-            .await
-            .unwrap(),
+        registered_count_rows(db, "observation_projection_provenance").await,
         1
     );
-    assert_eq!(
-        sqlite::count_rows(path, "projection_queue").await.unwrap(),
-        2
-    );
-    assert_no_orphaned_projection_provenance(path).await;
+    assert_eq!(registered_count_rows(db, "projection_queue").await, 2);
+    assert_no_orphaned_projection_provenance(db).await;
 }
 
-async fn assert_message_text(path: &Path, message_id: &str, expected: &str) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn()
+async fn assert_message_text(db: &RegisteredGlobalDb, message_id: &str, expected: &str) {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT text FROM session_messages WHERE provider='claude' AND message_id=?1",
-            libsql::params![message_id],
+            params![message_id],
         )
         .await
         .unwrap();
@@ -596,18 +597,15 @@ async fn assert_message_text(path: &Path, message_id: &str, expected: &str) {
         "{actual:?} does not contain {expected:?}"
     );
     assert!(rows.next().await.unwrap().is_none());
-    db.close();
+    drop(snapshot);
 }
 
-async fn assert_message_absent(path: &Path, message_id: &str) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn()
+async fn assert_message_absent(db: &RegisteredGlobalDb, message_id: &str) {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT COUNT(*) FROM session_messages WHERE provider='claude' AND message_id=?1",
-            libsql::params![message_id],
+            params![message_id],
         )
         .await
         .unwrap();
@@ -615,15 +613,12 @@ async fn assert_message_absent(path: &Path, message_id: &str) {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
     );
-    db.close();
+    drop(snapshot);
 }
 
-async fn assert_no_orphaned_projection_provenance(path: &Path) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    let mut rows = db
-        .conn()
+async fn assert_no_orphaned_projection_provenance(db: &RegisteredGlobalDb) {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT COUNT(*)
              FROM observation_projection_provenance AS provenance
@@ -639,31 +634,38 @@ async fn assert_no_orphaned_projection_provenance(path: &Path) {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
     );
-    db.close();
+    drop(snapshot);
 }
 
-async fn set_migration_cursor(db: &GlobalDb, session_id: &str, generation: u64, byte_offset: u64) {
+async fn set_migration_cursor(
+    db: &RegisteredGlobalDb,
+    session_id: &str,
+    generation: u64,
+    byte_offset: u64,
+) {
     let cursor = migration_cursor_generation_for(session_id, generation, byte_offset);
     db.writer_connection()
-        .await
         .unwrap()
         .execute(
             "UPDATE source_cursors SET cursor_json=?1",
-            libsql::params![serde_json::to_string(&cursor).unwrap()],
+            params![serde_json::to_string(&cursor).unwrap()],
         )
         .await
         .unwrap();
 }
 
-async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_message_id: &str) {
+async fn insert_projection_alias(
+    db: &RegisteredGlobalDb,
+    observation_id: &str,
+    output_message_id: &str,
+) {
     db.writer_connection()
-        .await
         .unwrap()
         .execute(
             "INSERT INTO observation_projection_aliases(
                  projector_version, observation_id, output_provider, output_message_id
              ) VALUES (?1, ?2, 'claude', ?3)",
-            libsql::params![
+            params![
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation_id,
                 output_message_id
@@ -671,10 +673,7 @@ async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_mes
         )
         .await
         .unwrap();
-    let rebuilt = GlobalDbObservationStore::new(db)
-        .rebuild_projection(0)
-        .await
-        .unwrap();
+    let rebuilt = db.observation_store().rebuild_projection(0).await.unwrap();
     assert!(rebuilt.is_complete());
 }
 
@@ -768,9 +767,7 @@ async fn build_fixture_tree(project: &Path, profile: &Path) {
         false,
     )
     .await;
-    let global = GlobalDb::open_at_without_structured_backfill(&profile.join("global.db"))
-        .await
-        .unwrap();
+    let global = HostAdmissionTestRuntimeV1::profile(profile).await.unwrap();
     let git_common_dir = crate::worktree::git_common_dir(project).unwrap();
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         global
@@ -804,8 +801,7 @@ async fn build_fixture_tree(project: &Path, profile: &Path) {
         .upsert_project_alias(project, FIXTURE_TARGET_ID)
         .await
         .unwrap();
-    global.checkpoint().await;
-    global.close();
+    global.checkpoint_profile_database_for_test().await;
     storage::write_repository_identity_marker(project, FIXTURE_TARGET_ID).unwrap();
 }
 
@@ -828,13 +824,10 @@ async fn fixture_from_template() -> Option<Fixture> {
 /// manifests (`project_root/data_root`), and the repository-identity marker.
 async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
     let git_common_dir = crate::worktree::git_common_dir(project)?;
-    let global = GlobalDb::open_at_without_structured_backfill(&profile.join("global.db")).await?;
+    let global = HostAdmissionTestRuntimeV1::profile(profile).await.ok()?;
     // Drop the template build's path aliases so only fresh new-path aliases
     // remain after the re-upserts below.
-    {
-        let conn = global.writer_connection().await.ok()?;
-        conn.execute("DELETE FROM project_aliases", ()).await.ok()?;
-    }
+    global.clear_project_aliases_for_test().await.ok()?;
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         global
             .upsert_code_project(
@@ -849,8 +842,7 @@ async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
     global
         .upsert_project_alias(project, FIXTURE_TARGET_ID)
         .await?;
-    global.checkpoint().await;
-    global.close();
+    global.checkpoint_profile_database_for_test().await;
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         let layout = layout_for_id(project, profile, project_id).ok()?;
         storage::write_store_manifest(&layout).ok()?;
@@ -1006,49 +998,65 @@ async fn create_shard(
     graph.checkpoint().await.unwrap();
     graph.close();
 
-    let sessions = GlobalDb::open_at_without_structured_backfill(&layout.sessions_db_path)
+    let project_id = ProjectId::new(project_id.to_string()).unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(profile, project, project_id.clone())
         .await
         .unwrap();
-    assert!(
-        sessions
-            .upsert_session(&SessionRecord {
-                provider: "codex".to_string(),
-                session_id: session_id.to_string(),
-                project_key: project_id.to_string(),
-                project_path: project.to_string_lossy().to_string(),
-                title: Some(session_id.to_string()),
-                started_at: Some(1_800_000_000),
-                ended_at: Some(1_800_000_001),
-                transcript_path: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
-            .await
+    assert_eq!(
+        runtime.database_path(HostAdmissionScope::Project).unwrap(),
+        layout.sessions_db_path
     );
     assert!(
-        sessions
-            .upsert_session_message(&SessionMessageRecord {
-                provider: "codex".to_string(),
-                message_id: format!("message-{session_id}"),
-                session_id: session_id.to_string(),
-                role: "user".to_string(),
-                timestamp: Some(1_800_000_000),
-                ordinal: 0,
-                text: format!("message from {session_id}"),
-                kind: Some("message".to_string()),
-                model: None,
-                tool_names: None,
-                source_path: None,
-                source_offset: None,
-                metadata_json: None,
-            })
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "codex".to_string(),
+                    session_id: session_id.to_string(),
+                    project_key: project_id.as_str().to_string(),
+                    project_path: project.to_string_lossy().to_string(),
+                    title: Some(session_id.to_string()),
+                    started_at: Some(1_800_000_000),
+                    ended_at: Some(1_800_000_001),
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                },
+            )
             .await
+            .unwrap()
     );
-    sessions.checkpoint().await;
-    sessions.close();
+    assert!(
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &SessionMessageRecord {
+                    provider: "codex".to_string(),
+                    message_id: format!("message-{session_id}"),
+                    session_id: session_id.to_string(),
+                    role: "user".to_string(),
+                    timestamp: Some(1_800_000_000),
+                    ordinal: 0,
+                    text: format!("message from {session_id}"),
+                    kind: Some("message".to_string()),
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: None,
+                },
+            )
+            .await
+            .unwrap()
+    );
+    runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap()
+        .checkpoint()
+        .await;
 
     branch_meta::save_branch_meta(&layout.data_root, &BranchMeta::new("main")).unwrap();
     fs::create_dir_all(layout.data_root.join("lcm-payloads")).unwrap();
@@ -1208,22 +1216,11 @@ fn sqlite_family_bytes(path: &Path) -> u64 {
     .sum()
 }
 
-async fn execute_sql(path: &Path, sql: &str) {
-    let (db, _) = test_open(path).await;
-    db.execute_write_batch("execute consolidation fixture SQL", sql)
-        .await
-        .unwrap();
-    db.checkpoint().await.unwrap();
-    db.close();
-}
-
 async fn rewrite_page_size(path: &Path, page_size: i64) {
-    let db = libsql::Builder::new_local(path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(&format!(
         "PRAGMA journal_mode = DELETE; PRAGMA page_size = {page_size}; VACUUM;"
     ))
-    .await
     .unwrap();
 }
 
@@ -1235,7 +1232,7 @@ async fn database_page_size(path: &Path) -> i64 {
     page_size
 }
 
-async fn explain_query_plan(conn: &libsql::Connection, sql: &str) -> Vec<String> {
+async fn explain_query_plan(conn: &impl QueryExecutor, sql: &str) -> Vec<String> {
     let mut rows = conn
         .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
         .await

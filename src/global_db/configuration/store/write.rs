@@ -38,7 +38,7 @@ fn snapshot_entry_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static st
 }
 
 pub(super) async fn insert_snapshot_entries(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     revision_id: &ConfigurationRevisionId,
     snapshot: &ConfigurationSnapshotV1,
 ) -> ConfigurationStoreResult<()> {
@@ -86,7 +86,7 @@ fn encode_plan_payload(
 }
 
 pub(super) async fn insert_change_plan(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     plan: &ConfigurationProtectedPlanRecordV1,
 ) -> ConfigurationStoreResult<()> {
     plan.validate().map_err(ConfigurationStoreError::from)?;

@@ -7,8 +7,8 @@
 //!   `savings_ledger` event log, the legacy per-project `projects.tokens_saved`
 //!   lifetime counters, and the `turns` cost table (Claude Code transcripts,
 //!   cost computed from real usage data at ingest — labeled `actual`).
-//!   Ledger aggregation reuses [`GlobalDb::sum_savings`] /
-//!   [`GlobalDb::savings_history`], the same queries `tracedecay gain` runs.
+//!   Ledger aggregation reuses [`RegisteredGlobalDb::sum_savings`] /
+//!   [`RegisteredGlobalDb::savings_history`], the same queries `tracedecay gain` runs.
 //! - **Session store** (the resolved LCM store the dashboard already serves):
 //!   `sessions` +
 //!   `session_messages`, whose `model` and `metadata_json` columns drive
@@ -46,7 +46,8 @@ use super::token_count::{
 use super::util::{JsonQuery, coerce_limit, i64_field, query_i64, query_rows, str_field};
 use super::{DashboardState, savings_pricing, token_count};
 use crate::accounting::metrics::parse_range;
-use crate::global_db::GlobalDb;
+use crate::db::engine::{Value as DbValue, params, params_from_iter};
+use crate::global_db::RegisteredGlobalDb;
 
 /// Aggregate SELECT list shared by the per-session and per-model rollups.
 /// "Actual" sums only count usage-bearing messages; estimated sums only count
@@ -235,8 +236,8 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
             "recording": recording_block(),
         }),
     };
-    let sessions = match state.lcm_conn.as_ref() {
-        Some(conn) => sessions_overview(conn, &state).await,
+    let sessions = match state.lcm_db.as_deref() {
+        Some(db) => sessions_overview(db, &state).await,
         None => json!({ "available": false, "db": state.lcm_db_path }),
     };
     let turns = match state.savings_db.as_deref() {
@@ -259,7 +260,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
     }))
 }
 
-async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
+async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -308,7 +309,8 @@ async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
     })
 }
 
-async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) -> Value {
+async fn sessions_overview(db: &RegisteredGlobalDb, state: &DashboardState) -> Value {
+    let conn = db.read_connection();
     let sql = format!(
         "SELECT {TOKEN_AGG_COLUMNS},
                 COUNT(DISTINCT session_id) AS session_count,
@@ -343,7 +345,7 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
     )
 }
 
-async fn turns_overview(gdb: &GlobalDb) -> Value {
+async fn turns_overview(gdb: &RegisteredGlobalDb) -> Value {
     let turn_count = query_i64(gdb.read_connection(), "SELECT COUNT(*) FROM turns", ()).await;
     let total_cost = gdb.total_cost_since(0).await.unwrap_or(0.0);
     let total_tokens = gdb.total_tokens_since(0).await.unwrap_or(0);
@@ -380,7 +382,7 @@ pub(crate) async fn ledger(
                 COUNT(*) AS calls
          FROM savings_ledger WHERE ts >= ?1
          GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50",
-        libsql::params![since],
+        params![since],
     )
     .await
     .unwrap_or_default();
@@ -391,7 +393,7 @@ pub(crate) async fn ledger(
                 COUNT(*) AS calls
          FROM savings_ledger WHERE ts >= ?1
          GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50",
-        libsql::params![since],
+        params![since],
     )
     .await
     .unwrap_or_default();
@@ -432,7 +434,7 @@ pub(crate) async fn sessions(
     let (range, since) = range_since(params.range.as_deref());
     let limit = coerce_limit(params.limit, 25, 100);
     let offset = params.offset.unwrap_or(0).max(0);
-    let Some(conn) = state.lcm_conn.as_ref() else {
+    let Some(db) = state.lcm_db.as_deref() else {
         return Json(json!({
             "available": false,
             "db": state.lcm_db_path,
@@ -441,6 +443,7 @@ pub(crate) async fn sessions(
             "total": 0,
         }));
     };
+    let conn = db.read_connection();
 
     let page_sql = "
         SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
@@ -453,7 +456,7 @@ pub(crate) async fn sessions(
                 WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1
         ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
         LIMIT ?2 OFFSET ?3";
-    let page = query_rows(conn, page_sql, libsql::params![since, limit, offset])
+    let page = query_rows(conn, page_sql, params![since, limit, offset])
         .await
         .unwrap_or_default();
     let total = query_i64(
@@ -462,7 +465,7 @@ pub(crate) async fn sessions(
          WHERE ?1 = 0 OR COALESCE(s.started_at,
                (SELECT MAX(m.timestamp) FROM session_messages m
                  WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1",
-        libsql::params![since],
+        params![since],
     )
     .await;
 
@@ -496,14 +499,12 @@ pub(crate) async fn sessions(
              GROUP BY provider, session_id, model
              ORDER BY messages DESC"
         );
-        let mut agg_params: Vec<libsql::Value> = Vec::with_capacity(page.len() * 2);
+        let mut agg_params: Vec<DbValue> = Vec::with_capacity(page.len() * 2);
         for row in &page {
-            agg_params.push(libsql::Value::Text(str_field(row, "provider").to_string()));
-            agg_params.push(libsql::Value::Text(
-                str_field(row, "session_id").to_string(),
-            ));
+            agg_params.push(DbValue::Text(str_field(row, "provider").to_string()));
+            agg_params.push(DbValue::Text(str_field(row, "session_id").to_string()));
         }
-        let rows = query_rows(conn, &agg_sql, libsql::params_from_iter(agg_params))
+        let rows = query_rows(conn, &agg_sql, params_from_iter(agg_params))
             .await
             .unwrap_or_default();
         for row in rows {
@@ -585,7 +586,7 @@ pub(crate) async fn sessions(
 /// Per-model token aggregates from the session store, per-day series for
 /// timestamped messages, plus the `turns` accounting (per-model cost and
 /// per-day cost — `actual`, computed from transcript usage at ingest by
-/// `tracedecay cost`, reusing [`GlobalDb::cost_by_model_since`]).
+/// `tracedecay cost`, reusing [`RegisteredGlobalDb::cost_by_model_since`]).
 pub(crate) async fn models(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
@@ -593,7 +594,7 @@ pub(crate) async fn models(
     let (range, since) = range_since(params.range.as_deref());
 
     let mut payload = json!({
-        "available": state.lcm_conn.is_some(),
+        "available": state.lcm_db.is_some(),
         "range": range,
         "since": since,
         "models": [],
@@ -601,7 +602,8 @@ pub(crate) async fn models(
         "turns": { "available": state.savings_db.is_some(), "by_model": [], "by_day": [] },
     });
 
-    if let Some(conn) = state.lcm_conn.as_ref() {
+    if let Some(db) = state.lcm_db.as_deref() {
+        let conn = db.read_connection();
         let overlay = token_count::non_usage_message_tokens(&state).await;
         // Folds replicate the SQL range predicates exactly: per-model rows
         // use COALESCE(timestamp, 0), the daily series requires a positive
@@ -625,7 +627,7 @@ pub(crate) async fn models(
              WHERE ?1 = 0 OR COALESCE(timestamp, 0) >= ?1
              GROUP BY model ORDER BY messages DESC LIMIT 100"
         );
-        let model_rows = query_rows(conn, &model_sql, libsql::params![since])
+        let model_rows = query_rows(conn, &model_sql, params![since])
             .await
             .unwrap_or_default();
         payload["models"] = Value::Array(
@@ -662,7 +664,7 @@ pub(crate) async fn models(
              FROM daily JOIN latest_days ON latest_days.day = daily.day
              ORDER BY daily.day ASC, daily.messages DESC"
         );
-        let daily_rows = query_rows(conn, &daily_sql, libsql::params![since])
+        let daily_rows = query_rows(conn, &daily_sql, params![since])
             .await
             .unwrap_or_default();
         payload["daily"] = Value::Array(
@@ -714,7 +716,7 @@ pub(crate) async fn models(
              SELECT daily.*
              FROM daily JOIN latest_days ON latest_days.day = daily.day
              ORDER BY daily.day ASC",
-            libsql::params![since],
+            params![since],
         )
         .await
         .unwrap_or_default();

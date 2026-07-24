@@ -255,11 +255,10 @@ async fn bulk_load_preserves_platform_synchronous_mode() {
 
     // NORMAL = 1, FULL = 2. Windows uses DELETE journaling with FULL sync;
     // other platforms use WAL with NORMAL sync.
-    let sync_value: i64 = {
-        let mut rows = db.conn().query("PRAGMA synchronous", ()).await.unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        row.get(0).unwrap()
-    };
+    let sync_value = db
+        .query_scalar_i64("inspect synchronous mode", "PRAGMA synchronous")
+        .await
+        .unwrap();
     let expected_sync = if cfg!(windows) { 2 } else { 1 };
     assert_eq!(
         sync_value, expected_sync,
@@ -760,33 +759,24 @@ async fn open_never_repairs_or_replaces_whole_database_corruption()
         .insert_nodes(&[sample_node("whole-db", "whole_db_probe")])
         .await?;
 
-    let mut rows = ts
+    let segment = ts
         .db()
-        .conn()
-        .query(
+        .query_scalar_blob(
+            "read FTS corruption fixture segment",
             "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
-            (),
         )
         .await?;
-    let segment = rows
-        .next()
-        .await?
-        .expect("FTS segment row")
-        .get::<Vec<u8>>(0)?;
-    drop(rows);
-    let mut rows = ts
+    let root_page = ts
         .db()
-        .conn()
-        .query(
+        .query_scalar_i64(
+            "read edges root page",
             "SELECT rootpage FROM sqlite_schema WHERE name = 'edges'",
-            (),
         )
-        .await?;
-    let root_page = rows.next().await?.expect("edges root page").get::<i64>(0)? as u64;
-    drop(rows);
-    let mut rows = ts.db().conn().query("PRAGMA page_size", ()).await?;
-    let page_size = rows.next().await?.expect("page size").get::<i64>(0)? as u64;
-    drop(rows);
+        .await? as u64;
+    let page_size = ts
+        .db()
+        .query_scalar_i64("read SQLite page size", "PRAGMA page_size")
+        .await? as u64;
     ts.checkpoint().await?;
     ts.close();
 
@@ -914,17 +904,10 @@ async fn dirty_open_recovers_committed_rows_before_clearing_sentinel()
 
     let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
     let layout = ts.store_layout().clone();
-    ts.db()
-        .conn()
-        .execute_batch("PRAGMA wal_autocheckpoint = 0")
+    let journal_mode = ts
+        .db()
+        .query_scalar_text("read SQLite journal mode", "PRAGMA journal_mode")
         .await?;
-    let mut journal_rows = ts.db().conn().query("PRAGMA journal_mode", ()).await?;
-    let journal_mode = journal_rows
-        .next()
-        .await?
-        .expect("journal mode row")
-        .get::<String>(0)?;
-    drop(journal_rows);
     let node = sample_node("wal-recovery-node", "wal_recovery_node");
     ts.db().insert_nodes(std::slice::from_ref(&node)).await?;
     if journal_mode.eq_ignore_ascii_case("wal") {

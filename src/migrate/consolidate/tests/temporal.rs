@@ -3,28 +3,92 @@
 
 use super::*;
 
-async fn temporal_execute_batch(path: &Path, sql: &str) {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
-        .await
-        .unwrap();
-    db.writer_connection()
+struct TemporalOwnedSessionFixture {
+    runtime: HostAdmissionTestRuntimeV1,
+    path: PathBuf,
+    project_id: ProjectId,
+    project_path: PathBuf,
+}
+
+impl TemporalOwnedSessionFixture {
+    async fn new(root: &Path, name: &str) -> Self {
+        let profile = root.join(format!("{name}-profile"));
+        let project = root.join(format!("{name}-project"));
+        fs::create_dir_all(&project).unwrap();
+        let project_id = ProjectId::new(format!("project.temporal.{name}")).unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+            .await
+            .unwrap();
+        let path = runtime
+            .database_path(HostAdmissionScope::Project)
+            .unwrap()
+            .to_path_buf();
+        Self {
+            runtime,
+            path,
+            project_id,
+            project_path: project,
+        }
+    }
+
+    fn database(&self) -> &RegisteredGlobalDb {
+        self.runtime
+            .registered_database(HostAdmissionScope::Project)
+            .unwrap()
+    }
+
+    async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        let mut session = session.clone();
+        session.project_key = self.project_id.as_str().to_owned();
+        session.project_path = self.project_path.to_string_lossy().into_owned();
+        self.runtime
+            .upsert_session_for_test(HostAdmissionScope::Project, &session)
+            .await
+            .unwrap()
+    }
+
+    async fn checkpoint(&self) {
+        self.database().checkpoint().await;
+    }
+}
+
+async fn temporal_database(path: &Path, mode: crate::db::TestDatabaseRuntimeMode) -> Database {
+    let authority =
+        DatabaseAuthority::acquire_test(path, "temporal consolidation fixture").unwrap();
+    Database::publish_test_runtime(path, &authority, mode)
         .await
         .unwrap()
-        .execute_batch(sql)
+        .0
+}
+
+async fn temporal_execute_batch(path: &Path, sql: &str) {
+    let db = temporal_database(path, crate::db::TestDatabaseRuntimeMode::Initialize).await;
+    db.execute_write_batch("seed temporal consolidation fixture", sql)
         .await
         .unwrap();
-    db.checkpoint().await;
+    db.checkpoint().await.unwrap();
     db.close();
 }
 
+async fn temporal_initialize(path: &Path) {
+    temporal_database(path, crate::db::TestDatabaseRuntimeMode::Initialize)
+        .await
+        .close();
+}
+
 async fn temporal_scalar(path: &Path, sql: &str) -> i64 {
-    let db = GlobalDb::open_at_without_structured_backfill(path)
+    let scratch_root = path.parent().unwrap();
+    let snapshot = crate::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .unwrap();
-    let mut rows = db.read_connection().query(sql, ()).await.unwrap();
-    let value = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
-    db.close();
-    value
+    let mut rows = snapshot.connection().query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+async fn temporal_registered_scalar(db: &RegisteredGlobalDb, sql: &str) -> i64 {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
 #[tokio::test]
@@ -460,8 +524,10 @@ async fn temporal_owner_bound_alias_collision_rolls_back_without_anchor_text() {
 #[tokio::test]
 async fn temporal_observation_effect_rebinds_to_destination_sequence() {
     let temp = TempDir::new().unwrap();
-    let target_path = temp.path().join("target.db");
-    let source_path = temp.path().join("source.db");
+    let target = TemporalOwnedSessionFixture::new(temp.path(), "effect-target").await;
+    let source = TemporalOwnedSessionFixture::new(temp.path(), "effect-source").await;
+    let target_path = target.path.clone();
+    let source_path = source.path.clone();
     let target_input_path = temp.path().join("target-input.db");
     let target_observation = migration_observation_for(
         "session.temporal.target",
@@ -483,29 +549,22 @@ async fn temporal_observation_effect_rebinds_to_destination_sequence() {
         .as_str()
         .to_owned();
 
-    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
-        .await
-        .unwrap();
     Box::pin(persist_migration_observation(
-        &target,
+        target.database(),
         target_observation,
         None,
     ))
     .await;
     target.checkpoint().await;
-    target.close();
-    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
-        .await
-        .unwrap();
     Box::pin(persist_migration_observation(
-        &source,
+        source.database(),
         source_observation,
         None,
     ))
     .await;
     source
+        .database()
         .writer_connection()
-        .await
         .unwrap()
         .execute(
             "INSERT INTO session_temporal_observation_effects(
@@ -514,12 +573,11 @@ async fn temporal_observation_effect_rebinds_to_destination_sequence() {
              ) SELECT observation_id, sequence, 'session-temporal',
                       ?2, 'effect-digest', 1, 30
                FROM observations WHERE observation_id = ?1",
-            libsql::params![source_observation_id, source_receipt_id],
+            params![source_observation_id, source_receipt_id],
         )
         .await
         .unwrap();
     source.checkpoint().await;
-    source.close();
 
     let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
         .await
@@ -536,8 +594,8 @@ async fn temporal_observation_effect_rebinds_to_destination_sequence() {
     .unwrap();
 
     assert_eq!(
-        temporal_scalar(
-            &target_path,
+        temporal_registered_scalar(
+            target.database(),
             "SELECT COUNT(*)
              FROM session_temporal_observation_effects AS effect
              JOIN observations AS observation USING(observation_id)
@@ -718,7 +776,8 @@ async fn temporal_generation_merge_is_idempotent_on_full_remerge() {
 #[tokio::test]
 async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
     let temp = TempDir::new().unwrap();
-    let target = temp.path().join("target.db");
+    let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "eligible-target").await;
+    let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
     let observation = migration_observation_for(
         "session.legacy.forward",
@@ -728,37 +787,36 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
     );
     let observation_id = observation.observation_id().as_str().to_owned();
 
-    let db = GlobalDb::open_at_without_structured_backfill(&target)
-        .await
-        .unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "claude".to_string(),
-            session_id: "session.legacy.forward".to_string(),
-            project_key: "fixture".to_string(),
-            project_path: "/fixture".to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        target_runtime
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_string(),
+                session_id: "session.legacy.forward".to_string(),
+                project_key: "fixture".to_string(),
+                project_path: "/fixture".to_string(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
     );
-    Box::pin(persist_migration_observation(&db, observation, None)).await;
-    assert_eq!(project_all_migration_observations(&db).await, 1);
+    let db = target_runtime.database();
+    Box::pin(persist_migration_observation(db, observation, None)).await;
+    assert_eq!(project_all_migration_observations(db).await, 1);
 
     // Projection materializes lcm_raw_messages + provenance; forward-migrate
     // binds those projected outputs into temporal sinks with receipts.
     let output_message_id = {
-        let mut rows = db
-            .read_connection()
-            .query(
-                "SELECT provenance.output_message_id
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = QueryExecutor::query(
+            &snapshot,
+            "SELECT provenance.output_message_id
                  FROM observation_projection_provenance AS provenance
                  JOIN lcm_raw_messages AS raw
                    ON raw.provider = provenance.output_provider
@@ -769,10 +827,10 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
                    AND COALESCE(raw.legacy_truncated, 0) = 0
                  ORDER BY provenance.output_ordinal
                  LIMIT 1",
-                libsql::params![observation_id],
-            )
-            .await
-            .unwrap();
+            params![observation_id],
+        )
+        .await
+        .unwrap();
         let row = rows
             .next()
             .await
@@ -780,13 +838,9 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
             .expect("projected observation must bind provenance to eligible lcm_raw_messages");
         row.get::<String>(0).unwrap()
     };
-    db.checkpoint().await;
-    db.close();
+    target_runtime.checkpoint().await;
 
-    GlobalDb::open_at_without_structured_backfill(&empty)
-        .await
-        .unwrap()
-        .close();
+    temporal_initialize(&empty).await;
 
     sqlite::merge_temporal_for_test(&target, &empty)
         .await
@@ -801,10 +855,13 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
            AND message_id = '{}'",
         output_message_id.replace('\'', "''")
     );
-    assert_eq!(temporal_scalar(&target, &occurrence_sql).await, 1);
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(target_runtime.database(), &occurrence_sql).await,
+        1
+    );
+    assert_eq!(
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_receipts
              WHERE session_id = 'session.legacy.forward' AND imported_items = 1"
         )
@@ -812,8 +869,8 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_dispositions
              WHERE session_id = 'session.legacy.forward'
                AND disposition = 'eligible'"
@@ -822,8 +879,8 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_current_entities
              WHERE session_id = 'session.legacy.forward'
                AND entity_kind = 'occurrence_anchor'"
@@ -832,8 +889,8 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*)
              FROM session_occurrences AS occurrence
              JOIN session_occurrences_fts AS fts ON fts.rowid = occurrence.rowid
@@ -849,31 +906,31 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
 #[tokio::test]
 async fn temporal_forward_migrate_skips_quarantined_legacy_sources() {
     let temp = TempDir::new().unwrap();
-    let target = temp.path().join("target.db");
+    let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "quarantined-target").await;
+    let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
-    let db = GlobalDb::open_at_without_structured_backfill(&target)
-        .await
-        .unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "claude".to_string(),
-            session_id: "session.quarantined".to_string(),
-            project_key: "fixture".to_string(),
-            project_path: "/fixture".to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        target_runtime
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_string(),
+                session_id: "session.quarantined".to_string(),
+                project_key: "fixture".to_string(),
+                project_path: "/fixture".to_string(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
     );
-    db.writer_connection()
-        .await
+    target_runtime
+        .database()
+        .writer_connection()
         .unwrap()
         .execute(
             "INSERT INTO lcm_raw_messages (
@@ -890,21 +947,17 @@ async fn temporal_forward_migrate_skips_quarantined_legacy_sources() {
         )
         .await
         .unwrap();
-    db.checkpoint().await;
-    db.close();
+    target_runtime.checkpoint().await;
 
-    GlobalDb::open_at_without_structured_backfill(&empty)
-        .await
-        .unwrap()
-        .close();
+    temporal_initialize(&empty).await;
 
     sqlite::merge_temporal_for_test(&target, &empty)
         .await
         .unwrap();
 
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_occurrences
              WHERE session_id = 'session.quarantined'"
         )
@@ -912,8 +965,8 @@ async fn temporal_forward_migrate_skips_quarantined_legacy_sources() {
         0
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_dispositions
              WHERE session_id = 'session.quarantined'
                AND disposition = 'quarantined'
@@ -923,8 +976,8 @@ async fn temporal_forward_migrate_skips_quarantined_legacy_sources() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_receipts
              WHERE session_id = 'session.quarantined' AND imported_items = 0"
         )
@@ -936,7 +989,8 @@ async fn temporal_forward_migrate_skips_quarantined_legacy_sources() {
 #[tokio::test]
 async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
     let temp = TempDir::new().unwrap();
-    let target = temp.path().join("target.db");
+    let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "recover-target").await;
+    let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
     let observation = migration_observation_for(
         "session.legacy.recover",
@@ -946,51 +1000,48 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
     );
     let observation_id = observation.observation_id().as_str().to_owned();
 
-    let db = GlobalDb::open_at_without_structured_backfill(&target)
-        .await
-        .unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "claude".to_string(),
-            session_id: "session.legacy.recover".to_string(),
-            project_key: "fixture".to_string(),
-            project_path: "/fixture".to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        target_runtime
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_string(),
+                session_id: "session.legacy.recover".to_string(),
+                project_key: "fixture".to_string(),
+                project_path: "/fixture".to_string(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
     );
-    Box::pin(persist_migration_observation(&db, observation, None)).await;
-    assert_eq!(project_all_migration_observations(&db).await, 1);
-    let mut rows = db
-        .read_connection()
-        .query(
-            "SELECT 1
+    let db = target_runtime.database();
+    Box::pin(persist_migration_observation(db, observation, None)).await;
+    assert_eq!(project_all_migration_observations(db).await, 1);
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = QueryExecutor::query(
+        &snapshot,
+        "SELECT 1
              FROM observation_projection_provenance AS provenance
              JOIN lcm_raw_messages AS raw
                ON raw.provider = provenance.output_provider
               AND raw.message_id = provenance.output_message_id
              WHERE provenance.observation_id = ?1
                AND raw.session_id = 'session.legacy.recover'",
-            libsql::params![observation_id],
-        )
-        .await
-        .unwrap();
+        params![observation_id],
+    )
+    .await
+    .unwrap();
     assert!(rows.next().await.unwrap().is_some());
-    db.checkpoint().await;
-    db.close();
+    drop(rows);
+    drop(snapshot);
+    target_runtime.checkpoint().await;
 
-    GlobalDb::open_at_without_structured_backfill(&empty)
-        .await
-        .unwrap()
-        .close();
+    temporal_initialize(&empty).await;
 
     // Abort after the first temporal import write; outer TX must roll back.
     sqlite::set_forward_migrate_fault_after_import(true);
@@ -1005,8 +1056,8 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
         "{error}"
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_occurrences
              WHERE session_id = 'session.legacy.recover'"
         )
@@ -1014,8 +1065,8 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
         0
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_receipts
              WHERE session_id = 'session.legacy.recover'"
         )
@@ -1031,8 +1082,8 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
         .await
         .unwrap();
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_occurrences
              WHERE session_id = 'session.legacy.recover'"
         )
@@ -1040,8 +1091,8 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_receipts
              WHERE session_id = 'session.legacy.recover' AND imported_items = 1"
         )
@@ -1049,8 +1100,8 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_dispositions
              WHERE session_id = 'session.legacy.recover'
                AND disposition = 'eligible'"
@@ -1063,28 +1114,27 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
 #[tokio::test]
 async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
     let temp = TempDir::new().unwrap();
-    let target = temp.path().join("target.db");
+    let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "dispositions-target").await;
+    let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
-    let db = GlobalDb::open_at_without_structured_backfill(&target)
-        .await
-        .unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "claude".to_string(),
-            session_id: "session.dispositions".to_string(),
-            project_key: "fixture".to_string(),
-            project_path: "/fixture".to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        target_runtime
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_string(),
+                session_id: "session.dispositions".to_string(),
+                project_key: "fixture".to_string(),
+                project_path: "/fixture".to_string(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
     );
     for (message_id, metadata, legacy_source, legacy_truncated) in [
         ("message.policy", "{}", 1_i64, 0_i64),
@@ -1096,8 +1146,9 @@ async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
             0,
         ),
     ] {
-        db.writer_connection()
-            .await
+        target_runtime
+            .database()
+            .writer_connection()
             .unwrap()
             .execute(
                 "INSERT INTO lcm_raw_messages (
@@ -1109,26 +1160,22 @@ async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
                     'user', 1, 1, 'body', 'deadbeef', 'inline', NULL,
                     'body', 'body', ?2, ?3, ?4
                  )",
-                libsql::params![message_id, metadata, legacy_source, legacy_truncated],
+                params![message_id, metadata, legacy_source, legacy_truncated],
             )
             .await
             .unwrap();
     }
-    db.checkpoint().await;
-    db.close();
+    target_runtime.checkpoint().await;
 
-    GlobalDb::open_at_without_structured_backfill(&empty)
-        .await
-        .unwrap()
-        .close();
+    temporal_initialize(&empty).await;
 
     sqlite::merge_temporal_for_test(&target, &empty)
         .await
         .unwrap();
 
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_dispositions
              WHERE session_id = 'session.dispositions' AND disposition = 'policy_excluded'"
         )
@@ -1136,8 +1183,8 @@ async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_dispositions
              WHERE session_id = 'session.dispositions' AND disposition = 'unbound'"
         )
@@ -1145,8 +1192,8 @@ async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_dispositions
              WHERE session_id = 'session.dispositions' AND disposition = 'ineligible'"
         )
@@ -1154,8 +1201,8 @@ async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
         1
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_occurrences
              WHERE session_id = 'session.dispositions'"
         )
@@ -1167,7 +1214,8 @@ async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
 #[tokio::test]
 async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
     let temp = TempDir::new().unwrap();
-    let target = temp.path().join("target.db");
+    let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "multi-output-target").await;
+    let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
     let first = migration_observation_for(
         "session.multi.output",
@@ -1186,51 +1234,50 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
     let first_id = first.observation_id().as_str().to_owned();
     let second_id = second.observation_id().as_str().to_owned();
 
-    let db = GlobalDb::open_at_without_structured_backfill(&target)
-        .await
-        .unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "claude".to_string(),
-            session_id: "session.multi.output".to_string(),
-            project_key: "fixture".to_string(),
-            project_path: "/fixture".to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        target_runtime
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_string(),
+                session_id: "session.multi.output".to_string(),
+                project_key: "fixture".to_string(),
+                project_path: "/fixture".to_string(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
     );
-    Box::pin(persist_migration_observation(&db, first, None)).await;
-    assert_eq!(project_all_migration_observations(&db).await, 1);
+    let db = target_runtime.database();
+    Box::pin(persist_migration_observation(db, first, None)).await;
+    assert_eq!(project_all_migration_observations(db).await, 1);
     Box::pin(persist_migration_observation(
-        &db,
+        db,
         second,
         Some(migration_cursor_for("session.multi.output", 10)),
     ))
     .await;
-    assert_eq!(project_all_migration_observations(&db).await, 1);
+    assert_eq!(project_all_migration_observations(db).await, 1);
 
     // Distinct projected outputs remain distinct after forward-migrate, and each
     // occurrence preserves the provenance output ordinal rather than collapsing
     // to a hard-coded zero.
     for (observation_id, expected_ordinal) in [(&first_id, 0_i64), (&second_id, 0_i64)] {
-        let mut rows = db
-            .read_connection()
-            .query(
-                "SELECT output_ordinal
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = QueryExecutor::query(
+            &snapshot,
+            "SELECT output_ordinal
                  FROM observation_projection_provenance
                  WHERE observation_id = ?1",
-                libsql::params![observation_id.clone()],
-            )
-            .await
-            .unwrap();
+            params![observation_id.clone()],
+        )
+        .await
+        .unwrap();
         let row = rows
             .next()
             .await
@@ -1238,21 +1285,17 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
             .expect("projected provenance ordinal");
         assert_eq!(row.get::<i64>(0).unwrap(), expected_ordinal);
     }
-    db.checkpoint().await;
-    db.close();
+    target_runtime.checkpoint().await;
 
-    GlobalDb::open_at_without_structured_backfill(&empty)
-        .await
-        .unwrap()
-        .close();
+    temporal_initialize(&empty).await;
 
     sqlite::merge_temporal_for_test(&target, &empty)
         .await
         .unwrap();
 
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_occurrences
              WHERE session_id = 'session.multi.output'"
         )
@@ -1260,8 +1303,8 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
         2
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_occurrences AS occurrence
              JOIN observation_projection_provenance AS provenance
                ON provenance.observation_id = occurrence.source_observation_id
@@ -1272,8 +1315,8 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
         2
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_dispositions
              WHERE session_id = 'session.multi.output'
                AND disposition = 'eligible'"
@@ -1286,7 +1329,8 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
 #[tokio::test]
 async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
     let temp = TempDir::new().unwrap();
-    let target = temp.path().join("target.db");
+    let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "phase-target").await;
+    let target = target_runtime.path.clone();
     let source = temp.path().join("source.db");
     let empty = temp.path().join("empty.db");
     let watermarks = r#"{"active_generation":1,"cursor_key":null,"projection_frontier":0,"source_frontier":0,"summary_frontier":0}"#;
@@ -1307,12 +1351,15 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
         )
     };
 
-    temporal_execute_batch(&target, &setup("session.phase.target")).await;
-    temporal_execute_batch(&source, &setup("session.phase.source")).await;
-    GlobalDb::open_at_without_structured_backfill(&empty)
-        .await
+    target_runtime
+        .database()
+        .writer_connection()
         .unwrap()
-        .close();
+        .execute_batch(&setup("session.phase.target"))
+        .await
+        .unwrap();
+    temporal_execute_batch(&source, &setup("session.phase.source")).await;
+    temporal_initialize(&empty).await;
 
     sqlite::set_temporal_merge_fault_phase("after_supersession_merge");
     let error = sqlite::merge_temporal_for_test(&target, &source)
@@ -1326,8 +1373,8 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
         "{error}"
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_generations
              WHERE session_id = 'session.phase.source'"
         )
@@ -1341,31 +1388,36 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
         "message.phase.fts",
         "fts phase rollback body",
     );
-    let db = GlobalDb::open_at_without_structured_backfill(&target)
-        .await
-        .unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "claude".to_string(),
-            session_id: "session.phase.fts".to_string(),
-            project_key: "fixture".to_string(),
-            project_path: "/fixture".to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        target_runtime
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_string(),
+                session_id: "session.phase.fts".to_string(),
+                project_key: "fixture".to_string(),
+                project_path: "/fixture".to_string(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
     );
-    Box::pin(persist_migration_observation(&db, observation, None)).await;
-    assert_eq!(project_all_migration_observations(&db).await, 1);
-    db.checkpoint().await;
-    db.close();
+    Box::pin(persist_migration_observation(
+        target_runtime.database(),
+        observation,
+        None,
+    ))
+    .await;
+    assert_eq!(
+        project_all_migration_observations(target_runtime.database()).await,
+        1
+    );
+    target_runtime.checkpoint().await;
 
     sqlite::set_temporal_merge_fault_phase("after_fts_parity");
     let error = sqlite::merge_temporal_for_test(&target, &empty)
@@ -1379,8 +1431,8 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
         "{error}"
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_occurrences
              WHERE session_id = 'session.phase.fts'"
         )
@@ -1388,8 +1440,8 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
         0
     );
     assert_eq!(
-        temporal_scalar(
-            &target,
+        temporal_registered_scalar(
+            target_runtime.database(),
             "SELECT COUNT(*) FROM session_temporal_migration_receipts
              WHERE session_id = 'session.phase.fts'"
         )

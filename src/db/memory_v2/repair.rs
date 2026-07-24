@@ -2,7 +2,9 @@ use tracedecay_domain::{
     Confidence, FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, SourceStoreId,
 };
 
-use crate::db::engine::{self, Executor, params};
+#[cfg(test)]
+use crate::db::engine;
+use crate::db::engine::params;
 use crate::errors::Result;
 
 use super::types::{

@@ -30,8 +30,9 @@ pub use capabilities::{
 };
 pub use context::{
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
-    ContextExpansionScope, ContextProjectionChange, ContextProjectionEnvelope,
-    ContextProjectionItem, ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
+    ContextExpansionScope, ContextFreshness, ContextProducerState, ContextProjectionChange,
+    ContextProjectionEnvelope, ContextProjectionIdentity, ContextProjectionItem,
+    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
     ContextProjectionRegistration, ContextProjectionRequest, ContextSubscribeRequest,
     MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS,
     MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
@@ -40,8 +41,10 @@ pub use context::{
 };
 pub use diagnostics::{
     DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
-    GatewayDiagnostic, LspPosition, LspRange, MAX_DIAGNOSTIC_MESSAGE_BYTES,
-    MAX_DOCUMENT_DIAGNOSTICS, PositionError, byte_offset_to_utf16_position, merge_diagnostics,
+    GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
+    GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspPosition, LspRange,
+    MAX_DIAGNOSTIC_MESSAGE_BYTES, MAX_DOCUMENT_DIAGNOSTICS, PositionError,
+    TRACEDECAY_DIAGNOSTIC_DATA_REVISION, byte_offset_to_utf16_position, merge_diagnostics,
     utf16_position_to_byte_offset,
 };
 pub use endpoint::{

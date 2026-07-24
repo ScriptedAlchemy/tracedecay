@@ -5,14 +5,16 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     let temp = TempDir::new().unwrap();
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
+    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
     let identity = DaemonClientIdentity {
         profile_root: profile_root.clone(),
         global_db_path: profile_root.join("global.db"),
     };
 
-    let first_admin = StoreAdministration::default();
+    let first_admin =
+        StoreAdministration::default().with_profile_identity(profile_identity.clone());
     let user_db = first_admin
-        .user_session_database(&identity.global_db_path)
+        .registered_profile_session_database()
         .await
         .unwrap();
     let broker = first_admin
@@ -22,37 +24,53 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         .broker()
         .cloned()
         .expect("fresh host admission spool");
-    let plan = crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt {
-        route: Some(crate::daemon::HookRouteMetadata {
-            session_id: Some("startup-session".to_string()),
-            thread_id: None,
-            cwd: None,
-            worktree: None,
-            branch: None,
-        }),
-        receipt: crate::daemon::HookTerminalReceipt {
-            tool_call_id: Some("startup-call".to_string()),
-            turn_id: Some("startup-turn".to_string()),
-            status: Some("success".to_string()),
-            duration_ms: Some(1),
-            transcript_watermark: Some("startup-watermark".to_string()),
-        },
-    };
-    let payload = crate::mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap();
+    let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+    std::fs::write(&automation_root, "block canonical receipt apply").unwrap();
+    let params = serde_json::json!({
+        "name": "tracedecay_hook_runtime",
+        "arguments": {
+            "action": "hermes_receipt",
+            "event": {
+                "agent": "hermes",
+                "event": "turnCompleted",
+                "route": { "session_id": "startup-session" },
+                "receipt": {
+                    "tool_call_id": "startup-call",
+                    "turn_id": "startup-turn",
+                    "status": "success",
+                    "duration_ms": 1,
+                    "transcript_watermark": "startup-watermark"
+                }
+            }
+        }
+    });
+    let response = super::super::projectless_tools_call_response(
+        serde_json::json!(1),
+        Some(&params),
+        &identity,
+        &first_admin,
+    )
+    .await;
+    assert!(
+        response.error.is_some(),
+        "blocked canonical apply must retain the daemon-admitted receipt"
+    );
+    assert_eq!(broker.pending_count().await, 1);
+    assert!(!profile_root.join("host_receipts.json").exists());
     first_admin.shutdown_host_admission_replay().await;
-    broker.admit("hermes:startup-test", &payload).await.unwrap();
     // Retain the pending record after the first daemon's replay authority has
-    // drained, so restart replay remains the acceptance path under test.
+    // stopped, so restart replay remains the acceptance path under test.
     drop(broker);
     drop(user_db);
     drop(first_admin);
+    std::fs::remove_file(&automation_root).unwrap();
 
-    let restarted = StoreAdministration::default();
+    let restarted = StoreAdministration::default().with_profile_identity(profile_identity);
     super::super::replay_user_profile_host_admission_for_identity(&restarted, &identity)
         .await
         .unwrap();
     let recovered_db = restarted
-        .user_session_database(&identity.global_db_path)
+        .registered_profile_session_database()
         .await
         .unwrap();
     let recovered = restarted

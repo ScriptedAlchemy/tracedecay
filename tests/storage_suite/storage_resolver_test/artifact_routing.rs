@@ -26,10 +26,6 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
         resolve_lcm_payload_root(&project).unwrap(),
         profile_root.join("projects/proj_123/lcm-payloads"),
     );
-    assert_path_eq(
-        project_session_db_path(&project),
-        profile_root.join("projects/proj_123/sessions.db"),
-    );
 }
 
 #[tokio::test]
@@ -45,10 +41,6 @@ async fn resolved_project_store_helpers_default_to_profile_sharded_artifact_path
 
     assert_path_eq(
         resolve_project_session_db_path(&project).unwrap(),
-        profile_root.join(format!("projects/{project_id}/sessions.db")),
-    );
-    assert_path_eq(
-        project_session_db_path(&project),
         profile_root.join(format!("projects/{project_id}/sessions.db")),
     );
 }
@@ -71,11 +63,8 @@ async fn hermes_profile_like_directory_uses_user_profile_shard() {
     let expected = home
         .join(".tracedecay")
         .join(format!("projects/{project_id}/sessions.db"));
-    assert_eq!(project_session_db_path(&hermes_home), expected);
     assert_eq!(
-        tracedecay::sessions::cursor::resolved_project_session_db_path(&hermes_home)
-            .await
-            .unwrap(),
+        resolve_project_session_db_path(&hermes_home).unwrap(),
         expected
     );
 }

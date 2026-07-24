@@ -11,11 +11,10 @@ use tracedecay_domain::{
     ProviderId, RetentionClass, SessionId,
 };
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::global_db::GlobalDb;
 use crate::privacy::parse_normalized_observation_record_v1;
 use crate::sessions::source::TranscriptIngestError;
 
@@ -180,16 +179,10 @@ pub fn build_cursor_composer_capture_request(
 }
 
 pub async fn capture_cursor_composer_observation(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     request: CaptureObservationRequest,
 ) -> Result<CaptureObservationOutcome, TranscriptIngestError> {
-    let authorities = match request.scope() {
-        ObservationScopeV1::Project { project_id } => {
-            HostAdmissionAuthorities::for_project(db, project_id.clone())
-        }
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
-    };
-    HostAdmissionFacade::new(authorities)
+    admission
         .capture_observation(request)
         .await
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })

@@ -10,10 +10,10 @@ use tempfile::TempDir;
 use tracedecay::application::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
-use tracedecay::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay::application::host_admission::{
+    HostAdmissionFacade, HostAdmissionScope, HostAdmissionTestRuntimeV1,
+};
 use tracedecay::application::memory::MemoryApplication;
-use tracedecay::global_db::GlobalDb;
-use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     AnchorResolutionStateV2, ClaudeByteRangeV1, ClaudeFileGenerationV1,
     ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
@@ -32,8 +32,6 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, StoredFactV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
-
-use crate::common::{isolated_lcm_db_path, open_lcm_db};
 
 const GENERATION: u64 = 7;
 const PROJECTION_SHARD: &str = "observation.projection";
@@ -153,7 +151,7 @@ fn anchored_write_with(
 }
 
 async fn persist(
-    store: &GlobalDbObservationStore<'_>,
+    store: &impl ObservationStore,
     anchored: AnchoredObservationWrite,
 ) -> ObservationCommitReceipt {
     match store.persist_observation(anchored).await.unwrap() {
@@ -162,8 +160,14 @@ async fn persist(
     }
 }
 
-fn profile_facade(db: &GlobalDb) -> HostAdmissionFacade<'_> {
-    HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db))
+async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap()
+}
+
+fn profile_facade(runtime: &HostAdmissionTestRuntimeV1) -> HostAdmissionFacade<'_> {
+    runtime.facade()
 }
 
 async fn resolve(
@@ -187,11 +191,13 @@ fn assert_payload_free(report: &EvidenceAnchorResolutionReport) {
 #[tokio::test]
 async fn current_resolution_reports_state_coverage_and_exact_record() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(0, 100, "receipt.anchor-current", "stable sanitized payload");
     let receipt = persist(&store, anchored_write(write(candidate, None))).await;
-    let facade = profile_facade(&db);
+    let facade = profile_facade(&runtime);
 
     let report = resolve(&facade, receipt.retrieval_anchor().anchor_id()).await;
 
@@ -223,8 +229,10 @@ async fn current_resolution_reports_state_coverage_and_exact_record() {
 #[tokio::test]
 async fn search_result_resolves_exact_source_after_index_change_with_drift_and_coverage() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
 
     // The search-time anchor freezes the projection watermark at the source
     // observation's own sequence.
@@ -240,7 +248,7 @@ async fn search_result_resolves_exact_source_after_index_change_with_drift_and_c
     )
     .await;
     let anchor_id = first_receipt.retrieval_anchor().anchor_id().clone();
-    let facade = profile_facade(&db);
+    let facade = profile_facade(&runtime);
 
     // Once the projection folds in the source observation, the anchor is current.
     store.project_observation(&first_id).await.unwrap();
@@ -329,9 +337,11 @@ async fn search_result_resolves_exact_source_after_index_change_with_drift_and_c
 #[tokio::test]
 async fn redacted_expired_and_deleted_targets_report_typed_states_without_payload() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
-    let facade = profile_facade(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let facade = profile_facade(&runtime);
     let cases = [
         (
             PayloadAccessState::Redacted,
@@ -393,8 +403,10 @@ async fn redacted_expired_and_deleted_targets_report_typed_states_without_payloa
 async fn unavailable_resolution_reports_typed_state_and_never_leaks_existence() {
     // Owner X retains an anchor that genuinely exists.
     let owner_x = TempDir::new().unwrap();
-    let db_x = open_lcm_db(&owner_x).await;
-    let store_x = GlobalDbObservationStore::new(&db_x);
+    let runtime_x = profile_runtime(&owner_x).await;
+    let store_x = runtime_x
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(
         0,
         100,
@@ -405,7 +417,7 @@ async fn unavailable_resolution_reports_typed_state_and_never_leaks_existence() 
     let existing_anchor_id = receipt.retrieval_anchor().anchor_id().clone();
 
     // A valid owner resolving a never-created anchor gets the typed state.
-    let facade_x = profile_facade(&db_x);
+    let facade_x = profile_facade(&runtime_x);
     let never_existed_anchor_id = RetrievalAnchorId::new("retrieval.never-existed").unwrap();
     let absent = resolve(&facade_x, &never_existed_anchor_id).await;
     assert_eq!(absent.state(), AnchorResolutionStateV2::Unavailable);
@@ -424,8 +436,8 @@ async fn unavailable_resolution_reports_typed_state_and_never_leaks_existence() 
     // An isolated unauthorized authority cannot distinguish an anchor that
     // exists under owner X from one that never existed at all.
     let owner_y = TempDir::new().unwrap();
-    let db_y = open_lcm_db(&owner_y).await;
-    let facade_y = profile_facade(&db_y);
+    let runtime_y = profile_runtime(&owner_y).await;
+    let facade_y = profile_facade(&runtime_y);
     let existing_elsewhere = resolve(&facade_y, &existing_anchor_id).await;
     let never_existed = resolve(&facade_y, &never_existed_anchor_id).await;
     assert_eq!(existing_elsewhere.state(), absent.state());
@@ -449,9 +461,11 @@ async fn unavailable_resolution_reports_typed_state_and_never_leaks_existence() 
 #[tokio::test]
 async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
-    let facade = profile_facade(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let facade = profile_facade(&runtime);
 
     // A retained record that itself declares ambiguous payload access.
     let declared = observation(
@@ -498,17 +512,14 @@ async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict
     )
     .await;
     let conflict_anchor_id = first_receipt.retrieval_anchor().anchor_id().clone();
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn =
+        rusqlite::Connection::open(runtime.database_path(HostAdmissionScope::Profile).unwrap())
+            .unwrap();
     // Simulate out-of-band store corruption: a second binding for the same
     // anchor id that the authoritative writer would never commit. The foreign
     // key exemption stays local to this raw connection.
     raw_conn
         .execute_batch("PRAGMA foreign_keys = OFF;")
-        .await
         .unwrap();
     raw_conn
         .execute(
@@ -517,12 +528,10 @@ async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict
              )
              SELECT 'observation.anchor-conflict-ghost', '{}', '{}', anchor_id, owner_json
              FROM retrieval_anchors WHERE anchor_id = ?1",
-            libsql::params![conflict_anchor_id.as_str()],
+            rusqlite::params![conflict_anchor_id.as_str()],
         )
-        .await
         .expect("conflicting anchor binding must insert");
     drop(raw_conn);
-    drop(raw_db);
 
     let conflict_report = resolve(&facade, &conflict_anchor_id).await;
     assert_eq!(conflict_report.state(), AnchorResolutionStateV2::Ambiguous);
@@ -588,8 +597,10 @@ impl FactStore for UnavailableFactStore {
 #[tokio::test]
 async fn memory_application_report_resolution_rechecks_owner_and_identity() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let candidate = observation(
         0,
         100,
@@ -597,7 +608,7 @@ async fn memory_application_report_resolution_rechecks_owner_and_identity() {
         "application sanitized payload",
     );
     let receipt = persist(&store, anchored_write(write(candidate, None))).await;
-    let facade = profile_facade(&db);
+    let facade = profile_facade(&runtime);
     let application = MemoryApplication::new(FactOwnerV1::Profile, UnavailableFactStore).unwrap();
 
     let report = application

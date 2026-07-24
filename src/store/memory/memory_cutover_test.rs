@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::db::DatabaseAuthority;
+use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -9,7 +9,10 @@ async fn daemon_cutover_binds_raw_v1_rows_without_query_fallback() {
     let path = temp.path().join("compatibility-cutover.db");
     let authority =
         DatabaseAuthority::acquire_test(&path, "compatibility cutover authority test").unwrap();
-    let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+    let (db, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
     let owner = FactOwnerV1::Profile;
     let source_store_id = compatibility_source_store_id().unwrap();
     {
@@ -19,7 +22,7 @@ async fn daemon_cutover_binds_raw_v1_rows_without_query_fallback() {
             .unwrap();
         for fact_id in 1..=202 {
             writer
-                .execute(
+                .execute_engine(
                     "INSERT INTO memory_facts(
                         fact_id, content, category, tags, trust_score, source,
                         metadata, hrr_vector, created_at, updated_at
@@ -106,7 +109,7 @@ async fn compatibility_mapping_count(
         .await
         .unwrap();
     let mut rows = writer
-        .query(
+        .query_engine(
             "SELECT COUNT(*) FROM memory_v2_legacy_map
              WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
                AND source_store_id = ?4",
@@ -130,15 +133,17 @@ async fn cutover_preserves_legacy_usage_telemetry_and_search_ranking() {
     let path = temp.path().join("compatibility-cutover-telemetry.db");
     let authority =
         DatabaseAuthority::acquire_test(&path, "compatibility cutover telemetry test").unwrap();
-    let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+    let (db, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
     let owner = FactOwnerV1::Project {
         project_id: tracedecay_domain::ProjectId::new("pr7.project.cutover-telemetry".to_owned())
             .unwrap(),
     };
     {
-        let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
-        let writer = raw_db.connect().unwrap();
-        let legacy = crate::memory::store::MemoryStore::new(&writer);
+        let writer = db.memory_writer().await.unwrap();
+        let legacy = writer.store();
         for (content, source) in [
             (
                 "Database backups run via pg_dump every night",
@@ -165,13 +170,17 @@ async fn cutover_preserves_legacy_usage_telemetry_and_search_ranking() {
                 .await
                 .unwrap();
         }
+    }
+    {
         // Usage counters have no legacy event log to replay; they exist only
         // as columns on `memory_facts`, so the cutover must carry them or a
         // migrated store silently loses its ranking usage signal. The recency
         // timestamps stay behind by contract: canonical created_at is the
         // migration time and pre-creation recency never validates.
-        writer
-            .execute(
+        db.writer_connection("seed compatibility telemetry")
+            .await
+            .unwrap()
+            .execute_engine(
                 "UPDATE memory_facts SET trust_score = 0.5, retrieval_count = 5000,
                      access_count = 5100, helpful_count = 7, unhelpful_count = 2,
                      last_retrieved_at = 1700000000, last_recalled_at = 1700000100,
@@ -274,9 +283,9 @@ async fn cutover_preserves_legacy_usage_telemetry_and_search_ranking() {
     // facts, no banks, and no dirty marks; repair must self-heal that state
     // rather than waiting for a fresh write in every category.
     {
-        let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
-        let raw_conn = raw_db.connect().unwrap();
-        raw_conn
+        db.writer_connection("clear compatibility banks")
+            .await
+            .unwrap()
             .execute_batch(
                 "DELETE FROM memory_v2_compatibility_banks;
                  DELETE FROM memory_v2_compatibility_bank_dirty;",
@@ -311,7 +320,10 @@ async fn dashboard_vector_points_report_v1_entity_link_connections() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("vector-points.db");
     let authority = DatabaseAuthority::acquire_test(&path, "vector points test").unwrap();
-    let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+    let (db, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
     let owner = FactOwnerV1::Profile;
     let store = DatabaseFactStore::new(&db);
     let application =

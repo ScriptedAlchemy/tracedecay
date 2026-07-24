@@ -17,7 +17,6 @@ use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome,
 };
 use crate::application::observation::{CaptureObservationOutcome, ObservationCancellation};
-use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::SqliteFileIdentityError;
 
@@ -96,15 +95,12 @@ fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
     crate::sessions::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
 }
 
-pub(crate) async fn drain_hermes_projections(
-    db: &GlobalDb,
-    scope: &ObservationScopeV1,
-) -> Result<(), String> {
+pub(crate) async fn drain_hermes_projections(scope: &ObservationScopeV1) -> Result<(), String> {
     let authorities = match scope {
         ObservationScopeV1::Project { project_id } => {
-            HostAdmissionAuthorities::for_project(db, project_id.clone())
+            HostAdmissionAuthorities::unregistered_for_project(project_id.clone())
         }
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::unregistered_for_profile(),
     };
     let facade = HostAdmissionFacade::new(authorities);
     drain_hermes_projections_with_admission(&facade, scope).await
@@ -135,7 +131,6 @@ pub(crate) async fn drain_hermes_projections_with_admission(
 }
 
 pub(crate) async fn admit_rows(
-    db: &GlobalDb,
     rows: &[HermesRow],
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
@@ -145,9 +140,9 @@ pub(crate) async fn admit_rows(
 ) -> Result<TranscriptIngestStats, String> {
     let authorities = match &scope {
         ObservationScopeV1::Project { project_id } => {
-            HostAdmissionAuthorities::for_project(db, project_id.clone())
+            HostAdmissionAuthorities::unregistered_for_project(project_id.clone())
         }
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::unregistered_for_profile(),
     };
     let facade = HostAdmissionFacade::new(authorities);
     admit_rows_with_admission(

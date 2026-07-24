@@ -695,14 +695,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(scheduler)
     }
 
-    /// Connect saved code generations to PR10 `schedule_generation`. The hook
+    /// Replace the PR10 `schedule_generation` hook on mount/remount. The hook
     /// must return immediately; `FastEmbed` download/indexing never blocks
-    /// exact/lexical/graph search.
-    pub fn set_semantic_schedule_hook(
+    /// exact/lexical/graph search. `None` retires a stale runtime.
+    pub fn replace_semantic_schedule_hook(
         &mut self,
-        hook: crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+        hook: Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
     ) {
-        self.semantic_schedule = Some(hook);
+        self.semantic_schedule = hook;
     }
 
     fn mount_watcher(&mut self) -> Result<(), CodeIndexSchedulerErrorV1> {
@@ -788,7 +788,17 @@ impl CodeIndexWorktreeSchedulerV1 {
             overflow_reconciled |= hints.overflow;
             let mut captured = self.capture_authoritative_snapshot()?;
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity) {
+            let latest_snapshot = self
+                .owner
+                .active_generation()?
+                .map(|generation| generation.snapshot().clone());
+            let unchanged_source = latest_snapshot.as_ref().is_some_and(|latest| {
+                latest.reference == captured.snapshot.reference
+                    && latest.source_revision == captured.snapshot.source_revision
+            });
+            if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity)
+                && unchanged_source
+            {
                 self.mark_reconciled(sampled_metadata, sampled_signature);
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
@@ -1055,8 +1065,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             snapshot: SanitizedCodeSnapshotV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),
-                reference: None,
-                source_revision: None,
+                reference: self.identity.head_ref().cloned(),
+                source_revision: self.identity.head_commit().cloned(),
                 sanitizer_revision: id::<SanitizerRevision>("sanitizer.daemon.v1")?,
                 sanitization_receipts: vec![sanitization_receipt(&content_identity)?],
                 content_identity,
@@ -1158,10 +1168,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests;
 
 mod classification;
-mod identity;
+pub(crate) mod identity;
 pub(in crate::daemon) mod pr9_runtime;
 mod queries;
 mod registry;
+pub(crate) mod semantic_query_runtime;
 
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures

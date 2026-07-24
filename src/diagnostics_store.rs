@@ -11,7 +11,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use libsql::{Connection, TransactionBehavior, params};
 use tracedecay_domain::{
     CodeGenerationId, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
     DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1,
@@ -23,6 +22,8 @@ use tracedecay_store::{
     SanitizedCleanDiagnosticSnapshotV1,
 };
 
+use crate::db::MemoryConnection;
+use crate::db::engine::{Row, Rows, TransactionBehavior, Value, params};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
 
@@ -85,12 +86,18 @@ const STATE_CLEARED: &str = "cleared";
 /// through `TraceDecay` application APIs but are excluded from active
 /// publication").
 pub struct DiagnosticsStore<'a> {
-    conn: &'a Connection,
+    conn: MemoryConnection<'a>,
 }
 
 impl<'a> DiagnosticsStore<'a> {
-    pub const fn new(conn: &'a Connection) -> Self {
-        Self { conn }
+    pub(crate) const fn new(conn: &'a crate::db::engine::Connection) -> Self {
+        Self {
+            conn: MemoryConnection::runtime(conn),
+        }
+    }
+
+    pub(crate) const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
+        Self::new(conn)
     }
 
     /// Creates the diagnostics schema idempotently. Safe to call on every
@@ -144,20 +151,30 @@ impl<'a> DiagnosticsStore<'a> {
     }
 
     /// Runs `work` inside an immediate transaction, committing on success and
-    /// rolling back on error or cancellation. The inner future is built
-    /// before the transaction opens, which is safe because async fns do no
-    /// work until polled.
+    /// rolling back on error or cancellation. The transactional store routes
+    /// every statement through that exact transaction.
     async fn with_immediate_tx<T>(
         &self,
         operation: &str,
-        work: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
+        work: impl Send
+        + for<'tx> FnOnce(
+            &'tx DiagnosticsStore<'tx>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T>> + Send + 'tx>,
+        >,
+    ) -> Result<T>
+    where
+        T: Send,
+    {
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| db_error(operation, e))?;
-        match work.await {
+        let transactional_store = DiagnosticsStore {
+            conn: MemoryConnection::transaction(&transaction),
+        };
+        match work(&transactional_store).await {
             Ok(value) => {
                 transaction
                     .commit()
@@ -249,8 +266,8 @@ impl<'a> DiagnosticsStore<'a> {
             ));
         }
         let generation = generation.clone();
-        self.with_immediate_tx(operation, async move {
-            if let Some(state) = self.generation_publication_state(&generation).await? {
+        self.with_immediate_tx(operation, move |store| Box::pin(async move {
+            if let Some(state) = store.generation_publication_state(&generation).await? {
                 if state != STATE_CURRENT {
                     return Err(db_message(
                         operation,
@@ -259,7 +276,7 @@ impl<'a> DiagnosticsStore<'a> {
                         ),
                     ));
                 }
-                let existing = self.current_records(&generation).await?;
+                let existing = store.current_records(&generation).await?;
                 if existing == records {
                     return Ok((0, 0, true));
                 }
@@ -272,7 +289,7 @@ impl<'a> DiagnosticsStore<'a> {
             }
 
             for record in &records {
-                if self
+                if store
                     .record_by_anchor(&record.diagnostic_anchor)
                     .await?
                     .is_some()
@@ -287,7 +304,7 @@ impl<'a> DiagnosticsStore<'a> {
                 }
             }
 
-            let cleared = self
+            let cleared = store
                 .conn
                 .execute(
                     "UPDATE generation_diagnostics
@@ -298,7 +315,7 @@ impl<'a> DiagnosticsStore<'a> {
                 .await
                 .map_err(|e| db_error(operation, e))?;
 
-            self.conn
+            store.conn
                 .execute(
                     "UPDATE diagnostic_generation_publications
                      SET record_state = ?1, state_generation = ?2
@@ -309,9 +326,9 @@ impl<'a> DiagnosticsStore<'a> {
                 .map_err(|e| db_error(operation, e))?;
 
             for record in &records {
-                self.insert_record(record).await?;
+                store.insert_record(record).await?;
             }
-            self.conn
+            store.conn
                 .execute(
                     "INSERT INTO diagnostic_generation_publications (
                         generation_id, record_state, state_generation, published_at
@@ -325,7 +342,7 @@ impl<'a> DiagnosticsStore<'a> {
                 .await
                 .map_err(|e| db_error(operation, e))?;
             Ok((records.len() as u64, cleared, false))
-        })
+        }))
         .await
     }
 
@@ -346,37 +363,40 @@ impl<'a> DiagnosticsStore<'a> {
         }
         let prior_generation = prior_generation.clone();
         let successor_generation = successor_generation.clone();
-        self.with_immediate_tx(operation, async move {
-            let transitioned = self
-                .conn
-                .execute(
-                    "UPDATE generation_diagnostics
+        self.with_immediate_tx(operation, move |store| {
+            Box::pin(async move {
+                let transitioned = store
+                    .conn
+                    .execute(
+                        "UPDATE generation_diagnostics
                      SET record_state = ?1, state_generation = ?2
                      WHERE record_state = ?3 AND generation_id = ?4",
-                    params![
-                        STATE_SUPERSEDED,
-                        successor_generation.as_str(),
-                        STATE_CURRENT,
-                        prior_generation.as_str()
-                    ],
-                )
-                .await
-                .map_err(|e| db_error(operation, e))?;
-            self.conn
-                .execute(
-                    "UPDATE diagnostic_generation_publications
+                        params![
+                            STATE_SUPERSEDED,
+                            successor_generation.as_str(),
+                            STATE_CURRENT,
+                            prior_generation.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                store
+                    .conn
+                    .execute(
+                        "UPDATE diagnostic_generation_publications
                      SET record_state = ?1, state_generation = ?2
                      WHERE record_state = ?3 AND generation_id = ?4",
-                    params![
-                        STATE_SUPERSEDED,
-                        successor_generation.as_str(),
-                        STATE_CURRENT,
-                        prior_generation.as_str()
-                    ],
-                )
-                .await
-                .map_err(|e| db_error(operation, e))?;
-            Ok(transitioned)
+                        params![
+                            STATE_SUPERSEDED,
+                            successor_generation.as_str(),
+                            STATE_CURRENT,
+                            prior_generation.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                Ok(transitioned)
+            })
         })
         .await
     }
@@ -625,20 +645,20 @@ impl<'a> DiagnosticsStore<'a> {
         state: Option<&str>,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
         let operation = "diagnostics records_for_generation";
-        let (sql, params_vec): (String, Vec<libsql::Value>) = match state {
+        let (sql, params_vec): (String, Vec<Value>) = match state {
             Some(state) => (
                 format!(
                     "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
                      ORDER BY diagnostic_anchor"
                 ),
                 vec![
-                    libsql::Value::Text(generation.as_str().to_owned()),
-                    libsql::Value::Text(state.to_owned()),
+                    Value::Text(generation.as_str().to_owned()),
+                    Value::Text(state.to_owned()),
                 ],
             ),
             None => (
                 format!("{SELECT_RECORDS} WHERE generation_id = ?1 ORDER BY diagnostic_anchor"),
-                vec![libsql::Value::Text(generation.as_str().to_owned())],
+                vec![Value::Text(generation.as_str().to_owned())],
             ),
         };
         let mut rows = self
@@ -959,10 +979,7 @@ const SELECT_RECORDS: &str = "SELECT diagnostic_anchor, generation_id, repositor
         collected_at, record_state, state_generation
      FROM generation_diagnostics";
 
-async fn collect_rows(
-    rows: &mut libsql::Rows,
-    operation: &str,
-) -> Result<Vec<GenerationDiagnosticV1>> {
+async fn collect_rows(rows: &mut Rows, operation: &str) -> Result<Vec<GenerationDiagnosticV1>> {
     let mut records = Vec::new();
     while let Some(row) = rows.next().await.map_err(|e| db_error(operation, e))? {
         records.push(record_from_row(&row, operation)?);
@@ -970,7 +987,7 @@ async fn collect_rows(
     Ok(records)
 }
 
-fn record_from_row(row: &libsql::Row, operation: &str) -> Result<GenerationDiagnosticV1> {
+fn record_from_row(row: &Row, operation: &str) -> Result<GenerationDiagnosticV1> {
     let text = |index: i32| row.get::<String>(index).map_err(|e| db_error(operation, e));
     let optional_text = |index: i32| {
         row.get::<Option<String>>(index)
@@ -1235,17 +1252,13 @@ mod tests {
         record
     }
 
-    async fn open_store(path: &std::path::Path) -> (libsql::Database, Connection) {
-        let db = libsql::Builder::new_local(path)
-            .build()
-            .await
-            .expect("open test database");
-        let conn = db.connect().expect("connect test database");
-        DiagnosticsStore::new(&conn)
+    async fn open_store(path: &std::path::Path) -> crate::db::engine::TestConnection {
+        let conn = crate::db::engine::TestConnection::open(path);
+        DiagnosticsStore::new_runtime(&conn)
             .ensure_schema()
             .await
             .expect("ensure diagnostics schema");
-        (db, conn)
+        conn
     }
 
     #[tokio::test]
@@ -1264,8 +1277,8 @@ mod tests {
         };
 
         {
-            let (_db, conn) = open_store(&path).await;
-            let store = DiagnosticsStore::new(&conn);
+            let conn = open_store(&path).await;
+            let store = DiagnosticsStore::new_runtime(&conn);
             let (inserted, cleared) = store
                 .publish_clean_generation(&id(gen1), &[first.clone(), second.clone()])
                 .await
@@ -1275,8 +1288,8 @@ mod tests {
 
         // Simulate a restart: new database handle and connection on the same
         // file, with the schema ensured again idempotently.
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let records = store
             .records_for_generation(&id(gen1))
             .await
@@ -1295,8 +1308,8 @@ mod tests {
     async fn clean_generation_clears_prior_diagnostics() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let gen2 = "generation.clean.2";
 
@@ -1339,8 +1352,8 @@ mod tests {
     async fn supersession_marks_old_records_and_chains() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let gen2 = "generation.clean.2";
 
@@ -1396,8 +1409,8 @@ mod tests {
     async fn dirty_overlay_never_writes() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
 
         let durable = fixture_record(gen1, "anchor.diagnostic.1");
@@ -1465,8 +1478,8 @@ mod tests {
     async fn queries_filter_by_generation() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let gen2 = "generation.clean.2";
 
@@ -1521,8 +1534,8 @@ mod tests {
     async fn publication_rejects_stale_or_mixed_generation_records() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let gen2 = "generation.clean.2";
 
@@ -1581,16 +1594,16 @@ mod tests {
         let gen1 = id("generation.clean.empty");
 
         {
-            let (_db, conn) = open_store(&path).await;
-            let store = DiagnosticsStore::new(&conn);
+            let conn = open_store(&path).await;
+            let store = DiagnosticsStore::new_runtime(&conn);
             assert_eq!(
                 store.publish_clean_generation(&gen1, &[]).await.unwrap(),
                 (0, 0)
             );
         }
 
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         assert_eq!(
             store.current_generation().await.unwrap(),
             Some(gen1.clone())
@@ -1605,8 +1618,8 @@ mod tests {
     async fn unchanged_clean_generation_republication_is_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let record = fixture_record(gen1, "anchor.diagnostic.1");
 
@@ -1634,8 +1647,8 @@ mod tests {
     async fn immutable_anchor_collision_rolls_back_current_generation() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let gen2 = "generation.clean.2";
         let original = fixture_record(gen1, "anchor.diagnostic.shared");
@@ -1670,8 +1683,8 @@ mod tests {
     async fn cleared_or_superseded_generation_cannot_be_reactivated() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let gen2 = "generation.clean.2";
         let gen3 = "generation.clean.3";
@@ -1769,8 +1782,8 @@ mod tests {
     async fn root_port_reports_commit_and_exact_replay() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
-        let (_db, conn) = open_store(&path).await;
-        let store = DiagnosticsStore::new(&conn);
+        let conn = open_store(&path).await;
+        let store = DiagnosticsStore::new_runtime(&conn);
         let generation = id("generation.clean.1");
         let snapshot = SanitizedCleanDiagnosticSnapshotV1::new(
             generation,

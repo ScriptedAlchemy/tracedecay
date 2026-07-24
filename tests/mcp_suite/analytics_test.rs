@@ -4,8 +4,10 @@
 
 use serde_json::{Value, json};
 
-use tracedecay::global_db::{AnalyticsEventInsert, GlobalDb, global_db_path};
-use tracedecay::mcp::handle_tool_call;
+use crate::support::{handle_real_server_tool_call, open_active_project_session_db};
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::global_db::AnalyticsEventInsert;
+use tracedecay::mcp::{McpServer, handle_tool_call};
 use tracedecay::tracedecay::current_timestamp;
 
 fn extract_text(v: &Value) -> String {
@@ -71,51 +73,29 @@ fn hint_event(
 #[tokio::test]
 async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
-    let project_id = GlobalDb::canonical_project_key(cg.project_root());
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
     let now = current_timestamp();
 
-    let gdb = GlobalDb::open()
+    let runtime = open_active_project_session_db(&cg).await;
+    runtime
+        .append_profile_analytics_events_for_test(&[
+            tool_call_event(&project_id, "tracedecay_grep", "ok", now - 60),
+            tool_call_event(&project_id, "tracedecay_grep", "ok", now - 50),
+            tool_call_event(&project_id, "tracedecay_grep", "error", now - 40),
+            tool_call_event(&project_id, "tracedecay_fact_store", "ok", now - 30),
+        ])
         .await
-        .expect("isolated test global db should open");
-    gdb.append_analytics_events(&[
-        tool_call_event(&project_id, "tracedecay_grep", "ok", now - 60),
-        tool_call_event(&project_id, "tracedecay_grep", "ok", now - 50),
-        tool_call_event(&project_id, "tracedecay_grep", "error", now - 40),
-        tool_call_event(&project_id, "tracedecay_fact_store", "ok", now - 30),
-    ])
-    .await
-    .expect("seeding analytics events should succeed");
-
-    // Markdown (default) response carries the tier/tool breakdown as
-    // human-readable text.
-    let res = handle_tool_call(&cg, "tracedecay_analytics", json!({}), None, None)
-        .await
-        .expect("tracedecay_analytics should succeed");
-    let text = extract_text(&res.value);
-    assert!(text.contains("Usage Analytics"), "missing heading: {text}");
-    assert!(
-        text.contains("navigation"),
-        "missing navigation tier: {text}"
-    );
-    assert!(text.contains("memory"), "missing memory tier: {text}");
-    assert!(text.contains("tracedecay_grep"), "missing top tool: {text}");
-    assert!(
-        text.contains("Zero-Call Defined Tools"),
-        "missing zero-call section: {text}"
-    );
+        .expect("seeding analytics events should succeed");
+    let server =
+        McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
+            .await;
 
     // JSON response carries the same data in the typed shape the markdown
     // was rendered from.
-    let json_res = handle_tool_call(
-        &cg,
-        "tracedecay_analytics",
-        json!({"format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .expect("json format should succeed");
-    let payload = extract_json(&json_res.value);
+    let json_res =
+        handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
+            .await;
+    let payload = extract_json(&json_res);
     let tools = &payload["tools"];
     assert_eq!(tools["available"].as_bool(), Some(true));
     assert_eq!(tools["distinct_tools_called"].as_i64(), Some(2));
@@ -159,6 +139,28 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
             .iter()
             .any(|name| name == "tracedecay_grep" || name == "tracedecay_fact_store"),
         "called tools must not appear in the zero-call sample: {sample:?}"
+    );
+
+    // Markdown response carries the tier/tool breakdown as human-readable
+    // text. Run it after the count assertions because the real server records
+    // its own tool calls asynchronously.
+    let res = handle_real_server_tool_call(
+        &server,
+        "tracedecay_analytics",
+        json!({"format": "markdown"}),
+    )
+    .await;
+    let text = extract_text(&res);
+    assert!(text.contains("Usage Analytics"), "missing heading: {text}");
+    assert!(
+        text.contains("navigation"),
+        "missing navigation tier: {text}"
+    );
+    assert!(text.contains("memory"), "missing memory tier: {text}");
+    assert!(text.contains("tracedecay_grep"), "missing top tool: {text}");
+    assert!(
+        text.contains("Zero-Call Defined Tools"),
+        "missing zero-call section: {text}"
     );
 }
 
@@ -272,11 +274,9 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
 #[tokio::test]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
-    let project_id = GlobalDb::canonical_project_key(cg.project_root());
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
     let timestamp = current_timestamp() - 60;
-    let gdb = GlobalDb::open()
-        .await
-        .expect("isolated test global db should open");
+    let runtime = open_active_project_session_db(&cg).await;
 
     let events = vec![
         hint_event(&project_id, "hint_emitted", None, timestamp),
@@ -284,43 +284,40 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
         hint_event(&project_id, "suppressed_duplicate", None, timestamp),
         tool_call_event(&project_id, "tracedecay_grep", "ok", timestamp),
     ];
-    gdb.append_analytics_events(&events)
+    runtime
+        .append_profile_analytics_events_for_test(&events)
         .await
         .expect("seeding a busy analytics window should succeed");
-    let db = libsql::Builder::new_local(global_db_path().expect("test global DB path"))
-        .build()
+    let unrelated_event = AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: project_id.clone(),
+        session_id: Some("busy-session".to_string()),
+        timestamp,
+        event_kind: "hook_completed".to_string(),
+        hook_name: Some("PostToolUse".to_string()),
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: Some("observed".to_string()),
+        metadata_json: None,
+    };
+    runtime
+        .append_profile_analytics_events_for_test(&vec![unrelated_event; 10_001])
         .await
-        .expect("open test global DB directly");
-    let conn = db.connect().expect("connect test global DB");
-    conn.execute(
-        "WITH RECURSIVE seq(n) AS (
-             VALUES(0)
-             UNION ALL
-             SELECT n + 1 FROM seq WHERE n < 100
-         )
-         INSERT INTO analytics_events
-             (provider, project_id, session_id, timestamp, event_kind, hook_name, outcome)
-         SELECT 'codex', ?1, 'busy-session', ?2, 'hook_completed', 'PostToolUse', 'observed'
-         FROM seq AS left_seq CROSS JOIN seq AS right_seq
-         LIMIT 10001",
-        libsql::params![project_id.as_str(), timestamp],
-    )
-    .await
-    .expect("seed more than ten thousand unrelated newer events");
+        .expect("seed more than ten thousand unrelated newer events");
+    let server =
+        McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
+            .await;
 
-    let hint_response = handle_tool_call(
-        &cg,
-        "tracedecay_analytics",
-        json!({"section": "hints", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .expect("hint analytics should succeed");
-    let hints = extract_json(&hint_response.value);
-    assert_eq!(hints["event_count"].as_i64(), Some(10_005));
-    assert_eq!(hints["event_count_truncated"].as_bool(), Some(false));
-    let search = hints["hints"]["by_category"]
+    let response =
+        handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
+            .await;
+    let payload = extract_json(&response);
+    assert_eq!(payload["event_count"].as_i64(), Some(10_005));
+    assert_eq!(payload["event_count_truncated"].as_bool(), Some(false));
+    let search = payload["hints"]["by_category"]
         .as_array()
         .expect("hint categories")
         .iter()
@@ -330,20 +327,10 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     assert_eq!(search["followed"].as_i64(), Some(1));
     assert_eq!(search["suppressed"].as_i64(), Some(1));
 
-    let tool_response = handle_tool_call(
-        &cg,
-        "tracedecay_analytics",
-        json!({"section": "tools", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .expect("tool analytics should succeed");
-    let tools = extract_json(&tool_response.value);
-    assert_eq!(tools["tools"]["distinct_tools_called"].as_i64(), Some(1));
+    assert_eq!(payload["tools"]["distinct_tools_called"].as_i64(), Some(1));
     assert_eq!(
-        tools["tools"]["top_tools"][0]["tool_name"],
+        payload["tools"]["top_tools"][0]["tool_name"],
         "tracedecay_grep"
     );
-    assert_eq!(tools["tools"]["top_tools"][0]["calls"].as_i64(), Some(1));
+    assert_eq!(payload["tools"]["top_tools"][0]["calls"].as_i64(), Some(1));
 }

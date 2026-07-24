@@ -24,7 +24,9 @@ mod post_tool_use;
 mod steering;
 pub mod tool_hints;
 mod v2;
+pub(crate) use v2::project_and_worktree_locators_for_scope as hook_v2_scope_locators;
 pub(crate) use v2::project_id_for_layout as hook_v2_project_id_for_layout;
+pub(crate) use v2::protected_session_id_for_native as hook_v2_protected_session_id_for_native;
 pub(crate) use v2::publish_daemon_bindings as publish_hook_v2_bindings;
 
 pub use claude::{
@@ -955,6 +957,12 @@ mod hint_analytics_tests {
         .unwrap();
         let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
+        // Hook telemetry is fail-closed: the timing span only records a
+        // `hook_completed` row once a runtime configuration snapshot is
+        // published. Bootstrap the default snapshot so duration telemetry and
+        // hint dedupe rows are observable in these tests.
+        crate::config::bootstrap_runtime_configuration(project_root, &layout)
+            .expect("publish hook test runtime configuration");
         layout.data_root
     }
 
@@ -1079,7 +1087,10 @@ mod hint_analytics_tests {
         let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
         let data_root = enroll_project(&project_root, "proj_terminal_invariant");
 
-        let project_key = crate::global_db::GlobalDb::canonical_project_key(&project_root);
+        let project_key =
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
+                &project_root,
+            );
 
         // Branch: root known, session known → on-disk dedupe emits once.
         let emit_id = mint_hint_id();
@@ -1158,7 +1169,11 @@ mod hint_analytics_tests {
                 let attributed = row
                     .get("project_root")
                     .and_then(Value::as_str)
-                    .map(|root| crate::global_db::GlobalDb::canonical_project_key(Path::new(root)));
+                    .map(|root| {
+                        crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
+                            Path::new(root),
+                        )
+                    });
                 if expect_attribution {
                     assert_eq!(
                         attributed.as_deref(),

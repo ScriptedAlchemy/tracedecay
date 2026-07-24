@@ -901,35 +901,28 @@ pub fn unrelated(x: i32) -> i32 {
     // The redundancy run persists its ranked pairs into the freshness-validated
     // `redundancy_pairs` cache so other surfaces can read them without
     // recomputing. At least the planted compute_a/compute_b pair lands.
-    let cached_count = {
-        let mut rows = cg
-            .db()
-            .conn()
-            .query("SELECT COUNT(*) FROM redundancy_pairs", ())
-            .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
-    };
+    let cached_count = cg
+        .db()
+        .query_scalar_i64(
+            "inspect redundancy cache",
+            "SELECT COUNT(*) FROM redundancy_pairs",
+        )
+        .await
+        .unwrap();
     assert!(
         cached_count >= 1,
         "redundancy run should populate the redundancy_pairs cache, got {cached_count}"
     );
 
     // Resolve compute_a's node id to exercise the fresh-pairs reader.
-    let compute_a_id = {
-        let mut rows = cg
-            .db()
-            .conn()
-            .query("SELECT id FROM nodes WHERE name = 'compute_a'", ())
-            .await
-            .unwrap();
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap()
-    };
+    let compute_a_id = cg
+        .db()
+        .query_scalar_text(
+            "resolve redundancy fixture node",
+            "SELECT id FROM nodes WHERE name = 'compute_a'",
+        )
+        .await
+        .unwrap();
 
     // The reader serves the planted pair while both source hashes are fresh.
     let fresh = cg
@@ -948,7 +941,7 @@ pub fn unrelated(x: i32) -> i32 {
         .execute_write(
             "stale redundancy fingerprint fixture",
             "UPDATE node_fingerprints SET source_hash = 'stale-hash' WHERE node_id = ?1",
-            libsql::params![compute_a_id.clone()],
+            (compute_a_id.clone(),),
         )
         .await
         .unwrap();

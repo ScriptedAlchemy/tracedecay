@@ -93,12 +93,15 @@ fn sample_file(path: &str) -> FileRecord {
 }
 
 async fn assert_can_start_new_transaction(db: &Database) {
-    db.conn()
-        .execute("BEGIN", ())
+    const PROBE_KEY: &str = "test.transaction_probe";
+    const PROBE_VALUE: &str = "committed";
+
+    db.set_metadata(PROBE_KEY, PROBE_VALUE)
         .await
-        .expect("connection should not be left inside a transaction");
-    db.conn()
-        .execute("ROLLBACK", ())
+        .expect("writer should not be left inside a transaction");
+    let stored = db
+        .get_metadata(PROBE_KEY)
         .await
-        .expect("test transaction rollback should succeed");
+        .expect("transaction probe should be readable");
+    assert_eq!(stored.as_deref(), Some(PROBE_VALUE));
 }

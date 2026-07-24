@@ -85,11 +85,11 @@ where
             .map_err(|_| SemanticRuntimeControlErrorV1::InvalidReceipt)?;
         let observed = self
             .runtime
-            .status(&configuration)
+            .status(&receipt.configuration)
             .await
             .map_err(map_backend_error)?;
         let current_configuration = self.configuration_pin().await?;
-        if current_configuration != configuration
+        if current_configuration != receipt.configuration
             || !matches!(
                 observed,
                 SemanticRuntimeStateV1::Current {
@@ -122,18 +122,23 @@ where
             .map_err(|_| SemanticRuntimeControlErrorV1::InvalidReceipt)?;
         let observed = self
             .runtime
-            .status(&configuration)
+            .status(&receipt.configuration)
             .await
             .map_err(map_backend_error)?;
         let current_configuration = self.configuration_pin().await?;
-        if current_configuration != configuration
-            || !matches!(
-                observed,
-                SemanticRuntimeStateV1::Current {
-                    receipt: ref current
-                } if current == &receipt.restored_activation
-            )
-        {
+        let promotion_observed = match (&receipt.restored_activation, &observed) {
+            (Some(restored), SemanticRuntimeStateV1::Current { receipt: current }) => {
+                current == restored
+            }
+            (
+                None,
+                SemanticRuntimeStateV1::Unavailable {
+                    reason: SemanticFallbackReasonV1::ArtifactUnavailable,
+                },
+            ) => true,
+            _ => false,
+        };
+        if current_configuration != receipt.configuration || !promotion_observed {
             return Err(SemanticRuntimeControlErrorV1::PromotionNotObserved);
         }
         Ok(receipt)

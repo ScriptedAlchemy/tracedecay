@@ -1,6 +1,7 @@
 //! Compatibility projection loads, telemetry rows, and legacy-mapping resolution.
 
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 
 use tracedecay_domain::{
     FactId, FactIdentityMaterialV1, FactOwnerV1, LegacyFactMappingV1, PayloadAccessState,
@@ -45,7 +46,7 @@ fn compatibility_unavailable(
 }
 
 pub(super) async fn compatibility_fact_status_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactStoreResult<Option<CompatibilityFactStatusV1>> {
@@ -97,7 +98,7 @@ pub(super) async fn compatibility_fact_status_tx(
 }
 
 pub(super) async fn compatibility_legacy_mapping_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactStoreResult<Option<LegacyFactMappingV1>> {
@@ -139,7 +140,7 @@ pub(super) async fn compatibility_legacy_mapping_tx(
 }
 
 pub(super) async fn compatibility_projection_metadata_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
     mapping: Option<&LegacyFactMappingV1>,
@@ -227,7 +228,7 @@ pub(super) async fn compatibility_projection_metadata_tx(
 }
 
 pub(super) async fn load_compatibility_projection_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactStoreResult<Option<CompatibilityFactProjectionV1>> {
@@ -267,7 +268,7 @@ pub(super) async fn load_compatibility_projection_tx(
 }
 
 pub(super) async fn resolve_compatibility_target_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     target: &CompatibilityFactTargetV1,
 ) -> FactStoreResult<Option<FactId>> {
     match target {
@@ -279,7 +280,7 @@ pub(super) async fn resolve_compatibility_target_tx(
 }
 
 pub(super) async fn compatibility_fact_for_legacy_id_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     legacy_fact_id: i64,
 ) -> FactStoreResult<Option<FactId>> {
@@ -315,7 +316,7 @@ pub(super) async fn compatibility_fact_for_legacy_id_tx(
 }
 
 pub(super) async fn compatibility_required_mapping_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactStoreResult<LegacyFactMappingV1> {
@@ -330,7 +331,7 @@ pub(super) async fn compatibility_required_mapping_tx(
 }
 
 pub(super) async fn compatibility_source_for_fact_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     mapping: &LegacyFactMappingV1,
 ) -> FactStoreResult<String> {
     let mut rows = transaction
@@ -352,7 +353,7 @@ pub(super) async fn compatibility_source_for_fact_tx(
 }
 
 pub(super) async fn resolve_legacy_fact_tx(
-    snapshot: &Transaction,
+    snapshot: &Transaction<'_>,
     query: &LegacyFactQuery,
 ) -> FactStoreResult<Option<FactId>> {
     let owner = OwnerKey::new(query.owner())?;

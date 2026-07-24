@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use libsql::Connection;
+use crate::db::engine::Executor;
 
 use super::super::util;
 use super::{LcmError, LcmGcConfig, LcmGcReport, payload, stage_payload_delete};
@@ -108,7 +108,7 @@ where
 }
 
 pub(super) async fn stage_orphan_files(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     dir: &Path,
     metadata_refs: &BTreeSet<String>,
     now: i64,

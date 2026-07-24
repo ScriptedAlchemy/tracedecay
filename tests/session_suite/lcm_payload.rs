@@ -4,16 +4,19 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::sessions::lcm::payload::{DeleteOpts, delete_external_payload};
-use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::sessions::lcm::payload::DeleteOpts;
+use tracedecay::sessions::lcm::types::{
+    LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt,
+};
 use tracedecay::sessions::lcm::{
-    LCM_SCHEMA_VERSION, LcmError, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
+    LCM_SCHEMA_VERSION, LcmContentSlice, LcmError, LcmExpandRequest, LcmExpandResponse,
+    LcmExpandTarget, LcmRawMessage, LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryNode,
+    LcmSummaryNodeDraft,
 };
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
-use crate::common::{
-    isolated_lcm_db_path as isolated_db_path, lcm_payload_message as raw_message,
-    lcm_payload_session as sample_session, open_lcm_db,
-};
+use crate::common::{lcm_payload_message as raw_message, lcm_payload_session as sample_session};
 
 const TOOL_PAYLOAD_FIXTURE_FILLER_CHARS: usize = 260 * 1024;
 
@@ -33,58 +36,143 @@ fn externalized_tool_payload(prefix: &str, fill: char) -> String {
     payload
 }
 
+async fn open_lcm_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("registered LCM test runtime")
+}
+
+trait ProfileLcmFixture {
+    fn lcm_store(&self, _storage_root: &Path) -> &Self {
+        self
+    }
+
+    async fn upsert_session(&self, session: &SessionRecord) -> bool;
+
+    async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError>;
+
+    async fn lcm_load_raw_message(&self, provider: &str, message_id: &str)
+    -> Option<LcmRawMessage>;
+
+    async fn lcm_expand_payload(
+        &self,
+        provider: &str,
+        session_id: &str,
+        payload_ref: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LcmExpandResponse, LcmError>;
+
+    async fn lcm_status(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<LcmStatus, LcmError>;
+
+    async fn lcm_insert_summary_node(
+        &self,
+        draft: LcmSummaryNodeDraft,
+    ) -> Result<LcmSummaryNode, LcmError>;
+
+    async fn lcm_publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> Result<LcmSummaryPublicationReceipt, LcmError>;
+}
+
+impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
+    async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.upsert_session_for_test(HostAdmissionScope::Profile, session)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
+        self.lcm_ingest_raw_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+    }
+
+    async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<LcmRawMessage> {
+        self.lcm_load_raw_message_for_test(provider, message_id)
+            .await
+    }
+
+    async fn lcm_expand_payload(
+        &self,
+        provider: &str,
+        session_id: &str,
+        payload_ref: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LcmExpandResponse, LcmError> {
+        self.lcm_expand_for_test(LcmExpandRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            target: LcmExpandTarget::ExternalPayload {
+                payload_ref: payload_ref.to_string(),
+            },
+            content_slice: Some(LcmContentSlice { offset, limit }),
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+    }
+
+    async fn lcm_status(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<LcmStatus, LcmError> {
+        self.lcm_status_for_test(provider, session_id).await
+    }
+
+    async fn lcm_insert_summary_node(
+        &self,
+        draft: LcmSummaryNodeDraft,
+    ) -> Result<LcmSummaryNode, LcmError> {
+        self.lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
+            .await
+    }
+
+    async fn lcm_publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> Result<LcmSummaryPublicationReceipt, LcmError> {
+        self.lcm_publish_immutable_summary_for_test(HostAdmissionScope::Profile, publication)
+            .await
+    }
+}
+
 async fn raw_snippet_and_index(
-    db_path: &std::path::Path,
+    db: &HostAdmissionTestRuntimeV1,
     provider: &str,
     message_id: &str,
 ) -> (String, String) {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT snippet_text, index_text
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND message_id = ?2",
-            libsql::params![provider, message_id],
-        )
+    db.lcm_raw_message_search_fields_for_test(provider, message_id)
         .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    (row.get(0).unwrap(), row.get(1).unwrap())
+        .expect("raw message search fields query")
+        .expect("raw message search fields")
 }
 
-async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_raw_messages_fts
-             WHERE lcm_raw_messages_fts MATCH ?1",
-            libsql::params![query],
-        )
+async fn lcm_fts_count(db: &HostAdmissionTestRuntimeV1, query: &str) -> i64 {
+    db.lcm_raw_message_fts_count_for_test(query)
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+        .expect("raw message FTS count")
 }
 
 async fn raw_metadata_json(
-    db_path: &std::path::Path,
+    db: &HostAdmissionTestRuntimeV1,
     provider: &str,
     message_id: &str,
 ) -> Option<String> {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND message_id = ?2",
-            libsql::params![provider, message_id],
-        )
+    db.lcm_raw_message_metadata_json_for_test(provider, message_id)
         .await
-        .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+        .expect("raw message metadata query")
+        .expect("raw message metadata row")
 }
 
 #[cfg(unix)]
@@ -118,7 +206,6 @@ fn externalized_ref_from_placeholder(text: &str) -> String {
 #[tokio::test]
 async fn externalizes_nested_json_media_payload_without_externalizing_scaffold() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -170,8 +257,8 @@ async fn externalizes_nested_json_media_payload_without_externalizing_scaffold()
         .await
         .expect("nested payload should expand with hash and ownership checks");
     assert_eq!(expanded.content, media_payload);
-    assert_eq!(lcm_fts_count(&db_path, "nested").await, 1);
-    assert_eq!(lcm_fts_count(&db_path, "QWxhZGRpbjpvcGVu").await, 0);
+    assert_eq!(lcm_fts_count(&db, "nested").await, 1);
+    assert_eq!(lcm_fts_count(&db, "QWxhZGRpbjpvcGVu").await, 0);
 }
 
 // Mirrors hermes-lcm `_protect_payload_substrings`
@@ -182,7 +269,6 @@ async fn externalizes_nested_json_media_payload_without_externalizing_scaffold()
 #[tokio::test]
 async fn data_uri_substring_externalizes_span_keeping_surrounding_text_searchable() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -216,9 +302,9 @@ async fn data_uri_substring_externalizes_span_keeping_surrounding_text_searchabl
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["ingest_protection"]["nested_external_payloads"], 1);
 
-    assert_eq!(lcm_fts_count(&db_path, "substringprefixcanary").await, 1);
-    assert_eq!(lcm_fts_count(&db_path, "substringsuffixcanary").await, 1);
-    assert_eq!(lcm_fts_count(&db_path, "QUJDRA").await, 0);
+    assert_eq!(lcm_fts_count(&db, "substringprefixcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db, "substringsuffixcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db, "QUJDRA").await, 0);
 
     let payload_ref = externalized_ref_from_placeholder(&raw.content);
     let expanded = store
@@ -240,7 +326,6 @@ async fn data_uri_substring_externalizes_span_keeping_surrounding_text_searchabl
 #[tokio::test]
 async fn long_base64_run_substring_externalizes_span_inline() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -269,8 +354,8 @@ async fn long_base64_run_substring_externalizes_span_inline() {
     assert!(raw.content.contains("[Externalized LCM ingest payload:"));
     assert!(!raw.content.contains(&run));
 
-    assert_eq!(lcm_fts_count(&db_path, "buildlogprefixcanary").await, 1);
-    assert_eq!(lcm_fts_count(&db_path, "buildlogsuffixcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db, "buildlogprefixcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db, "buildlogsuffixcanary").await, 1);
 
     let payload_ref = externalized_ref_from_placeholder(&raw.content);
     let expanded = store
@@ -331,7 +416,6 @@ async fn message_that_is_only_a_media_payload_externalizes_whole_message() {
 #[tokio::test]
 async fn tiny_data_uri_stays_inline_and_lossless() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -358,7 +442,7 @@ async fn tiny_data_uri_stays_inline_and_lossless() {
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert_eq!(raw.content, content);
     assert!(raw.metadata_json.is_none());
-    assert_eq!(lcm_fts_count(&db_path, "tinyiconcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db, "tinyiconcanary").await, 1);
 }
 
 // Mirrors hermes-lcm `_sensitive_pattern_for_key` / `redact_sensitive_value`
@@ -368,7 +452,6 @@ async fn tiny_data_uri_stays_inline_and_lossless() {
 #[tokio::test]
 async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -433,8 +516,8 @@ async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets()
     assert!(patterns.contains(&json!("api_key")));
     assert!(patterns.contains(&json!("bearer_token")));
 
-    assert_eq!(lcm_fts_count(&db_path, "shortkey1").await, 0);
-    assert_eq!(lcm_fts_count(&db_path, "jsonkeyredactioncanary").await, 1);
+    assert_eq!(lcm_fts_count(&db, "shortkey1").await, 0);
+    assert_eq!(lcm_fts_count(&db, "jsonkeyredactioncanary").await, 1);
 }
 
 // Parity with Hermes defaults: the JSON-key walk is opt-in; without the
@@ -469,7 +552,6 @@ async fn json_key_sensitive_redaction_disabled_by_default_keeps_content() {
 #[tokio::test]
 async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -524,17 +606,13 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
         .expect("status should load");
     assert!(status.redaction.enabled);
     assert_eq!(status.redaction.lossy_records, 1);
-    assert_eq!(
-        lcm_fts_count(&db_path, "redaction1234567890abcdef").await,
-        0
-    );
-    assert_eq!(lcm_fts_count(&db_path, "redaction").await, 1);
+    assert_eq!(lcm_fts_count(&db, "redaction1234567890abcdef").await, 0);
+    assert_eq!(lcm_fts_count(&db, "redaction").await, 1);
 }
 
 #[tokio::test]
 async fn quoted_password_assignment_redacts_full_quoted_value() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -575,13 +653,12 @@ async fn quoted_password_assignment_redacts_full_quoted_value() {
             .contains("[LCM sensitive redaction: name=password_assignment")
     );
     assert!(raw.content.contains("keep quotedpasswordcanary"));
-    assert_eq!(lcm_fts_count(&db_path, "battery").await, 0);
+    assert_eq!(lcm_fts_count(&db, "battery").await, 0);
 }
 
 #[tokio::test]
 async fn api_alias_assignments_redact_apikey_and_apitoken() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -624,14 +701,13 @@ async fn api_alias_assignments_redact_apikey_and_apitoken() {
             .contains("[LCM sensitive redaction: name=api_key")
     );
     assert!(raw.content.contains("keep aliasredactioncanary"));
-    assert_eq!(lcm_fts_count(&db_path, api_key_secret).await, 0);
-    assert_eq!(lcm_fts_count(&db_path, api_token_secret).await, 0);
+    assert_eq!(lcm_fts_count(&db, api_key_secret).await, 0);
+    assert_eq!(lcm_fts_count(&db, api_token_secret).await, 0);
 }
 
 #[tokio::test]
 async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -684,14 +760,13 @@ async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
         metadata["ingest_protection"]["redaction_patterns"],
         json!(["private_key"])
     );
-    assert_eq!(lcm_fts_count(&db_path, private_key_body).await, 0);
-    assert_eq!(lcm_fts_count(&db_path, "searchable").await, 1);
+    assert_eq!(lcm_fts_count(&db, private_key_body).await, 0);
+    assert_eq!(lcm_fts_count(&db, "searchable").await, 1);
 }
 
 #[tokio::test]
 async fn private_key_redaction_disabled_preserves_lossless_content() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -722,16 +797,12 @@ async fn private_key_redaction_disabled_preserves_lossless_content() {
     assert!(raw.content.contains("BEGIN PRIVATE KEY"));
     assert!(raw.content.contains("LOSSLESSPRIVATEKEY1234567890"));
     assert!(raw.metadata_json.is_none());
-    assert_eq!(
-        lcm_fts_count(&db_path, "LOSSLESSPRIVATEKEY1234567890").await,
-        1
-    );
+    assert_eq!(lcm_fts_count(&db, "LOSSLESSPRIVATEKEY1234567890").await, 1);
 }
 
 #[tokio::test]
 async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -763,8 +834,7 @@ async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
     );
     assert_eq!(metadata["ingest_protection"]["reason"], "high_repetition");
     assert!(!raw.content.contains("LOOP_SEGMENT"));
-    let (snippet_text, index_text) =
-        raw_snippet_and_index(&db_path, "cursor", "assistant-loop").await;
+    let (snippet_text, index_text) = raw_snippet_and_index(&db, "cursor", "assistant-loop").await;
     assert!(
         snippet_text.contains("[Externalized LCM ingest payload: assistant output quarantined;")
     );
@@ -772,7 +842,7 @@ async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
     assert!(snippet_text.contains("reason=high_repetition;"));
     assert_eq!(snippet_text, index_text);
     assert!(!index_text.contains("LOOP_SEGMENT"));
-    assert_eq!(lcm_fts_count(&db_path, "LOOP_SEGMENT").await, 0);
+    assert_eq!(lcm_fts_count(&db, "LOOP_SEGMENT").await, 0);
 
     let expanded = store
         .lcm_expand_payload("cursor", "session-1", payload_ref, 0, body.chars().count())
@@ -825,7 +895,6 @@ async fn externalizes_large_tool_payload_with_recoverable_ref() {
 #[tokio::test]
 async fn externalized_payload_indexes_placeholder_without_body_text() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -862,7 +931,7 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
         .expect("payload should expand");
     assert_eq!(expanded.content, payload);
 
-    let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "tool-secret").await;
+    let (snippet_text, index_text) = raw_snippet_and_index(&db, "cursor", "tool-secret").await;
     assert!(snippet_text.contains("[Externalized LCM ingest payload: kind=tool_result;"));
     assert!(snippet_text.contains("field=content;"));
     assert!(snippet_text.contains(payload_ref));
@@ -872,16 +941,16 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
     assert!(!snippet_text.contains(unique_secret));
     assert!(!index_text.contains(unique_secret));
 
-    let raw_metadata = raw_metadata_json(&db_path, "cursor", "tool-secret").await;
+    let raw_metadata = raw_metadata_json(&db, "cursor", "tool-secret").await;
     assert!(
         !raw_metadata
             .as_deref()
             .unwrap_or("")
             .contains(metadata_secret)
     );
-    assert_eq!(lcm_fts_count(&db_path, "externalized").await, 1);
-    assert_eq!(lcm_fts_count(&db_path, unique_secret).await, 0);
-    assert_eq!(lcm_fts_count(&db_path, metadata_secret).await, 0);
+    assert_eq!(lcm_fts_count(&db, "externalized").await, 1);
+    assert_eq!(lcm_fts_count(&db, unique_secret).await, 0);
+    assert_eq!(lcm_fts_count(&db, metadata_secret).await, 0);
 }
 
 #[tokio::test]
@@ -993,7 +1062,6 @@ async fn denies_cross_session_payload_expansion() {
 #[tokio::test]
 async fn delete_external_payload_rejects_referenced_payload_without_hash_verification() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -1024,19 +1092,17 @@ async fn delete_external_payload_rejects_referenced_payload_without_hash_verific
         tracedecay::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.exists());
 
-    let direct_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = direct_db.connect().unwrap();
-    let result = delete_external_payload(
-        &conn,
-        &storage_root,
-        &payload_ref,
-        &DeleteOpts {
-            rewrite_placeholders: true,
-            remove_file: true,
-            verify_hash: false,
-        },
-    )
-    .await;
+    let result = db
+        .lcm_delete_external_payload_for_test(
+            HostAdmissionScope::Profile,
+            &payload_ref,
+            &DeleteOpts {
+                rewrite_placeholders: true,
+                remove_file: true,
+                verify_hash: false,
+            },
+        )
+        .await;
 
     assert!(matches!(result, Err(LcmError::StillReferenced)));
     assert!(payload_path.exists());
@@ -1198,7 +1264,6 @@ async fn external_payload_write_rejects_symlinked_payload_directory() {
 #[tokio::test]
 async fn unicode_scaffold_survives_data_uri_substring_externalization() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -1236,8 +1301,8 @@ async fn unicode_scaffold_survives_data_uri_substring_externalization() {
     assert!(!raw.content.contains(";base64,"));
     assert!(!raw.content.contains("QUJDRA"));
 
-    assert_eq!(lcm_fts_count(&db_path, "unicodescaffoldcanary").await, 1);
-    assert_eq!(lcm_fts_count(&db_path, "QUJDRA").await, 0);
+    assert_eq!(lcm_fts_count(&db, "unicodescaffoldcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db, "QUJDRA").await, 0);
 
     let payload_ref = externalized_ref_from_placeholder(&raw.content);
     let expanded = store
@@ -1261,7 +1326,6 @@ async fn unicode_scaffold_survives_data_uri_substring_externalization() {
 #[tokio::test]
 async fn redaction_applies_before_whole_message_externalization() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -1319,8 +1383,8 @@ async fn redaction_applies_before_whole_message_externalization() {
     assert!(payload_body.contains("preexternalredactcanary"));
 
     // Neither the secret nor the payload body is searchable.
-    assert_eq!(lcm_fts_count(&db_path, secret).await, 0);
-    assert_eq!(lcm_fts_count(&db_path, "preexternalredactcanary").await, 0);
+    assert_eq!(lcm_fts_count(&db, secret).await, 0);
+    assert_eq!(lcm_fts_count(&db, "preexternalredactcanary").await, 0);
 }
 
 // Mirrors hermes-lcm `test_ingest_keeps_scanning_after_existing_placeholder_prefix`
@@ -1479,7 +1543,6 @@ async fn json_key_media_payload_externalizes_key_span_without_whole_message_exte
 #[tokio::test]
 async fn summary_publication_binds_external_payload_manifest_and_sanitization_receipt() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -1518,42 +1581,27 @@ async fn summary_publication_binds_external_payload_manifest_and_sanitization_re
     .await
     .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT manifest.payload_ref, manifest.session_id,
-                    manifest.payload_digest, manifest.manifest_json,
-                    receipt.receipt_id, manifest.created_at, external.created_at
-             FROM session_external_payload_manifests manifest
-             JOIN sanitization_receipts receipt
-               ON receipt.receipt_id = manifest.receipt_id
-             JOIN lcm_external_payloads external
-               ON external.payload_ref = manifest.payload_ref
-             WHERE manifest.payload_ref = ?1",
-            libsql::params![payload_ref.as_str()],
-        )
-        .await
-        .unwrap();
-    let row = rows
-        .next()
+    let manifest_record = db
+        .lcm_external_payload_manifest_for_test(&payload_ref)
         .await
         .unwrap()
         .expect("canonical payload manifest");
-    assert_eq!(row.get::<String>(0).unwrap(), payload_ref);
-    assert_eq!(row.get::<String>(1).unwrap(), "session-1");
-    assert_eq!(row.get::<String>(2).unwrap(), raw.content_hash);
-    let manifest: Value = serde_json::from_str(&row.get::<String>(3).unwrap()).unwrap();
+    assert_eq!(manifest_record.payload_ref, payload_ref);
+    assert_eq!(manifest_record.session_id, "session-1");
+    assert_eq!(manifest_record.payload_digest, raw.content_hash);
+    let manifest: Value = serde_json::from_str(&manifest_record.manifest_json).unwrap();
     assert_eq!(manifest["provider"], "cursor");
     assert_eq!(manifest["session_id"], "session-1");
-    assert!(!row.get::<String>(4).unwrap().is_empty());
-    assert_eq!(row.get::<i64>(5).unwrap(), row.get::<i64>(6).unwrap());
+    assert!(!manifest_record.receipt_id.is_empty());
+    assert_eq!(
+        manifest_record.created_at,
+        manifest_record.external_created_at
+    );
 }
 
 #[tokio::test]
 async fn external_payload_manifest_is_reused_by_successor_summary() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -1602,20 +1650,12 @@ async fn external_payload_manifest_is_reused_by_successor_summary() {
         .lcm_publish_immutable_summary(first_publication)
         .await
         .unwrap();
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT receipt_id FROM session_external_payload_manifests
-             WHERE payload_ref = ?1",
-            libsql::params![raw.payload_ref.as_deref().unwrap()],
-        )
+    let first_receipt_id = db
+        .lcm_external_payload_manifest_for_test(raw.payload_ref.as_deref().unwrap())
         .await
-        .unwrap();
-    let first_receipt_id: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    drop(rows);
-    drop(conn);
-    drop(raw_db);
+        .unwrap()
+        .expect("first payload manifest")
+        .receipt_id;
 
     let mut second_draft = first_draft;
     second_draft.summary_text = "second payload binding".to_string();
@@ -1631,27 +1671,17 @@ async fn external_payload_manifest_is_reused_by_successor_summary() {
         .await
         .expect("the successor replay must reuse the same payload-global authority");
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*), MIN(receipt_id), MAX(receipt_id)
-             FROM session_external_payload_manifests
-             WHERE payload_ref = ?1",
-            libsql::params![raw.payload_ref.as_deref().unwrap()],
-        )
+    let reused = db
+        .lcm_external_payload_manifest_for_test(raw.payload_ref.as_deref().unwrap())
         .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<i64>(0).unwrap(), 1);
-    assert_eq!(row.get::<String>(1).unwrap(), first_receipt_id);
-    assert_eq!(row.get::<String>(2).unwrap(), first_receipt_id);
+        .unwrap()
+        .expect("reused payload manifest");
+    assert_eq!(reused.receipt_id, first_receipt_id);
 }
 
 #[tokio::test]
 async fn replay_and_successor_reuse_reject_mutated_payload_global_authority() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
@@ -1718,53 +1748,40 @@ async fn replay_and_successor_reuse_reject_mutated_payload_global_authority() {
         draft: incompatible_reuse_draft,
     };
 
-    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
-    conn.execute_batch("DROP TRIGGER session_external_payload_manifests_immutable_update_v1;")
-        .await
-        .unwrap();
     let payload_ref = raw.payload_ref.as_deref().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT session_id, payload_digest, manifest_json, receipt_id, created_at
-             FROM session_external_payload_manifests WHERE payload_ref = ?1",
-            libsql::params![payload_ref],
-        )
+    let original = db
+        .lcm_external_payload_manifest_for_test(payload_ref)
         .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    let original_session_id: String = row.get(0).unwrap();
-    let original_digest: String = row.get(1).unwrap();
-    let original_manifest: String = row.get(2).unwrap();
-    let original_receipt_id: String = row.get(3).unwrap();
-    let original_created_at: i64 = row.get(4).unwrap();
-    drop(rows);
-    let mut rows = conn
-        .query(
-            "SELECT json_extract(publication_json, '$.receipt_id')
-             FROM session_summary_nodes WHERE summary_id = ?1",
-            libsql::params![successor.summary.node_id.as_str()],
-        )
+        .unwrap()
+        .expect("original payload manifest");
+    let alternate_receipt_id = db
+        .lcm_summary_publication_receipt_id_for_test(&successor.summary.node_id)
         .await
-        .unwrap();
-    let alternate_receipt_id: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    drop(rows);
+        .unwrap()
+        .expect("successor publication receipt");
+    let mut mutated_session = original.clone();
+    mutated_session.session_id = "different-session".to_string();
+    let mut mutated_digest = original.clone();
+    mutated_digest.payload_digest.push_str("-mutated");
+    let mut mutated_manifest = original.clone();
+    let mut manifest_json: Value = serde_json::from_str(&mutated_manifest.manifest_json).unwrap();
+    manifest_json["kind"] = json!("mutated");
+    mutated_manifest.manifest_json = manifest_json.to_string();
+    let mut mutated_receipt = original.clone();
+    mutated_receipt.receipt_id = alternate_receipt_id;
+    let mut mutated_created_at = original.clone();
+    mutated_created_at.created_at += 1;
 
-    for mutation in [
-        "session_id = 'different-session'".to_string(),
-        "payload_digest = payload_digest || '-mutated'".to_string(),
-        "manifest_json = json_set(manifest_json, '$.kind', 'mutated')".to_string(),
-        format!("receipt_id = '{alternate_receipt_id}'"),
-        "created_at = created_at + 1".to_string(),
+    for (mutation, replacement) in [
+        ("session_id", mutated_session),
+        ("payload_digest", mutated_digest),
+        ("manifest_json", mutated_manifest),
+        ("receipt_id", mutated_receipt),
+        ("created_at", mutated_created_at),
     ] {
-        conn.execute(
-            &format!(
-                "UPDATE session_external_payload_manifests SET {mutation} WHERE payload_ref = ?1"
-            ),
-            libsql::params![payload_ref],
-        )
-        .await
-        .unwrap();
+        db.replace_lcm_external_payload_manifest_for_test(payload_ref, &replacement)
+            .await
+            .unwrap();
         let error = db
             .lcm_publish_immutable_summary(publication.clone())
             .await
@@ -1781,21 +1798,8 @@ async fn replay_and_successor_reuse_reject_mutated_payload_global_authority() {
             matches!(error, LcmError::ImmutablePayloadConflict { .. }),
             "unexpected successor error after mutating {mutation}: {error:?}"
         );
-        conn.execute(
-            "UPDATE session_external_payload_manifests
-             SET session_id = ?2, payload_digest = ?3, manifest_json = ?4,
-                 receipt_id = ?5, created_at = ?6
-             WHERE payload_ref = ?1",
-            libsql::params![
-                payload_ref,
-                original_session_id.as_str(),
-                original_digest.as_str(),
-                original_manifest.as_str(),
-                original_receipt_id.as_str(),
-                original_created_at,
-            ],
-        )
-        .await
-        .unwrap();
+        db.replace_lcm_external_payload_manifest_for_test(payload_ref, &original)
+            .await
+            .unwrap();
     }
 }

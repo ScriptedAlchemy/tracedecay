@@ -3,12 +3,64 @@ use super::{
     format_index_age_phrase, staleness_banner, tool_error_response,
 };
 use crate::config::PinnedUserDataDir;
-use crate::global_db::GlobalDb;
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+
+static FRESHNESS_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+
+struct FreshnessRuntime {
+    registry: DaemonSessionRuntimeRegistryV1,
+    _scope: crate::db::DaemonDatabaseScope,
+}
+
+impl FreshnessRuntime {
+    async fn open(profile_root: &std::path::Path) -> Self {
+        std::fs::create_dir_all(profile_root).expect("freshness profile root");
+        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+            .expect("freshness profile identity");
+        let nonce = FRESHNESS_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
+        let scope = crate::db::enter_daemon_database_scope(
+            identity.profile_root(),
+            nonce,
+            "mcp-freshness-test",
+        )
+        .expect("freshness daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("freshness session runtime registry");
+        Self {
+            registry,
+            _scope: scope,
+        }
+    }
+
+    async fn profile_database(&self) -> Arc<RegisteredGlobalDb> {
+        self.registry
+            .profile_database()
+            .await
+            .expect("registered freshness profile database")
+    }
+
+    async fn project_sessions(&self, cg: &TraceDecay) -> Arc<RegisteredGlobalDb> {
+        let project_id = tracedecay_domain::ProjectId::new(
+            cg.store_layout()
+                .identity
+                .project_id
+                .as_deref()
+                .expect("freshness project identity"),
+        )
+        .expect("typed freshness project identity");
+        self.registry
+            .project_sessions(project_id, [cg.project_root().to_path_buf()])
+            .await
+            .expect("registered freshness project sessions")
+    }
+}
 
 fn git(root: &std::path::Path, args: &[&str]) {
     let ok = std::process::Command::new(crate::git::git_program())
@@ -196,12 +248,10 @@ async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db
     let (cg, dir, _pin) = init_indexed_repo().await;
     let profile_root = crate::config::user_data_dir().expect("configured profile root");
     let override_root = dir.path().join("registry-override");
-    std::fs::create_dir_all(&override_root).expect("override root");
-    let registry = GlobalDb::open_at(&override_root.join("global.db"))
-        .await
-        .expect("override registry");
+    let runtime = FreshnessRuntime::open(&override_root).await;
+    let registry = runtime.profile_database().await;
 
-    let server = McpServer::new_with_dbs(cg, None, None, Some(Arc::new(registry)), true).await;
+    let server = McpServer::new_with_dbs(cg, None, None, Some(registry), true).await;
 
     assert_eq!(server.profile_root.as_deref(), Some(profile_root.as_path()));
     assert_ne!(
@@ -214,25 +264,25 @@ async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db
 }
 
 #[tokio::test]
-async fn project_startup_catch_up_succeeds_without_user_session_authority() {
+async fn project_startup_catch_up_rejects_missing_registered_authority_argument() {
     let (cg, _dir, _pin) = init_indexed_repo().await;
-    let project_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .expect("project session DB"),
-    );
+    let profile_root = crate::config::user_data_dir().expect("configured profile root");
+    let runtime = FreshnessRuntime::open(&profile_root).await;
+    let project_db = runtime.project_sessions(&cg).await;
 
     let completed = super::run_startup_session_catch_up(
         Some(Arc::clone(&project_db)),
         None,
         None,
+        None,
+        None,
+        None,
         cg.project_root(),
         cg.store_layout().identity.project_id.as_deref(),
     )
-    .await
-    .expect("project catch-up must not depend on user session storage");
+    .await;
 
-    assert!(Arc::ptr_eq(&completed, &project_db));
+    assert!(completed.is_none());
 }
 
 #[test]

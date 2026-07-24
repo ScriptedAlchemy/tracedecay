@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_file;
@@ -30,7 +30,7 @@ impl Database {
         }
 
         let stmt = transaction
-            .prepare("INSERT OR REPLACE INTO files (path,content_hash,size,modified_at,indexed_at,node_count) VALUES (?1,?2,?3,?4,?5,?6)")
+            .prepare_engine("INSERT OR REPLACE INTO files (path,content_hash,size,modified_at,indexed_at,node_count) VALUES (?1,?2,?3,?4,?5,?6)")
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to prepare: {e}"),
@@ -74,7 +74,7 @@ impl Database {
         file: &FileRecord,
     ) -> Result<()> {
         transaction
-            .execute(
+            .execute_engine(
                 "INSERT OR REPLACE INTO files
                 (path, content_hash, size, modified_at, indexed_at, node_count)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -98,7 +98,7 @@ impl Database {
     /// Retrieves a file record by path, returning `None` if not found.
     pub async fn get_file(&self, path: &str) -> Result<Option<FileRecord>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT path, content_hash, size, modified_at, indexed_at, node_count
                  FROM files WHERE path = ?1",
@@ -128,7 +128,7 @@ impl Database {
     /// Returns all file records.
     pub async fn get_all_files(&self) -> Result<Vec<FileRecord>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT path, content_hash, size, modified_at, indexed_at, node_count FROM files",
                 (),
@@ -156,7 +156,7 @@ impl Database {
     ) -> Result<()> {
         Self::delete_nodes_by_file_in_transaction(transaction, path).await?;
         transaction
-            .execute("DELETE FROM files WHERE path = ?1", params![path])
+            .execute_engine("DELETE FROM files WHERE path = ?1", params![path])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete file: {e}"),
@@ -173,7 +173,7 @@ impl Database {
         Self::delete_nodes_by_file_in_transaction(&transaction, path).await?;
         after_node_delete.await;
         transaction
-            .execute("DELETE FROM files WHERE path = ?1", params![path])
+            .execute_engine("DELETE FROM files WHERE path = ?1", params![path])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete file: {e}"),
@@ -188,13 +188,16 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::db::DatabaseAuthority;
+    use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
     async fn seeded_database() -> (tempfile::TempDir, Database) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "delete file tests").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
         db.upsert_file(&FileRecord {
             path: "src/lib.rs".to_string(),
             content_hash: "hash".to_string(),
@@ -237,7 +240,7 @@ mod tests {
 
     async fn row_count(db: &Database, table: &str) -> i64 {
         let sql = format!("SELECT COUNT(*) FROM {table}");
-        let mut rows = db.conn().query(&sql, ()).await.unwrap();
+        let mut rows = db.engine_conn().query(&sql, ()).await.unwrap();
         rows.next().await.unwrap().unwrap().get(0).unwrap()
     }
 

@@ -1,12 +1,12 @@
 use super::*;
 
 pub(super) async fn upsert_live_transcript_projection(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     project_root: Option<&Path>,
     provider: &str,
     session_id: &str,
     messages: &[Value],
-) {
+) -> Result<()> {
     let project = project_root.map_or_else(
         || "user".to_string(),
         |root| root.to_string_lossy().to_string(),
@@ -74,7 +74,7 @@ pub(super) async fn upsert_live_transcript_projection(
         });
     }
     if projected.is_empty() {
-        return;
+        return Ok(());
     }
     let title = projected
         .iter()
@@ -108,14 +108,10 @@ pub(super) async fn upsert_live_transcript_projection(
         },
         messages: projected,
     };
-    let persisted = db
-        .upsert_transcript_projection_batches(&[batch], &source_path, ParseOffset::default())
-        .await;
-    if !persisted {
-        tracing::debug!(
-            provider,
-            session_id,
-            "live transcript projection upsert failed"
-        );
-    }
+    db.upsert_transcript_projection_batches(&[batch], &source_path, ParseOffset::default())
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "persist live transcript projection".to_string(),
+            message: error.to_string(),
+        })
 }

@@ -30,7 +30,7 @@ struct StatusCounts {
 }
 
 pub(super) async fn status_for_provider(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -51,7 +51,7 @@ pub(super) async fn status_for_provider(
 }
 
 async fn status_for_provider_with_work(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -94,7 +94,7 @@ async fn status_for_provider_with_work(
 }
 
 pub(super) async fn aggregate_provider_status(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     session_id: Option<&str>,
     deep: bool,
@@ -108,7 +108,7 @@ pub(super) async fn aggregate_provider_status(
 }
 
 async fn aggregate_provider_status_with_work(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     session_id: Option<&str>,
     deep: bool,
@@ -144,7 +144,7 @@ async fn aggregate_provider_status_with_work(
 }
 
 async fn status_counts(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<StatusCounts, LcmError> {
@@ -203,7 +203,7 @@ async fn status_counts(
                          metadata_json,
                          '$.ingest_protection.lossy'
                      ) = 'true')",
-            params![provider, util::opt_text(session_id)],
+            params![provider, session_id],
         )
         .await?;
     let row = rows
@@ -466,7 +466,7 @@ pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmS
 }
 
 async fn store_status(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmStoreStatus, LcmError> {
@@ -476,7 +476,7 @@ async fn store_status(
              FROM lcm_raw_messages
              WHERE (?1 = 'all' OR provider = ?1)
                AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
+            params![provider, session_id],
         )
         .await?;
     let mut messages = 0_i64;
@@ -497,7 +497,7 @@ async fn store_status(
 }
 
 async fn dag_status(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmDagStatus, LcmError> {
@@ -509,7 +509,7 @@ async fn dag_status(
                AND (?2 IS NULL OR session_id = ?2)
              GROUP BY depth
              ORDER BY depth",
-            params![provider, util::opt_text(session_id)],
+            params![provider, session_id],
         )
         .await?;
     let mut depths = std::collections::BTreeMap::new();
@@ -571,11 +571,10 @@ fn python_round_ratio_to_tenths(total_source_tokens: i64, total_tokens: i64) -> 
 }
 
 async fn load_lifecycle_metadata(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmLifecycleMetadata, LcmError> {
-    let session_value = util::opt_text(session_id);
     let mut rows = conn
         .query(
             "SELECT current_session_id, current_frontier_store_id,
@@ -584,7 +583,7 @@ async fn load_lifecycle_metadata(
              WHERE provider = ?1 AND (?2 IS NULL OR current_session_id = ?2)
              ORDER BY updated_at DESC, conversation_id DESC
              LIMIT 1",
-            params![provider, session_value],
+            params![provider, session_id],
         )
         .await?;
     let Some(row) = rows.next().await? else {
@@ -614,17 +613,14 @@ struct LcmLifecycleMetadata {
 
 #[cfg(test)]
 mod tests {
-    use libsql::Connection;
+    use crate::db::engine::{Connection, TestConnection};
     use tempfile::TempDir;
 
     use super::*;
 
-    async fn in_memory_lcm_connection() -> Connection {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .expect("build in-memory session database");
-        let conn = db.connect().expect("connect to session database");
+    async fn test_lcm_connection() -> (TempDir, TestConnection) {
+        let directory = TempDir::new().expect("session database tempdir");
+        let conn = TestConnection::open(&directory.path().join("sessions.db"));
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE sessions (
@@ -658,10 +654,10 @@ mod tests {
         )
         .await
         .expect("create session tables");
-        schema::ensure_lcm_schema(&conn)
+        schema::ensure_lcm_schema(&*conn)
             .await
             .expect("create LCM schema");
-        conn
+        (directory, conn)
     }
 
     async fn seed_provider(conn: &Connection, index: usize) {
@@ -784,7 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_status_batches_queries_and_preserves_legacy_output() {
-        let conn = in_memory_lcm_connection().await;
+        let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
         for index in 0..3 {
             seed_provider(&conn, index).await;
@@ -795,7 +791,7 @@ mod tests {
         for deep in [false, true] {
             let expected = legacy_aggregate(&conn, storage.path(), &providers, deep).await;
             let (actual, work) = aggregate_provider_status_with_work(
-                &conn,
+                &*conn,
                 storage.path(),
                 None,
                 deep,
@@ -812,11 +808,11 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_status_work_is_provider_independent_across_thirty_runs() {
-        let conn = in_memory_lcm_connection().await;
+        let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
         seed_provider(&conn, 0).await;
         let (_, baseline) = aggregate_provider_status_with_work(
-            &conn,
+            &*conn,
             storage.path(),
             None,
             false,
@@ -832,7 +828,7 @@ mod tests {
         }
         for _ in 0..30 {
             let (status, work) = aggregate_provider_status_with_work(
-                &conn,
+                &*conn,
                 storage.path(),
                 None,
                 false,

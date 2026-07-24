@@ -5,10 +5,9 @@ use crate::global;
 
 use super::daemon::daemon_tool_json;
 
-async fn strict_registered_project_paths(
-    gdb: &tracedecay::global_db::GlobalDb,
+fn strict_registered_project_paths(
+    paths: Vec<PathBuf>,
 ) -> tracedecay::errors::Result<Vec<PathBuf>> {
-    let paths = gdb.try_list_code_project_paths(usize::MAX).await?;
     paths
         .into_iter()
         .enumerate()
@@ -84,19 +83,27 @@ mod wipe_target_tests {
             )
         };
 
-        let db = tracedecay::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-            .await
-            .expect("open global database");
-        db.upsert_code_project("proj_first", &first, None, None, None)
+        let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+            dir.path(),
+        )
+        .await
+        .expect("open global database");
+        runtime
+            .upsert_code_project("proj_first", &first, None, None, None)
             .await
             .expect("register first project");
-        db.upsert_code_project("proj_second", &second, None, None, None)
+        runtime
+            .upsert_code_project("proj_second", &second, None, None, None)
             .await
             .expect("register second project");
 
-        let paths = strict_registered_project_paths(&db)
-            .await
-            .expect("list registered paths");
+        let paths = strict_registered_project_paths(
+            runtime
+                .registered_project_paths_for_test()
+                .await
+                .expect("read registered project paths"),
+        )
+        .expect("list registered paths");
         assert!(paths.contains(&first));
         assert!(paths.contains(&second));
     }
@@ -111,15 +118,19 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
         tracedecay::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, "wipe")?;
     let _database_scope =
         tracedecay::db::enter_maintenance_database_scope(&lifecycle_lease, &profile_root, "wipe")?;
-    let gdb = tracedecay::global_db::GlobalDb::try_open().await?;
+    let registry =
+        tracedecay::migrate::registry::MigrationRegistryRuntime::try_open_existing(&profile_root)
+            .await?;
 
     // `--all` must enumerate the registry only after exclusive maintenance
     // ownership is active. A strict local query avoids both the daemon
     // discovery-to-lease race and any failure-to-empty fallback before global.db
     // is eligible for removal.
     let project_paths = if all {
-        match gdb.as_ref() {
-            Some(gdb) => strict_registered_project_paths(gdb).await?,
+        match registry.as_ref() {
+            Some(registry) => {
+                strict_registered_project_paths(registry.registered_project_paths().await?)?
+            }
             None => Vec::new(),
         }
     } else {
@@ -129,10 +140,10 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     for path in &project_paths {
         let location = global::classify_project_storage_with_registry(
             path,
-            gdb.as_ref(),
+            registry.as_ref(),
             home_tracedecay.as_deref(),
         )
-        .await;
+        .await?;
         if location.status.is_live() {
             targets.push(location);
         }
@@ -186,7 +197,7 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     }
 
     if all {
-        drop(gdb);
+        drop(registry);
         if let Some(global_dir) = home_tracedecay.as_ref() {
             for ext in ["db", "db-wal", "db-shm"] {
                 let p = global_dir.join(format!("global.{ext}"));
@@ -197,10 +208,10 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
                 global_dir.display()
             );
         }
-    } else if !wiped_paths.is_empty()
-        && let Some(gdb) = gdb.as_ref()
-    {
-        gdb.delete_project_paths(&wiped_paths).await;
+    } else if !wiped_paths.is_empty() {
+        if let Some(registry) = registry.as_ref() {
+            registry.delete_project_paths(&wiped_paths).await?;
+        }
     }
 
     eprintln!();
@@ -279,15 +290,17 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         } else {
             0
         };
-        let project_key = tracedecay::global_db::GlobalDb::canonical_project_key(path);
+        let project_key =
+            tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(path);
         let tokens = token_rows
             .iter()
             .find(|row| {
                 row.get("project")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|value| {
-                        tracedecay::global_db::GlobalDb::canonical_project_key(Path::new(value))
-                            == project_key
+                        tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
+                            Path::new(value),
+                        ) == project_key
                     })
             })
             .and_then(|row| row.get("tokens"))
@@ -383,7 +396,9 @@ fn append_orphan_manifest_rows(
     };
     let registered: std::collections::HashSet<String> = project_paths
         .iter()
-        .map(|path| tracedecay::global_db::GlobalDb::canonical_project_key(path))
+        .map(|path| {
+            tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(path)
+        })
         .collect();
     let report = tracedecay::migrate::registry::scan_profile_store_manifests(
         profile_root,
@@ -393,8 +408,9 @@ fn append_orphan_manifest_rows(
         if plan.status != tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible {
             continue;
         }
-        let key =
-            tracedecay::global_db::GlobalDb::canonical_project_key(&plan.project.project_root);
+        let key = tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
+            &plan.project.project_root,
+        );
         if registered.contains(&key) {
             continue;
         }

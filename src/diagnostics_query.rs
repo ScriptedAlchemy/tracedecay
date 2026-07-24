@@ -22,12 +22,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use libsql::{Connection, params};
 use tracedecay_domain::{
     CodeGenerationId, DiagnosticRecordStateV1, FileOccurrenceId, GenerationDiagnosticV1,
     RetrievalAnchorId,
 };
 
+use crate::db::engine::{Connection, params};
 use crate::diagnostics_store::{DiagnosticsStore, DirtyDiagnosticOverlay};
 use crate::errors::{Result as CrateResult, TraceDecayError};
 
@@ -290,7 +290,7 @@ impl<'a> DiagnosticsQuery<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self {
             conn,
-            store: DiagnosticsStore::new(conn),
+            store: DiagnosticsStore::new_runtime(conn),
         }
     }
 
@@ -819,6 +819,7 @@ fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::engine::TestConnection;
     use tracedecay_domain::{
         DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
         DiagnosticSeverityV1, SourceSpan, UtcMicros,
@@ -888,17 +889,13 @@ mod tests {
         record
     }
 
-    async fn open_store(path: &std::path::Path) -> (libsql::Database, Connection) {
-        let db = libsql::Builder::new_local(path)
-            .build()
-            .await
-            .expect("open test database");
-        let conn = db.connect().expect("connect test database");
-        DiagnosticsStore::new(&conn)
+    async fn open_store(path: &std::path::Path) -> TestConnection {
+        let conn = TestConnection::open(path);
+        DiagnosticsStore::new_runtime(&conn)
             .ensure_schema()
             .await
             .expect("ensure diagnostics schema");
-        (db, conn)
+        conn
     }
 
     const GEN1: &str = "generation.clean.1";
@@ -909,7 +906,7 @@ mod tests {
     /// A1's logical finding as A2 (anchor.3) and adds the new finding C2
     /// (anchor.4, `unused_variables`). B1 has no gen2 successor.
     async fn seed_two_generations(conn: &Connection) {
-        let store = DiagnosticsStore::new(conn);
+        let store = DiagnosticsStore::new_runtime(conn);
         store
             .publish_clean_generation(
                 &id(GEN1),
@@ -954,7 +951,7 @@ mod tests {
     #[tokio::test]
     async fn current_by_generation_lane_paginates_deterministically() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
         let query = DiagnosticsQuery::new(&conn);
 
@@ -1004,7 +1001,7 @@ mod tests {
     #[tokio::test]
     async fn current_and_stale_file_lanes_filter_by_file_and_state() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
         let query = DiagnosticsQuery::new(&conn);
 
@@ -1077,7 +1074,7 @@ mod tests {
     #[tokio::test]
     async fn anchor_lookup_hit_and_miss() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
         let query = DiagnosticsQuery::new(&conn);
 
@@ -1102,7 +1099,7 @@ mod tests {
     #[tokio::test]
     async fn supersession_navigation_walks_forward_and_backward() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
         let query = DiagnosticsQuery::new(&conn);
 
@@ -1188,7 +1185,7 @@ mod tests {
     #[tokio::test]
     async fn generation_diff_reports_introduced_superseded_cleared_lanes() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
         let query = DiagnosticsQuery::new(&conn);
 
@@ -1244,13 +1241,13 @@ mod tests {
     #[tokio::test]
     async fn generation_diff_lane_limit_truncates() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
         let query = DiagnosticsQuery::new(&conn);
 
         // Introduce a second new finding in gen2 so the introduced lane
         // exceeds a lane limit of 1.
-        let store = DiagnosticsStore::new(&conn);
+        let store = DiagnosticsStore::new_runtime(&conn);
         let extra = with_message(
             fixture_record(GEN2, "anchor.diagnostic.5"),
             "unused_imports",
@@ -1298,7 +1295,7 @@ mod tests {
     #[tokio::test]
     async fn overlay_merge_prefers_overlay_and_marks_provenance() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
         let query = DiagnosticsQuery::new(&conn);
 
@@ -1396,11 +1393,10 @@ mod tests {
     #[tokio::test]
     async fn store_unavailable_is_typed_never_silent() {
         let temp = tempfile::tempdir().unwrap();
-        let (_db, conn) = open_store(&temp.path().join("diagnostics.db")).await;
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        // libsql's facade `Connection` exposes no close/disconnect, so the
-        // test drives the identical store-error path by dropping the schema
-        // out from under the reader: every store query now fails.
+        // Drive the store-error path by dropping the schema out from under
+        // the reader: every store query now fails.
         conn.execute_batch(
             "DROP TABLE generation_diagnostics;
              DROP TABLE diagnostic_generation_publications;",

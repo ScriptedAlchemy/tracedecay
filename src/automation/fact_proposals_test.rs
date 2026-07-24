@@ -1,12 +1,15 @@
 use super::*;
 use crate::application::memory::MemoryApplication;
-use crate::db::{Database, DatabaseAuthority};
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::FactOwnerV1;
 
 async fn database(path: &Path) -> Database {
     let authority = DatabaseAuthority::acquire_test(path, "fact proposal lifecycle test").unwrap();
-    Database::initialize(path, &authority).await.unwrap().0
+    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)
+        .await
+        .unwrap()
+        .0
 }
 
 fn request(content: &str) -> AddFactRequest {

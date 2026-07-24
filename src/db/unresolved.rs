@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_unresolved_ref;
@@ -24,7 +24,7 @@ impl Database {
         uref: &UnresolvedRef,
     ) -> Result<()> {
         transaction
-            .execute(
+            .execute_engine(
                 "INSERT INTO unresolved_refs
                 (from_node_id, reference_name, reference_kind, line, col, file_path)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -69,7 +69,7 @@ impl Database {
         }
 
         let stmt = transaction
-            .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
+            .prepare_engine("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to prepare: {e}"),
@@ -104,7 +104,7 @@ impl Database {
     /// Returns all unresolved references.
     pub async fn get_unresolved_refs(&self) -> Result<Vec<UnresolvedRef>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT from_node_id, reference_name, reference_kind, line, col, file_path
                  FROM unresolved_refs",
@@ -133,7 +133,7 @@ impl Database {
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
         transaction
-            .execute("DELETE FROM unresolved_refs", ())
+            .execute_engine("DELETE FROM unresolved_refs", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to clear unresolved refs: {e}"),

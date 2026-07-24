@@ -57,6 +57,18 @@ impl TranscriptCatchUpFailure {
     pub(super) const fn pass_frontier_unavailable() -> Self {
         Self::new("scheduler", "frontier", "ingest_frontier_unavailable", true)
     }
+
+    /// Mutable session ingestion requires a retained daemon registry mount.
+    /// Compatibility callers without that mount must fail before touching the
+    /// legacy database or any provider source.
+    pub(super) const fn registered_authority_unavailable(provider: &'static str) -> Self {
+        Self::new(
+            provider,
+            "host_admission",
+            "registered_authority_unavailable",
+            true,
+        )
+    }
 }
 
 /// One provider adapter's bounded contribution to a catch-up pass.

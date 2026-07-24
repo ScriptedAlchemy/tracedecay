@@ -190,6 +190,7 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
             thread_id: Some(GitHubReviewThreadIdV1::new("thread.1").unwrap()),
             comment_id: GitHubReviewCommentIdV1::new("comment.1").unwrap(),
             reply_to_comment_id: None,
+            version_digest: digest(SHA_A),
             author_anchor: anchor("anchor.pr13.github-author"),
             author_class: GitHubReviewAuthorClassV1::Maintainer,
             review_state: GitHubReviewStateV1::Commented,

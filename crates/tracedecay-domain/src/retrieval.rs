@@ -1272,6 +1272,34 @@ struct Pr9FallbackSubpayloadDigestInput<'a> {
 }
 
 impl Pr9FallbackSubpayload {
+    /// Construct one canonical PR9 fallback payload and compute its
+    /// domain-separated digest without exposing any placeholder identity.
+    pub fn new(
+        profile_id: FusionProfileId,
+        ordered_candidates: Vec<RankedCandidate>,
+        public_pr9_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+        freshness: Vec<SourceFreshness>,
+        cursor: Option<RetrievalCursor>,
+    ) -> Result<Self, RetrievalContractError> {
+        let digest = compute_pr9_fallback_subpayload_digest(
+            &profile_id,
+            &ordered_candidates,
+            &public_pr9_lane_coverage,
+            &freshness,
+            &cursor,
+        )?;
+        let payload = Self {
+            profile_id,
+            ordered_candidates,
+            public_pr9_lane_coverage,
+            freshness,
+            cursor,
+            digest,
+        };
+        payload.validate()?;
+        Ok(payload)
+    }
+
     /// Validate the PR9 lane invariant: the subpayload covers only
     /// `ExactLiteral`, `Lexical`, and `Graph` (Plan 15).
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
@@ -1328,17 +1356,13 @@ impl Pr9FallbackSubpayload {
     /// Compute the canonical domain-separated digest of this subpayload,
     /// excluding the `digest` field itself.
     pub fn compute_digest(&self) -> Result<FallbackSubpayloadDigest, RetrievalContractError> {
-        let input = Pr9FallbackSubpayloadDigestInput {
-            domain: PR9_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN,
-            profile_id: &self.profile_id,
-            ordered_candidates: &self.ordered_candidates,
-            public_pr9_lane_coverage: &self.public_pr9_lane_coverage,
-            freshness: &self.freshness,
-            cursor: &self.cursor,
-        };
-        let digest = canonical_sha256(&input)
-            .map_err(|error| RetrievalContractError::CanonicalSerialization(error.to_string()))?;
-        FallbackSubpayloadDigest::new(digest.as_str())
+        compute_pr9_fallback_subpayload_digest(
+            &self.profile_id,
+            &self.ordered_candidates,
+            &self.public_pr9_lane_coverage,
+            &self.freshness,
+            &self.cursor,
+        )
     }
 
     /// Verify the stored digest against the canonical payload.
@@ -1349,6 +1373,26 @@ impl Pr9FallbackSubpayload {
             Err(RetrievalContractError::DigestMismatch)
         }
     }
+}
+
+fn compute_pr9_fallback_subpayload_digest(
+    profile_id: &FusionProfileId,
+    ordered_candidates: &[RankedCandidate],
+    public_pr9_lane_coverage: &BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    freshness: &[SourceFreshness],
+    cursor: &Option<RetrievalCursor>,
+) -> Result<FallbackSubpayloadDigest, RetrievalContractError> {
+    let input = Pr9FallbackSubpayloadDigestInput {
+        domain: PR9_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN,
+        profile_id,
+        ordered_candidates,
+        public_pr9_lane_coverage,
+        freshness,
+        cursor,
+    };
+    let digest = canonical_sha256(&input)
+        .map_err(|error| RetrievalContractError::CanonicalSerialization(error.to_string()))?;
+    FallbackSubpayloadDigest::new(digest.as_str())
 }
 
 /// The assembled retrieval result (Plan 15 pipeline step 12).

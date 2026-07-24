@@ -1,17 +1,15 @@
 use tempfile::TempDir;
-use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::application::host_admission::HostAdmissionScope;
+use tracedecay::sessions::SessionProvider;
 use tracedecay::sessions::kiro::KiroSource;
-use tracedecay::sessions::source::{
-    StoredCursor, TranscriptIngestError, TranscriptSource, try_ingest_source,
-};
-use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay::sessions::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
 use tracedecay_store::ObservationProjectionStore;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    assert_secret_absent_from_observation_sinks, durable_table_count, mark_test_project,
-    observation_source_cursor, set_projection_failure,
+    assert_secret_absent_from_observation_sinks, durable_table_count,
+    ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
+    open_project_session_db, set_projection_failure, try_ingest_source,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
@@ -649,8 +647,11 @@ async fn kiro_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
             .messages_upserted,
         0
     );
-    let committed = durable_table_count(&project, "observations").await;
-    let store = GlobalDbObservationStore::new(&reopened);
+    let committed = durable_table_count(&reopened, "observations").await;
+    let store = reopened
+        .runtime()
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
     loop {
         if store
             .rebuild_projection(committed)
@@ -705,7 +706,9 @@ async fn kiro_projection_failure_commits_frontier_and_replays_once() {
     )
     .unwrap();
 
-    set_projection_failure(&project, true).await;
+    let failure_runtime = open_project_session_db(&project).await.unwrap();
+    set_projection_failure(&failure_runtime, true).await;
+    drop(failure_runtime);
     let rejected = open_project_session_db(&project).await.unwrap();
     let _ =
         ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Kiro)).await;
@@ -723,7 +726,9 @@ async fn kiro_projection_failure_commits_frontier_and_replays_once() {
     );
     drop(rejected);
 
-    set_projection_failure(&project, false).await;
+    let recovery_runtime = open_project_session_db(&project).await.unwrap();
+    set_projection_failure(&recovery_runtime, false).await;
+    drop(recovery_runtime);
     let recovered = open_project_session_db(&project).await.unwrap();
     let _ =
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Kiro)).await;
@@ -843,8 +848,9 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
     mark_test_project(&project);
     let _path = write_workspace_session_json(&home, &project, "sess-commit-before-ack");
 
-    drop(open_project_session_db(&project).await.unwrap());
-    set_projection_failure(&project, true).await;
+    let failure_runtime = open_project_session_db(&project).await.unwrap();
+    set_projection_failure(&failure_runtime, true).await;
+    drop(failure_runtime);
 
     let rejected = open_project_session_db(&project).await.unwrap();
     let _ =
@@ -863,9 +869,10 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
     assert_eq!(committed_cursor.position(), 2);
     drop(rejected);
 
-    let observations = durable_table_count(&project, "observations").await;
-    let receipts = durable_table_count(&project, "sanitization_receipts").await;
-    let queued = durable_table_count(&project, "projection_queue").await;
+    let durable_runtime = open_project_session_db(&project).await.unwrap();
+    let observations = durable_table_count(&durable_runtime, "observations").await;
+    let receipts = durable_table_count(&durable_runtime, "sanitization_receipts").await;
+    let queued = durable_table_count(&durable_runtime, "projection_queue").await;
     assert!(
         observations >= 1,
         "Kiro observation commits before projection ack"
@@ -879,7 +886,8 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
         "Kiro projection work stays queued across the failed ack"
     );
 
-    set_projection_failure(&project, false).await;
+    set_projection_failure(&durable_runtime, false).await;
+    drop(durable_runtime);
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Kiro))
@@ -895,14 +903,14 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
         1
     );
     assert_eq!(
-        durable_table_count(&project, "observations").await,
+        durable_table_count(&recovered, "observations").await,
         observations
     );
     assert_eq!(
-        durable_table_count(&project, "sanitization_receipts").await,
+        durable_table_count(&recovered, "sanitization_receipts").await,
         receipts
     );
-    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
         ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Kiro))
             .await

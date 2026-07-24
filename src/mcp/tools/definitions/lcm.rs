@@ -110,16 +110,10 @@ pub(super) fn def_lcm_load_session() -> ToolDefinition {
                     "type": "string",
                     "description": "Provider-local session id."
                 },
-                "after_store_id": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "deprecated": true,
-                    "description": "Deprecated unpinned first-page compatibility input. It is never returned or reused as next_cursor; continue with the authenticated opaque cursor."
-                },
                 "cursor": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Authenticated opaque continuation cursor returned as next_cursor. Cannot be combined with after_store_id."
+                    "description": "Authenticated opaque continuation cursor returned as next_cursor."
                 },
                 "temporal_mode": {
                     "type": "string",

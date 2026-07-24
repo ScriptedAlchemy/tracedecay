@@ -1,40 +1,44 @@
 use tempfile::TempDir;
 
-use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, GlobalDb};
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 use super::{
-    HORIZON_TOOL_STEPS, HintOutcomeStats, Resolution, ToolStep, correlate_hint_outcomes, resolve,
-    tool_matches_expected,
+    HORIZON_TOOL_STEPS, HintOutcomeStats, Resolution, ToolStep, resolve, tool_matches_expected,
 };
 
 const PROJECT: &str = "proj_hint_outcomes";
 const HINT_TS: i64 = 1_000_000;
 
-async fn open_db(dir: &TempDir) -> GlobalDb {
-    GlobalDb::open_at(&dir.path().join("global.db"))
+async fn open_db(dir: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
-        .expect("open global db")
+        .expect("open registered profile runtime")
 }
 
-async fn seed_session(db: &GlobalDb, provider: &str, session_id: &str) {
+async fn seed_session(db: &HostAdmissionTestRuntimeV1, provider: &str, session_id: &str) {
     let ok = db
-        .upsert_session(&SessionRecord {
-            provider: provider.to_string(),
-            session_id: session_id.to_string(),
-            project_key: PROJECT.to_string(),
-            project_path: "/tmp/proj".to_string(),
-            title: None,
-            started_at: Some(HINT_TS),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await;
+        .upsert_session_for_test(
+            HostAdmissionScope::Profile,
+            &SessionRecord {
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                project_key: PROJECT.to_string(),
+                project_path: "/tmp/proj".to_string(),
+                title: None,
+                started_at: Some(HINT_TS),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+        )
+        .await
+        .expect("upsert session through retained runtime");
     assert!(ok, "session should upsert");
 }
 
@@ -80,39 +84,48 @@ impl<'a> Msg<'a> {
     }
 }
 
-async fn seed_message(db: &GlobalDb, msg: Msg<'_>) {
+async fn seed_message(db: &HostAdmissionTestRuntimeV1, msg: Msg<'_>) {
     let ok = db
-        .upsert_session_message(&SessionMessageRecord {
-            provider: msg.provider.to_string(),
-            message_id: format!("{}:{}", msg.session_id, msg.ordinal),
-            session_id: msg.session_id.to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(msg.ts),
-            ordinal: msg.ordinal,
-            text: "activity".to_string(),
-            kind: msg.kind.map(str::to_string),
-            model: None,
-            tool_names: msg.tool_names.map(str::to_string),
-            source_path: None,
-            source_offset: Some(msg.ordinal),
-            metadata_json: msg.metadata_json.map(str::to_string),
-        })
-        .await;
+        .upsert_session_message_for_test(
+            HostAdmissionScope::Profile,
+            &SessionMessageRecord {
+                provider: msg.provider.to_string(),
+                message_id: format!("{}:{}", msg.session_id, msg.ordinal),
+                session_id: msg.session_id.to_string(),
+                role: "assistant".to_string(),
+                timestamp: Some(msg.ts),
+                ordinal: msg.ordinal,
+                text: "activity".to_string(),
+                kind: msg.kind.map(str::to_string),
+                model: None,
+                tool_names: msg.tool_names.map(str::to_string),
+                source_path: None,
+                source_offset: Some(msg.ordinal),
+                metadata_json: msg.metadata_json.map(str::to_string),
+            },
+        )
+        .await
+        .expect("upsert session message through retained runtime");
     assert!(ok, "session message should upsert");
 }
 
-async fn seed_hint_emitted(db: &GlobalDb, session_id: &str, hint_id: &str, category: &str) {
+async fn seed_hint_emitted(
+    db: &HostAdmissionTestRuntimeV1,
+    session_id: &str,
+    hint_id: &str,
+    category: &str,
+) {
     seed_hint_emitted_for(db, "hook_claude", session_id, hint_id, category).await;
 }
 
 async fn seed_hint_emitted_for(
-    db: &GlobalDb,
+    db: &HostAdmissionTestRuntimeV1,
     provider: &str,
     session_id: &str,
     hint_id: &str,
     category: &str,
 ) {
-    db.append_analytics_event(&AnalyticsEventInsert {
+    db.append_profile_analytics_event_for_test(&AnalyticsEventInsert {
         provider: provider.to_string(),
         project_id: PROJECT.to_string(),
         session_id: Some(session_id.to_string()),
@@ -131,8 +144,10 @@ async fn seed_hint_emitted_for(
     .expect("hint_emitted should append");
 }
 
-async fn outcome_events(db: &GlobalDb) -> Vec<crate::global_db::AnalyticsEventRecord> {
-    db.query_analytics_events(&AnalyticsEventQuery {
+async fn outcome_events(
+    db: &HostAdmissionTestRuntimeV1,
+) -> Vec<crate::global_db::AnalyticsEventRecord> {
+    db.query_profile_analytics_events_for_test(&AnalyticsEventQuery {
         project_id: Some(PROJECT.to_string()),
         event_kind: Some("hint_outcome".to_string()),
         limit: 100,
@@ -140,6 +155,11 @@ async fn outcome_events(db: &GlobalDb) -> Vec<crate::global_db::AnalyticsEventRe
     })
     .await
     .expect("query outcomes")
+}
+
+async fn correlate(db: &HostAdmissionTestRuntimeV1, now_secs: i64) -> HintOutcomeStats {
+    db.correlate_hint_outcomes_for_test(HostAdmissionScope::Profile, PROJECT, now_secs)
+        .await
 }
 
 #[tokio::test]
@@ -156,7 +176,7 @@ async fn matching_tool_after_hint_resolves_acted() {
     )
     .await;
 
-    let stats = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 120).await;
+    let stats = correlate(&db, HINT_TS + 120).await;
     assert_eq!(
         stats,
         HintOutcomeStats {
@@ -188,7 +208,7 @@ async fn codex_tool_event_row_resolves_acted() {
     )
     .await;
 
-    let stats = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 60).await;
+    let stats = correlate(&db, HINT_TS + 60).await;
     assert_eq!(stats.acted, 1);
     let outcomes = outcome_events(&db).await;
     assert_eq!(outcomes.len(), 1);
@@ -211,7 +231,7 @@ async fn claude_metadata_tool_events_resolve_acted() {
     )
     .await;
 
-    let stats = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 90).await;
+    let stats = correlate(&db, HINT_TS + 90).await;
     assert_eq!(stats.acted, 1);
 }
 
@@ -225,7 +245,7 @@ async fn non_matching_activity_past_horizon_resolves_ignored() {
     // past the 30-minute horizon, so the window is closed with no match.
     seed_message(&db, Msg::new("claude", "s1", HINT_TS + 60).tools("Read")).await;
 
-    let stats = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 2_000).await;
+    let stats = correlate(&db, HINT_TS + 2_000).await;
     assert_eq!(
         stats,
         HintOutcomeStats {
@@ -254,7 +274,7 @@ async fn no_post_hint_activity_stays_unresolved() {
     )
     .await;
 
-    let stats = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 120).await;
+    let stats = correlate(&db, HINT_TS + 120).await;
     assert_eq!(
         stats,
         HintOutcomeStats {
@@ -277,7 +297,7 @@ async fn short_quiet_session_before_wall_clock_horizon_stays_unresolved() {
     // clock has not yet reached the time horizon: the window is still open.
     seed_message(&db, Msg::new("claude", "s1", HINT_TS + 60).tools("Read")).await;
 
-    let stats = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 120).await;
+    let stats = correlate(&db, HINT_TS + 120).await;
     assert_eq!(stats.unresolved, 1);
     assert_eq!(stats.acted, 0);
     assert_eq!(stats.ignored, 0);
@@ -296,10 +316,10 @@ async fn correlation_is_idempotent_across_runs() {
     )
     .await;
 
-    let first = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 120).await;
+    let first = correlate(&db, HINT_TS + 120).await;
     assert_eq!(first.acted, 1);
     // Re-running must not re-scan or re-write the already-resolved hint.
-    let second = correlate_hint_outcomes(&db, &db, PROJECT, HINT_TS + 240).await;
+    let second = correlate(&db, HINT_TS + 240).await;
     assert_eq!(
         second,
         HintOutcomeStats {

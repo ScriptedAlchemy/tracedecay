@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DurableClaudeObservationV1, ObservationScopeV1,
@@ -25,7 +25,7 @@ struct FrozenPublicationReceipt {
     publication_manifest_digest: String,
 }
 
-pub(super) async fn merge_observation_authority(conn: &Connection) -> Result<()> {
+pub(super) async fn merge_observation_authority(conn: &impl Executor) -> Result<()> {
     conn.execute_batch(
         "INSERT OR IGNORE INTO sanitization_receipts(
              receipt_id, sanitizer_version, payload_digest, receipt_json
@@ -88,7 +88,7 @@ pub(super) async fn merge_observation_authority(conn: &Connection) -> Result<()>
     projection::merge(conn).await
 }
 
-pub(in super::super) async fn verify_observation_merge(conn: &Connection) -> Result<()> {
+pub(in super::super) async fn verify_observation_merge(conn: &impl Executor) -> Result<()> {
     verify_observation_union(conn, "target_input", "source").await?;
     projection::verify(conn).await?;
     crate::global_db::schema_stages::validate_observation_authority_connection(conn).await
@@ -103,7 +103,7 @@ struct AuthorityUnionSpec {
 }
 
 async fn verify_authority_table_union(
-    conn: &Connection,
+    conn: &impl Executor,
     target: &str,
     source: &str,
     spec: AuthorityUnionSpec,
@@ -192,7 +192,7 @@ async fn verify_authority_table_union(
 }
 
 pub(super) async fn verify_observation_union(
-    conn: &Connection,
+    conn: &impl Executor,
     target: &str,
     source: &str,
 ) -> Result<()> {
@@ -351,7 +351,7 @@ fn observation_matches_columns(
         && cursor.byte_offset() == observation.identity().position().end()
 }
 
-async fn collect_receipt_repairs(conn: &Connection) -> Result<Vec<(String, String)>> {
+async fn collect_receipt_repairs(conn: &impl Executor) -> Result<Vec<(String, String)>> {
     let mut receipt_rows = conn
         .query(
             "SELECT s.receipt_id, s.sanitizer_version, s.payload_digest, s.receipt_json,
@@ -461,7 +461,9 @@ async fn collect_receipt_repairs(conn: &Connection) -> Result<Vec<(String, Strin
     Ok(receipt_repairs)
 }
 
-async fn collect_observation_repairs(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+async fn collect_observation_repairs(
+    conn: &impl Executor,
+) -> Result<Vec<(String, String, String)>> {
     let mut observation_rows = conn
         .query(
             "SELECT s.observation_id, s.payload_digest, s.receipt_id,
@@ -553,7 +555,7 @@ async fn collect_observation_repairs(conn: &Connection) -> Result<Vec<(String, S
     Ok(observation_repairs)
 }
 
-async fn canonicalize_equivalent_duplicate_authority(conn: &Connection) -> Result<()> {
+async fn canonicalize_equivalent_duplicate_authority(conn: &impl Executor) -> Result<()> {
     let receipt_repairs = collect_receipt_repairs(conn).await?;
     let observation_repairs = collect_observation_repairs(conn).await?;
     if receipt_repairs.is_empty() && observation_repairs.is_empty() {
@@ -581,7 +583,7 @@ async fn canonicalize_equivalent_duplicate_authority(conn: &Connection) -> Resul
     crate::global_db::schema_stages::finish_observation_authority_canonical_repair(conn).await
 }
 
-pub(in super::super) async fn preflight_observation_merge(conn: &Connection) -> Result<()> {
+pub(in super::super) async fn preflight_observation_merge(conn: &impl Executor) -> Result<()> {
     canonicalize_equivalent_duplicate_authority(conn).await?;
 
     if super::query_i64(
@@ -619,7 +621,7 @@ pub(in super::super) async fn preflight_observation_merge(conn: &Connection) -> 
     projection::preflight(conn).await
 }
 
-async fn merge_source_cursors(conn: &Connection) -> Result<()> {
+async fn merge_source_cursors(conn: &impl Executor) -> Result<()> {
     let target_rows = read_source_cursor_rows(conn, "main").await?;
     let source_rows = read_source_cursor_rows(conn, "source").await?;
     for ((source_json, scope_json), (cursor_json, source_cursor)) in source_rows {
@@ -652,7 +654,7 @@ async fn merge_source_cursors(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn merge_source_cursor_advances(conn: &Connection) -> Result<()> {
+async fn merge_source_cursor_advances(conn: &impl Executor) -> Result<()> {
     conn.execute_batch(
         "INSERT OR IGNORE INTO source_cursor_advances(
              source_json, scope_json, coverage_json, reason, receipt_id
@@ -666,7 +668,7 @@ async fn merge_source_cursor_advances(conn: &Connection) -> Result<()> {
 }
 
 async fn read_source_cursor_rows(
-    conn: &Connection,
+    conn: &impl Executor,
     schema: &str,
 ) -> Result<BTreeMap<(String, String), (String, ClaudeSourceCursorV1)>> {
     let sql = format!(

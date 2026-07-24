@@ -247,64 +247,34 @@ impl ClaudeSource {
     }
 }
 
-/// Compatibility entry for projectless Claude transcript ingestion.
-///
-/// Durable writes always pass through the observation coordinator so callers
-/// cannot bypass sanitization receipts, observation cursors, or projections.
-pub async fn ingest_user_sessions(
-    db: &crate::global_db::GlobalDb,
+/// Profile ingestion through an already registered host-admission facade.
+pub async fn ingest_user_sessions_with_admission(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
+    admission: &crate::application::host_admission::HostAdmissionFacade<'_>,
 ) -> crate::sessions::shared::TranscriptIngestStats {
-    match try_ingest_user_sessions(db, profile_root, session_id, registered_roots).await {
-        Ok(stats) => stats,
+    match crate::sessions::claude_observation::ingest_user_sessions_with_admission(
+        profile_root,
+        session_id,
+        registered_roots,
+        admission,
+        None,
+        crate::application::observation::ObservationCancellation::default(),
+    )
+    .await
+    {
+        Ok(stats) => stats.transcript,
         Err(error) => {
             let failure = crate::sessions::classify_claude_observation_failure(&error);
             tracing::warn!(
                 reason_code = failure.reason_code,
                 retryable = failure.retryable,
-                "Claude compatibility ingest failed"
+                "registered Claude ingest failed"
             );
             crate::sessions::shared::TranscriptIngestStats::default()
         }
     }
-}
-
-async fn try_ingest_user_sessions(
-    db: &crate::global_db::GlobalDb,
-    profile_root: &Path,
-    session_id: Option<String>,
-    registered_roots: Vec<PathBuf>,
-) -> Result<
-    crate::sessions::shared::TranscriptIngestStats,
-    crate::sessions::claude_observation::ClaudeObservationIngestError,
-> {
-    let Some(source) = ClaudeSource::new() else {
-        return Ok(crate::sessions::shared::TranscriptIngestStats::default());
-    };
-    let source = source.for_user_scope(session_id, registered_roots);
-    try_ingest_user_sessions_with_source(db, profile_root, &source).await
-}
-
-pub(crate) async fn try_ingest_user_sessions_with_source(
-    db: &crate::global_db::GlobalDb,
-    profile_root: &Path,
-    source: &ClaudeSource,
-) -> Result<
-    crate::sessions::shared::TranscriptIngestStats,
-    crate::sessions::claude_observation::ClaudeObservationIngestError,
-> {
-    crate::sessions::claude_observation::ingest_source_with_observations(
-        db,
-        source,
-        profile_root,
-        tracedecay_domain::ObservationScopeV1::Profile,
-        None,
-        crate::application::observation::ObservationCancellation::default(),
-    )
-    .await
-    .map(|stats| stats.transcript)
 }
 
 fn discover_claude_session_scoped_paths(

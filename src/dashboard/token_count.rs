@@ -28,6 +28,7 @@ use serde_json::Value;
 
 use super::DashboardState;
 use super::util::{qmarks, query_rows};
+use crate::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 use crate::global_db::TokenCountUpsert;
 
 #[cfg(feature = "token-counting")]
@@ -210,7 +211,8 @@ fn row_str(row: &Value, key: &str) -> String {
 pub(crate) async fn non_usage_message_tokens(
     state: &DashboardState,
 ) -> Option<Arc<Vec<MessageTokens>>> {
-    let conn = state.lcm_conn.as_ref()?;
+    let db = state.lcm_db.as_deref()?;
+    let conn = db.read_connection();
 
     let fingerprint = overlay_fingerprint(conn).await?;
     let mut cached = state.token_counts.overlay.lock().await;
@@ -229,7 +231,7 @@ pub(crate) async fn non_usage_message_tokens(
 }
 
 /// Aggregate fingerprint of `session_messages` — see [`OverlayCache`].
-async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<OverlayFingerprint> {
+async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
         "SELECT rowid, provider, message_id, model, metadata_json, LENGTH(text) AS text_len
@@ -258,7 +260,7 @@ async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<OverlayFingerp
 
 async fn build_overlay(
     state: &DashboardState,
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
 ) -> Option<Vec<MessageTokens>> {
     // Metadata only — text never leaves SQLite unless a count is missing.
     let sql = format!(
@@ -353,7 +355,7 @@ async fn hydrate_cache(state: &DashboardState) {
 /// first warm paid ~75 full scans).
 async fn count_and_store(
     state: &DashboardState,
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     mut misses: Vec<(String, String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
@@ -369,14 +371,14 @@ async fn count_and_store(
             "SELECT provider, message_id, COALESCE(text, '') AS text
              FROM session_messages WHERE provider = ? AND message_id IN ({placeholders})"
         );
-        let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() + 1);
-        params.push(libsql::Value::Text(chunk[0].0.clone()));
+        let mut params: Vec<DbValue> = Vec::with_capacity(chunk.len() + 1);
+        params.push(DbValue::Text(chunk[0].0.clone()));
         params.extend(
             chunk
                 .iter()
-                .map(|(_, message_id, _, _)| libsql::Value::Text(message_id.clone())),
+                .map(|(_, message_id, _, _)| DbValue::Text(message_id.clone())),
         );
-        let Ok(rows) = query_rows(conn, &sql, libsql::params_from_iter(params)).await else {
+        let Ok(rows) = query_rows(conn, &sql, params_from_iter(params)).await else {
             continue;
         };
         let mut texts: HashMap<(String, String), String> = rows
@@ -462,6 +464,12 @@ pub(crate) fn spawn_warm(state: DashboardState) {
 mod tests {
     use super::*;
 
+    fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+        let dir = tempfile::tempdir().expect("create token-count test directory");
+        let conn = crate::db::engine::TestConnection::open(&dir.path().join("sessions.db"));
+        (dir, conn)
+    }
+
     #[test]
     fn openai_families_are_exact() {
         for model in [
@@ -529,14 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn overlay_fingerprint_changes_when_metadata_is_backfilled() {
-        let db = match libsql::Builder::new_local(":memory:").build().await {
-            Ok(db) => db,
-            Err(err) => panic!("failed to build in-memory database: {err}"),
-        };
-        let conn = match db.connect() {
-            Ok(conn) => conn,
-            Err(err) => panic!("failed to connect to in-memory database: {err}"),
-        };
+        let (_dir, conn) = test_conn();
         if let Err(err) = conn
             .execute_batch(
             "CREATE TABLE session_messages (
@@ -562,7 +563,7 @@ mod tests {
             panic!("failed to seed session_messages: {err}");
         }
 
-        let Some(before) = overlay_fingerprint(&conn).await else {
+        let Some(before) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist");
         };
         if let Err(err) = conn
@@ -576,7 +577,7 @@ mod tests {
         {
             panic!("failed to backfill metadata usage: {err}");
         }
-        let Some(after) = overlay_fingerprint(&conn).await else {
+        let Some(after) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist after backfill");
         };
 
@@ -584,7 +585,7 @@ mod tests {
         assert_eq!(before.1, after.1, "max rowid should be unchanged");
         assert_ne!(before, after, "metadata backfill must invalidate overlay");
 
-        let Some(first_backfill) = overlay_fingerprint(&conn).await else {
+        let Some(first_backfill) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist after first backfill");
         };
         if let Err(err) = conn
@@ -598,7 +599,7 @@ mod tests {
         {
             panic!("failed to replace metadata usage: {err}");
         }
-        let Some(second_backfill) = overlay_fingerprint(&conn).await else {
+        let Some(second_backfill) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist after second backfill");
         };
 
@@ -623,11 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn derived_kinds_are_excluded_from_token_cte() {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .expect("build in-memory database");
-        let conn = db.connect().expect("connect in-memory database");
+        let (_dir, conn) = test_conn();
         conn.execute_batch(
             "CREATE TABLE session_messages (
                 provider TEXT NOT NULL,

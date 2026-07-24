@@ -3,10 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
-use tracedecay::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use tracedecay::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use tracedecay::migrate::inventory::{
     MigrationInventory, RegistryStatus, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
     StoreStatus,
@@ -17,17 +18,16 @@ use tracedecay::migrate::manifest::{
 };
 use tracedecay::migrate::registry::{
     RegistryReconstructionReport, RegistryReconstructionStatus,
-    apply_registry_reconstruction_report, apply_single_registry_reconstruction_report,
     reconstruct_registry_from_store_manifest, scan_profile_store_manifests,
 };
 use tracedecay::serve;
-use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_domain::ProjectId;
 
 use crate::common::EnvVarGuard;
 use crate::support::{HOME_ENV_LOCK, ephemeral_safe_fixture_base};
@@ -153,17 +153,18 @@ fn run_git(project: &Path, args: &[&str]) {
     );
 }
 
-async fn table_exists(db_path: &std::path::Path, table: &str) -> bool {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            libsql::params![table],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().is_some()
+fn table_exists(db_path: &std::path::Path, table: &str) -> bool {
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+         )",
+        rusqlite::params![table],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap()
 }
 
 fn write_profile_store_manifest(profile_root: &Path, project_root: &Path) -> std::path::PathBuf {
@@ -206,7 +207,11 @@ fn write_profile_store_manifest_for_id(
 async fn global_db_creates_profile_storage_registry_tables() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
-    GlobalDb::open_at(&db_path).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     for table in [
         "code_projects",
@@ -215,7 +220,7 @@ async fn global_db_creates_profile_storage_registry_tables() {
         "graph_scopes",
         "store_artifacts",
     ] {
-        assert!(table_exists(&db_path, table).await, "{table} missing");
+        assert!(table_exists(&db_path, table), "{table} missing");
     }
 }
 
@@ -380,10 +385,11 @@ fn unsafe_branch_database_path_blocks_reconstruction() {
 #[tokio::test]
 async fn registry_resolves_project_store_by_canonical_alias() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
 
     let project = db
         .upsert_code_project(
@@ -454,10 +460,11 @@ async fn registry_resolves_project_store_by_canonical_alias() {
 #[tokio::test]
 async fn delete_project_uses_same_canonical_key_as_upsert() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
     let project_root = dir.path().join("repo");
     fs::create_dir_all(&project_root).unwrap();
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .unwrap();
 
     db.upsert(&project_root, 99).await;
     assert_eq!(db.get_project_tokens(&project_root).await, 99);
@@ -522,8 +529,8 @@ async fn staged_migration_resumes_cutover_after_registry_and_marker() {
     assert!(!staged.apply_supported);
     assert!(read_enrollment_marker(&project).unwrap().is_none());
 
-    let db = GlobalDb::open_at(&root.join("global.db")).await.unwrap();
-    apply_registry_reconstruction_report(&db, &staged.registry_reconstruction)
+    let db = HostAdmissionTestRuntimeV1::profile(root).await.unwrap();
+    db.apply_registry_reconstruction_report(&staged.registry_reconstruction)
         .await
         .unwrap();
     write_enrollment_marker(
@@ -547,11 +554,12 @@ async fn applies_registry_reconstruction_records_from_manifest() {
     let manifest_path = write_profile_store_manifest(&profile_root, &project_root);
     let report =
         reconstruct_registry_from_store_manifest(&manifest_path, &profile_root, 1_800_000_001);
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
 
-    let applied = apply_registry_reconstruction_report(&db, &report)
+    let applied = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap();
 
@@ -603,11 +611,12 @@ async fn registry_reconstruction_preserves_distinct_native_path_aliases() {
         plans: first.plans.into_iter().chain(second.plans).collect(),
         issues: Vec::new(),
     };
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
 
-    let applied = apply_registry_reconstruction_report(&db, &report)
+    let applied = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap();
     assert_eq!(applied.projects, 2);
@@ -615,6 +624,7 @@ async fn registry_reconstruction_preserves_distinct_native_path_aliases() {
     assert_eq!(
         db.project_registry_context_by_alias(&first_path)
             .await
+            .unwrap()
             .unwrap()
             .project
             .project_id,
@@ -624,12 +634,14 @@ async fn registry_reconstruction_preserves_distinct_native_path_aliases() {
         db.project_registry_context_by_alias(&second_path)
             .await
             .unwrap()
+            .unwrap()
             .project
             .project_id,
         "proj_second_native"
     );
 
-    let resumed = apply_registry_reconstruction_report(&db, &report)
+    let resumed = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap();
     assert_eq!(resumed.projects, 0);
@@ -644,26 +656,29 @@ async fn single_plan_reconstruction_rejects_noneligible_and_accepts_matching_exi
     let manifest_path = write_profile_store_manifest(&profile_root, &project_root);
     let report =
         reconstruct_registry_from_store_manifest(&manifest_path, &profile_root, 1_800_000_001);
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
 
     let mut retired = report.clone();
     retired.plans[0].status = RegistryReconstructionStatus::Retired;
     retired.plans[0].status_reason = Some("superseded project".to_string());
-    let error = apply_single_registry_reconstruction_report(&db, &retired)
+    let error = db
+        .apply_single_registry_reconstruction_report(&retired)
         .await
         .unwrap_err();
     assert!(error.iter().any(|issue| issue.contains("Retired")));
     assert!(db.get_code_project("proj_123").await.is_none());
 
-    let inserted = apply_registry_reconstruction_report(&db, &report)
+    let inserted = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap();
     assert_eq!(inserted.projects, 1);
     assert_eq!(inserted.stores, 1);
 
-    let resumed = apply_single_registry_reconstruction_report(&db, &report)
+    let resumed = db
+        .apply_single_registry_reconstruction_report(&report)
         .await
         .unwrap();
     assert_eq!(resumed.projects, 0);
@@ -686,14 +701,15 @@ async fn conflicting_alias_is_rejected_without_stealing_or_partial_writes() {
     let project_root = dir.path().join("repo");
     let manifest = write_profile_store_manifest(&profile_root, &project_root);
     let report = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     db.upsert_code_project("proj_owner", &project_root, None, None, None)
         .await
         .unwrap();
 
-    let error = apply_registry_reconstruction_report(&db, &report)
+    let error = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap_err();
 
@@ -702,6 +718,7 @@ async fn conflicting_alias_is_rejected_without_stealing_or_partial_writes() {
     assert_eq!(
         db.project_registry_context_by_alias(&project_root)
             .await
+            .unwrap()
             .unwrap()
             .project
             .project_id,
@@ -712,13 +729,15 @@ async fn conflicting_alias_is_rejected_without_stealing_or_partial_writes() {
     let second_manifest = write_profile_store_manifest(&profile_root, &second_project_root);
     let second_report =
         reconstruct_registry_from_store_manifest(&second_manifest, &profile_root, 2);
-    let applied = apply_registry_reconstruction_report(&db, &second_report)
+    let applied = db
+        .apply_registry_reconstruction_report(&second_report)
         .await
         .unwrap();
     assert_eq!(applied.projects, 1);
     assert_eq!(
         db.project_registry_context_by_alias(&second_project_root)
             .await
+            .unwrap()
             .unwrap()
             .project
             .project_id,
@@ -740,14 +759,14 @@ async fn conflicting_later_plan_rolls_back_the_entire_reconstruction_batch() {
         plans: first.plans.into_iter().chain(second.plans).collect(),
         issues: Vec::new(),
     };
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     db.upsert_code_project("proj_owner", &second_root, None, None, None)
         .await
         .unwrap();
 
-    apply_registry_reconstruction_report(&db, &report)
+    db.apply_registry_reconstruction_report(&report)
         .await
         .unwrap_err();
 
@@ -763,7 +782,7 @@ async fn physical_store_path_conflict_rolls_back_without_creating_project() {
     let project_root = dir.path().join("repo");
     let manifest = write_profile_store_manifest(&profile_root, &project_root);
     let report = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     let owner_root = dir.path().join("owner");
@@ -784,7 +803,8 @@ async fn physical_store_path_conflict_rolls_back_without_creating_project() {
     .await
     .unwrap();
 
-    let error = apply_registry_reconstruction_report(&db, &report)
+    let error = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap_err();
 
@@ -803,7 +823,7 @@ async fn physical_graph_scope_conflict_rolls_back_without_creating_project() {
     let project_root = dir.path().join("repo");
     let manifest = write_profile_store_manifest(&profile_root, &project_root);
     let report = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
     let owner_root = dir.path().join("owner");
@@ -836,7 +856,8 @@ async fn physical_graph_scope_conflict_rolls_back_without_creating_project() {
     .await
     .unwrap();
 
-    let error = apply_registry_reconstruction_report(&db, &report)
+    let error = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap_err();
 
@@ -985,11 +1006,12 @@ async fn consolidation_source_is_skipped_while_destination_applies() {
         plans: source.plans.into_iter().chain(destination.plans).collect(),
         issues,
     };
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
         .unwrap();
 
-    let applied = apply_registry_reconstruction_report(&db, &report)
+    let applied = db
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap();
 
@@ -1054,22 +1076,25 @@ async fn cursor_session_db_uses_registry_profile_shard_without_marker() {
     let manifest_path = write_profile_store_manifest(&profile_root, &project_root);
     let session_db = profile_root.join("projects/proj_123/sessions.db");
     fs::remove_file(&session_db).unwrap();
-    GlobalDb::open_at(&session_db).await.unwrap();
+    let global = HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project_root,
+        ProjectId::new("proj_123").unwrap(),
+    )
+    .await
+    .unwrap();
     let _home_guard = HomeEnvGuard::set(&home);
     let report =
         reconstruct_registry_from_store_manifest(&manifest_path, &profile_root, 1_800_000_001);
-    let global = GlobalDb::open_at(&profile_root.join("global.db"))
-        .await
-        .unwrap();
-    apply_registry_reconstruction_report(&global, &report)
+    global
+        .apply_registry_reconstruction_report(&report)
         .await
         .unwrap();
 
-    let db = open_project_session_db(&project_root).await;
-
-    assert!(
-        db.is_some(),
-        "session ingest should open the registry-backed profile session DB"
+    assert_eq!(
+        global.database_path(HostAdmissionScope::Project),
+        Some(session_db.as_path()),
+        "session ingest should retain the registry-backed profile session DB"
     );
     assert!(session_db.is_file());
     assert!(

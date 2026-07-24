@@ -1,5 +1,6 @@
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -21,6 +22,7 @@ use super::scheduler::{
     stale_lock_secs,
 };
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::current_timestamp;
 
 static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -39,9 +41,9 @@ pub(crate) struct AgentTaskRunContext<'a> {
     pub(crate) run_id: String,
     pub(crate) trigger: AutomationTrigger,
     pub(crate) dashboard_root: PathBuf,
-    /// LCM sessions database for the project store; the scheduler gate reads
-    /// its newest message timestamp as the session-activity signal.
-    sessions_db_path: PathBuf,
+    /// Exact registered LCM session shard whose newest message timestamp is
+    /// the scheduler activity signal.
+    sessions_db: Arc<RegisteredGlobalDb>,
     config: &'a AutomationConfig,
     task: AgentTaskKind,
     started_at: String,
@@ -55,7 +57,7 @@ pub(crate) struct AgentTaskRunContext<'a> {
 impl<'a> AgentTaskRunContext<'a> {
     pub(crate) fn new(
         dashboard_root: PathBuf,
-        sessions_db_path: PathBuf,
+        sessions_db: Arc<RegisteredGlobalDb>,
         run_id: Option<String>,
         run_id_prefix: &'static str,
         trigger: AutomationTrigger,
@@ -66,7 +68,7 @@ impl<'a> AgentTaskRunContext<'a> {
             run_id: run_id.unwrap_or_else(|| generated_run_id(run_id_prefix)),
             trigger,
             dashboard_root,
-            sessions_db_path,
+            sessions_db,
             config,
             task,
             started_at: current_timestamp().to_string(),
@@ -82,7 +84,7 @@ impl<'a> AgentTaskRunContext<'a> {
         let (gate, records) = task_run_gate(
             self.config,
             &self.dashboard_root,
-            &self.sessions_db_path,
+            self.sessions_db.as_ref(),
             self.task,
             self.trigger,
         )
@@ -150,7 +152,7 @@ pub(crate) fn task_skip_reason(
 pub(crate) async fn scheduler_gate(
     config: &AutomationConfig,
     dashboard_root: &Path,
-    sessions_db_path: &Path,
+    sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
@@ -174,7 +176,7 @@ pub(crate) async fn scheduler_gate(
         return Ok((SchedulerGate::Skip("scheduler_lock_active"), Some(records)));
     };
 
-    let activity = load_session_activity(sessions_db_path).await;
+    let activity = load_session_activity(sessions_db).await;
     let decision = if trigger == AutomationTrigger::HostReceipt {
         super::scheduler::host_receipt_decision(config, task, &records, activity, now_secs)
     } else {
@@ -190,12 +192,12 @@ pub(crate) async fn scheduler_gate(
 pub(crate) async fn task_run_gate(
     config: &AutomationConfig,
     dashboard_root: &Path,
-    sessions_db_path: &Path,
+    sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
     let (gate, records) =
-        scheduler_gate(config, dashboard_root, sessions_db_path, task, trigger).await?;
+        scheduler_gate(config, dashboard_root, sessions_db, task, trigger).await?;
     let gate = match gate {
         SchedulerGate::Skip(reason) => SchedulerGate::Skip(reason),
         SchedulerGate::Proceed(lock) => match task_skip_reason(config, task) {
@@ -651,6 +653,36 @@ mod tests {
     use super::super::config::{AutomationTaskConfig, AutomationTaskSet};
     use super::*;
 
+    struct TestSessionsDb {
+        db: Arc<RegisteredGlobalDb>,
+        _scope: crate::db::DaemonDatabaseScope,
+        _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    }
+
+    async fn test_sessions_db(root: &Path) -> TestSessionsDb {
+        let nonce = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        let profile_root = root.join(format!("profile-{nonce}"));
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let scope = crate::db::enter_daemon_database_scope(&profile_root, nonce, "automation")
+            .expect("daemon database scope");
+        let registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("session runtime registry");
+        let db = registry
+            .profile_sessions()
+            .await
+            .expect("registered profile sessions");
+        TestSessionsDb {
+            db,
+            _scope: scope,
+            _registry: registry,
+        }
+    }
+
     #[test]
     fn generated_run_ids_are_unique_for_same_prefix() {
         let first = generated_run_id("memory_curator");
@@ -670,9 +702,10 @@ mod tests {
         reason: &str,
     ) -> AutomationRunLedgerRecord {
         let config = AutomationConfig::default();
+        let sessions = test_sessions_db(dashboard_root).await;
         let mut run = AgentTaskRunContext::new(
             dashboard_root.to_path_buf(),
-            dashboard_root.join("sessions.db"),
+            Arc::clone(&sessions.db),
             Some(run_id.to_string()),
             "test",
             trigger,
@@ -801,9 +834,10 @@ mod tests {
     /// ledger records), and the task body later decides to skip.
     async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &str) {
         let config = scheduler_enabled_config();
+        let sessions = test_sessions_db(dashboard_root).await;
         let mut run = AgentTaskRunContext::new(
             dashboard_root.to_path_buf(),
-            dashboard_root.join("sessions.db"),
+            Arc::clone(&sessions.db),
             Some(run_id.to_string()),
             "test",
             AutomationTrigger::Scheduler,
@@ -842,6 +876,7 @@ mod tests {
         let root = temp.path();
         let config = AutomationConfig::default();
         let task = AgentTaskKind::MemoryCurator;
+        let sessions = test_sessions_db(root).await;
 
         // Both identical scheduler skips persist when the caller reports
         // is_repeat=false, even though the second is a repeat on disk: the
@@ -850,7 +885,7 @@ mod tests {
         for run_id in ["run-1", "run-2"] {
             let run = AgentTaskRunContext::new(
                 root.to_path_buf(),
-                root.join("sessions.db"),
+                Arc::clone(&sessions.db),
                 Some(run_id.to_string()),
                 "memory_curator",
                 AutomationTrigger::Scheduler,
@@ -870,7 +905,7 @@ mod tests {
 
         let run = AgentTaskRunContext::new(
             root.to_path_buf(),
-            root.join("sessions.db"),
+            Arc::clone(&sessions.db),
             Some("run-3".to_string()),
             "memory_curator",
             AutomationTrigger::Scheduler,

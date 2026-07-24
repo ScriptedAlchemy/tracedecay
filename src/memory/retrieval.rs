@@ -3,8 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use libsql::{Connection, params};
-
 use super::encoding::HolographicEncoder;
 use super::entities::normalize_entity;
 use super::store::MemoryStore;
@@ -12,6 +10,7 @@ use super::trust::DEFAULT_MIN_TRUST;
 use super::types::{
     ContradictionResult, EntityRecord, FactRecord, FactSearchResult, MemoryCategory,
 };
+use crate::db::engine::{Value, params};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
 
@@ -28,9 +27,9 @@ pub struct FactRetriever<'a> {
 }
 
 impl<'a> FactRetriever<'a> {
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
         Self {
-            store: MemoryStore::new(conn),
+            store: MemoryStore::new_runtime(conn),
             encoder: HolographicEncoder::new(),
         }
     }
@@ -215,8 +214,8 @@ impl<'a> FactRetriever<'a> {
         let normalized = normalize_entity(entity).to_ascii_lowercase();
         let mut rows = self
             .store
-            .conn()
             .query(
+                "related",
                 "SELECT DISTINCT related.entity_id, related.name, related.normalized_name,
                         related.entity_type, related.created_at, related.updated_at
                  FROM memory_entities source
@@ -232,8 +231,7 @@ impl<'a> FactRetriever<'a> {
                  LIMIT ?2",
                 params![normalized, normalized_limit(limit) as i64],
             )
-            .await
-            .map_err(|e| db_error("related", e))?;
+            .await?;
 
         let mut entities = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| db_error("related", e))? {
@@ -288,15 +286,15 @@ impl<'a> FactRetriever<'a> {
         let limit_i64 = limit_usize as i64;
         // Bind the entity names (and the trailing scalars) as anonymous `?`
         // placeholders in positional order rather than interpolating them.
-        let mut values: Vec<libsql::Value> = normalized
+        let mut values: Vec<Value> = normalized
             .iter()
-            .map(|entity| libsql::Value::Text(entity.clone()))
+            .map(|entity| Value::Text(entity.clone()))
             .collect();
         let sql = if let Some(category) = category {
-            values.push(libsql::Value::Text(category.as_str().to_string()));
-            values.push(libsql::Value::Real(min_trust));
-            values.push(libsql::Value::Integer(required_count));
-            values.push(libsql::Value::Integer(limit_i64));
+            values.push(Value::Text(category.as_str().to_string()));
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(required_count));
+            values.push(Value::Integer(limit_i64));
             format!(
                 "SELECT f.fact_id
                  FROM memory_facts f
@@ -311,9 +309,9 @@ impl<'a> FactRetriever<'a> {
                  LIMIT ?"
             )
         } else {
-            values.push(libsql::Value::Real(min_trust));
-            values.push(libsql::Value::Integer(required_count));
-            values.push(libsql::Value::Integer(limit_i64));
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(required_count));
+            values.push(Value::Integer(limit_i64));
             format!(
                 "SELECT f.fact_id
                  FROM memory_facts f
@@ -327,12 +325,7 @@ impl<'a> FactRetriever<'a> {
                  LIMIT ?"
             )
         };
-        let mut rows = self
-            .store
-            .conn()
-            .query(&sql, values)
-            .await
-            .map_err(|e| db_error("reason", e))?;
+        let mut rows = self.store.query("reason", &sql, values).await?;
         let mut fact_ids = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| db_error("reason", e))? {
             fact_ids.push(row.get::<i64>(0).map_err(|e| db_error("reason", e))?);
@@ -350,10 +343,7 @@ impl<'a> FactRetriever<'a> {
         threshold: f64,
         limit: usize,
     ) -> Result<Vec<ContradictionResult>> {
-        let facts = self
-            .store
-            .list_facts(Some(category), Some(0.0), usize::MAX)
-            .await?;
+        let facts = self.all_facts_for_category(category).await?;
         let mut results = Vec::new();
         for (index, left) in facts.iter().enumerate() {
             for right in facts.iter().skip(index + 1) {
@@ -385,6 +375,66 @@ impl<'a> FactRetriever<'a> {
             }
         }
         Ok(results)
+    }
+
+    async fn all_facts_for_category(&self, category: MemoryCategory) -> Result<Vec<FactRecord>> {
+        const PAGE_SIZE: i64 = 512;
+
+        let mut facts = Vec::new();
+        let mut updated_at_cursor: Option<i64> = None;
+        let mut fact_id_cursor: Option<i64> = None;
+        loop {
+            let mut rows = self
+                .store
+                .query(
+                    "contradict",
+                    "SELECT fact_id, updated_at
+                     FROM memory_facts
+                     WHERE category = ?1 AND trust_score >= ?2
+                       AND (
+                           ?3 IS NULL
+                           OR updated_at < ?3
+                           OR (updated_at = ?3 AND fact_id < ?4)
+                       )
+                     ORDER BY updated_at DESC, fact_id DESC
+                     LIMIT ?5",
+                    params![
+                        category.as_str(),
+                        0.0,
+                        updated_at_cursor,
+                        fact_id_cursor,
+                        PAGE_SIZE
+                    ],
+                )
+                .await?;
+            let mut page = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| db_error("contradict", error))?
+            {
+                let fact_id = row
+                    .get::<i64>(0)
+                    .map_err(|error| db_error("contradict", error))?;
+                let updated_at = row
+                    .get::<i64>(1)
+                    .map_err(|error| db_error("contradict", error))?;
+                updated_at_cursor = Some(updated_at);
+                fact_id_cursor = Some(fact_id);
+                page.push(fact_id);
+            }
+            let page_len = page.len();
+            let mut hydrated = self.store.get_facts(&page).await?;
+            for fact_id in page {
+                if let Some(fact) = hydrated.remove(&fact_id) {
+                    facts.push(fact);
+                }
+            }
+            if page_len < PAGE_SIZE as usize {
+                break;
+            }
+        }
+        Ok(facts)
     }
 
     async fn fts_candidates(
@@ -419,8 +469,8 @@ impl<'a> FactRetriever<'a> {
 
         let mut rows = if let Some(category) = category {
             self.store
-                .conn()
                 .query(
+                    "fts_candidates",
                     sql,
                     params![
                         fts_query,
@@ -432,14 +482,13 @@ impl<'a> FactRetriever<'a> {
                 .await
         } else {
             self.store
-                .conn()
                 .query(
+                    "fts_candidates",
                     sql,
                     params![fts_query, min_trust, normalized_limit(limit) as i64],
                 )
                 .await
-        }
-        .map_err(|e| db_error("fts_candidates", e))?;
+        }?;
 
         let mut ranked = Vec::new();
         while let Some(row) = rows
@@ -482,14 +531,14 @@ impl<'a> FactRetriever<'a> {
         // Bind each term's exact and LIKE values as anonymous `?` placeholders in
         // positional order. `escape_like` still governs wildcard semantics on the
         // LIKE value, but the value is bound rather than interpolated.
-        let mut values: Vec<libsql::Value> = Vec::with_capacity(terms.len() * 4 + 3);
+        let mut values: Vec<Value> = Vec::with_capacity(terms.len() * 4 + 3);
         let predicates = terms
             .iter()
             .map(|term| {
-                values.push(libsql::Value::Text(term.clone()));
-                values.push(libsql::Value::Text(format!("%{}%", escape_like(term))));
-                values.push(libsql::Value::Text(term.clone()));
-                values.push(libsql::Value::Text(format!("%{}%", escape_like(term))));
+                values.push(Value::Text(term.clone()));
+                values.push(Value::Text(format!("%{}%", escape_like(term))));
+                values.push(Value::Text(term.clone()));
+                values.push(Value::Text(format!("%{}%", escape_like(term))));
                 "(e.normalized_name = ? OR e.normalized_name LIKE ? ESCAPE '\\' OR EXISTS (
                     SELECT 1 FROM json_each(e.aliases) alias
                     WHERE lower(alias.value) = ? OR lower(alias.value) LIKE ? ESCAPE '\\'
@@ -500,9 +549,9 @@ impl<'a> FactRetriever<'a> {
             .join(" OR ");
 
         let sql = if let Some(category) = category {
-            values.push(libsql::Value::Text(category.as_str().to_string()));
-            values.push(libsql::Value::Real(min_trust));
-            values.push(libsql::Value::Integer(normalized_limit(limit) as i64));
+            values.push(Value::Text(category.as_str().to_string()));
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(normalized_limit(limit) as i64));
             format!(
                 "SELECT DISTINCT f.fact_id
                  FROM memory_facts f
@@ -515,8 +564,8 @@ impl<'a> FactRetriever<'a> {
                  LIMIT ?"
             )
         } else {
-            values.push(libsql::Value::Real(min_trust));
-            values.push(libsql::Value::Integer(normalized_limit(limit) as i64));
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(normalized_limit(limit) as i64));
             format!(
                 "SELECT DISTINCT f.fact_id
                  FROM memory_facts f
@@ -531,10 +580,8 @@ impl<'a> FactRetriever<'a> {
 
         let mut rows = self
             .store
-            .conn()
-            .query(sql.as_str(), values)
-            .await
-            .map_err(|e| db_error("entity_candidates", e))?;
+            .query("entity_candidates", sql.as_str(), values)
+            .await?;
 
         let mut fact_ids = Vec::new();
         while let Some(row) = rows
@@ -592,8 +639,8 @@ impl<'a> FactRetriever<'a> {
 
         let mut rows = if let Some(category) = category {
             self.store
-                .conn()
                 .query(
+                    "fact_ids_for_entity",
                     sql,
                     params![
                         normalized,
@@ -605,14 +652,13 @@ impl<'a> FactRetriever<'a> {
                 .await
         } else {
             self.store
-                .conn()
                 .query(
+                    "fact_ids_for_entity",
                     sql,
                     params![normalized, min_trust, normalized_limit(limit) as i64],
                 )
                 .await
-        }
-        .map_err(|e| db_error("fact_ids_for_entity", e))?;
+        }?;
 
         let mut fact_ids = Vec::new();
         while let Some(row) = rows

@@ -1,9 +1,8 @@
 // Rust guideline compliant 2025-10-17
-use libsql::Transaction;
-
+use super::connection::DatabaseEngineReadSnapshot;
 use crate::errors::{Result, TraceDecayError};
 
-pub(super) async fn commit(transaction: Transaction, operation: &str) -> Result<()> {
+pub(super) async fn commit(transaction: DatabaseEngineReadSnapshot, operation: &str) -> Result<()> {
     transaction
         .commit()
         .await

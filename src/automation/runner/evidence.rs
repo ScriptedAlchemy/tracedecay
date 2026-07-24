@@ -16,7 +16,7 @@ use crate::automation::skill_writer::{
 };
 use crate::automation::text::truncate_chars_for_prompt;
 use crate::errors::Result;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::current_timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -752,6 +752,7 @@ pub(super) async fn build_session_reflector_evidence(
 pub(super) async fn build_skill_writer_evidence(
     retrieval: &dyn AutomationSessionRetrieval,
     analytics_project_root: Option<&std::path::Path>,
+    analytics_db: Option<&RegisteredGlobalDb>,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterEvidenceOutcome> {
     let profile_root = match options.profile_root {
@@ -832,16 +833,11 @@ pub(super) async fn build_skill_writer_evidence(
         });
     }
     let existing_skills = list_managed_skills(&profile_root).await?;
-    if let Some(project_root) = analytics_project_root {
-        let global_db_path = crate::global_db::global_db_path();
-        let global_db = match global_db_path.as_deref() {
-            Some(path) => GlobalDb::open_read_only_at(path).await,
-            None => None,
-        };
+    if let (Some(project_root), Some(analytics_db)) = (analytics_project_root, analytics_db) {
         ingest_project_analytics_events(
             &profile_root,
             project_root,
-            global_db.as_ref(),
+            Some(analytics_db),
             SKILL_ANALYTICS_IMPORT_LIMIT,
         )
         .await?;

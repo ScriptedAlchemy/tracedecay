@@ -88,17 +88,10 @@ pub(super) async fn verify_destination(
     Ok(())
 }
 
-pub(super) async fn register_destination(resolved: &ResolvedPlan) -> Result<()> {
-    let global_path = resolved
-        .report
-        .destination_data_root
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| config_error("destination shard has no profile root"))?
-        .join("global.db");
-    let db = GlobalDb::try_open_at(&global_path)
-        .await?
-        .ok_or_else(|| config_error("could not open global registry for consolidation"))?;
+pub(super) async fn register_destination(
+    resolved: &ResolvedPlan,
+    db: &RegisteredGlobalDb,
+) -> Result<()> {
     let project = db
         .upsert_code_project(
             &resolved.report.destination_project_id,
@@ -171,8 +164,6 @@ pub(super) async fn register_destination(resolved: &ResolvedPlan) -> Result<()> 
         .await
         .ok_or_else(|| config_error("could not register consolidated artifact"))?;
     }
-    db.checkpoint().await;
-    db.close();
     Ok(())
 }
 

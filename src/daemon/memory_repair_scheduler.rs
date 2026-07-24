@@ -21,7 +21,6 @@ use super::branch_admin::MaintenanceReaperKind;
 use super::scheduler::{MaintenanceTaskTermination, same_scheduler_owner};
 use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
-    open_existing_project_with_options,
 };
 
 pub(super) struct MemoryRepairSchedulerHandle {
@@ -117,8 +116,19 @@ impl DaemonEngine {
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
-        handshake: DaemonHandshake,
+        _handshake: DaemonHandshake,
     ) -> MemoryRepairSchedulerReconcileOutcome {
+        let server = {
+            let servers = self.store_administration.project_servers().lock().await;
+            let owner = servers
+                .keys()
+                .find(|candidate| same_scheduler_owner(candidate, &key));
+            owner.and_then(|owner| servers.get(owner).cloned())
+        };
+        let Some(server) = server else {
+            return MemoryRepairSchedulerReconcileOutcome::LifecycleInactive;
+        };
+        let cg = server.cg().await;
         loop {
             if !self.lifecycle.accepting() {
                 return MemoryRepairSchedulerReconcileOutcome::LifecycleInactive;
@@ -166,10 +176,11 @@ impl DaemonEngine {
                     let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let termination = Arc::new(MaintenanceTaskTermination::pending());
                     let administration = self.store_administration.clone();
+                    let cg = Arc::clone(&cg);
                     let (published, start) = tokio::sync::oneshot::channel();
                     let task = tokio::spawn(async move {
                         let _ = start.await;
-                        Box::pin(run_memory_repair_scheduler_loop(project_path, handshake)).await;
+                        Box::pin(run_memory_repair_scheduler_loop(project_path, cg)).await;
                         administration
                             .memory_repair_schedulers()
                             .lock()
@@ -366,14 +377,17 @@ fn observed_memory_repair_lifecycle(
     handle.lifecycle
 }
 
-async fn run_memory_repair_scheduler_loop(project_path: PathBuf, handshake: DaemonHandshake) {
+async fn run_memory_repair_scheduler_loop(
+    project_path: PathBuf,
+    cg: Arc<crate::tracedecay::TraceDecay>,
+) {
     let tick_project = project_path.clone();
     run_memory_repair_scheduler_loop_with(
         &project_path,
         move || {
             let project_path = tick_project.clone();
-            let handshake = handshake.clone();
-            async move { run_memory_repair_scheduler_tick(&project_path, &handshake).await }
+            let cg = Arc::clone(&cg);
+            async move { run_memory_repair_scheduler_tick(&project_path, &cg).await }
         },
         tokio::time::sleep,
     )
@@ -445,13 +459,8 @@ async fn run_memory_repair_scheduler_loop_with<Tick, TickFuture, Wait, WaitFutur
 
 pub(super) async fn run_memory_repair_scheduler_tick(
     project_path: &Path,
-    handshake: &DaemonHandshake,
+    cg: &crate::tracedecay::TraceDecay,
 ) -> Result<MemoryRepairPassDecision> {
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
     let stats = cg.repair_project_memory_once().await?;
     let progress = stats.feedback_history_repair();
     let repair_outcome = memory_repair_tick_outcome(progress)?;

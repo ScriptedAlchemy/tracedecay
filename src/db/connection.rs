@@ -34,8 +34,10 @@ mod registry;
 
 pub use pragmas::SQLITE_UNSAFE_FAST_ENV;
 #[cfg(test)]
-pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
-pub(crate) use pragmas::{platform_safe_journal_mode, platform_safe_synchronous_mode};
+pub(crate) use pragmas::{
+    adaptive_cache_sizes, platform_safe_journal_mode, platform_safe_mmap_size,
+    platform_safe_synchronous_mode,
+};
 use registry::{DatabaseInner, database_slot};
 
 /// `SQLite` database backed by one daemon-owned native runtime attachment.
@@ -93,12 +95,12 @@ impl StoreRuntimeResolver for ExactTestRuntimeResolver {
                 });
             }
             match (mode, locator.path.try_exists()) {
-                (StoreRuntimeOpenMode::Initialize, Ok(false)) => Ok(
-                    ResolvedStoreLocator::prospective(
+                (StoreRuntimeOpenMode::Initialize, Ok(false)) => {
+                    Ok(ResolvedStoreLocator::prospective(
                         locator.verified.clone(),
                         locator.path.clone(),
-                    ),
-                ),
+                    ))
+                }
                 (StoreRuntimeOpenMode::Existing, Ok(true)) => Ok(ResolvedStoreLocator::new(
                     locator.verified.clone(),
                     locator.path.clone(),
@@ -712,6 +714,47 @@ impl Database {
                 operation: "publish test database runtime".to_owned(),
             });
         }
+        Self::publish_fixture_runtime(db_path, authority, mode).await
+    }
+
+    /// Publishes an isolated integration-test fixture with the retained
+    /// exclusive-maintenance authority whose scope the test controls.
+    ///
+    /// This remains separate from [`Self::publish_test_runtime`]: it accepts
+    /// only maintenance authority, rejects production paths, and therefore
+    /// preserves actor-time scope revocation without weakening the Test-only
+    /// fixture escape hatch.
+    #[doc(hidden)]
+    pub async fn publish_maintenance_test_runtime(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+    ) -> Result<(Self, bool)> {
+        if authority.role() != super::DatabaseAuthorityRole::Maintenance {
+            return Err(TraceDecayError::Database {
+                message:
+                    "maintenance test runtime requires explicit exclusive-maintenance authority"
+                        .to_owned(),
+                operation: "publish maintenance test database runtime".to_owned(),
+            });
+        }
+        if !super::access::is_isolated_test_path(db_path) {
+            return Err(TraceDecayError::Database {
+                message: format!(
+                    "maintenance test database must be inside an isolated test root at '{}'",
+                    db_path.display()
+                ),
+                operation: "publish maintenance test database runtime".to_owned(),
+            });
+        }
+        Self::publish_fixture_runtime(db_path, authority, mode).await
+    }
+
+    async fn publish_fixture_runtime(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+    ) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
         let path = authority.canonical_database_path().to_path_buf();
@@ -760,19 +803,14 @@ impl Database {
             &hex::encode(digest.finalize())[..16]
         );
         let profile_path = path.with_file_name(profile_name);
-        let (profile_key, profile_locator) = exact_test_runtime_locator(
-            profile_shard.clone(),
-            incarnation,
-            profile_path.clone(),
-        )?;
+        let (profile_key, profile_locator) =
+            exact_test_runtime_locator(profile_shard.clone(), incarnation, profile_path.clone())?;
         let (code_key, code_locator) =
             exact_test_runtime_locator(code_shard.clone(), incarnation, path)?;
         let mut locators = BTreeMap::new();
         locators.insert(profile_key, profile_locator);
         locators.insert(code_key, code_locator);
-        let resolver = Arc::new(ExactTestRuntimeResolver {
-            locators,
-        });
+        let resolver = Arc::new(ExactTestRuntimeResolver { locators });
         let registry =
             StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
         let profile_authority =
@@ -946,6 +984,53 @@ impl Database {
             .inner
             .conn
             .query(sql, ())
+            .await
+            .map_err(|error| database_query_error(operation, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| database_query_error(operation, error))?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "scalar query returned no rows".to_owned(),
+                operation: operation.to_owned(),
+            })?;
+        row.get(0)
+            .map_err(|error| database_query_error(operation, error))
+    }
+
+    /// Runs a bounded scalar text inspection on the retained runtime.
+    #[doc(hidden)]
+    pub async fn query_scalar_text(&self, operation: &str, sql: &str) -> Result<String> {
+        let mut rows = self
+            .inner
+            .conn
+            .query(sql, ())
+            .await
+            .map_err(|error| database_query_error(operation, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| database_query_error(operation, error))?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "scalar query returned no rows".to_owned(),
+                operation: operation.to_owned(),
+            })?;
+        row.get(0)
+            .map_err(|error| database_query_error(operation, error))
+    }
+
+    /// Runs a bounded scalar integer inspection with one text identity bound.
+    #[doc(hidden)]
+    pub async fn query_scalar_i64_with_text(
+        &self,
+        operation: &str,
+        sql: &str,
+        value: &str,
+    ) -> Result<i64> {
+        let mut rows = self
+            .inner
+            .conn
+            .query(sql, (value,))
             .await
             .map_err(|error| database_query_error(operation, error))?;
         let row = rows
@@ -1356,27 +1441,6 @@ impl Database {
         database_health(&snapshot, operation).await
     }
 
-    /// Maintenance-only: rebuilds the FTS5 index of a store whose open-time
-    /// integrity validation fails with FTS-only damage, which `open` itself
-    /// rejects before any repair can run. The database slot excludes a
-    /// concurrent open, and a full quick-check classification proves that all
-    /// reported damage is confined to the derivable index before any write.
-    pub async fn repair_fts_offline(db_path: &Path, authority: &DatabaseAuthority) -> Result<()> {
-        let held = authority.hold_for(db_path, "fts repair")?;
-        held.require_active_write_scope("fts repair")?;
-        let slot = database_slot(held.database_identity_key());
-        let open = slot.lock().await;
-        if let Some(inner) = open.upgrade() {
-            drop(open);
-            Self { inner }.repair_fts_after_open().await?;
-            return Ok(());
-        }
-        Err(registered_attachment_required(
-            "repair_fts_offline",
-            db_path,
-        ))
-    }
-
     pub(crate) async fn rebuild_fts_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
@@ -1706,7 +1770,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "connection reuse").unwrap();
-        let (first, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (first, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let (second, _) = Database::open(&path, &authority).await.unwrap();
         let mut readers = Vec::new();
         for _ in 0..12 {
@@ -1728,7 +1798,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "writer reuse").unwrap();
-        let (first, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (first, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let (second, _) = Database::open(&path, &authority).await.unwrap();
 
         let first_writer = first.writer().await;
@@ -1773,7 +1849,13 @@ mod tests {
         let path = temp.path().join("projects/project/tracedecay.db");
         let scope = crate::db::enter_daemon_database_scope(temp.path(), 9, "writer-scope").unwrap();
         let authority = DatabaseAuthority::acquire_daemon(&path, "writer-scope").unwrap();
-        let (database, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (database, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let retained = database.clone();
         drop(scope);
 
@@ -1791,7 +1873,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "twelve writers").unwrap();
-        let (first, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (first, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         first
             .writer_connection("create writer counter")
             .await
@@ -1836,7 +1924,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "paused writer read").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         db.writer_connection("seed paused writer")
             .await
             .unwrap()
@@ -1881,7 +1975,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "memory writer capability").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let first = db.memory_writer().await.unwrap();
         let mut second = Box::pin(db.memory_writer());
 
@@ -1926,7 +2026,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "cancelled writer").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         db.writer_connection("seed cancelled writer")
             .await
             .unwrap()
@@ -1981,7 +2087,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "writer alias reuse").unwrap();
-        let (direct, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (direct, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let alias = temp.path().join("graph-alias.db");
         std::os::unix::fs::symlink(&path, &alias).unwrap();
         let (through_alias, _) = Database::open(&alias, &authority).await.unwrap();
@@ -1997,7 +2109,13 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("Graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "writer case reuse").unwrap();
-        let (direct, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (direct, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let alias = directory.join("graph.db");
         let (through_alias, _) = Database::open(&alias, &authority).await.unwrap();
 
@@ -2009,7 +2127,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "checkpoint writer lane").unwrap();
-        let (first, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (first, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let (second, _) = Database::open(&path, &authority).await.unwrap();
         let writer = first.writer().await;
         let mut checkpoint = tokio::spawn(async move { second.checkpoint().await });
@@ -2028,7 +2152,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "dashboard guard").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let raw = db.conn().clone();
         let guard = Arc::new(db.clone());
         drop(db);
@@ -2053,11 +2183,22 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "readonly upgrade").unwrap();
-        let (seed, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (seed, _) = Database::publish_fixture_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let runtime = seed.retained_runtime().clone();
         drop(seed);
 
-        let (reader, _) = Database::open_read_only(&path, &authority).await.unwrap();
-        let (writer, _) = Database::open(&path, &authority).await.unwrap();
+        let reader = Database::publish_runtime(runtime.clone(), DatabaseAccessMode::ReadOnly)
+            .await
+            .unwrap();
+        let writer = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite)
+            .await
+            .unwrap();
         assert!(!Arc::ptr_eq(&reader.inner, &writer.inner));
         writer
             .writer_connection("reader isolation test")

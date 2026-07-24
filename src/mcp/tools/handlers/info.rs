@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::context::read_modes::{LineRange, ReadMode};
 use crate::context::source_read::{SourceReadRequest, read_source, resolve_indexed_source_file};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, SessionIngestHealth, global_db_path};
+use crate::global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::project_registry::{
     ProjectRegistryView, PublicCodeProject, PublicProjectRegistryContext,
@@ -137,7 +137,7 @@ pub(super) async fn handle_status(
     args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
-    project_session_db: Option<&GlobalDb>,
+    project_session_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
     let include_branch_diagnostics = status_arg_flag(&args, "include_branch_diagnostics", true);
     let include_storage_health = status_arg_flag(&args, "include_storage_health", true);
@@ -450,50 +450,16 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
         .map_or(default, |value| value.clamp(1, max))
 }
 
-enum ProjectRegistryDb<'a> {
-    Borrowed(&'a GlobalDb),
-    Owned(Box<GlobalDb>),
-}
-
-impl ProjectRegistryDb<'_> {
-    fn db(&self) -> &GlobalDb {
-        match self {
-            Self::Borrowed(db) => db,
-            Self::Owned(db) => db,
-        }
-    }
-}
-
 async fn open_project_registry_read_only(
-    global_db: Option<&GlobalDb>,
-    allow_default_registry_fallback: bool,
-) -> Result<Option<(PathBuf, ProjectRegistryDb<'_>)>> {
+    global_db: Option<&RegisteredGlobalDb>,
+    _allow_default_registry_fallback: bool,
+) -> Result<Option<(PathBuf, &RegisteredGlobalDb)>> {
     if let Some(db) = global_db {
-        return Ok(Some((
-            db.db_path().to_path_buf(),
-            ProjectRegistryDb::Borrowed(db),
-        )));
+        return Ok(Some((db.db_path().to_path_buf(), db)));
     }
-    if !allow_default_registry_fallback {
-        return Err(TraceDecayError::Config {
-            message: "client project registry is unavailable for selector resolution".to_string(),
-        });
-    }
-    let Some(path) = global_db_path() else {
-        return Ok(None);
-    };
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let db = GlobalDb::open_read_only_at(&path)
-        .await
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "could not open project registry read-only at '{}'",
-                path.display()
-            ),
-        })?;
-    Ok(Some((path, ProjectRegistryDb::Owned(Box::new(db)))))
+    Err(TraceDecayError::Config {
+        message: "client project registry is unavailable for selector resolution".to_string(),
+    })
 }
 
 fn project_registry_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
@@ -556,20 +522,20 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
 /// Resolves the active project's registry id by looking up `cg`'s project
 /// root in the registry, the same identity lookup the `tracedecay projects`
 /// CLI performs for its own `active_project_id` (see `src/project_cmd.rs`).
-async fn active_project_id(cg: &TraceDecay, db: &ProjectRegistryDb<'_>) -> Option<String> {
+async fn active_project_id(cg: &TraceDecay, db: &RegisteredGlobalDb) -> Result<Option<String>> {
     let project_root = cg.project_root();
     let git_common_dir = crate::worktree::git_common_dir(project_root);
-    db.db()
+    Ok(db
         .project_registry_context_by_identity(project_root, git_common_dir.as_deref())
-        .await
-        .map(|context| context.project.project_id)
+        .await?
+        .map(|context| context.project.project_id))
 }
 
 /// Handles `tracedecay_project_list` tool calls.
 pub(super) async fn handle_project_list(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
@@ -585,14 +551,11 @@ pub(super) async fn handle_project_list(
         payload["truncated"] = json!(false);
         return Ok(registry_result(&args, &payload));
     };
-    let active_id = active_project_id(cg, &db).await;
-    let mut projects = db.db().list_code_projects(limit + 1).await;
+    let active_id = active_project_id(cg, db).await?;
+    let mut projects = db.list_code_projects(limit + 1).await?;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let contexts = db
-        .db()
-        .project_registry_contexts_for_projects(&projects)
-        .await;
+    let contexts = db.project_registry_contexts_for_projects(&projects).await?;
     let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
     let projects = projects
         .iter()
@@ -617,7 +580,7 @@ pub(super) async fn handle_project_list(
 pub(super) async fn handle_project_search(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let query =
@@ -641,14 +604,11 @@ pub(super) async fn handle_project_search(
         payload["truncated"] = json!(false);
         return Ok(registry_result(&args, &payload));
     };
-    let active_id = active_project_id(cg, &db).await;
-    let mut projects = db.db().search_code_projects(query, limit + 1).await;
+    let active_id = active_project_id(cg, db).await?;
+    let mut projects = db.search_code_projects(query, limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let contexts = db
-        .db()
-        .project_registry_contexts_for_projects(&projects)
-        .await;
+    let contexts = db.project_registry_contexts_for_projects(&projects).await?;
     let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
     let projects = projects
         .iter()
@@ -676,7 +636,7 @@ fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> (PathB
     };
     let path = Path::new(path);
     let allow_git_identity = path.is_absolute()
-        && GlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
+        && RegisteredGlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
     (path.to_path_buf(), allow_git_identity)
 }
 
@@ -684,7 +644,7 @@ fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> (PathB
 pub(super) async fn handle_project_context(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let Some((registry_path, db)) =
@@ -697,16 +657,15 @@ pub(super) async fn handle_project_context(
         ));
     };
     let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
-        db.db().project_registry_context_by_id(project_id).await
+        db.project_registry_context_by_id(project_id).await?
     } else {
         let (alias_path, allow_git_identity) = project_context_alias_path(cg, &args);
-        if let Some(context) = db.db().project_registry_context_by_alias(&alias_path).await {
+        if let Some(context) = db.project_registry_context_by_alias(&alias_path).await? {
             Some(context)
         } else if allow_git_identity {
             let git_common_dir = crate::worktree::git_common_dir(&alias_path);
-            db.db()
-                .project_registry_context_by_identity(&alias_path, git_common_dir.as_deref())
-                .await
+            db.project_registry_context_by_identity(&alias_path, git_common_dir.as_deref())
+                .await?
         } else {
             None
         }
@@ -724,7 +683,7 @@ pub(super) async fn handle_project_context(
             }),
         ));
     };
-    let active_id = active_project_id(cg, &db).await;
+    let active_id = active_project_id(cg, db).await?;
     let is_active = active_id.as_deref() == Some(context.project.project_id.as_str());
     Ok(project_registry_result(
         cg,

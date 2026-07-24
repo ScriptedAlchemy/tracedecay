@@ -3,8 +3,14 @@ use super::*;
 #[tokio::test]
 async fn v3_projection_persists_stable_multi_output_ordinals() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let provider = ProviderId::new("cursor").unwrap();
     let session_id = SessionId::new("session.multi-output").unwrap();
     let source =
@@ -81,27 +87,26 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
         panic!("observation should project");
     };
     assert_eq!(projected.output_count(), 4);
-    drop(db);
+    drop(store);
+    drop(runtime);
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = raw_db.connect().unwrap();
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT output_ordinal, output_message_id
              FROM observation_projection_provenance
              WHERE projector_version = ?1
              ORDER BY output_ordinal",
-            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
-        .await
         .unwrap();
-    let mut actual = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        actual.push((row.get::<i64>(0).unwrap(), row.get::<String>(1).unwrap()));
-    }
+    let actual = statement
+        .query_map(
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(
         actual,
         vec![
@@ -116,8 +121,14 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
 #[tokio::test]
 async fn queued_projection_commits_search_effect_provenance_checkpoint_and_replay_noop() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         "session-atomic",
         0,
@@ -165,9 +176,7 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
             .projection_status(),
         ObservationProjectionStatus::NotQueued
     );
-    let hits = db
-        .search_session_messages("claude", Some("user"), "atomic searchable", 10)
-        .await;
+    let hits = search_session_messages(&tmp, "atomic searchable", 10).await;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message.message_id, "message-atomic");
     assert_eq!(hits[0].message.role, "assistant");
@@ -198,27 +207,21 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(provenance[0].5, "message-atomic");
     assert!(PayloadDigestV1::new(provenance[0].6.clone()).is_ok());
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     assert!(
         raw_conn
             .execute(
                 "UPDATE observation_projection_provenance
                  SET retrieval_anchor_id = NULL
                  WHERE projector_version = ?1 AND observation_id = ?2",
-                libsql::params![
+                rusqlite::params![
                     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                     candidate.observation_id().as_str()
                 ],
             )
-            .await
             .is_err()
     );
     drop(raw_conn);
-    drop(raw_db);
 
     let before = projection_counts(&tmp).await;
     let replay = store
@@ -236,8 +239,10 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
 #[tokio::test]
 async fn non_conversational_observation_is_skipped_without_blocking_the_checkpoint() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let skipped = observation(
         "session-skip",
         0,
@@ -314,8 +319,10 @@ async fn bounded_next_queue_item_resumes_after_restart_and_drains_idempotently()
     );
 
     {
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         persist(&store, first.clone(), None).await;
         persist(&store, second.clone(), Some(cursor("session-restart", 100))).await;
         assert_eq!(
@@ -328,8 +335,10 @@ async fn bounded_next_queue_item_resumes_after_restart_and_drains_idempotently()
             .unwrap();
     }
 
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
         1
@@ -356,8 +365,14 @@ async fn bounded_next_queue_item_resumes_after_restart_and_drains_idempotently()
 #[tokio::test]
 async fn stale_exact_duplicate_queue_item_is_consumed_before_later_observation() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let first = observation(
         "session-stale-queue",
         0,
@@ -384,19 +399,13 @@ async fn stale_exact_duplicate_queue_item_is_consumed_before_later_observation()
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    raw_db
-        .connect()
+    rusqlite::Connection::open(database_path)
         .unwrap()
         .execute(
             "INSERT INTO projection_queue (observation_id, observation_sequence)
              VALUES (?1, 1)",
-            libsql::params![first.observation_id().as_str()],
+            rusqlite::params![first.observation_id().as_str()],
         )
-        .await
         .unwrap();
 
     assert_eq!(

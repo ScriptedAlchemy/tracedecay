@@ -1,4 +1,4 @@
-//! Read-only parity coverage for GlobalDb-backed profile, project, and session stores.
+//! Read-only parity coverage for registered profile and project session stores.
 //!
 //! The helper process receives only completed copies. Fixture admission and
 //! legacy compatibility reads happen through production APIs before the copy
@@ -16,24 +16,23 @@ use std::{
 
 use serde_json::{Value, json};
 use tracedecay::{
-    global_db::{GlobalDb, ProjectRegistryContext},
+    application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1},
+    global_db::ProjectRegistryContext,
     sessions::{
         SessionMessageRecord, SessionRecord,
         codex::{
-            CodexSource, try_admit_codex_jsonl_observations_for_profile,
-            try_admit_codex_jsonl_observations_for_project,
+            CodexSource, try_admit_codex_jsonl_observations_for_profile_with_admission,
+            try_admit_codex_jsonl_observations_for_project_with_admission,
         },
         lcm::{LcmLoadSessionMessage, LcmLoadSessionRequest, LcmRecentSession},
-        source::try_ingest_source,
     },
-    store::GlobalDbObservationStore,
 };
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_sqlite_parity_protocol::{
     Command, CopiedDatabase, CopiedSnapshotProvenance, DatabaseKind, PROTOCOL_VERSION, Request,
     SnapshotFileIdentity, VerifiedCopiedSnapshot, validate_request,
 };
-use tracedecay_store::{ObservationReplayRequest, ObservationStore};
+use tracedecay_store::ObservationReplayRequest;
 
 use crate::support::{
     DatabaseArtifactInventory, DatabaseArtifactKind, IsolatedTempRoot, assert_artifacts_unchanged,
@@ -220,20 +219,24 @@ async fn profile_project_and_session_snapshots_have_read_only_rusqlite_parity() 
 }
 
 async fn seed_profile_store(root: &Path, session_id: &str) -> (PathBuf, Vec<ObservationMetadata>) {
-    let database_path = root.join("authoritative/profile.db");
+    let runtime = HostAdmissionTestRuntimeV1::profile(root.join("authoritative/profile-runtime"))
+        .await
+        .expect("open isolated registered profile store");
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .expect("registered profile session database path")
+        .to_path_buf();
     let transcript = write_admission_fixture(root, "profile", None);
     let expected_bytes = fs::metadata(&transcript)
         .expect("profile fixture metadata")
         .len();
-    let db = GlobalDb::open_at(&database_path)
-        .await
-        .expect("open isolated profile store");
 
-    let progress = try_admit_codex_jsonl_observations_for_profile(
+    let admission = runtime.facade();
+    let progress = try_admit_codex_jsonl_observations_for_profile_with_admission(
         &transcript,
-        &db,
         Some(session_id),
         &[],
+        &admission,
         None,
     )
     .await
@@ -241,14 +244,18 @@ async fn seed_profile_store(root: &Path, session_id: &str) -> (PathBuf, Vec<Obse
     assert_eq!(progress.bytes_consumed, expected_bytes);
     assert!(!progress.source_deferred);
 
-    let metadata = read_observation_metadata(&db).await;
+    let metadata = read_observation_metadata(&runtime, HostAdmissionScope::Profile).await;
     assert_normalized_observations(&metadata, session_id, "profile");
-    checkpoint_and_close(db).await;
+    runtime
+        .checkpoint_session_database_for_test(HostAdmissionScope::Profile)
+        .await
+        .expect("checkpoint registered profile session store");
+    drop(runtime);
     (database_path, metadata)
 }
 
 async fn seed_project_store(root: &Path, session_id: &str) -> (PathBuf, ProjectStoreMetadata) {
-    let database_path = root.join("authoritative/project.db");
+    let profile_root = root.join("authoritative/project-profile");
     let project_root = root.join("project-root");
     fs::create_dir_all(&project_root).expect("create isolated project root");
     let transcript = write_admission_fixture(root, "project", Some(&project_root));
@@ -256,21 +263,28 @@ async fn seed_project_store(root: &Path, session_id: &str) -> (PathBuf, ProjectS
         .expect("project fixture metadata")
         .len();
     let project_id = ProjectId::new(PROJECT_ID).expect("valid project identity");
-    let db = GlobalDb::open_at(&database_path)
-        .await
-        .expect("open isolated project store");
+    let runtime =
+        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
+            .await
+            .expect("open isolated registered project store");
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Project)
+        .expect("registered project session database path")
+        .to_path_buf();
     assert!(
-        db.upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
+        runtime
+            .upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
             .await
             .is_some(),
         "register the authoritative project before project-scoped admission"
     );
 
-    let progress = try_admit_codex_jsonl_observations_for_project(
+    let admission = runtime.facade();
+    let progress = try_admit_codex_jsonl_observations_for_project_with_admission(
         &transcript,
-        &db,
         &project_root,
         project_id,
+        &admission,
         None,
     )
     .await
@@ -278,19 +292,23 @@ async fn seed_project_store(root: &Path, session_id: &str) -> (PathBuf, ProjectS
     assert_eq!(progress.bytes_consumed, expected_bytes);
     assert!(!progress.source_deferred);
 
-    let metadata = read_project_store_metadata(&db).await;
+    let metadata = read_project_store_metadata(&runtime).await;
     assert_eq!(metadata.registry.project.project_id, PROJECT_ID);
     assert_normalized_observations(
         &metadata.observations,
         session_id,
         &format!("project:{PROJECT_ID}"),
     );
-    checkpoint_and_close(db).await;
+    runtime
+        .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("checkpoint registered project session store");
+    drop(runtime);
     (database_path, metadata)
 }
 
 async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionStoreMetadata) {
-    let database_path = root.join("authoritative/session.db");
+    let profile_root = root.join("authoritative/session-profile");
     let project_root = root.join("session-project-root");
     let home = root.join("session-home");
     fs::create_dir_all(&project_root).expect("create isolated session project root");
@@ -299,21 +317,28 @@ async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionS
         .expect("session fixture metadata")
         .len();
     let project_id = ProjectId::new(PROJECT_ID).expect("valid project identity");
-    let db = GlobalDb::open_at(&database_path)
-        .await
-        .expect("open isolated session store");
+    let runtime =
+        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
+            .await
+            .expect("open isolated registered session store");
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Project)
+        .expect("registered project session database path")
+        .to_path_buf();
     assert!(
-        db.upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
+        runtime
+            .upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
             .await
             .is_some(),
         "register the authoritative project before session fixture admission"
     );
 
-    let admission = try_admit_codex_jsonl_observations_for_project(
+    let admission_facade = runtime.facade();
+    let admission = try_admit_codex_jsonl_observations_for_project_with_admission(
         &transcript,
-        &db,
         &project_root,
         project_id,
+        &admission_facade,
         None,
     )
     .await
@@ -321,7 +346,12 @@ async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionS
     assert_eq!(admission.bytes_consumed, expected_bytes);
     assert!(!admission.source_deferred);
 
-    let ingest = try_ingest_source(&db, &CodexSource::with_home(&home), &project_root, None)
+    let ingest = runtime
+        .ingest_project_transcript_source_for_test(
+            &CodexSource::with_home(&home),
+            &project_root,
+            None,
+        )
         .await
         .expect("checked-in Codex fixture must pass legacy production ingestion");
     assert_eq!(ingest.sessions_upserted, 1);
@@ -330,20 +360,19 @@ async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionS
         "the real fixture must produce at least one legacy session message"
     );
 
-    let metadata = read_session_store_metadata(&db, session_id).await;
+    let metadata = read_session_store_metadata(&runtime, session_id).await;
     assert_normalized_observations(
         &metadata.observations,
         session_id,
         &format!("project:{PROJECT_ID}"),
     );
     assert_session_metadata_is_ordered_and_typed(&metadata.session, session_id);
-    checkpoint_and_close(db).await;
+    runtime
+        .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("checkpoint registered project session store");
+    drop(runtime);
     (database_path, metadata)
-}
-
-async fn checkpoint_and_close(db: GlobalDb) {
-    db.checkpoint().await;
-    db.close();
 }
 
 fn copy_checkpointed_store(source_path: &Path, root: &Path, label: &str) -> CopiedStore {
@@ -523,9 +552,15 @@ fn write_jsonl(path: &Path, records: Vec<Value>) {
     fs::write(path, bytes).expect("write checked-in JSONL fixture copy");
 }
 
-async fn read_observation_metadata(db: &GlobalDb) -> Vec<ObservationMetadata> {
-    GlobalDbObservationStore::new(db)
-        .replay_observations(ObservationReplayRequest::new(0, 64).expect("bounded replay request"))
+async fn read_observation_metadata(
+    runtime: &HostAdmissionTestRuntimeV1,
+    scope: HostAdmissionScope,
+) -> Vec<ObservationMetadata> {
+    runtime
+        .replay_observations(
+            scope,
+            ObservationReplayRequest::new(0, 64).expect("bounded replay request"),
+        )
         .await
         .expect("read normalized observations")
         .into_iter()
@@ -546,26 +581,39 @@ async fn read_observation_metadata(db: &GlobalDb) -> Vec<ObservationMetadata> {
         .collect()
 }
 
-async fn read_session_store_metadata(db: &GlobalDb, session_id: &str) -> SessionStoreMetadata {
-    let observations = read_observation_metadata(db).await;
-    let record = db
-        .get_session(PROVIDER, session_id)
+async fn read_session_store_metadata(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &str,
+) -> SessionStoreMetadata {
+    let observations = read_observation_metadata(runtime, HostAdmissionScope::Project).await;
+    let record = runtime
+        .session_for_test(HostAdmissionScope::Project, PROVIDER, session_id)
         .await
+        .expect("read registered session record")
         .expect("legacy production ingestion must retain the fixture session");
-    let temporal_messages = load_all_temporal_messages(db, session_id).await;
+    let temporal_messages = load_all_temporal_messages(runtime, session_id).await;
     let mut ordered_messages = Vec::with_capacity(temporal_messages.len());
     for message in &temporal_messages {
         ordered_messages.push(
-            db.get_session_message(PROVIDER, &message.message_id)
+            runtime
+                .session_message_for_test(
+                    HostAdmissionScope::Project,
+                    PROVIDER,
+                    &message.message_id,
+                )
                 .await
+                .expect("read registered session message")
                 .expect("each ordered raw message must retain its legacy projection"),
         );
     }
-    let recent_sessions = db
-        .lcm_recent_sessions(Some(PROVIDER), 16)
+    let recent_sessions = runtime
+        .lcm_recent_sessions_for_test(Some(PROVIDER), 16)
         .await
         .expect("read temporal session metadata");
-    let lcm_schema_version = db.lcm_schema_version().await;
+    let lcm_schema_version = runtime
+        .lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("read registered LCM schema version");
 
     SessionStoreMetadata {
         observations,
@@ -579,24 +627,27 @@ async fn read_session_store_metadata(db: &GlobalDb, session_id: &str) -> Session
     }
 }
 
-async fn read_project_store_metadata(db: &GlobalDb) -> ProjectStoreMetadata {
-    let registry = db
+async fn read_project_store_metadata(runtime: &HostAdmissionTestRuntimeV1) -> ProjectStoreMetadata {
+    let registry = runtime
         .project_registry_context_by_id(PROJECT_ID)
         .await
         .expect("the seeded project registry row must be readable");
-    let observations = read_observation_metadata(db).await;
+    let observations = read_observation_metadata(runtime, HostAdmissionScope::Project).await;
     ProjectStoreMetadata {
         registry,
         observations,
     }
 }
 
-async fn load_all_temporal_messages(db: &GlobalDb, session_id: &str) -> Vec<LcmLoadSessionMessage> {
+async fn load_all_temporal_messages(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &str,
+) -> Vec<LcmLoadSessionMessage> {
     let mut after_store_id = None;
     let mut messages = Vec::new();
     loop {
-        let page = db
-            .lcm_load_session(LcmLoadSessionRequest {
+        let page = runtime
+            .lcm_load_session_for_test(LcmLoadSessionRequest {
                 provider: PROVIDER.to_owned(),
                 session_id: session_id.to_owned(),
                 after_store_id,
@@ -713,7 +764,7 @@ fn assert_observation_helper_parity(
     assert_eq!(
         probe.count["row_count"].as_u64(),
         Some(u64::try_from(legacy.len()).expect("legacy observation count fits u64")),
-        "{label} observation count differs across GlobalDb and rusqlite"
+        "{label} observation count differs across the registered runtime and rusqlite"
     );
     let legacy_keys = legacy
         .iter()
@@ -841,7 +892,7 @@ fn assert_session_helper_parity(
             .session
             .lcm_schema_version
             .is_some_and(|version| helper_lcm_versions.contains(&version)),
-        "GlobalDb and helper must report the same persisted LCM schema version"
+        "registered runtime and helper must report the same persisted LCM schema version"
     );
 }
 
@@ -1094,7 +1145,7 @@ fn probe_with_rusqlite_helper(copied: &CopiedStore, label: &str) -> HelperProbe 
 
     // `metadata` is the only currently allowlisted non-FTS row-count target
     // shared by this protocol revision. Semantic session rows are captured
-    // through GlobalDb's typed read ports before the snapshot boundary rather
+    // through registered typed read ports before the snapshot boundary rather
     // than falling back to SQL here.
     let allowlisted_count = helper_command(
         copied,
@@ -1268,7 +1319,7 @@ fn assert_helper_probes_agree(probes: &[&HelperProbe]) {
         assert_eq!(
             metadata_without_path(&probe.metadata),
             metadata_without_path(&first.metadata),
-            "the bundled SQLite metadata must agree across copied GlobalDb stores"
+            "the bundled SQLite metadata must agree across copied registered stores"
         );
         assert_eq!(probe.schema, first.schema);
         assert_eq!(probe.foreign_keys, first.foreign_keys);

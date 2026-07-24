@@ -97,6 +97,38 @@ pub struct EngineStatus {
     pub last_diagnostic_update: Option<i64>,
 }
 
+/// One project-active diagnostic provider whose configured command is mounted.
+///
+/// This is the production registration authority: callers must not advertise
+/// adapters that are disabled, absent from the project, or unavailable on the
+/// current host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountedLspProvider {
+    pub language: String,
+    pub command: String,
+}
+
+/// One enabled provider admitted by project language activity.
+///
+/// Analyzer absence is state, not failed admission: graph-backed semantic and
+/// managed diagnostic owners remain mountable when `analyzer_available` is
+/// false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedLspProvider {
+    pub language: String,
+    pub command: String,
+    pub analyzer_available: bool,
+}
+
+impl AdmittedLspProvider {
+    pub fn mounted(&self) -> Option<MountedLspProvider> {
+        self.analyzer_available.then(|| MountedLspProvider {
+            language: self.language.clone(),
+            command: self.command.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BackfillProgress {
     pub queued_files: usize,
@@ -497,15 +529,15 @@ impl DiagnosticBroker {
             .cloned()
     }
 
-    /// Returns a concrete retained semantic authority over the same stdio
-    /// client slot used by diagnostic refreshes for this language/root.
-    pub fn semantic_authority(
+    /// Returns a retained semantic authority over the same stdio client slot
+    /// used by diagnostic refreshes, or `None` when the executable is absent.
+    pub fn semantic_authority_if_available(
         &mut self,
         language: &str,
         workspace_root: PathBuf,
         root_uri: impl Into<String>,
         timeouts: LspRefreshTimeouts,
-    ) -> Result<Arc<StdioLspSemanticAuthority>> {
+    ) -> Result<Option<Arc<StdioLspSemanticAuthority>>> {
         let adapter = self
             .adapter_for(language)
             .ok_or_else(|| TraceDecayError::Config {
@@ -513,9 +545,7 @@ impl DiagnosticBroker {
             })?;
         let command = self.settings.command_for(language, &adapter.command);
         if !command_available(&command) {
-            return Err(TraceDecayError::Config {
-                message: format!("LSP command '{command}' is not available on PATH"),
-            });
+            return Ok(None);
         }
         let key = LspSessionKey {
             language: language.to_owned(),
@@ -527,14 +557,14 @@ impl DiagnosticBroker {
             .entry(key)
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone();
-        Ok(StdioLspSemanticAuthority::from_shared_client(
+        Ok(Some(StdioLspSemanticAuthority::from_shared_client(
             command,
             adapter.args,
             workspace_root,
             root_uri,
             timeouts,
             client,
-        ))
+        )))
     }
 
     pub fn update_adapters(&mut self, adapters: Vec<LspAdapterDefinition>) {
@@ -563,6 +593,42 @@ impl DiagnosticBroker {
                 self.engine_overrides.remove(&language);
             }
         }
+    }
+
+    /// Reconciles enabled project language activity without requiring the
+    /// external analyzer executable to be installed.
+    pub fn admitted_providers_for_files(&mut self, files: &[String]) -> Vec<AdmittedLspProvider> {
+        let languages = crate::diagnostics::lsp::activity::active_languages_for_files(
+            &self.project_root,
+            &self.adapters,
+            files,
+        );
+        self.update_project_languages(languages);
+        self.adapters
+            .iter()
+            .filter(|adapter| {
+                self.project_languages.contains(&adapter.language)
+                    && self.settings.language_enabled(&adapter.language)
+            })
+            .map(|adapter| {
+                let command = self
+                    .settings
+                    .command_for(&adapter.language, &adapter.command);
+                AdmittedLspProvider {
+                    language: adapter.language.clone(),
+                    analyzer_available: command_available(&command),
+                    command,
+                }
+            })
+            .collect()
+    }
+
+    /// Returns only analyzer-backed providers that are executable now.
+    pub fn mounted_providers_for_files(&mut self, files: &[String]) -> Vec<MountedLspProvider> {
+        self.admitted_providers_for_files(files)
+            .iter()
+            .filter_map(AdmittedLspProvider::mounted)
+            .collect()
     }
 
     pub fn set_language_enabled(&mut self, language: &str, enabled: bool) {
@@ -944,4 +1010,120 @@ fn command_candidates(command: &str) -> Vec<String> {
 #[cfg(not(windows))]
 fn command_candidates(command: &str) -> Vec<String> {
     vec![command.to_string()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::lsp::adapters::DiagnosticMode;
+
+    fn adapter(
+        language: &str,
+        command: impl Into<String>,
+        extension: &str,
+        root_marker: &str,
+    ) -> LspAdapterDefinition {
+        LspAdapterDefinition {
+            language: language.to_owned(),
+            language_id: language.to_owned(),
+            command: command.into(),
+            args: Vec::new(),
+            extensions: vec![extension.to_owned()],
+            root_markers: vec![root_marker.to_owned()],
+            install_options: Vec::new(),
+            diagnostics: DiagnosticMode::Push,
+        }
+    }
+
+    #[test]
+    fn admitted_providers_derive_python_and_typescript_from_project_files() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(project.path().join("pyproject.toml"), "").expect("python root marker");
+        std::fs::write(project.path().join("tsconfig.json"), "").expect("typescript root marker");
+        let python = project.path().join("pyright-langserver");
+        std::fs::write(&python, "").expect("mounted python provider");
+        let mut broker = DiagnosticBroker::new(
+            project.path(),
+            vec![
+                adapter(
+                    "typescript",
+                    project
+                        .path()
+                        .join("missing-typescript-language-server")
+                        .to_string_lossy(),
+                    "ts",
+                    "tsconfig.json",
+                ),
+                adapter("python", python.to_string_lossy(), "py", "pyproject.toml"),
+            ],
+            CodeDiagnosticsSettings::default(),
+        );
+
+        let admitted = broker
+            .admitted_providers_for_files(&["src/main.ts".to_owned(), "src/main.py".to_owned()]);
+
+        assert_eq!(
+            admitted,
+            vec![
+                AdmittedLspProvider {
+                    language: "typescript".to_owned(),
+                    command: project
+                        .path()
+                        .join("missing-typescript-language-server")
+                        .to_string_lossy()
+                        .into_owned(),
+                    analyzer_available: false,
+                },
+                AdmittedLspProvider {
+                    language: "python".to_owned(),
+                    command: python.to_string_lossy().into_owned(),
+                    analyzer_available: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(project.path().join("Cargo.toml"), "").expect("rust root marker");
+        let missing = project.path().join("missing-rust-analyzer");
+        let mut broker = DiagnosticBroker::new(
+            project.path(),
+            vec![adapter(
+                "rust",
+                missing.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+            CodeDiagnosticsSettings::default(),
+        );
+
+        assert_eq!(
+            broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]),
+            vec![AdmittedLspProvider {
+                language: "rust".to_owned(),
+                command: missing.to_string_lossy().into_owned(),
+                analyzer_available: false,
+            }]
+        );
+        assert!(
+            broker
+                .semantic_authority_if_available(
+                    "rust",
+                    project.path().to_path_buf(),
+                    "file:///project",
+                    LspRefreshTimeouts::from_diagnostics_quiet_window(
+                        std::time::Duration::from_millis(10),
+                    ),
+                )
+                .expect("configured adapter")
+                .is_none()
+        );
+        assert!(
+            broker
+                .mounted_providers_for_files(&["src/lib.rs".to_owned()])
+                .is_empty()
+        );
+    }
 }

@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_node;
@@ -23,7 +23,7 @@ impl Database {
         node: &Node,
     ) -> Result<()> {
         transaction
-            .execute(
+            .execute_engine(
                 "INSERT OR REPLACE INTO nodes
                 (id, kind, name, qualified_name, file_path,
                  start_line, end_line, start_column, end_column,
@@ -244,7 +244,7 @@ impl Database {
         sql: &str,
     ) -> Result<()> {
         transaction
-            .execute_batch(sql)
+            .execute_batch_engine(sql)
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to bulk insert: {e}"),
@@ -275,7 +275,7 @@ impl Database {
         }
 
         let stmt = transaction
-            .prepare(
+            .prepare_engine(
                     "INSERT OR REPLACE INTO nodes \
                      (id,kind,name,qualified_name,file_path,\
                      start_line,end_line,start_column,end_column,\
@@ -334,7 +334,7 @@ impl Database {
     /// Retrieves a node by its unique ID, returning `None` if not found.
     pub async fn get_node_by_id(&self, id: &str) -> Result<Option<Node>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT id, kind, name, qualified_name, file_path,
                         start_line, end_line, start_column, end_column,
@@ -370,7 +370,7 @@ impl Database {
             return Ok(Vec::new());
         }
         // Build `?, ?, ?, …` in one allocation instead of `Vec<String>` of
-        // `?1`/`?2`/`?N`. libsql binds anonymous `?` parameters in order, so
+        // `?1`/`?2`/`?N`. SQLite binds anonymous `?` parameters in order, so
         // dropping the numbered form changes nothing for the driver. Large
         // BFS frontiers (`traverse_bfs` calls this once per level) hit this
         // path often enough that the per-id `format!` allocations showed up
@@ -382,13 +382,10 @@ impl Database {
                     docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
              FROM nodes WHERE id IN ({placeholders})",
         );
-        let param_values: Vec<libsql::Value> = ids
-            .iter()
-            .map(|id| libsql::Value::Text(id.clone()))
-            .collect();
+        let param_values: Vec<Value> = ids.iter().map(|id| Value::Text(id.clone())).collect();
         let mut rows = self
-            .conn()
-            .query(&sql, libsql::params_from_iter(param_values))
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to batch query nodes: {e}"),
@@ -400,7 +397,7 @@ impl Database {
     /// Returns all nodes for a given file, ordered by start line.
     pub async fn get_nodes_by_file(&self, file_path: &str) -> Result<Vec<Node>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT id, kind, name, qualified_name, file_path,
                     start_line, end_line, start_column, end_column,
@@ -422,7 +419,7 @@ impl Database {
     /// edges table no longer carries that information.
     pub async fn get_children_of(&self, parent_id: &str) -> Result<Vec<Node>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT id, kind, name, qualified_name, file_path,
                     start_line, end_line, start_column, end_column,
@@ -442,7 +439,7 @@ impl Database {
     /// Returns all nodes of a given kind.
     pub async fn get_nodes_by_kind(&self, kind: NodeKind) -> Result<Vec<Node>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT id, kind, name, qualified_name, file_path,
                     start_line, end_line, start_column, end_column,
@@ -462,7 +459,7 @@ impl Database {
     /// Returns every node in the database.
     pub async fn get_all_nodes(&self) -> Result<Vec<Node>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT id, kind, name, qualified_name, file_path,
                     start_line, end_line, start_column, end_column,
@@ -497,7 +494,7 @@ impl Database {
     }
 
     pub(super) async fn delete_nodes_by_file_in_transaction(
-        transaction: &libsql::Transaction,
+        transaction: &DatabaseWriteTransaction<'_>,
         file_path: &str,
     ) -> Result<()> {
         debug_assert!(
@@ -511,7 +508,7 @@ impl Database {
         // Gather node IDs for the file first.
         let node_ids: Vec<String> = {
             let mut rows = transaction
-                .query(
+                .query_engine(
                     "SELECT id FROM nodes WHERE file_path = ?1",
                     params![file_path],
                 )
@@ -543,7 +540,7 @@ impl Database {
 
         for id in &node_ids {
             transaction
-                .execute(
+                .execute_engine(
                     "DELETE FROM edges WHERE source = ?1 OR target = ?1",
                     params![id.as_str()],
                 )
@@ -554,7 +551,7 @@ impl Database {
                 })?;
 
             transaction
-                .execute(
+                .execute_engine(
                     "DELETE FROM unresolved_refs WHERE from_node_id = ?1",
                     params![id.as_str()],
                 )
@@ -565,7 +562,7 @@ impl Database {
                 })?;
 
             transaction
-                .execute(
+                .execute_engine(
                     "DELETE FROM vectors WHERE node_id = ?1",
                     params![id.as_str()],
                 )
@@ -577,7 +574,7 @@ impl Database {
         }
 
         transaction
-            .execute("DELETE FROM nodes WHERE file_path = ?1", params![file_path])
+            .execute_engine("DELETE FROM nodes WHERE file_path = ?1", params![file_path])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete nodes: {e}"),

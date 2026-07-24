@@ -334,7 +334,17 @@ pub async fn execute_temporal_kernel(
     // occurrences are enumerated (and counted) individually, so admitting the
     // group anchor into the coverage denominator would double-count every
     // grouped message as an extra hidden omission.
-    let all_candidate_anchors = all_candidates
+    let derived_candidate_anchors = all_candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.channel,
+                candidates::CandidateChannel::Span | candidates::CandidateChannel::Burst
+            )
+        })
+        .map(|candidate| candidate.anchor_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut all_candidate_anchors = all_candidates
         .iter()
         .filter(|candidate| {
             !matches!(
@@ -344,9 +354,30 @@ pub async fn execute_temporal_kernel(
         })
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<BTreeSet<_>>();
+    all_candidate_anchors.extend(
+        resolved
+            .iter()
+            .filter(|item| {
+                item.occurrence
+                    .evidence
+                    .supporting_anchor_ids
+                    .iter()
+                    .any(|anchor| derived_candidate_anchors.contains(anchor))
+            })
+            .map(|item| item.occurrence.anchor_id.clone()),
+    );
     let visible_candidates = all_candidates
         .into_iter()
-        .filter(|candidate| visible_anchors.contains(&candidate.anchor_id))
+        .filter(|candidate| {
+            visible_anchors.contains(&candidate.anchor_id)
+                || (derived_candidate_anchors.contains(&candidate.anchor_id)
+                    && resolved.iter().any(|item| {
+                        item.occurrence
+                            .evidence
+                            .supporting_anchor_ids
+                            .contains(&candidate.anchor_id)
+                    }))
+        })
         .collect::<Vec<_>>();
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;
     if let Some(after) = &after {

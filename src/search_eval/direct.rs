@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[path = "candidate_output.rs"]
@@ -28,7 +28,7 @@ pub enum SearchEvalError {
     Contract(String),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectEvaluationStatusV1 {
     Pass,
@@ -49,7 +49,7 @@ pub struct DirectWorkloadSummaryV1 {
     pub fixture_source_repository_tree: String,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectQueryEvaluationV1 {
     pub query_id: String,
     pub first_useful_rank: Option<u32>,
@@ -60,7 +60,7 @@ pub struct DirectQueryEvaluationV1 {
     pub status: DirectEvaluationStatusV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectProfileEvaluationV1 {
     pub profile_id: String,
     pub partition: String,
@@ -75,9 +75,9 @@ pub struct DirectProfileEvaluationV1 {
     pub queries: Vec<DirectQueryEvaluationV1>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectEvaluationReportV1 {
-    pub command: &'static str,
+    pub command: String,
     pub status: DirectEvaluationStatusV1,
     pub workload_digest: String,
     pub corpus_digest: String,
@@ -158,7 +158,7 @@ pub fn evaluate_generated_outputs(
         (&left.profile_id, &left.partition).cmp(&(&right.profile_id, &right.partition))
     });
     Ok(DirectEvaluationReportV1 {
-        command: "compare",
+        command: "compare".to_owned(),
         status: aggregate_profile_status(&profiles),
         workload_digest: digest,
         corpus_digest,

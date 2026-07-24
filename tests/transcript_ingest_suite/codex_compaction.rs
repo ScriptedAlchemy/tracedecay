@@ -4,15 +4,28 @@
 use std::io::Write;
 
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::{open_project_session_db, resolved_project_session_db_path};
 use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use tracedecay::sessions::source::try_ingest_source;
+use tracedecay_domain::ProjectId;
 
 use crate::support::setup;
+
+async fn registered_runtime(
+    home: &std::path::Path,
+    project: &std::path::Path,
+) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::project(
+        home.join(".tracedecay"),
+        project,
+        ProjectId::new("project.codex-compaction").unwrap(),
+    )
+    .await
+    .unwrap()
+}
 
 fn write_codex_rollout_with_compaction(
     home: &std::path::Path,
@@ -72,21 +85,25 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
 
-    let stats = try_ingest_source(&db, &source, &project, None)
+    let stats = runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
     assert_eq!(stats.messages_upserted, 4);
 
-    let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
+    let status = runtime
+        .lcm_status_for_test("codex", Some("codex-compact"))
+        .await
+        .unwrap();
     assert_eq!(status.raw_message_count, 4);
     assert_eq!(status.summary_node_count, 1);
     assert!(status.dag.depths.values().any(|depth| depth.count == 1));
 
-    let description = db
-        .lcm_describe(LcmDescribeRequest {
+    let description = runtime
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "codex".to_string(),
             session_id: "codex-compact".to_string(),
             target: LcmDescribeTarget::Session,
@@ -98,8 +115,8 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
     assert_eq!(description.summary_nodes[0].source_count, 2);
 
     let node_id = description.summary_nodes[0].node_id.clone();
-    let expanded = db
-        .lcm_describe(LcmDescribeRequest {
+    let expanded = runtime
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "codex".to_string(),
             session_id: "codex-compact".to_string(),
             target: LcmDescribeTarget::SummaryNode { node_id },
@@ -109,8 +126,8 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
     let summary = expanded.summary_node.expect("summary node should expand");
     assert_eq!(summary.source_count, 2);
 
-    let expansion = db
-        .lcm_expand(LcmExpandRequest {
+    let expansion = runtime
+        .lcm_expand_for_test(LcmExpandRequest {
             provider: "codex".to_string(),
             session_id: "codex-compact".to_string(),
             target: LcmExpandTarget::SummaryNode {
@@ -194,15 +211,16 @@ async fn repeated_codex_compactions_only_source_messages_since_previous_boundary
     )
     .unwrap();
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
+    let stats = runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
     assert_eq!(stats.messages_upserted, 6);
 
-    let description = db
-        .lcm_describe(LcmDescribeRequest {
+    let description = runtime
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "codex".to_string(),
             session_id: "codex-repeat".to_string(),
             target: LcmDescribeTarget::Session,
@@ -268,9 +286,10 @@ async fn incremental_codex_compaction_depth_continues_from_prior_history() {
     )
     .unwrap();
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
+    let stats = runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
     assert_eq!(stats.messages_upserted, 3);
@@ -296,13 +315,14 @@ async fn incremental_codex_compaction_depth_continues_from_prior_history() {
         writeln!(file, "{line}").unwrap();
     }
 
-    let stats = try_ingest_source(&db, &source, &project, None)
+    let stats = runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
     assert_eq!(stats.messages_upserted, 3);
 
-    let description = db
-        .lcm_describe(LcmDescribeRequest {
+    let description = runtime
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "codex".to_string(),
             session_id: "codex-incremental".to_string(),
             target: LcmDescribeTarget::Session,
@@ -374,26 +394,29 @@ async fn codex_compaction_depth_resets_when_rollout_replays_from_start() {
         + "\n";
     std::fs::write(&path, contents).unwrap();
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
     let path_str = path.to_string_lossy().to_string();
-    db.set_parse_offset(
-        &path_str,
-        ParseOffset {
-            byte_offset: std::fs::metadata(&path).unwrap().len(),
-            mtime: 1,
-            file_id: 1,
-        },
-    )
-    .await;
+    runtime
+        .set_project_parse_offset_for_test(
+            &path_str,
+            ParseOffset {
+                byte_offset: std::fs::metadata(&path).unwrap().len(),
+                mtime: 1,
+                file_id: 1,
+            },
+        )
+        .await
+        .unwrap();
 
-    let stats = try_ingest_source(&db, &source, &project, None)
+    let stats = runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
     assert_eq!(stats.messages_upserted, 6);
 
-    let description = db
-        .lcm_describe(LcmDescribeRequest {
+    let description = runtime
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "codex".to_string(),
             session_id: "codex-replay".to_string(),
             target: LcmDescribeTarget::Session,
@@ -414,14 +437,15 @@ async fn codex_compaction_summary_can_publish_immutable_successor_with_auxiliary
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
+    runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
 
-    let pending = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact"), 10)
+    let pending = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact"), 10)
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
@@ -441,12 +465,12 @@ async fn codex_compaction_summary_can_publish_immutable_successor_with_auxiliary
     );
 
     let predecessor_node_id = pending[0].node_id.clone();
-    let predecessor_before = db
-        .lcm_expand_summary_node("codex", "codex-compact", &predecessor_node_id)
+    let predecessor_before = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact", &predecessor_node_id)
         .await
         .unwrap();
-    let successor = db
-        .publish_codex_compaction_summary_successor(
+    let successor = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &predecessor_node_id,
             "Auxiliary Codex app-server summary",
             "codex_app_server",
@@ -481,8 +505,8 @@ async fn codex_compaction_summary_can_publish_immutable_successor_with_auxiliary
         Some("gpt-5.4")
     );
 
-    let replayed_successor = db
-        .publish_codex_compaction_summary_successor(
+    let replayed_successor = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &predecessor_node_id,
             "Auxiliary Codex app-server summary",
             "codex_app_server",
@@ -492,22 +516,25 @@ async fn codex_compaction_summary_can_publish_immutable_successor_with_auxiliary
         .unwrap();
     assert_eq!(replayed_successor, successor);
 
-    let pending_after = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact"), 10)
+    let pending_after = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact"), 10)
         .await
         .unwrap();
     assert!(pending_after.is_empty());
 
-    let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
+    let status = runtime
+        .lcm_status_for_test("codex", Some("codex-compact"))
+        .await
+        .unwrap();
     assert_eq!(status.summary_node_count, 2);
 
-    let predecessor_after = db
-        .lcm_expand_summary_node("codex", "codex-compact", &predecessor_node_id)
+    let predecessor_after = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact", &predecessor_node_id)
         .await
         .expect("predecessor summary remains addressable after successor publish");
     assert_eq!(predecessor_after, predecessor_before);
-    let successor_expansion = db
-        .lcm_expand_summary_node("codex", "codex-compact", &successor.node_id)
+    let successor_expansion = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact", &successor.node_id)
         .await
         .unwrap();
     assert_eq!(successor_expansion.summary.node_id, successor.node_id);
@@ -525,28 +552,13 @@ async fn codex_compaction_summary_can_publish_immutable_successor_with_auxiliary
     );
     assert_eq!(successor_expansion.sources, predecessor_before.sources);
 
-    let db_path = resolved_project_session_db_path(&project).await.unwrap();
-    let lineage_db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let lineage_conn = lineage_db.connect().unwrap();
-    let mut lineage_rows = lineage_conn
-        .query(
-            "SELECT successor_summary_id
-             FROM session_summary_successors
-             WHERE predecessor_summary_id = ?1
-             ORDER BY successor_summary_id",
-            libsql::params![predecessor_node_id.as_str()],
-        )
-        .await
-        .unwrap();
-    let persisted_successor_id: String = lineage_rows
-        .next()
-        .await
-        .unwrap()
-        .expect("successful publication must persist a successor edge")
-        .get(0)
-        .unwrap();
-    assert_eq!(persisted_successor_id, successor.node_id);
-    assert!(lineage_rows.next().await.unwrap().is_none());
+    assert_eq!(
+        runtime
+            .lcm_summary_successor_edges_for_test()
+            .await
+            .unwrap(),
+        vec![(predecessor_node_id, successor.node_id)]
+    );
 }
 
 #[tokio::test]
@@ -555,25 +567,26 @@ async fn codex_compaction_pending_tracks_only_current_non_app_leaf() {
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact-chain");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
+    runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
 
-    let pending = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact-chain"), 10)
+    let pending = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-chain"), 10)
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
     let predecessor_node_id = pending[0].node_id.clone();
-    let predecessor_before = db
-        .lcm_expand_summary_node("codex", "codex-compact-chain", &predecessor_node_id)
+    let predecessor_before = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-chain", &predecessor_node_id)
         .await
         .unwrap();
 
-    let non_app = db
-        .publish_codex_compaction_summary_successor(
+    let non_app = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &predecessor_node_id,
             "Intermediate non-app summary",
             "codex_local",
@@ -582,20 +595,20 @@ async fn codex_compaction_pending_tracks_only_current_non_app_leaf() {
         .await
         .unwrap();
     assert_eq!(non_app.source_refs, predecessor_before.summary.source_refs);
-    let non_app_before = db
-        .lcm_expand_summary_node("codex", "codex-compact-chain", &non_app.node_id)
+    let non_app_before = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-chain", &non_app.node_id)
         .await
         .unwrap();
 
-    let pending_non_app = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact-chain"), 10)
+    let pending_non_app = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-chain"), 10)
         .await
         .unwrap();
     assert_eq!(pending_non_app.len(), 1);
     assert_eq!(pending_non_app[0].node_id, non_app.node_id);
 
-    let branch_error = db
-        .publish_codex_compaction_summary_successor(
+    let branch_error = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &predecessor_node_id,
             "Invalid sibling summary",
             "codex_local",
@@ -611,8 +624,8 @@ async fn codex_compaction_pending_tracks_only_current_non_app_leaf() {
         } if predecessor_summary_id == predecessor_node_id
     ));
 
-    let app = db
-        .publish_codex_compaction_summary_successor(
+    let app = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &non_app.node_id,
             "Final Codex app-server summary",
             "codex_app_server",
@@ -620,8 +633,8 @@ async fn codex_compaction_pending_tracks_only_current_non_app_leaf() {
         )
         .await
         .unwrap();
-    let replayed_app = db
-        .publish_codex_compaction_summary_successor(
+    let replayed_app = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &non_app.node_id,
             "Final Codex app-server summary",
             "codex_app_server",
@@ -632,22 +645,23 @@ async fn codex_compaction_pending_tracks_only_current_non_app_leaf() {
     assert_eq!(replayed_app, app);
     assert_eq!(app.source_refs, non_app.source_refs);
     assert!(
-        db.pending_codex_compaction_summary_requests(Some("codex-compact-chain"), 10)
+        runtime
+            .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-chain"), 10,)
             .await
             .unwrap()
             .is_empty()
     );
 
-    let predecessor_after = db
-        .lcm_expand_summary_node("codex", "codex-compact-chain", &predecessor_node_id)
+    let predecessor_after = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-chain", &predecessor_node_id)
         .await
         .unwrap();
-    let non_app_after = db
-        .lcm_expand_summary_node("codex", "codex-compact-chain", &non_app.node_id)
+    let non_app_after = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-chain", &non_app.node_id)
         .await
         .unwrap();
-    let app_expansion = db
-        .lcm_expand_summary_node("codex", "codex-compact-chain", &app.node_id)
+    let app_expansion = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-chain", &app.node_id)
         .await
         .unwrap();
     assert_eq!(predecessor_after, predecessor_before);
@@ -677,22 +691,10 @@ async fn codex_compaction_pending_tracks_only_current_non_app_leaf() {
         Some("gpt-5.4")
     );
 
-    let db_path = resolved_project_session_db_path(&project).await.unwrap();
-    let lineage_db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let lineage_conn = lineage_db.connect().unwrap();
-    let mut lineage_rows = lineage_conn
-        .query(
-            "SELECT predecessor_summary_id, successor_summary_id
-             FROM session_summary_successors
-             ORDER BY predecessor_summary_id, successor_summary_id",
-            (),
-        )
+    let persisted_edges = runtime
+        .lcm_summary_successor_edges_for_test()
         .await
         .unwrap();
-    let mut persisted_edges = Vec::new();
-    while let Some(row) = lineage_rows.next().await.unwrap() {
-        persisted_edges.push((row.get::<String>(0).unwrap(), row.get::<String>(1).unwrap()));
-    }
     let mut expected_edges = vec![
         (predecessor_node_id, non_app.node_id),
         (non_app_before.summary.node_id, app.node_id),
@@ -707,68 +709,58 @@ async fn codex_compaction_queue_skips_unpublishable_poison_before_limit() {
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact-poison");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
+    runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
-    let pending = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact-poison"), 10)
+    let pending = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-poison"), 10)
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
     let predecessor_node_id = pending[0].node_id.clone();
-    let predecessor_before = db
-        .lcm_expand_summary_node("codex", "codex-compact-poison", &predecessor_node_id)
+    let predecessor_before = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-poison", &predecessor_node_id)
         .await
         .unwrap();
 
-    let db_path = resolved_project_session_db_path(&project).await.unwrap();
-    let poison_db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let poison_conn = poison_db.connect().unwrap();
-    poison_conn
-        .execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth,
-                summary_text, summary_hash, summary_token_count, source_token_count,
-                source_time_start, source_time_end, expand_hint, metadata_json, created_at
-             )
-             SELECT ?1, provider, conversation_id, session_id, depth + 1000,
-                    'unpublishable poison', 'poison-hash', summary_token_count,
-                    source_token_count, source_time_start, source_time_end,
-                    expand_hint, metadata_json, created_at + 1000000
-             FROM lcm_summary_nodes
-             WHERE node_id = ?2",
-            libsql::params!["poison-summary", predecessor_node_id.as_str()],
-        )
+    runtime
+        .insert_lcm_poison_summary_for_test("poison-summary", &predecessor_node_id)
         .await
         .unwrap();
-    drop(poison_conn);
-    drop(poison_db);
 
-    let bounded_pending = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact-poison"), 1)
+    let bounded_pending = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-poison"), 1)
         .await
         .unwrap();
     assert_eq!(bounded_pending.len(), 1);
     assert_eq!(bounded_pending[0].node_id, predecessor_node_id);
 
-    db.publish_codex_compaction_summary_successor(
-        &predecessor_node_id,
-        "Processed despite poison",
-        "codex_app_server",
-        Some("gpt-5.4"),
-    )
-    .await
-    .unwrap();
+    runtime
+        .publish_codex_compaction_summary_successor_for_test(
+            &predecessor_node_id,
+            "Processed despite poison",
+            "codex_app_server",
+            Some("gpt-5.4"),
+        )
+        .await
+        .unwrap();
     assert!(
-        db.pending_codex_compaction_summary_requests(Some("codex-compact-poison"), 1)
+        runtime
+            .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-poison"), 1)
             .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        db.lcm_expand_summary_node("codex", "codex-compact-poison", &predecessor_node_id)
+        runtime
+            .lcm_expand_summary_node_for_test(
+                "codex",
+                "codex-compact-poison",
+                &predecessor_node_id,
+            )
             .await
             .unwrap(),
         predecessor_before
@@ -781,23 +773,24 @@ async fn codex_compaction_summary_successor_rolls_back_and_reuses_writer_after_f
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact-rollback");
 
-    let db = open_project_session_db(&project).await.unwrap();
+    let runtime = registered_runtime(&home, &project).await;
     let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
+    runtime
+        .ingest_project_transcript_source_for_test(&source, &project, None)
         .await
         .unwrap();
-    let pending = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact-rollback"), 10)
+    let pending = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-rollback"), 10)
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
     let original_node_id = pending[0].node_id.clone();
-    let predecessor_before = db
-        .lcm_expand_summary_node("codex", "codex-compact-rollback", &original_node_id)
+    let predecessor_before = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-rollback", &original_node_id)
         .await
         .unwrap();
-    let intermediate = db
-        .publish_codex_compaction_summary_successor(
+    let intermediate = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &original_node_id,
             "Intermediate rollback leaf",
             "codex_local",
@@ -805,34 +798,25 @@ async fn codex_compaction_summary_successor_rolls_back_and_reuses_writer_after_f
         )
         .await
         .unwrap();
-    let pending_leaf = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact-rollback"), 10)
+    let pending_leaf = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-rollback"), 10)
         .await
         .unwrap();
     assert_eq!(pending_leaf.len(), 1);
     assert_eq!(pending_leaf[0].node_id, intermediate.node_id);
     let leaf_request = pending_leaf[0].request.clone();
-    let leaf_before = db
-        .lcm_expand_summary_node("codex", "codex-compact-rollback", &intermediate.node_id)
+    let leaf_before = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-rollback", &intermediate.node_id)
         .await
         .unwrap();
 
-    let db_path = resolved_project_session_db_path(&project).await.unwrap();
-    let trigger_db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let trigger_conn = trigger_db.connect().unwrap();
-    trigger_conn
-        .execute_batch(
-            "CREATE TRIGGER fail_codex_summary_successor
-             BEFORE INSERT ON lcm_summary_nodes
-             BEGIN
-                SELECT RAISE(ABORT, 'forced summary successor failure');
-             END;",
-        )
+    runtime
+        .install_lcm_summary_insert_abort_trigger_for_test()
         .await
         .unwrap();
 
-    let error = db
-        .publish_codex_compaction_summary_successor(
+    let error = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &intermediate.node_id,
             "Failed replacement",
             "codex_app_server",
@@ -844,40 +828,39 @@ async fn codex_compaction_summary_successor_rolls_back_and_reuses_writer_after_f
         format!("{error:?}").contains("forced summary successor failure"),
         "unexpected error: {error:?}"
     );
-    let pending_after_failure = db
-        .pending_codex_compaction_summary_requests(Some("codex-compact-rollback"), 10)
+    let pending_after_failure = runtime
+        .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-rollback"), 10)
         .await
         .unwrap();
     assert_eq!(pending_after_failure.len(), 1);
     assert_eq!(pending_after_failure[0].node_id, intermediate.node_id);
     assert_eq!(pending_after_failure[0].request, leaf_request);
-    let predecessor_after_failure = db
-        .lcm_expand_summary_node("codex", "codex-compact-rollback", &original_node_id)
+    let predecessor_after_failure = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-rollback", &original_node_id)
         .await
         .unwrap();
-    let leaf_after_failure = db
-        .lcm_expand_summary_node("codex", "codex-compact-rollback", &intermediate.node_id)
+    let leaf_after_failure = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-rollback", &intermediate.node_id)
         .await
         .unwrap();
     assert_eq!(predecessor_after_failure, predecessor_before);
     assert_eq!(leaf_after_failure, leaf_before);
     assert_eq!(
-        db.lcm_status("codex", Some("codex-compact-rollback"))
+        runtime
+            .lcm_status_for_test("codex", Some("codex-compact-rollback"))
             .await
             .unwrap()
             .summary_node_count,
         2
     );
 
-    trigger_conn
-        .execute_batch("DROP TRIGGER fail_codex_summary_successor;")
+    runtime
+        .remove_lcm_summary_insert_abort_trigger_for_test()
         .await
         .unwrap();
-    drop(trigger_conn);
-    drop(trigger_db);
 
-    let successor = db
-        .publish_codex_compaction_summary_successor(
+    let successor = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &intermediate.node_id,
             "Successful replacement",
             "codex_app_server",
@@ -888,8 +871,8 @@ async fn codex_compaction_summary_successor_rolls_back_and_reuses_writer_after_f
     assert_eq!(successor.summary_text, "Successful replacement");
     assert_ne!(successor.node_id, intermediate.node_id);
     assert_eq!(successor.source_refs, leaf_before.summary.source_refs);
-    let replayed_successor = db
-        .publish_codex_compaction_summary_successor(
+    let replayed_successor = runtime
+        .publish_codex_compaction_summary_successor_for_test(
             &intermediate.node_id,
             "Successful replacement",
             "codex_app_server",
@@ -899,17 +882,18 @@ async fn codex_compaction_summary_successor_rolls_back_and_reuses_writer_after_f
         .unwrap();
     assert_eq!(replayed_successor, successor);
     assert!(
-        db.pending_codex_compaction_summary_requests(Some("codex-compact-rollback"), 10)
+        runtime
+            .pending_codex_compaction_summary_requests_for_test(Some("codex-compact-rollback"), 10,)
             .await
             .unwrap()
             .is_empty()
     );
-    let predecessor_after_success = db
-        .lcm_expand_summary_node("codex", "codex-compact-rollback", &original_node_id)
+    let predecessor_after_success = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-rollback", &original_node_id)
         .await
         .unwrap();
-    let leaf_after_success = db
-        .lcm_expand_summary_node("codex", "codex-compact-rollback", &intermediate.node_id)
+    let leaf_after_success = runtime
+        .lcm_expand_summary_node_for_test("codex", "codex-compact-rollback", &intermediate.node_id)
         .await
         .unwrap();
     assert_eq!(predecessor_after_success, predecessor_before);

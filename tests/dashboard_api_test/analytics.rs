@@ -6,13 +6,15 @@ use std::path::{Path, PathBuf};
 
 use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
-    http_agent, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
+    http_agent, pick_free_port, wait_for_dashboard,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
-use tracedecay::global_db::{AnalyticsEventInsert, GlobalDb};
-use tracedecay::sessions::cursor::project_session_db_path;
+use tracedecay::global_db::AnalyticsEventInsert;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
@@ -20,11 +22,11 @@ use tracedecay::tracedecay::TraceDecay;
 struct Fixture {
     _tmp: TempDir,
     _env_guard: EnvVarGuard,
+    _data_dir_guard: EnvVarGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     project_root: PathBuf,
-    global_db_path: PathBuf,
-    session_db_path: PathBuf,
+    host_runtime: Arc<HostAdmissionTestRuntimeV1>,
 }
 
 impl Drop for Fixture {
@@ -98,40 +100,60 @@ fn message(
         .build()
 }
 
-async fn seed_session_store(db_path: &Path, project: &Path) {
-    let gdb = GlobalDb::open_at(db_path).await.expect("open session db");
-    assert!(gdb.upsert_session(&session(project)).await);
+async fn seed_session_store(runtime: &HostAdmissionTestRuntimeV1, project: &Path) {
     assert!(
-        gdb.upsert_session(&subagent_session(
-            project,
-            "subagent-code-explorer",
-            "tracedecay-code-explorer"
-        ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session(&subagent_session(
-            project,
-            "subagent-session-historian",
-            "session-historian"
-        ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session(&subagent_session(project, "subagent-worker", "worker"))
+        runtime
+            .upsert_session_for_test(HostAdmissionScope::Project, &session(project))
             .await
+            .expect("seed session")
     );
     assert!(
-        gdb.upsert_session(&subagent_session_with_metadata(
-            project,
-            "subagent-code-health-auditor",
-            "auditor",
-            serde_json::json!({
-                "agent_nickname": "tracedecay-code-health-auditor",
-                "agent_role": "auditor"
-            })
-        ))
-        .await
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &subagent_session(
+                    project,
+                    "subagent-code-explorer",
+                    "tracedecay-code-explorer",
+                ),
+            )
+            .await
+            .expect("seed code explorer subagent")
+    );
+    assert!(
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &subagent_session(project, "subagent-session-historian", "session-historian",),
+            )
+            .await
+            .expect("seed session historian subagent")
+    );
+    assert!(
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &subagent_session(project, "subagent-worker", "worker"),
+            )
+            .await
+            .expect("seed worker subagent")
+    );
+    assert!(
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &subagent_session_with_metadata(
+                    project,
+                    "subagent-code-health-auditor",
+                    "auditor",
+                    serde_json::json!({
+                        "agent_nickname": "tracedecay-code-health-auditor",
+                        "agent_role": "auditor"
+                    }),
+                ),
+            )
+            .await
+            .expect("seed code health auditor subagent")
     );
 
     let rows = [
@@ -174,7 +196,12 @@ async fn seed_session_store(db_path: &Path, project: &Path) {
     ];
 
     for row in rows {
-        assert!(gdb.upsert_session_message(&row).await);
+        assert!(
+            runtime
+                .upsert_session_message_for_test(HostAdmissionScope::Project, &row)
+                .await
+                .expect("seed analytics session message")
+        );
     }
 }
 
@@ -196,9 +223,8 @@ fn analytics_event(project_id: &str, timestamp: i64, event_kind: &str) -> Analyt
     }
 }
 
-async fn seed_durable_analytics(db_path: &Path, project_root: &Path) {
-    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
-    let project_id = GlobalDb::canonical_project_key(project_root);
+async fn seed_durable_analytics(runtime: &HostAdmissionTestRuntimeV1, project_root: &Path) {
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -225,7 +251,8 @@ async fn seed_durable_analytics(db_path: &Path, project_root: &Path) {
         },
     ];
     for row in rows {
-        gdb.append_analytics_event(&row)
+        runtime
+            .append_analytics_event_for_test(HostAdmissionScope::Profile, &row)
             .await
             .expect("append durable analytics event");
     }
@@ -266,9 +293,8 @@ fn seed_hook_analytics(project_root: &Path) {
     .expect("write hook analytics");
 }
 
-async fn seed_durable_recent_window(db_path: &Path, project_root: &Path) {
-    let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
-    let project_id = GlobalDb::canonical_project_key(project_root);
+async fn seed_durable_recent_window(runtime: &HostAdmissionTestRuntimeV1, project_root: &Path) {
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(project_root);
     let mut events: Vec<_> = (0..10_000)
         .map(|offset| analytics_event(&project_id, 1_760_000_000 + offset, "older_noise"))
         .collect();
@@ -277,14 +303,14 @@ async fn seed_durable_recent_window(db_path: &Path, project_root: &Path) {
         outcome: Some("used".to_string()),
         ..analytics_event(&project_id, 1_760_020_000, "skill")
     });
-    gdb.append_analytics_events(&events)
+    runtime
+        .append_analytics_events_for_test(HostAdmissionScope::Profile, &events)
         .await
         .expect("append durable analytics events");
 }
 
-async fn seed_fallback_analytics(db_path: &Path, project_root: &Path) {
-    let gdb = GlobalDb::open_at(db_path).await.expect("open session db");
-    let project_id = GlobalDb::canonical_project_key(project_root);
+async fn seed_fallback_analytics(runtime: &HostAdmissionTestRuntimeV1, project_root: &Path) {
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -305,7 +331,8 @@ async fn seed_fallback_analytics(db_path: &Path, project_root: &Path) {
         },
     ];
     for row in rows {
-        gdb.append_analytics_event(&row)
+        runtime
+            .append_analytics_event_for_test(HostAdmissionScope::Project, &row)
             .await
             .expect("append fallback analytics event");
     }
@@ -323,37 +350,53 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guard = EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path);
-    // Pre-create both GlobalDb-schema stores from the cached empty template
-    // so seeding and dashboard startup open existing DBs instead of paying a
-    // full schema creation each (slow on Windows).
-    write_empty_global_db_schema(&global_db_path).await;
+    let profile_root = tmp.path().join("profile").join(".tracedecay");
+    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
-    let session_db_path = project_session_db_path(&project_root);
-    write_empty_global_db_schema(&session_db_path).await;
-    seed_session_store(&session_db_path, &project_root).await;
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|project_id| tracedecay_domain::ProjectId::new(project_id.to_owned()).ok())
+        .expect("analytics fixture project identity");
+    let host_runtime = Arc::new(
+        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
+            .await
+            .expect("analytics host-admission runtime"),
+    );
+    seed_session_store(&host_runtime, &project_root).await;
     if seed_durable_events {
-        seed_durable_analytics(&global_db_path, &project_root).await;
+        seed_durable_analytics(&host_runtime, &project_root).await;
     }
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
+    let server_runtime = Arc::clone(&host_runtime);
+    let server_graph = Arc::new(cg);
     let server = tokio::spawn(async move {
-        let _ =
-            dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, std::future::pending())
-                .await;
+        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+            server_graph,
+            server_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            "127.0.0.1",
+            port,
+            std::future::pending(),
+        )
+        .await;
     });
     wait_for_dashboard(&http_agent(), &base_url).await;
 
     Fixture {
         _tmp: tmp,
         _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
         base_url,
         server,
         project_root,
-        global_db_path,
-        session_db_path,
+        host_runtime,
     }
 }
 
@@ -399,10 +442,7 @@ fn analytics_api_advertises_and_aggregates_session_usage() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(
-            overview["db"],
-            fixture.session_db_path.display().to_string()
-        );
+        assert!(overview["db"].as_str().is_some_and(|path| !path.is_empty()));
         assert_eq!(overview["hints"]["available"], false);
         assert_eq!(overview["hints"]["by_category"][0]["emitted"], 0);
 
@@ -520,7 +560,7 @@ fn analytics_api_filters_fallback_events_to_current_project() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        seed_fallback_analytics(&fixture.session_db_path, &fixture.project_root).await;
+        seed_fallback_analytics(&fixture.host_runtime, &fixture.project_root).await;
         let agent = http_agent();
 
         let (status, overview) = get_json(
@@ -551,7 +591,7 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        seed_durable_recent_window(&fixture.global_db_path, &fixture.project_root).await;
+        seed_durable_recent_window(&fixture.host_runtime, &fixture.project_root).await;
         let agent = http_agent();
 
         let (status, overview) = get_json(

@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::db::DatabaseAuthority;
+use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -9,7 +9,10 @@ async fn compatibility_repair_rolls_back_feedback_batch_and_replays_receipt() {
     let path = temp.path().join("compatibility-repair.db");
     let authority =
         DatabaseAuthority::acquire_test(&path, "compatibility repair authority test").unwrap();
-    let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+    let (db, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
     let owner = FactOwnerV1::Profile;
     let source_store_id = compatibility_source_store_id().unwrap();
     let owner_key = OwnerKey::new(&owner).unwrap();
@@ -19,7 +22,7 @@ async fn compatibility_repair_rolls_back_feedback_batch_and_replays_receipt() {
             .await
             .unwrap();
         writer
-            .execute(
+            .execute_engine(
                 "INSERT INTO memory_facts(fact_id, content)
                  VALUES(1, 'repair feedback fixture')",
                 (),
@@ -27,7 +30,7 @@ async fn compatibility_repair_rolls_back_feedback_batch_and_replays_receipt() {
             .await
             .unwrap();
         writer
-            .execute(
+            .execute_engine(
                 "INSERT INTO memory_feedback_events(
                     event_id, fact_id, action, trust_delta, old_trust, new_trust,
                     created_at, source, note
@@ -37,7 +40,7 @@ async fn compatibility_repair_rolls_back_feedback_batch_and_replays_receipt() {
             .await
             .unwrap();
         writer
-            .execute(
+            .execute_engine(
                 "INSERT INTO memory_v2_facts(
                     fact_id, owner_kind, project_id, owner_json, identity_json, created_at
                  ) VALUES('repair-feedback-fixture', ?1, ?2, ?3, '{}', 1)",
@@ -50,7 +53,7 @@ async fn compatibility_repair_rolls_back_feedback_batch_and_replays_receipt() {
             .await
             .unwrap();
         writer
-            .execute(
+            .execute_engine(
                 "INSERT INTO memory_v2_legacy_map(
                     owner_kind, project_id, owner_json, source_store_id,
                     legacy_fact_id, fact_id, mapping_json
@@ -65,7 +68,7 @@ async fn compatibility_repair_rolls_back_feedback_batch_and_replays_receipt() {
             .await
             .unwrap();
         writer
-            .execute(
+            .execute_engine(
                 "INSERT INTO memory_v2_feedback_history_repair_progress(
                     owner_kind, project_id, source_store_id, owner_json,
                     feedback_frontier, feedback_cursor, phase,

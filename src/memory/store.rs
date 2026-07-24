@@ -2,14 +2,16 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-
-use libsql::{Connection, TransactionBehavior, params};
+use std::future::Future;
+use std::pin::Pin;
 
 use super::encoding::HolographicEncoder;
 use super::entities::{extract_entities, normalize_entity};
 use super::types::{
     FactRecord, FactRelationKind, FactRelationRecord, FeedbackAction, MemoryCategory,
 };
+use crate::db::MemoryConnection;
+use crate::db::engine::{IntoParams, Row, Rows, TransactionBehavior, Value, params};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
 
@@ -26,33 +28,65 @@ const MEMORY_SOURCE_DEFAULT: &str = "manual";
 const HRR_ALGEBRA: &str = "amari_fhrr";
 
 pub struct MemoryStore<'a> {
-    conn: &'a Connection,
+    conn: MemoryConnection<'a>,
     encoder: HolographicEncoder,
 }
 
 impl<'a> MemoryStore<'a> {
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
         Self {
-            conn,
+            conn: MemoryConnection::runtime(conn),
             encoder: HolographicEncoder::new(),
         }
     }
 
-    /// Runs `work` inside an immediate transaction, committing on success and
-    /// rolling back on error or cancellation. The inner future is built before
-    /// the transaction opens, which is safe because async fns do no work until
-    /// polled — `work.await` is the first time any statement runs.
-    async fn with_immediate_tx<T>(
-        &self,
-        operation: &str,
-        work: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
+    pub(crate) const fn new_engine_transaction(
+        transaction: &'a crate::db::engine::Transaction,
+    ) -> Self {
+        Self {
+            conn: MemoryConnection::runtime_transaction(transaction),
+            encoder: HolographicEncoder::new(),
+        }
+    }
+
+    pub(crate) const fn new_database_transaction(
+        transaction: &'a crate::db::DatabaseMemoryTransaction<'a>,
+    ) -> Self {
+        Self {
+            conn: MemoryConnection::database_transaction(transaction),
+            encoder: HolographicEncoder::new(),
+        }
+    }
+
+    /// Runs `work` through the transaction executor, committing on success and
+    /// rolling back on error or cancellation. Caller-owned transactions remain
+    /// caller-owned and provide the surrounding atomic boundary.
+    async fn with_immediate_tx<T, F>(&self, operation: &str, work: F) -> Result<T>
+    where
+        T: Send,
+        F: Send
+            + for<'tx> FnOnce(
+                &'tx MemoryStore<'tx>,
+            ) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'tx>>,
+    {
+        if matches!(
+            self.conn,
+            MemoryConnection::RuntimeTransaction(_)
+                | MemoryConnection::Transaction(_)
+                | MemoryConnection::DatabaseTransaction(_)
+        ) {
+            return work(self).await;
+        }
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| db_error(operation, e))?;
-        match work.await {
+        let transactional_store = MemoryStore {
+            conn: MemoryConnection::transaction(&transaction),
+            encoder: self.encoder.clone(),
+        };
+        match work(&transactional_store).await {
             Ok(value) => {
                 transaction
                     .commit()
@@ -117,14 +151,20 @@ impl<'a> MemoryStore<'a> {
             return Ok(());
         }
         let loser_set: BTreeSet<i64> = loser_ids.iter().copied().collect();
-        let relations = self.list_fact_relations(None).await?;
+        let relations = self.load_fact_relations_for_rewire(loser_ids).await?;
+        let mut relation_delete_params = Vec::with_capacity(loser_ids.len() * 2);
+        relation_delete_params.extend(loser_ids.iter().copied().map(Value::Integer));
+        relation_delete_params.extend(loser_ids.iter().copied().map(Value::Integer));
         self.conn
             .execute(
                 &format!(
-                    "DELETE FROM memory_fact_relations WHERE source_fact_id IN ({0}) OR target_fact_id IN ({0})",
-                    std::iter::repeat_n("?", loser_ids.len()).collect::<Vec<_>>().join(",")
+                    "DELETE FROM memory_fact_relations
+                     WHERE source_fact_id IN ({0}) OR target_fact_id IN ({0})",
+                    std::iter::repeat_n("?", loser_ids.len())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 ),
-                loser_ids.iter().copied().map(libsql::Value::Integer).collect::<Vec<_>>(),
+                relation_delete_params,
             )
             .await
             .map_err(|e| db_error("merge_facts", e))?;
@@ -157,8 +197,97 @@ impl<'a> MemoryStore<'a> {
         Ok(())
     }
 
-    pub(crate) fn conn(&self) -> &Connection {
+    async fn load_fact_relations_for_rewire(
+        &self,
+        fact_ids: &[i64],
+    ) -> Result<Vec<FactRelationRecord>> {
+        const PAGE_SIZE: i64 = 512;
+
+        let placeholders = std::iter::repeat_n("?", fact_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                    metadata, created_at, updated_at
+             FROM memory_fact_relations
+             WHERE (
+                 source_fact_id IN ({placeholders})
+                 OR target_fact_id IN ({placeholders})
+             )
+               AND (
+                   ? IS NULL
+                   OR source_fact_id > ?
+                   OR (source_fact_id = ? AND target_fact_id > ?)
+                   OR (
+                       source_fact_id = ?
+                       AND target_fact_id = ?
+                       AND relation > ?
+                   )
+               )
+             ORDER BY source_fact_id, target_fact_id, relation
+             LIMIT ?"
+        );
+        let mut relations = Vec::new();
+        let mut source_cursor: Option<i64> = None;
+        let mut target_cursor: Option<i64> = None;
+        let mut relation_cursor: Option<String> = None;
+        loop {
+            let mut values = Vec::with_capacity(fact_ids.len() * 2 + 8);
+            values.extend(fact_ids.iter().copied().map(Value::Integer));
+            values.extend(fact_ids.iter().copied().map(Value::Integer));
+            values.push(source_cursor.map_or(Value::Null, Value::Integer));
+            values.push(source_cursor.map_or(Value::Null, Value::Integer));
+            values.push(source_cursor.map_or(Value::Null, Value::Integer));
+            values.push(target_cursor.map_or(Value::Null, Value::Integer));
+            values.push(source_cursor.map_or(Value::Null, Value::Integer));
+            values.push(target_cursor.map_or(Value::Null, Value::Integer));
+            values.push(
+                relation_cursor
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+            );
+            values.push(Value::Integer(PAGE_SIZE));
+            let mut rows = self
+                .conn
+                .query(sql.as_str(), values)
+                .await
+                .map_err(|error| db_error("merge_facts", error))?;
+            let mut page_count = 0;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| db_error("merge_facts", error))?
+            {
+                source_cursor = Some(
+                    row.get::<i64>(0)
+                        .map_err(|error| db_error("merge_facts", error))?,
+                );
+                target_cursor = Some(
+                    row.get::<i64>(1)
+                        .map_err(|error| db_error("merge_facts", error))?,
+                );
+                relation_cursor = Some(
+                    row.get::<String>(2)
+                        .map_err(|error| db_error("merge_facts", error))?,
+                );
+                relations.push(relation_from_row(&row, "merge_facts")?);
+                page_count += 1;
+            }
+            if page_count < PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(relations)
+    }
+
+    pub(crate) async fn query<P>(&self, operation: &str, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
         self.conn
+            .query(sql, params)
+            .await
+            .map_err(|error| db_error(operation, error))
     }
 
     async fn get_fact_by_content(&self, content: &str) -> Result<Option<FactRecord>> {
@@ -183,42 +312,75 @@ impl<'a> MemoryStore<'a> {
         self.get_fact(fact_id).await
     }
 
-    async fn row_to_fact(&self, row: &libsql::Row, operation: &str) -> Result<FactRecord> {
+    async fn row_to_fact(&self, row: &Row, operation: &str) -> Result<FactRecord> {
         let fact_id = row.get::<i64>(0).map_err(|e| db_error(operation, e))?;
         let entities = self.load_fact_entities(fact_id).await?;
         fact_from_row(row, operation, entities)
     }
 
     async fn load_entities_for_facts(&self, fact_ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
+        const PAGE_SIZE: i64 = 512;
+
         let mut entities: HashMap<i64, Vec<String>> = HashMap::new();
         for chunk in fact_ids.chunks(ENTITY_BATCH_SIZE) {
             let Some(id_list) = sql_i64_list(chunk) else {
                 continue;
             };
             let sql = format!(
-                "SELECT fe.fact_id, e.name
+                "SELECT fe.fact_id, e.name, e.entity_id
                  FROM memory_fact_entities fe
                  JOIN memory_entities e ON e.entity_id = fe.entity_id
                  WHERE fe.fact_id IN ({id_list})
-                 ORDER BY fe.fact_id, e.name"
+                   AND (
+                       ?1 IS NULL
+                       OR fe.fact_id > ?1
+                       OR (
+                           fe.fact_id = ?1
+                           AND (
+                               e.name > ?2
+                               OR (e.name = ?2 AND e.entity_id > ?3)
+                           )
+                       )
+                   )
+                 ORDER BY fe.fact_id, e.name, e.entity_id
+                 LIMIT ?4"
             );
-            let mut rows = self
-                .conn
-                .query(sql.as_str(), ())
-                .await
-                .map_err(|e| db_error("load_entities_for_facts", e))?;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| db_error("load_entities_for_facts", e))?
-            {
-                let fact_id = row
-                    .get::<i64>(0)
+            let mut fact_cursor: Option<i64> = None;
+            let mut name_cursor: Option<String> = None;
+            let mut entity_cursor: Option<i64> = None;
+            loop {
+                let mut rows = self
+                    .conn
+                    .query(
+                        sql.as_str(),
+                        params![fact_cursor, name_cursor.as_ref(), entity_cursor, PAGE_SIZE],
+                    )
+                    .await
                     .map_err(|e| db_error("load_entities_for_facts", e))?;
-                let entity = row
-                    .get::<String>(1)
-                    .map_err(|e| db_error("load_entities_for_facts", e))?;
-                entities.entry(fact_id).or_default().push(entity);
+                let mut page_count = 0;
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .map_err(|e| db_error("load_entities_for_facts", e))?
+                {
+                    let fact_id = row
+                        .get::<i64>(0)
+                        .map_err(|e| db_error("load_entities_for_facts", e))?;
+                    let entity = row
+                        .get::<String>(1)
+                        .map_err(|e| db_error("load_entities_for_facts", e))?;
+                    fact_cursor = Some(fact_id);
+                    name_cursor = Some(entity.clone());
+                    entity_cursor = Some(
+                        row.get::<i64>(2)
+                            .map_err(|e| db_error("load_entities_for_facts", e))?,
+                    );
+                    entities.entry(fact_id).or_default().push(entity);
+                    page_count += 1;
+                }
+                if page_count < PAGE_SIZE {
+                    break;
+                }
             }
         }
         Ok(entities)
@@ -296,66 +458,68 @@ impl<'a> MemoryStore<'a> {
     }
 
     async fn load_fact_entities(&self, fact_id: i64) -> Result<Vec<String>> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT e.name
-                 FROM memory_entities e
-                 JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
-                 WHERE fe.fact_id = ?1
-                 ORDER BY e.name",
-                params![fact_id],
-            )
-            .await
-            .map_err(|e| db_error("load_fact_entities", e))?;
-        let mut entities = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| db_error("load_fact_entities", e))?
-        {
-            entities.push(
-                row.get::<String>(0)
-                    .map_err(|e| db_error("load_fact_entities", e))?,
-            );
-        }
-        Ok(entities)
+        Ok(self
+            .load_entities_for_facts(&[fact_id])
+            .await?
+            .remove(&fact_id)
+            .unwrap_or_default())
     }
 
     async fn load_bank_vectors(
         &self,
         category: Option<MemoryCategory>,
     ) -> Result<(usize, Vec<Vec<f64>>)> {
+        const PAGE_SIZE: i64 = 512;
         let sql = if category.is_some() {
-            "SELECT hrr_vector
+            "SELECT fact_id, hrr_vector
              FROM memory_facts
-             WHERE category = ?1 AND trust_score >= ?2"
+             WHERE category = ?1 AND trust_score >= ?2
+               AND (?3 IS NULL OR fact_id > ?3)
+             ORDER BY fact_id
+             LIMIT ?4"
         } else {
-            "SELECT hrr_vector
+            "SELECT fact_id, hrr_vector
              FROM memory_facts
-             WHERE trust_score >= ?1"
+             WHERE trust_score >= ?1
+               AND (?2 IS NULL OR fact_id > ?2)
+             ORDER BY fact_id
+             LIMIT ?3"
         };
-
-        let mut rows = if let Some(category) = category {
-            self.conn.query(sql, params![category.as_str(), 0.0]).await
-        } else {
-            self.conn.query(sql, params![0.0]).await
-        }
-        .map_err(|e| db_error("load_bank_vectors", e))?;
 
         let mut fact_count = 0;
         let mut vectors = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| db_error("load_bank_vectors", e))?
-        {
-            fact_count += 1;
-            let value = row
-                .get::<libsql::Value>(0)
-                .map_err(|e| db_error("load_bank_vectors", e))?;
-            if let Some(vector) = deserialize_vector_value(value, "load_bank_vectors")? {
-                vectors.push(vector);
+        let mut cursor: Option<i64> = None;
+        loop {
+            let mut rows = if let Some(category) = category {
+                self.conn
+                    .query(sql, params![category.as_str(), 0.0, cursor, PAGE_SIZE])
+                    .await
+            } else {
+                self.conn.query(sql, params![0.0, cursor, PAGE_SIZE]).await
+            }
+            .map_err(|e| db_error("load_bank_vectors", e))?;
+
+            let mut page_count = 0;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| db_error("load_bank_vectors", e))?
+            {
+                cursor = Some(
+                    row.get::<i64>(0)
+                        .map_err(|e| db_error("load_bank_vectors", e))?,
+                );
+                fact_count += 1;
+                page_count += 1;
+                let value = row
+                    .get::<Value>(1)
+                    .map_err(|e| db_error("load_bank_vectors", e))?;
+                if let Some(vector) = deserialize_vector_value(value, "load_bank_vectors")? {
+                    vectors.push(vector);
+                }
+            }
+            if page_count < PAGE_SIZE {
+                break;
             }
         }
         Ok((fact_count, vectors))
@@ -498,7 +662,7 @@ fn parse_category(value: &str, operation: &str) -> Result<MemoryCategory> {
         .map_err(|e| db_message(operation, format!("failed to parse category: {e}")))
 }
 
-fn fact_from_row(row: &libsql::Row, operation: &str, entities: Vec<String>) -> Result<FactRecord> {
+fn fact_from_row(row: &Row, operation: &str, entities: Vec<String>) -> Result<FactRecord> {
     let category = parse_category(
         &row.get::<String>(2).map_err(|e| db_error(operation, e))?,
         operation,
@@ -538,7 +702,7 @@ fn fact_from_row(row: &libsql::Row, operation: &str, entities: Vec<String>) -> R
     })
 }
 
-fn relation_from_row(row: &libsql::Row, operation: &str) -> Result<FactRelationRecord> {
+fn relation_from_row(row: &Row, operation: &str) -> Result<FactRelationRecord> {
     let relation = row
         .get::<String>(2)
         .map_err(|e| db_error(operation, e))?
@@ -571,12 +735,12 @@ fn serialize_vector(vector: &[f64], operation: &str) -> Result<Vec<u8>> {
         .map_err(|e| db_message(operation, format!("failed to serialize vector: {e}")))
 }
 
-fn deserialize_vector_value(value: libsql::Value, operation: &str) -> Result<Option<Vec<f64>>> {
+fn deserialize_vector_value(value: Value, operation: &str) -> Result<Option<Vec<f64>>> {
     match value {
-        libsql::Value::Blob(bytes) => HolographicEncoder::deserialize(&bytes)
+        Value::Blob(bytes) => HolographicEncoder::deserialize(&bytes)
             .map(Some)
             .map_err(|e| db_message(operation, format!("failed to decode vector: {e}"))),
-        libsql::Value::Null => Ok(None),
+        Value::Null => Ok(None),
         _ => Err(db_message(
             operation,
             "hrr_vector contained a non-blob value",
@@ -673,21 +837,36 @@ mod cancellation_tests {
     use std::future::pending;
 
     use super::*;
+    use crate::memory::trust::DEFAULT_TRUST;
+    use crate::memory::types::AddFactRequest;
 
     #[tokio::test]
     async fn cancelled_immediate_transaction_rolls_back() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        let db = libsql::Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        let retained = conn.clone();
+        let runtime = crate::db::engine::TestConnection::open(&path);
+        runtime
+            .execute_batch("CREATE TABLE cancellation_probe(value INTEGER NOT NULL)")
+            .await
+            .unwrap();
+        let retained = runtime.clone();
         let (started, started_rx) = tokio::sync::oneshot::channel();
 
         let task = tokio::spawn(async move {
-            MemoryStore::new(&conn)
-                .with_immediate_tx("cancelled memory write", async move {
-                    let _ = started.send(());
-                    pending::<Result<()>>().await
+            MemoryStore::new_runtime(&runtime)
+                .with_immediate_tx("cancelled memory write", move |transactional| {
+                    Box::pin(async move {
+                        transactional
+                            .conn
+                            .execute(
+                                "INSERT INTO cancellation_probe(value) VALUES(?1)",
+                                params![1_i64],
+                            )
+                            .await
+                            .unwrap();
+                        let _ = started.send(());
+                        pending::<Result<()>>().await
+                    })
                 })
                 .await
         });
@@ -695,6 +874,149 @@ mod cancellation_tests {
         task.abort();
         let _ = task.await;
 
-        assert!(retained.is_autocommit());
+        let mut rows = retained
+            .query("SELECT COUNT(*) FROM cancellation_probe", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_memory_store_executes_writes_inside_its_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime-memory.db");
+        let authority =
+            crate::db::DatabaseAuthority::acquire_test(&path, "runtime memory transaction parity")
+                .unwrap();
+        let (database, _) = crate::db::Database::publish_test_runtime(
+            &path,
+            &authority,
+            crate::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        drop(database);
+        drop(authority);
+
+        let runtime = crate::db::engine::TestConnection::open(&path);
+        let store = MemoryStore::new_runtime(&runtime);
+        let outcome = store
+            .add_fact(
+                AddFactRequest {
+                    content: "runtime memory transaction fact".to_owned(),
+                    category: MemoryCategory::Project,
+                    tags: vec!["runtime".to_owned()],
+                    entities: vec!["TraceDecay".to_owned()],
+                    trust: Some(DEFAULT_TRUST),
+                    source: Some("runtime-test".to_owned()),
+                    metadata: serde_json::json!({"engine": "rusqlite"}),
+                },
+                DEFAULT_TRUST,
+            )
+            .await
+            .unwrap();
+
+        let fact = outcome.fact.expect("runtime fact");
+        assert_eq!(
+            store.get_fact(fact.fact_id).await.unwrap().unwrap().content,
+            "runtime memory transaction fact"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_memory_store_rolls_back_failed_transaction_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime-memory-rollback.db");
+        let runtime = crate::db::engine::TestConnection::open(&path);
+        runtime
+            .execute_batch("CREATE TABLE transaction_probe(value INTEGER NOT NULL)")
+            .await
+            .unwrap();
+        let store = MemoryStore::new_runtime(&runtime);
+
+        let result: Result<()> = store
+            .with_immediate_tx("runtime rollback parity", |transactional| {
+                Box::pin(async move {
+                    transactional
+                        .conn
+                        .execute(
+                            "INSERT INTO transaction_probe(value) VALUES(?1)",
+                            params![42_i64],
+                        )
+                        .await
+                        .map_err(|error| db_error("runtime rollback parity", error))?;
+                    Err(db_message("runtime rollback parity", "deliberate failure"))
+                })
+            })
+            .await;
+        assert!(result.is_err());
+
+        let mut rows = runtime
+            .query("SELECT COUNT(*) FROM transaction_probe", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn database_transaction_memory_store_uses_ambient_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("database-memory-transaction.db");
+        let authority =
+            crate::db::DatabaseAuthority::acquire_test(&path, "database memory transaction")
+                .unwrap();
+        let (database, _) = crate::db::Database::publish_test_runtime(
+            &path,
+            &authority,
+            crate::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let transaction = database
+            .begin_memory_write_transaction("database memory transaction")
+            .await
+            .unwrap();
+        let store = MemoryStore::new_database_transaction(&transaction);
+
+        let outcome = store
+            .add_fact(
+                AddFactRequest {
+                    content: "ambient database transaction fact".to_owned(),
+                    category: MemoryCategory::Project,
+                    tags: Vec::new(),
+                    entities: Vec::new(),
+                    trust: Some(DEFAULT_TRUST),
+                    source: Some("database-transaction-test".to_owned()),
+                    metadata: serde_json::Value::Null,
+                },
+                DEFAULT_TRUST,
+            )
+            .await
+            .unwrap();
+        assert!(outcome.fact.is_some());
+
+        transaction.rollback().await.unwrap();
+        let read = database
+            .begin_memory_read_transaction("verify database memory rollback")
+            .await
+            .unwrap();
+        let mut rows = read
+            .query(
+                "SELECT COUNT(*) FROM memory_facts WHERE content = ?1",
+                params!["ambient database transaction fact"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+        read.commit().await.unwrap();
     }
 }

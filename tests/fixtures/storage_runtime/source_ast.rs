@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 pub struct CallSite {
     pub callee: String,
     pub line: usize,
+    pub scope: String,
 }
 
 pub struct RustAst {
@@ -95,6 +96,24 @@ impl RustAst {
             }
         });
         methods
+    }
+
+    pub fn module_is_cfg_test_only(&self, module_name: &str) -> bool {
+        let modules = direct_children(self.tree.root_node())
+            .filter(|node| {
+                node.kind() == "mod_item"
+                    && node
+                        .child_by_field_name("name")
+                        .is_some_and(|name| self.text(name) == module_name)
+            })
+            .collect::<Vec<_>>();
+        !modules.is_empty()
+            && modules.iter().all(|module| {
+                direct_children(*module).any(|child| {
+                    child.kind() == "attribute_item"
+                        && normalize(self.text(child)) == "#[cfg(test)]"
+                })
+            })
     }
 
     pub fn method_paths(&self, impl_type: &str, method_name: &str) -> BTreeSet<String> {
@@ -256,8 +275,32 @@ impl RustAst {
             calls.push(CallSite {
                 callee: normalize(self.text(function)),
                 line: node.start_position().row + 1,
+                scope: self.call_scope(node),
             });
         });
+    }
+
+    fn call_scope(&self, mut node: Node<'_>) -> String {
+        while let Some(parent) = node.parent() {
+            if parent.kind() == "function_item" {
+                let function_name = parent
+                    .child_by_field_name("name")
+                    .map(|name| self.text(name))
+                    .unwrap_or("<anonymous>");
+                let mut container = parent;
+                while let Some(ancestor) = container.parent() {
+                    if ancestor.kind() == "impl_item"
+                        && let Some(item_type) = ancestor.child_by_field_name("type")
+                    {
+                        return format!("{}::{function_name}", normalize(self.text(item_type)));
+                    }
+                    container = ancestor;
+                }
+                return function_name.to_owned();
+            }
+            node = parent;
+        }
+        "<module>".to_owned()
     }
 
     fn is_test_scope(&self, mut node: Node<'_>) -> bool {
@@ -309,7 +352,8 @@ pub fn rust_files_below(relative_roots: &[String]) -> Vec<String> {
                     (!display.contains("/tests/")
                         && !display.ends_with("/tests.rs")
                         && !display.contains("/fixtures/")
-                        && !display.contains("/test_support.rs"))
+                        && !display.contains("/test_support.rs")
+                        && !is_below_cfg_test_module(&root, relative))
                     .then_some(display)
                 })
                 .collect::<Vec<_>>()
@@ -318,6 +362,53 @@ pub fn rust_files_below(relative_roots: &[String]) -> Vec<String> {
     files.sort();
     files.dedup();
     files
+}
+
+fn is_below_cfg_test_module(repository_root: &std::path::Path, relative: &std::path::Path) -> bool {
+    let mut module_file = repository_root.join(relative);
+    loop {
+        let Some((parent_file, module_name)) = parent_module_file(&module_file) else {
+            return false;
+        };
+        let parent_relative = parent_file
+            .strip_prefix(repository_root)
+            .expect("parent module must stay below the repository");
+        let parent = RustAst::parse(&parent_relative.to_string_lossy().replace('\\', "/"));
+        if parent.module_is_cfg_test_only(&module_name) {
+            return true;
+        }
+        module_file = parent_file;
+    }
+}
+
+fn parent_module_file(module_file: &std::path::Path) -> Option<(PathBuf, String)> {
+    let file_name = module_file.file_name()?.to_str()?;
+    if matches!(file_name, "lib.rs" | "main.rs") {
+        return None;
+    }
+
+    let (container, module_name) = if file_name == "mod.rs" {
+        let module_directory = module_file.parent()?;
+        (
+            module_directory.parent()?,
+            module_directory.file_name()?.to_str()?.to_owned(),
+        )
+    } else {
+        (
+            module_file.parent()?,
+            module_file.file_stem()?.to_str()?.to_owned(),
+        )
+    };
+
+    let mut candidates = vec![container.with_extension("rs"), container.join("mod.rs")];
+    if container.file_name().is_some_and(|name| name == "src") {
+        candidates.push(container.join("lib.rs"));
+        candidates.push(container.join("main.rs"));
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|parent| (parent, module_name))
 }
 
 pub fn has_path_suffix(paths: &BTreeSet<String>, expected: &str) -> bool {

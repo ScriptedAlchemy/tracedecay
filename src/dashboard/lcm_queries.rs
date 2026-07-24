@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::db::engine::{QueryExecutor, Value as DbValue, params};
+
 use super::util::{qmarks, query_i64, query_rows};
 
 pub(crate) const MESSAGE_TOKEN_ESTIMATE_EXPR: &str =
@@ -49,7 +51,7 @@ pub(crate) fn message_columns() -> String {
 }
 
 pub(crate) async fn invalid_summary_metadata_node(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<Option<String>, String> {
     let rows = query_rows(
         conn,
@@ -68,7 +70,9 @@ pub(crate) async fn invalid_summary_metadata_node(
     }))
 }
 
-pub(crate) async fn overview_role_counts(conn: &libsql::Connection) -> Result<Vec<Value>, String> {
+pub(crate) async fn overview_role_counts(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Vec<Value>, String> {
     query_rows(
         conn,
         "SELECT role, COUNT(*) AS count
@@ -81,7 +85,7 @@ pub(crate) async fn overview_role_counts(conn: &libsql::Connection) -> Result<Ve
 }
 
 pub(crate) async fn overview_source_counts(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<Vec<Value>, String> {
     query_rows(
         conn,
@@ -95,7 +99,9 @@ pub(crate) async fn overview_source_counts(
     .await
 }
 
-pub(crate) async fn overview_depth_counts(conn: &libsql::Connection) -> Result<Vec<Value>, String> {
+pub(crate) async fn overview_depth_counts(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Vec<Value>, String> {
     query_rows(
         conn,
         "SELECT depth, COUNT(*) AS count
@@ -108,7 +114,7 @@ pub(crate) async fn overview_depth_counts(conn: &libsql::Connection) -> Result<V
 }
 
 pub(crate) async fn latest_sessions(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     limit: i64,
 ) -> Result<Vec<Value>, String> {
     query_rows(
@@ -121,13 +127,13 @@ pub(crate) async fn latest_sessions(
          GROUP BY session_id
          ORDER BY last_timestamp DESC
          LIMIT ?1",
-        libsql::params![limit],
+        params![limit],
     )
     .await
 }
 
 pub(crate) async fn latest_summary_nodes(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     limit: i64,
 ) -> Result<Vec<Value>, String> {
     let sql = format!(
@@ -136,11 +142,11 @@ pub(crate) async fn latest_summary_nodes(
          ORDER BY COALESCE(n.source_time_end, n.created_at) DESC, n.rowid DESC
          LIMIT ?1"
     );
-    query_rows(conn, &sql, libsql::params![limit]).await
+    query_rows(conn, &sql, params![limit]).await
 }
 
 pub(crate) async fn overview_message_matches(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     like: &str,
     limit: i64,
 ) -> Result<Vec<Value>, String> {
@@ -154,11 +160,11 @@ pub(crate) async fn overview_message_matches(
          ORDER BY m.timestamp DESC, m.store_id DESC
          LIMIT ?2"
     );
-    query_rows(conn, &sql, libsql::params![like.to_string(), limit]).await
+    query_rows(conn, &sql, params![like.to_string(), limit]).await
 }
 
 pub(crate) async fn overview_summary_node_matches(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     like: &str,
     limit: i64,
 ) -> Result<Vec<Value>, String> {
@@ -171,20 +177,20 @@ pub(crate) async fn overview_summary_node_matches(
          ORDER BY recency DESC, n.rowid DESC
          LIMIT ?2"
     );
-    query_rows(conn, &sql, libsql::params![like.to_string(), limit]).await
+    query_rows(conn, &sql, params![like.to_string(), limit]).await
 }
 
 pub(crate) async fn search_message_fts(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     expr: &str,
     facet_clauses: &[String],
-    facet_params: &[libsql::Value],
+    facet_params: &[DbValue],
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<Value>, i64), String> {
     let mut where_clauses = vec!["lcm_raw_messages_fts MATCH ?".to_string()];
     where_clauses.extend(facet_clauses.iter().cloned());
-    let mut fts_params = vec![libsql::Value::Text(expr.to_string())];
+    let mut fts_params = vec![DbValue::Text(expr.to_string())];
     fts_params.extend(facet_params.iter().cloned());
     let count_sql = format!(
         "SELECT COUNT(*)
@@ -194,8 +200,8 @@ pub(crate) async fn search_message_fts(
         where_clauses.join(" AND ")
     );
     let count_params = fts_params.clone();
-    fts_params.push(libsql::Value::Integer(limit));
-    fts_params.push(libsql::Value::Integer(offset));
+    fts_params.push(DbValue::Integer(limit));
+    fts_params.push(DbValue::Integer(offset));
     let message_columns = message_columns();
     let sql = format!(
         "SELECT {message_columns},
@@ -213,10 +219,10 @@ pub(crate) async fn search_message_fts(
 }
 
 pub(crate) async fn search_message_like(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     like: &str,
     facet_clauses: &[String],
-    facet_params: &[libsql::Value],
+    facet_params: &[DbValue],
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<Value>, i64), String> {
@@ -228,9 +234,9 @@ pub(crate) async fn search_message_like(
     ];
     where_clauses.extend(facet_clauses.iter().cloned());
     let mut like_params = vec![
-        libsql::Value::Text(like.to_string()),
-        libsql::Value::Text(like.to_string()),
-        libsql::Value::Text(like.to_string()),
+        DbValue::Text(like.to_string()),
+        DbValue::Text(like.to_string()),
+        DbValue::Text(like.to_string()),
     ];
     like_params.extend(facet_params.iter().cloned());
     let count_sql = format!(
@@ -238,8 +244,8 @@ pub(crate) async fn search_message_like(
         where_clauses.join(" AND ")
     );
     let total = query_i64(conn, &count_sql, like_params.clone()).await;
-    like_params.push(libsql::Value::Integer(limit));
-    like_params.push(libsql::Value::Integer(offset));
+    like_params.push(DbValue::Integer(limit));
+    like_params.push(DbValue::Integer(offset));
     let message_columns = message_columns();
     let sql = format!(
         "SELECT {message_columns},
@@ -255,17 +261,17 @@ pub(crate) async fn search_message_like(
 }
 
 pub(crate) async fn search_node_fts(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     expr: &str,
     node_clauses: &[String],
-    node_params: &[libsql::Value],
+    node_params: &[DbValue],
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<Value>, i64), String> {
     let node_match_expr = format!("{{summary_text expand_hint}} : ({expr})");
     let mut where_clauses = vec!["lcm_summary_nodes_fts MATCH ?".to_string()];
     where_clauses.extend(node_clauses.iter().cloned());
-    let mut fts_params = vec![libsql::Value::Text(node_match_expr)];
+    let mut fts_params = vec![DbValue::Text(node_match_expr)];
     fts_params.extend(node_params.iter().cloned());
     let count_sql = format!(
         "SELECT COUNT(*)
@@ -275,8 +281,8 @@ pub(crate) async fn search_node_fts(
         where_clauses.join(" AND ")
     );
     let count_params = fts_params.clone();
-    fts_params.push(libsql::Value::Integer(limit));
-    fts_params.push(libsql::Value::Integer(offset));
+    fts_params.push(DbValue::Integer(limit));
+    fts_params.push(DbValue::Integer(offset));
     let sql = format!(
         "SELECT {NODE_COLUMNS},
                 COALESCE(n.source_time_end, n.created_at) AS recency,
@@ -294,10 +300,10 @@ pub(crate) async fn search_node_fts(
 }
 
 pub(crate) async fn search_node_like(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     like: &str,
     node_clauses: &[String],
-    node_params: &[libsql::Value],
+    node_params: &[DbValue],
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<Value>, i64), String> {
@@ -307,8 +313,8 @@ pub(crate) async fn search_node_like(
     ];
     where_clauses.extend(node_clauses.iter().cloned());
     let mut like_params = vec![
-        libsql::Value::Text(like.to_string()),
-        libsql::Value::Text(like.to_string()),
+        DbValue::Text(like.to_string()),
+        DbValue::Text(like.to_string()),
     ];
     like_params.extend(node_params.iter().cloned());
     let count_sql = format!(
@@ -316,8 +322,8 @@ pub(crate) async fn search_node_like(
         where_clauses.join(" AND ")
     );
     let total = query_i64(conn, &count_sql, like_params.clone()).await;
-    like_params.push(libsql::Value::Integer(limit));
-    like_params.push(libsql::Value::Integer(offset));
+    like_params.push(DbValue::Integer(limit));
+    like_params.push(DbValue::Integer(offset));
     let sql = format!(
         "SELECT {NODE_COLUMNS},
                 COALESCE(n.source_time_end, n.created_at) AS recency,
@@ -333,7 +339,7 @@ pub(crate) async fn search_node_like(
 }
 
 pub(crate) async fn session_messages(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     session_id: &str,
     order: &str,
     limit: i64,
@@ -347,16 +353,11 @@ pub(crate) async fn session_messages(
          ORDER BY m.ordinal {order}, m.timestamp {order}, m.store_id {order}
          LIMIT ?2 OFFSET ?3"
     );
-    query_rows(
-        conn,
-        &sql,
-        libsql::params![session_id.to_string(), limit, offset],
-    )
-    .await
+    query_rows(conn, &sql, params![session_id.to_string(), limit, offset]).await
 }
 
 pub(crate) async fn session_summary_nodes(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     session_id: &str,
     limit: i64,
     offset: i64,
@@ -369,16 +370,11 @@ pub(crate) async fn session_summary_nodes(
          ORDER BY n.depth ASC, recency ASC, n.rowid ASC
          LIMIT ?2 OFFSET ?3"
     );
-    query_rows(
-        conn,
-        &sql,
-        libsql::params![session_id.to_string(), limit, offset],
-    )
-    .await
+    query_rows(conn, &sql, params![session_id.to_string(), limit, offset]).await
 }
 
 pub(crate) async fn node_row(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
 ) -> Result<Option<Value>, String> {
     let sql = format!(
@@ -395,12 +391,12 @@ pub(crate) async fn node_row(
          FROM lcm_summary_nodes n
          WHERE n.node_id = ?1"
     );
-    let rows = query_rows(conn, &sql, libsql::params![node_id.to_string()]).await?;
+    let rows = query_rows(conn, &sql, params![node_id.to_string()]).await?;
     Ok(rows.into_iter().next())
 }
 
 pub(crate) async fn node_source_rows(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
 ) -> Result<Vec<Value>, String> {
     query_rows(
@@ -409,24 +405,20 @@ pub(crate) async fn node_source_rows(
          FROM lcm_summary_sources
          WHERE node_id = ?1
          ORDER BY ordinal ASC",
-        libsql::params![node_id.to_string()],
+        params![node_id.to_string()],
     )
     .await
 }
 
 pub(crate) async fn child_summary_nodes(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     child_node_ids: &[String],
 ) -> Result<Vec<Value>, String> {
     if child_node_ids.is_empty() {
         return Ok(Vec::new());
     }
     let placeholders = qmarks(child_node_ids.len());
-    let params: Vec<libsql::Value> = child_node_ids
-        .iter()
-        .cloned()
-        .map(libsql::Value::Text)
-        .collect();
+    let params: Vec<DbValue> = child_node_ids.iter().cloned().map(DbValue::Text).collect();
     let sql = format!(
         "SELECT {NODE_COLUMNS},
                 COALESCE(n.source_time_end, n.created_at) AS recency
@@ -438,18 +430,14 @@ pub(crate) async fn child_summary_nodes(
 }
 
 pub(crate) async fn source_messages(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     message_ids: &[i64],
 ) -> Result<Vec<Value>, String> {
     if message_ids.is_empty() {
         return Ok(Vec::new());
     }
     let placeholders = qmarks(message_ids.len());
-    let params: Vec<libsql::Value> = message_ids
-        .iter()
-        .copied()
-        .map(libsql::Value::Integer)
-        .collect();
+    let params: Vec<DbValue> = message_ids.iter().copied().map(DbValue::Integer).collect();
     let message_columns = message_columns();
     let sql = format!(
         "SELECT {message_columns}
@@ -460,7 +448,7 @@ pub(crate) async fn source_messages(
 }
 
 pub(crate) async fn timeline_message_buckets(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     fmt: &str,
     session_id: Option<&str>,
     limit: i64,
@@ -481,14 +469,14 @@ pub(crate) async fn timeline_message_buckets(
          LIMIT ?1"
     );
     if let Some(session_id) = session_id {
-        query_rows(conn, &sql, libsql::params![limit, session_id.to_string()]).await
+        query_rows(conn, &sql, params![limit, session_id.to_string()]).await
     } else {
-        query_rows(conn, &sql, libsql::params![limit]).await
+        query_rows(conn, &sql, params![limit]).await
     }
 }
 
 pub(crate) async fn timeline_undated_messages(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     session_id: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     let undated_where = if session_id.is_some() {
@@ -503,14 +491,14 @@ pub(crate) async fn timeline_undated_messages(
          {undated_where}"
     );
     if let Some(session_id) = session_id {
-        query_rows(conn, &sql, libsql::params![session_id.to_string()]).await
+        query_rows(conn, &sql, params![session_id.to_string()]).await
     } else {
         query_rows(conn, &sql, ()).await
     }
 }
 
 pub(crate) async fn timeline_summary_buckets(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     fmt: &str,
     session_id: Option<&str>,
     limit: i64,
@@ -530,14 +518,14 @@ pub(crate) async fn timeline_summary_buckets(
          LIMIT ?1"
     );
     if let Some(session_id) = session_id {
-        query_rows(conn, &sql, libsql::params![limit, session_id.to_string()]).await
+        query_rows(conn, &sql, params![limit, session_id.to_string()]).await
     } else {
-        query_rows(conn, &sql, libsql::params![limit]).await
+        query_rows(conn, &sql, params![limit]).await
     }
 }
 
 pub(crate) async fn compression_groups(
-    conn: &libsql::Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     by_node: bool,
     limit: i64,
 ) -> Result<Vec<Value>, String> {
@@ -560,5 +548,5 @@ pub(crate) async fn compression_groups(
          ORDER BY source_token_count DESC, session_id ASC
          LIMIT ?1"
     };
-    query_rows(conn, groups_sql, libsql::params![limit]).await
+    query_rows(conn, groups_sql, params![limit]).await
 }

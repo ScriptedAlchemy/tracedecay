@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
-use libsql::params;
+use crate::db::engine::{Row, params};
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ impl Database {
     /// Fetch a single fingerprint by node id, returning `None` if missing.
     pub async fn get_fingerprint(&self, node_id: &str) -> Result<Option<StoredFingerprint>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash
                    FROM node_fingerprints WHERE node_id = ?1",
@@ -85,7 +85,7 @@ impl Database {
                 operation: "get_fingerprints".to_string(),
             })?;
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash
                    FROM node_fingerprints
@@ -122,7 +122,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<StoredFingerprint>> {
         let mut rows = self
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash
                    FROM node_fingerprints
@@ -151,12 +151,12 @@ impl Database {
 }
 
 pub(super) async fn upsert_fingerprint_in_transaction(
-    transaction: &libsql::Transaction,
+    transaction: &DatabaseWriteTransaction<'_>,
     node_id: &str,
     fp: &crate::redundancy::Fingerprint,
 ) -> Result<()> {
     transaction
-        .execute(
+        .execute_engine(
             "INSERT OR REPLACE INTO node_fingerprints
              (node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -178,7 +178,7 @@ pub(super) async fn upsert_fingerprint_in_transaction(
     Ok(())
 }
 
-fn row_to_fingerprint(row: &libsql::Row) -> Result<StoredFingerprint> {
+fn row_to_fingerprint(row: &Row) -> Result<StoredFingerprint> {
     let shingles_str: String = row.get(4).map_err(|e| TraceDecayError::Database {
         message: format!("failed to read shingles: {e}"),
         operation: "row_to_fingerprint".to_string(),
@@ -217,7 +217,7 @@ fn row_to_fingerprint(row: &libsql::Row) -> Result<StoredFingerprint> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::Database;
-    use crate::db::{DatabaseAuthority, StoredFingerprint};
+    use crate::db::{DatabaseAuthority, StoredFingerprint, TestDatabaseRuntimeMode};
     use crate::redundancy::Fingerprint;
     use crate::types::{Node, NodeKind, Visibility};
 
@@ -265,7 +265,10 @@ mod tests {
         let path = temp.path().join("graph.db");
         let authority =
             DatabaseAuthority::acquire_test(&path, "fingerprint bulk read tests").unwrap();
-        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (db, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
         for id in ["alpha", "beta", "gamma"] {
             db.insert_node(&test_node(id)).await.unwrap();
             db.upsert_fingerprint(id, &test_fingerprint(id))

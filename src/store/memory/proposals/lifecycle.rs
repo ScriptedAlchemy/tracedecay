@@ -14,7 +14,8 @@ use super::{
     compatibility_proposal_request_value, compatibility_proposal_state_label,
     compatibility_proposal_transition_json,
 };
-use libsql::{Transaction, params};
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, FactAssertionId, FactEventId, FactId, FactOwnerV1, ProvenanceId, SourceStoreId,
@@ -44,7 +45,7 @@ fn compatibility_proposal_request_digest(
 }
 
 async fn compatibility_proposal_digest_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
 ) -> FactStoreResult<Option<String>> {
@@ -71,7 +72,7 @@ async fn compatibility_proposal_digest_tx(
 }
 
 async fn compatibility_proposal_for_digest_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     request_digest: &str,
 ) -> FactStoreResult<Option<ProvenanceId>> {
@@ -116,7 +117,7 @@ fn compatibility_proposal_receipt_proposal_id(
 }
 
 pub(in crate::store::memory) async fn compatibility_replay_proposal_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
 ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
@@ -134,7 +135,7 @@ pub(in crate::store::memory) async fn compatibility_replay_proposal_tx(
 
 #[allow(clippy::too_many_arguments)]
 async fn compatibility_insert_proposal_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     proposal_id: &ProvenanceId,
     request: &CompatibilityFactAddCommandV1,
     idempotency_key: &ProvenanceId,
@@ -248,7 +249,7 @@ async fn compatibility_insert_proposal_tx(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
     expected_state: CompatibilityFactProposalStateV1,
@@ -361,7 +362,7 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
 }
 
 pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     proposal_id: ProvenanceId,
     request: &CompatibilityFactAddCommandV1,
     submitter: Option<&ActorId>,
@@ -484,7 +485,7 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
 }
 
 pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
     expected_revision: CompatibilityFactProposalRevisionV1,
@@ -582,7 +583,7 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
 }
 
 async fn compatibility_legacy_proposal_mapping_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     legacy_proposal_id: i64,
@@ -685,7 +686,7 @@ fn compatibility_import_initial_state(
 }
 
 pub(in crate::store::memory) async fn import_legacy_compatibility_fact_proposals_tx(
-    transaction: &Transaction,
+    transaction: &Transaction<'_>,
     request: &CompatibilityFactProposalImportV1,
 ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1> {
     let fixed_source_store_id = compatibility_source_store_id()?;

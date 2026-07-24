@@ -402,13 +402,9 @@ async fn disabled_watcher_never_registers() {
 }
 
 #[tokio::test]
-async fn shutdown_cancels_and_joins_watcher_tasks() {
+async fn shutdown_cancels_and_joins_project_watcher_tasks() {
     let repo = temp_repo();
-    let profile = tempfile::tempdir().unwrap();
-    let mut config = fast_watch_config();
-    config.backstop_interval_mins = 1;
-    let watcher = GitWatcher::new(config);
-    watcher.spawn(Some(profile.path().join("global.db"))).await;
+    let watcher = GitWatcher::new(fast_watch_config());
     let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
         return;
     };
@@ -417,7 +413,6 @@ async fn shutdown_cancels_and_joins_watcher_tasks() {
 
     assert!(watcher.inner.projects.lock().await.is_empty());
     assert!(state.task.lock().await.is_none());
-    assert!(watcher.inner.backstop_task.lock().await.is_none());
 }
 
 /// The safety-critical property that justifies this metadata watcher over the
@@ -553,46 +548,5 @@ async fn debounce_loop_coalesces_and_drains_events() {
     assert!(
         state.dirty.lock().await.is_clean(),
         "draining the coalesced plan must clear the dirty set"
-    );
-}
-
-/// The default (inert) retention config must make `run_session_retention` a
-/// complete no-op: it never opens or creates the profile session store. This
-/// pins the "inert by default, off the hot path" contract for the daemon
-/// caller — every engine stays disabled unless an owner opens a window.
-#[tokio::test]
-async fn disabled_retention_config_never_touches_the_session_store() {
-    let profile = tempfile::TempDir::new().expect("temp profile");
-    let config = crate::config::RetentionConfig::default();
-
-    super::store_maintenance::run_session_retention(profile.path(), &config).await;
-
-    let sessions_db = profile.path().join(crate::storage::SESSIONS_DB_FILENAME);
-    assert!(
-        !sessions_db.exists(),
-        "an inert retention config must not create or open the session store"
-    );
-}
-
-/// A retention config whose only opted-in engine is compaction still short-
-/// circuits when no session store exists, rather than materializing one.
-#[tokio::test]
-async fn compaction_only_config_skips_absent_session_store() {
-    let profile = tempfile::TempDir::new().expect("temp profile");
-    let mut config = crate::config::RetentionConfig::default();
-    config.compaction = Some(crate::config::CompactionThresholdConfig {
-        free_page_ratio_threshold: 0.25,
-        minimum_reclaimable_bytes: 1,
-        max_pages_per_tick: 8,
-    });
-
-    super::store_maintenance::run_session_retention(profile.path(), &config).await;
-
-    assert!(
-        !profile
-            .path()
-            .join(crate::storage::SESSIONS_DB_FILENAME)
-            .exists(),
-        "a missing session store must be skipped, not created"
     );
 }

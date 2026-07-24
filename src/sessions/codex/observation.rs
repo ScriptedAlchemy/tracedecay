@@ -21,7 +21,6 @@ use super::events;
 use super::meta::{nested_string_field, session_meta_with_provenance, string_field};
 use super::records::{response_item_tool_name, timestamp_from_record};
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::global_db::GlobalDb;
 use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
@@ -46,13 +45,11 @@ pub struct CodexJsonlAdmissionProgress {
 /// before a resumed byte cursor.
 pub async fn try_admit_codex_jsonl_observations_for_project(
     path: &Path,
-    db: &GlobalDb,
     project_root: &Path,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::unregistered_for_project(
         project_id.clone(),
     ));
     try_admit_codex_jsonl_observations_for_project_with_admission(
@@ -69,7 +66,7 @@ pub async fn try_admit_codex_jsonl_observations_for_project(
 ///
 /// The project scheduler constructs this facade from its authoritative project
 /// identity and may attach additional admission evidence before source routing.
-pub(crate) async fn try_admit_codex_jsonl_observations_for_project_with_admission(
+pub async fn try_admit_codex_jsonl_observations_for_project_with_admission(
     path: &Path,
     project_root: &Path,
     project_id: ProjectId,
@@ -94,19 +91,35 @@ pub(crate) async fn try_admit_codex_jsonl_observations_for_project_with_admissio
 /// profile-owned rollout.
 pub async fn try_admit_codex_jsonl_observations_for_profile(
     path: &Path,
-    db: &GlobalDb,
     session_id: Option<&str>,
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::unregistered_for_profile());
+    try_admit_codex_jsonl_observations_for_profile_with_admission(
+        path,
+        session_id,
+        registered_roots,
+        &admission,
+        max_new_bytes,
+    )
+    .await
+}
+
+pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission(
+    path: &Path,
+    session_id: Option<&str>,
+    registered_roots: &[PathBuf],
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     try_admit_codex_jsonl_observations(
         path,
         CodexObservationAdmission::Profile {
             session_id,
             registered_roots,
         },
-        &admission,
+        admission,
         max_new_bytes,
     )
     .await

@@ -108,6 +108,51 @@ fn dispatch_controls_retain_the_callers_deadline_and_live_cancellation_identity(
 }
 
 #[test]
+fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
+    let catalog = super::application_surface_catalog().expect("application catalog");
+    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .expect("application profile");
+
+    for name in tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+        let operation = ApplicationSurfaceOperation::from_tool_name(name)
+            .unwrap_or_else(|| panic!("{name} must be a canonical surface operation"));
+        assert_eq!(operation.as_str(), name);
+        for surface in [
+            tracedecay_tool_catalog::BindingSurface::Cli,
+            tracedecay_tool_catalog::BindingSurface::Mcp,
+            tracedecay_tool_catalog::BindingSurface::Http,
+        ] {
+            assert!(
+                crate::daemon_client::BindingResolver::resolve_binding(
+                    &resolver,
+                    surface,
+                    &crate::daemon_client::BindingResolution {
+                        profile_id: profile_id.clone(),
+                        operation: tracedecay_tool_catalog::SurfaceOperationName::new(name)
+                            .expect("operation"),
+                        protocol_revision: 1,
+                        negotiated_features: BTreeSet::new(),
+                    },
+                )
+                .is_some(),
+                "{name} must resolve on {surface:?}"
+            );
+        }
+    }
+
+    assert!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationList,
+            serde_json::json!({}),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn sse_item_maps_to_content_free_delivery_lifecycle() {
     let event = StreamEvent::item(7, "content-is-not-observed").expect("stream item");
     assert_eq!(

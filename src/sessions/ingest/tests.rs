@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_domain::ProjectId;
 
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{
     FileDiscoveryReport, ParsedTranscript, SessionDraft, StoredCursor, TranscriptDiscoveryBounds,
@@ -21,15 +21,22 @@ use super::failure::{
     plan_round_robin_admission, scheduling_write_required,
 };
 use super::project::{
-    ingest_project_sources_for_provider, parse_git_log_commits, push_file_source,
+    ingest_project_sources_for_provider_without_registered_authority, parse_git_log_commits,
+    push_file_source,
 };
 use super::scheduler::{
     DiscoveredIngestUnit, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY, admit_fair_ingest_units,
     discover_ingest_units, finish_user_provider_coverage, ingest_sources_bounded,
     merge_project_provider_backpressure, plan_user_provider_admission, read_ingest_frontier,
 };
-use super::startup::{StartupUserIngestGuard, TranscriptIngestOutcome};
-use super::user::{provider_selected, registered_project_roots_from};
+use super::startup::{
+    StartupUserIngestGuard, TranscriptIngestOutcome,
+    ingest_user_global_sources_for_startup_with_db_without_registered_authority,
+};
+use super::user::{
+    ingest_user_global_sources_for_provider_with_roots_without_registered_authority,
+    provider_selected, registered_project_roots_from,
+};
 use super::user_provider::try_ingest_file_source_bounded;
 
 const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
@@ -51,14 +58,38 @@ fn scheduler_test_project_id() -> ProjectId {
     .unwrap()
 }
 
+async fn profile_test_runtime(temp: &tempfile::TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(temp.path().join("profile"))
+        .await
+        .unwrap()
+}
+
+async fn project_test_runtime(
+    temp: &tempfile::TempDir,
+    project_root: &Path,
+    project_id: ProjectId,
+) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::project(temp.path().join("profile"), project_root, project_id)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn missing_project_identity_fails_before_ingest_writes() {
     let temp = tempfile::tempdir().unwrap();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = profile_test_runtime(&temp).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
         .unwrap();
 
-    let outcome = ingest_project_sources_for_provider(&db, temp.path(), None, None, true).await;
+    let outcome = ingest_project_sources_for_provider_without_registered_authority(
+        db,
+        temp.path(),
+        None,
+        None,
+        true,
+    )
+    .await;
 
     assert_eq!(outcome.failures.len(), 1);
     assert_eq!(outcome.failures[0].reason_code, "project_identity_missing");
@@ -72,6 +103,91 @@ async fn missing_project_identity_fails_before_ingest_writes() {
 }
 
 #[tokio::test]
+async fn unregistered_project_authority_fails_before_ingest_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = scheduler_test_project_id();
+    let runtime = project_test_runtime(&temp, temp.path(), project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+
+    let outcome = ingest_project_sources_for_provider_without_registered_authority(
+        db,
+        temp.path(),
+        Some(project_id),
+        Some(SessionProvider::Vibe),
+        true,
+    )
+    .await;
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(
+        outcome.failures[0].reason_code,
+        "registered_authority_unavailable"
+    );
+    assert_eq!(outcome.stats, TranscriptIngestStats::default());
+    assert!(
+        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn unregistered_profile_authority_fails_before_ingest_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = profile_test_runtime(&temp).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+
+    let outcome = ingest_user_global_sources_for_provider_with_roots_without_registered_authority(
+        db,
+        temp.path(),
+        Some(SessionProvider::Codex),
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(
+        outcome.failures[0].reason_code,
+        "registered_authority_unavailable"
+    );
+    assert_eq!(outcome.stats, TranscriptIngestStats::default());
+    assert!(
+        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn unregistered_startup_authority_fails_before_registry_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = profile_test_runtime(&temp).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+
+    let outcome = ingest_user_global_sources_for_startup_with_db_without_registered_authority(
+        db,
+        db,
+        temp.path(),
+    )
+    .await;
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(
+        outcome.failures[0].reason_code,
+        "registered_authority_unavailable"
+    );
+    assert_eq!(outcome.stats, TranscriptIngestStats::default());
+}
+
+#[tokio::test]
 async fn registered_project_roots_include_modern_registry_aliases() {
     let temp = tempfile::tempdir().unwrap();
     let canonical = temp.path().join("repo");
@@ -80,17 +196,16 @@ async fn registered_project_roots_include_modern_registry_aliases() {
     std::fs::create_dir_all(&worktree).unwrap();
     let canonical = std::fs::canonicalize(canonical).unwrap();
     let worktree = std::fs::canonicalize(worktree).unwrap();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+    let runtime = profile_test_runtime(&temp).await;
+    runtime
+        .upsert_code_project("project-1", &canonical, None, None, None)
         .await
         .unwrap();
-    db.upsert_code_project("project-1", &canonical, None, None, None)
+    runtime
+        .upsert_project_alias(&worktree, "project-1")
         .await
         .unwrap();
-    db.upsert_project_alias(&worktree, "project-1")
-        .await
-        .unwrap();
-
-    let roots = registered_project_roots_from(&db).await.unwrap();
+    let roots = runtime.registered_project_paths_for_test().await.unwrap();
 
     assert!(roots.contains(&canonical));
     assert!(roots.contains(&worktree));
@@ -108,14 +223,12 @@ async fn registered_project_roots_preserve_non_unicode_current_root() {
         .join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+    let runtime = profile_test_runtime(&temp).await;
+    runtime
+        .upsert_code_project("project-native", &root, None, None, None)
         .await
         .unwrap();
-    db.upsert_code_project("project-native", &root, None, None, None)
-        .await
-        .unwrap();
-
-    let roots = registered_project_roots_from(&db).await.unwrap();
+    let roots = runtime.registered_project_paths_for_test().await.unwrap();
 
     assert!(roots.contains(&root));
 }
@@ -583,11 +696,12 @@ async fn file_provider_reserves_one_aggregate_byte_budget_across_paths() {
         fail: false,
         budget_log: Some(Arc::clone(&budget_log)),
     };
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = profile_test_runtime(&temp).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
         .unwrap();
 
-    try_ingest_file_source_bounded(&db, &source, &project, 10)
+    try_ingest_file_source_bounded(db, &source, &project, 10)
         .await
         .unwrap();
 
@@ -881,8 +995,9 @@ async fn source_failure_is_isolated_and_does_not_block_siblings() {
     let bad_path = temp.path().join("bad.jsonl");
     std::fs::write(&ok_path, b"{}\n").unwrap();
     std::fs::write(&bad_path, b"{}\n").unwrap();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let sources = vec![
         boxed_source(FakeSource {
@@ -910,7 +1025,7 @@ async fn source_failure_is_isolated_and_does_not_block_siblings() {
         ..TEST_INGEST_BOUNDS
     };
     let outcome = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -955,8 +1070,9 @@ async fn retryable_source_respects_retry_and_pass_byte_bounds() {
     let project_id = scheduler_test_project_id();
     let path = temp.path().join("retryable.jsonl");
     std::fs::write(&path, b"{}\n").unwrap();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let budget_log = Arc::new(Mutex::new(Vec::new()));
     let sources = vec![boxed_source(FakeSource {
@@ -973,7 +1089,7 @@ async fn retryable_source_respects_retry_and_pass_byte_bounds() {
     };
 
     let outcome = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -993,8 +1109,9 @@ async fn aggregate_byte_budget_is_granted_once_across_the_pass() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project_id = scheduler_test_project_id();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let budget_log = Arc::new(Mutex::new(Vec::new()));
     let mut sources = Vec::new();
@@ -1014,7 +1131,7 @@ async fn aggregate_byte_budget_is_granted_once_across_the_pass() {
         ..TEST_INGEST_BOUNDS
     };
     let outcome = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1039,8 +1156,9 @@ async fn zero_byte_pass_defers_work_without_frontier_advance() {
     let project_id = scheduler_test_project_id();
     let path = temp.path().join("a.jsonl");
     std::fs::write(&path, b"{}\n").unwrap();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let budget_log = Arc::new(Mutex::new(Vec::new()));
     let sources = vec![boxed_source(FakeSource {
@@ -1055,7 +1173,7 @@ async fn zero_byte_pass_defers_work_without_frontier_advance() {
         ..TEST_INGEST_BOUNDS
     };
     let outcome = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1075,7 +1193,7 @@ async fn zero_byte_pass_defers_work_without_frontier_advance() {
     ));
     assert!(!outcome.scheduling_state_written);
     assert_eq!(
-        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(0)
     );
 }
@@ -1090,8 +1208,9 @@ async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() 
     let second_path = temp.path().join("b.jsonl");
     std::fs::write(&first_path, b"{}\n").unwrap();
     std::fs::write(&second_path, b"{}\n").unwrap();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let cancellation = ObservationCancellation::default();
     let sources: Vec<Box<dyn TranscriptSource>> = vec![
@@ -1117,7 +1236,7 @@ async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() 
         ..TEST_INGEST_BOUNDS
     };
     let outcome =
-        ingest_sources_bounded(&db, &project, &project_id, &sources, bounds, &cancellation).await;
+        ingest_sources_bounded(db, &project, &project_id, &sources, bounds, &cancellation).await;
 
     assert_eq!(outcome.units_completed, 1);
     assert!(cancellation.is_cancelled());
@@ -1129,7 +1248,7 @@ async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() 
     );
     assert!(!outcome.scheduling_state_written);
     assert_eq!(
-        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(0)
     );
 }
@@ -1140,8 +1259,9 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project_id = scheduler_test_project_id();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let mut sources = Vec::new();
     for (provider, name) in [("a", "a.jsonl"), ("b", "b.jsonl"), ("c", "c.jsonl")] {
@@ -1160,7 +1280,7 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
         ..TEST_INGEST_BOUNDS
     };
     let first = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1174,14 +1294,14 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
     ));
     assert!(first.scheduling_state_written);
     assert_eq!(
-        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(1)
     );
 
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
     let cancelled =
-        ingest_sources_bounded(&db, &project, &project_id, &sources, bounds, &cancellation).await;
+        ingest_sources_bounded(db, &project, &project_id, &sources, bounds, &cancellation).await;
     assert!(
         cancelled
             .failures
@@ -1193,12 +1313,12 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
         "cancellation must not advance the scheduling frontier"
     );
     assert_eq!(
-        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(1)
     );
 
     let second = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1210,7 +1330,7 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
     // Frontier advanced past source 0, so the next single-unit pass starts at 1.
     assert!(second.scheduling_state_written);
     assert_eq!(
-        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(2)
     );
 }
@@ -1221,8 +1341,9 @@ async fn production_frontier_rotates_before_a_continuously_busy_source() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project_id = scheduler_test_project_id();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let first_log = Arc::new(Mutex::new(Vec::new()));
     let second_log = Arc::new(Mutex::new(Vec::new()));
@@ -1252,7 +1373,7 @@ async fn production_frontier_rotates_before_a_continuously_busy_source() {
     };
 
     let first = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1261,7 +1382,7 @@ async fn production_frontier_rotates_before_a_continuously_busy_source() {
     )
     .await;
     let second = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1282,8 +1403,9 @@ async fn terminal_source_failure_rotates_to_a_healthy_peer() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project_id = scheduler_test_project_id();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let healthy_log = Arc::new(Mutex::new(Vec::new()));
     let sources = vec![
@@ -1309,7 +1431,7 @@ async fn terminal_source_failure_rotates_to_a_healthy_peer() {
     };
 
     let failed = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1318,7 +1440,7 @@ async fn terminal_source_failure_rotates_to_a_healthy_peer() {
     )
     .await;
     let healthy = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1339,8 +1461,9 @@ async fn attempted_no_op_does_not_write_partial_scheduling_state() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project_id = scheduler_test_project_id();
-    let db = GlobalDb::open_at(&temp.path().join("global.db"))
-        .await
+    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
         .unwrap();
     let first_attempts = Arc::new(Mutex::new(0usize));
     let second_attempts = Arc::new(Mutex::new(0usize));
@@ -1365,7 +1488,7 @@ async fn attempted_no_op_does_not_write_partial_scheduling_state() {
     };
 
     let first = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1374,7 +1497,7 @@ async fn attempted_no_op_does_not_write_partial_scheduling_state() {
     )
     .await;
     let second = ingest_sources_bounded(
-        &db,
+        db,
         &project,
         &project_id,
         &sources,
@@ -1392,7 +1515,7 @@ async fn attempted_no_op_does_not_write_partial_scheduling_state() {
     assert_eq!(*first_attempts.lock().unwrap(), 1);
     assert_eq!(*second_attempts.lock().unwrap(), 1);
     assert_eq!(
-        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(0)
     );
 }

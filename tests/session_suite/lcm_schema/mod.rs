@@ -1,44 +1,34 @@
 #![allow(clippy::collapsible_if)] // test scaffolding
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::oneshot;
-use tokio::time::{sleep, timeout};
-use tracedecay::global_db::GlobalDb;
+use tokio::time::timeout;
 
-/// Counts BUSY/LOCKED retries and signals once on the first observation.
-struct ContentionProbe {
-    busy_retries: AtomicUsize,
-    first_busy: Mutex<Option<oneshot::Sender<()>>>,
+use crate::db::engine::{Connection, TestConnection, TransactionBehavior, params};
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+
+async fn open_global_db(db_path: &Path) -> crate::errors::Result<TestConnection> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let connection = TestConnection::open(db_path);
+    crate::global_db::ensure_registered_schema(&connection).await?;
+    Ok(connection)
 }
 
-impl ContentionProbe {
-    fn new(first_busy: oneshot::Sender<()>) -> Self {
-        Self {
-            busy_retries: AtomicUsize::new(0),
-            first_busy: Mutex::new(Some(first_busy)),
-        }
+async fn open_read_only_global_db(
+    db_path: &Path,
+) -> crate::errors::Result<Option<(DatabaseAuthority, Database)>> {
+    if !db_path.try_exists()? {
+        return Ok(None);
     }
-
-    fn observe_busy(&self) {
-        let previous = self.busy_retries.fetch_add(1, Ordering::SeqCst);
-        if previous == 0
-            && let Some(tx) = self
-                .first_busy
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-        {
-            let _ = tx.send(());
-        }
-    }
-
-    fn busy_retries(&self) -> usize {
-        self.busy_retries.load(Ordering::SeqCst)
-    }
+    let authority = DatabaseAuthority::acquire_test(db_path, "LCM schema read-only fixture")?;
+    let (database, _) =
+        Database::publish_test_runtime(db_path, &authority, TestDatabaseRuntimeMode::ReadOnly)
+            .await?;
+    Ok(Some((authority, database)))
 }
 
 async fn create_legacy_sessions_db(db_path: &Path) {
@@ -48,8 +38,8 @@ async fn create_legacy_sessions_db(db_path: &Path) {
 async fn create_legacy_sessions_db_with_text(db_path: &Path, legacy_text: &str) {
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-    let old_db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = old_db.connect().unwrap();
+    let old_db = TestConnection::open(db_path);
+    let conn = (*old_db).clone();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -87,7 +77,7 @@ async fn create_legacy_sessions_db_with_text(db_path: &Path, legacy_text: &str) 
     conn.execute(
         "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
          VALUES ('cursor', 'legacy-message', 'legacy-session', 'assistant', 1, ?1)",
-        libsql::params![legacy_text],
+        params![legacy_text],
     )
     .await
     .unwrap();
@@ -96,12 +86,12 @@ async fn create_legacy_sessions_db_with_text(db_path: &Path, legacy_text: &str) 
 }
 
 async fn table_exists(db_path: &Path, table: &str) -> bool {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE name = ?1 AND type IN ('table', 'view')",
-            libsql::params![table],
+            params![table],
         )
         .await
         .unwrap();
@@ -109,47 +99,17 @@ async fn table_exists(db_path: &Path, table: &str) -> bool {
 }
 
 async fn row_count(db_path: &Path, table: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let sql = format!("SELECT COUNT(*) FROM {table}");
     let mut rows = conn.query(&sql, ()).await.unwrap();
     let row = rows.next().await.unwrap().unwrap();
     row.get(0).unwrap()
 }
 
-async fn execute_with_busy_retry(
-    conn: &libsql::Connection,
-    sql: &str,
-    probe: Option<&ContentionProbe>,
-) -> Result<(), String> {
-    const MAX_ATTEMPTS: usize = 20;
-    for attempt in 0..MAX_ATTEMPTS {
-        match timeout(Duration::from_millis(500), conn.execute(sql, ())).await {
-            Ok(Ok(_)) => return Ok(()),
-            Ok(Err(error)) => {
-                let message = error.to_string();
-                let lower = message.to_ascii_lowercase();
-                let retryable = lower.contains("busy") || lower.contains("locked");
-                if retryable && let Some(probe) = probe {
-                    probe.observe_busy();
-                }
-                if !retryable || attempt + 1 == MAX_ATTEMPTS {
-                    return Err(message);
-                }
-            }
-            Err(_) if attempt + 1 == MAX_ATTEMPTS => {
-                return Err("cursor rotation timed out".to_string());
-            }
-            Err(_) => {}
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-    Err("cursor rotation exhausted retries".to_string())
-}
-
 async fn cursor_key_history(db_path: &Path) -> Vec<(i64, i64, Option<i64>)> {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT key_version, created_at, retired_at
@@ -190,8 +150,8 @@ fn assert_valid_cursor_chain(history: &[(i64, i64, Option<i64>)]) {
 }
 
 async fn fts_legacy_message_ids(db_path: &Path) -> Vec<String> {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT raw.message_id
@@ -211,8 +171,12 @@ async fn fts_legacy_message_ids(db_path: &Path) -> Vec<String> {
 }
 
 async fn schema_version(db_path: &Path) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
+    schema_version_on(&conn).await
+}
+
+async fn schema_version_on(conn: &Connection) -> i64 {
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
@@ -225,8 +189,8 @@ async fn schema_version(db_path: &Path) -> i64 {
 }
 
 async fn migration_applied_at(db_path: &Path) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
@@ -239,26 +203,26 @@ async fn migration_applied_at(db_path: &Path) -> i64 {
 }
 
 async fn set_migration_applied_at(db_path: &Path, applied_at: i64) {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     conn.execute(
         "UPDATE session_schema_migrations
          SET applied_at = ?1
          WHERE name = 'lcm'",
-        libsql::params![applied_at],
+        params![applied_at],
     )
     .await
     .unwrap();
 }
 
 async fn set_migration_version(db_path: &Path, version: i64) {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     conn.execute(
         "UPDATE session_schema_migrations
          SET version = ?1
          WHERE name = 'lcm'",
-        libsql::params![version],
+        params![version],
     )
     .await
     .unwrap();
@@ -268,8 +232,8 @@ async fn set_migration_version(db_path: &Path, version: i64) {
 /// metadata_json indexed alongside index_text) and stamps the requested
 /// schema version, simulating a database written by an older tracedecay.
 async fn downgrade_raw_fts_to_v2(db_path: &Path) {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
          DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
@@ -309,8 +273,8 @@ async fn downgrade_raw_fts_to_v2(db_path: &Path) {
 }
 
 async fn fts_message_ids_matching(db_path: &Path, query: &str) -> Vec<String> {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT raw.message_id
@@ -318,7 +282,7 @@ async fn fts_message_ids_matching(db_path: &Path, query: &str) -> Vec<String> {
              JOIN lcm_raw_messages raw ON raw.store_id = lcm_raw_messages_fts.rowid
              WHERE lcm_raw_messages_fts MATCH ?1
              ORDER BY raw.message_id",
-            libsql::params![query],
+            params![query],
         )
         .await
         .unwrap();
@@ -330,8 +294,8 @@ async fn fts_message_ids_matching(db_path: &Path, query: &str) -> Vec<String> {
 }
 
 async fn raw_fts_object_sql(db_path: &Path) -> Vec<String> {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT sql FROM sqlite_master
@@ -351,12 +315,12 @@ async fn raw_fts_object_sql(db_path: &Path) -> Vec<String> {
 }
 
 async fn normalized_trigger_sql(db_path: &Path, trigger: &str) -> String {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
-            libsql::params![trigger],
+            params![trigger],
         )
         .await
         .unwrap();
@@ -546,8 +510,8 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
 ];
 
 async fn temporal_schema_object_catalog(db_path: &Path) -> Vec<(String, String)> {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT type, name, tbl_name
@@ -586,7 +550,7 @@ async fn temporal_schema_object_catalog(db_path: &Path) -> Vec<(String, String)>
     objects
 }
 
-async fn explain_query_plan(conn: &libsql::Connection, sql: &str) -> Vec<String> {
+async fn explain_query_plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut rows = conn
         .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
         .await
@@ -598,7 +562,7 @@ async fn explain_query_plan(conn: &libsql::Connection, sql: &str) -> Vec<String>
     details
 }
 
-async fn index_key_columns(conn: &libsql::Connection, index: &str) -> Vec<(String, i64)> {
+async fn index_key_columns(conn: &Connection, index: &str) -> Vec<(String, i64)> {
     let mut rows = conn
         .query(&format!("PRAGMA index_xinfo('{index}')"), ())
         .await
@@ -623,7 +587,7 @@ async fn index_key_columns(conn: &libsql::Connection, index: &str) -> Vec<(Strin
         .collect()
 }
 
-async fn table_index_names(conn: &libsql::Connection, table: &str) -> Vec<String> {
+async fn table_index_names(conn: &Connection, table: &str) -> Vec<String> {
     let mut rows = conn
         .query(&format!("PRAGMA index_list('{table}')"), ())
         .await
@@ -636,8 +600,8 @@ async fn table_index_names(conn: &libsql::Connection, table: &str) -> Vec<String
 }
 
 async fn temporal_schema_version(db_path: &Path) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(db_path);
+    let conn = (*db).clone();
     let mut rows = conn
         .query(
             "SELECT version
@@ -652,8 +616,8 @@ async fn temporal_schema_version(db_path: &Path) -> i64 {
 }
 
 async fn copy_database_for_temporal_restart(source: &Path, target: &Path) {
-    let db = libsql::Builder::new_local(source).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = TestConnection::open(source);
+    let conn = (*db).clone();
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .await
         .unwrap();

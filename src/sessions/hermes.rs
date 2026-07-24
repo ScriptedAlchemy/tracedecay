@@ -32,15 +32,14 @@ mod tests;
 
 pub use ingest::{
     HermesSweepOutcome, ProjectIngestDestination, ingest_for_project, ingest_for_project_capped,
-    ingest_for_projects, ingest_homes, ingest_homes_capped, ingest_homes_for_projects,
+    ingest_for_project_capped_with_admission, ingest_for_projects, ingest_homes,
+    ingest_homes_capped, ingest_homes_capped_with_admission, ingest_homes_for_projects,
     ingest_user_homes, ingest_user_homes_capped, ingest_user_sessions_capped,
 };
-pub(crate) use ingest::{ingest_for_project_capped_with_admission, ingest_legacy_pinned_profile};
+pub(crate) use ingest::{ingest_legacy_pinned_profile, ingest_user_sessions_capped_with_admission};
 
 #[cfg(all(test, windows))]
 pub(crate) use coverage::sqlite_incarnation;
-#[cfg(test)]
-pub(crate) use coverage::{admit_rows, drain_hermes_projections};
 #[cfg(test)]
 pub(crate) use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,

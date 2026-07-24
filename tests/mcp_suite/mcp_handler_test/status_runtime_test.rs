@@ -3,8 +3,7 @@
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
-use std::sync::Arc;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::sessions::SessionRecord;
 
 // ---------------------------------------------------------------------------
@@ -65,28 +64,33 @@ async fn status_can_omit_verbose_branch_diagnostics() {
 #[tokio::test]
 async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
     let (cg, _env, dir) = setup_empty_project().await;
-    let db = Arc::new(open_active_project_session_db(&cg).await);
+    let runtime = open_active_project_session_db(&cg).await;
     let transcript = dir.path().join("claude-backlog.jsonl");
     let file = fs::File::create(&transcript).unwrap();
     file.set_len(tracedecay::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1)
         .unwrap();
     assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "claude".to_string(),
-            session_id: "claude-backlog".to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some("Claude backlog".to_string()),
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: Some(transcript.to_string_lossy().to_string()),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "claude".to_string(),
+                    session_id: "claude-backlog".to_string(),
+                    project_key: cg.project_root().to_string_lossy().to_string(),
+                    project_path: cg.project_root().to_string_lossy().to_string(),
+                    title: Some("Claude backlog".to_string()),
+                    started_at: Some(1),
+                    ended_at: None,
+                    transcript_path: Some(transcript.to_string_lossy().to_string()),
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                }
+            )
+            .await
+            .unwrap()
     );
 
     let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
@@ -96,7 +100,7 @@ async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
         None,
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions {
-            session_authorities: tracedecay::mcp::tools::SessionAuthorities::new(Some(&db), None),
+            session_authorities: runtime.mcp_session_authorities(),
             ..Default::default()
         },
     )
@@ -113,7 +117,7 @@ async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
 #[tokio::test]
 async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
     let (cg, _env, dir) = setup_empty_project().await;
-    let db = Arc::new(open_active_project_session_db(&cg).await);
+    let runtime = open_active_project_session_db(&cg).await;
     let transcript = dir.path().join("cursor-backlog.jsonl");
     fs::write(&transcript, b"pending cursor transcript").unwrap();
     for (session_id, transcript_path) in [
@@ -124,22 +128,27 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         ),
     ] {
         assert!(
-            db.upsert_session(&SessionRecord {
-                provider: "cursor".to_string(),
-                session_id: session_id.to_string(),
-                project_key: cg.project_root().to_string_lossy().to_string(),
-                project_path: cg.project_root().to_string_lossy().to_string(),
-                title: None,
-                started_at: Some(1),
-                ended_at: None,
-                transcript_path: Some(transcript_path),
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
-            .await
+            runtime
+                .upsert_session_for_test(
+                    HostAdmissionScope::Project,
+                    &SessionRecord {
+                        provider: "cursor".to_string(),
+                        session_id: session_id.to_string(),
+                        project_key: cg.project_root().to_string_lossy().to_string(),
+                        project_path: cg.project_root().to_string_lossy().to_string(),
+                        title: None,
+                        started_at: Some(1),
+                        ended_at: None,
+                        transcript_path: Some(transcript_path),
+                        metadata_json: None,
+                        parent_session_id: None,
+                        is_subagent: false,
+                        agent_id: None,
+                        parent_tool_use_id: None,
+                    }
+                )
+                .await
+                .unwrap()
         );
     }
 
@@ -150,7 +159,7 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         None,
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions {
-            session_authorities: tracedecay::mcp::tools::SessionAuthorities::new(Some(&db), None),
+            session_authorities: runtime.mcp_session_authorities(),
             ..Default::default()
         },
     )
@@ -286,7 +295,7 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
         db["node_count"].as_u64().unwrap_or(0) > 0,
         "fixture indexed > 0 nodes"
     );
-    // journal_mode pragma should be readable on a libsql connection.
+    // journal_mode should remain visible through the canonical database status surface.
     assert!(db["journal_mode"].is_string() || db["journal_mode"].is_null());
     assert!(db.get("authority_audit_ok").is_none());
     assert!(db.get("authority_audit_error").is_none());
@@ -295,22 +304,15 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
 #[tokio::test]
 async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
     let (cg, _dir) = setup_project().await;
-    let registry_dir = test_temp_dir();
-    let registry = GlobalDb::open_at(&registry_dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_runtime",
         json!({ "authority_audit": true, "format": "json" }),
-        None,
-        None,
-        Some(&registry),
-        false,
     )
-    .await
-    .unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    .await;
+    let parsed: serde_json::Value =
+        serde_json::from_str(extract_real_server_text(&result)).unwrap();
     let db = &parsed["database"];
     assert_eq!(db["authority_audit_ok"], true);
     assert!(db["authority_audit_error"].is_null());

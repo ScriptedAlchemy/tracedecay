@@ -1043,7 +1043,10 @@ mod tests {
     async fn codex_session_context_resolves_global_only_and_preserves_nudge() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-        let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+        let gdb =
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .unwrap();
 
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();

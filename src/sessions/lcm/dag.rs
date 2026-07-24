@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use libsql::{Connection, Value, params};
-
-use crate::global_db::session_temporal_operations;
+use crate::{
+    db::engine::{Executor, QueryExecutor, Value, params},
+    global_db::session_temporal_operations,
+};
 
 use super::types::LcmImmutableSummaryPublication;
 use super::{
@@ -11,7 +12,7 @@ use super::{
 };
 
 pub(crate) async fn insert_summary_node_in_transaction(
-    conn: &Connection,
+    conn: &impl Executor,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
     let summary_hash = raw::sha256_hex(&draft.summary_text);
@@ -36,12 +37,33 @@ pub(crate) async fn insert_summary_node_in_transaction(
 }
 
 pub(crate) async fn expand_summary_node(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     node_id: &str,
 ) -> Result<LcmSummaryExpansion, LcmError> {
-    let summary = load_summary_node(conn, provider, session_id, node_id).await?;
+    expand_summary_node_with_content(conn, provider, session_id, node_id, true).await
+}
+
+pub(crate) async fn expand_summary_node_metadata(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    node_id: &str,
+) -> Result<LcmSummaryExpansion, LcmError> {
+    expand_summary_node_with_content(conn, provider, session_id, node_id, false).await
+}
+
+async fn expand_summary_node_with_content(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    node_id: &str,
+    include_content: bool,
+) -> Result<LcmSummaryExpansion, LcmError> {
+    let summary =
+        load_summary_node_with_content(conn, provider, session_id, node_id, include_content)
+            .await?;
     let mut raw_store_ids = Vec::new();
     let mut child_node_ids = Vec::new();
     for source_ref in &summary.source_refs {
@@ -50,8 +72,8 @@ pub(crate) async fn expand_summary_node(
             LcmSourceRef::SummaryNode { node_id } => child_node_ids.push(node_id.clone()),
         }
     }
-    let raw_sources = load_raw_messages_by_store_ids(conn, &raw_store_ids).await?;
-    let child_sources = load_summary_nodes_by_ids(conn, &child_node_ids).await?;
+    let raw_sources = load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content).await?;
+    let child_sources = load_summary_nodes_by_ids(conn, &child_node_ids, include_content).await?;
 
     let mut sources = Vec::with_capacity(summary.source_refs.len());
 
@@ -112,7 +134,7 @@ pub(crate) struct LcmUncondensedSummaryNode {
 /// collapsed across all depths in one query; replay assembly consumes the
 /// result ordered by lineage position (then depth, highest first).
 pub(crate) async fn load_uncondensed_summary_nodes(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmUncondensedSummaryNode>, LcmError> {
@@ -226,12 +248,22 @@ pub fn summary_node_id(
 }
 
 pub(crate) async fn load_summary_node(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     node_id: &str,
 ) -> Result<LcmSummaryNode, LcmError> {
-    let node = load_summary_node_by_id(conn, node_id).await?;
+    load_summary_node_with_content(conn, provider, session_id, node_id, true).await
+}
+
+async fn load_summary_node_with_content(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    node_id: &str,
+    include_content: bool,
+) -> Result<LcmSummaryNode, LcmError> {
+    let node = load_summary_node_by_id(conn, node_id, include_content).await?;
     if node.provider == provider && node.session_id == session_id {
         Ok(node)
     } else {
@@ -240,19 +272,23 @@ pub(crate) async fn load_summary_node(
 }
 
 async fn load_summary_node_by_id(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
+    include_content: bool,
 ) -> Result<LcmSummaryNode, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count, source_time_start,
-                    source_time_end, expand_hint, metadata_json, created_at
-             FROM lcm_summary_nodes
-             WHERE node_id = ?1",
-            params![node_id],
-        )
-        .await?;
+    let summary_text = if include_content {
+        "summary_text"
+    } else {
+        "'' AS summary_text"
+    };
+    let sql = format!(
+        "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
+                summary_hash, summary_token_count, source_token_count, source_time_start,
+                source_time_end, expand_hint, metadata_json, created_at
+         FROM lcm_summary_nodes
+         WHERE node_id = ?1"
+    );
+    let mut rows = conn.query(&sql, params![node_id]).await?;
     let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
     let source_refs = load_summary_source_refs(conn, node_id).await?;
     Ok(LcmSummaryNode {
@@ -275,7 +311,7 @@ async fn load_summary_node_by_id(
 }
 
 async fn load_summary_source_refs(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
 ) -> Result<Vec<LcmSourceRef>, LcmError> {
     let mut rows = conn
@@ -297,8 +333,9 @@ async fn load_summary_source_refs(
 }
 
 async fn load_raw_messages_by_store_ids(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     store_ids: &[i64],
+    include_content: bool,
 ) -> Result<BTreeMap<i64, LcmRawMessage>, LcmError> {
     let unique_store_ids = store_ids
         .iter()
@@ -312,10 +349,13 @@ async fn load_raw_messages_by_store_ids(
     let placeholders = std::iter::repeat_n("?", unique_store_ids.len())
         .collect::<Vec<_>>()
         .join(", ");
+    let select_columns = if include_content {
+        raw::RAW_MESSAGE_SELECT_COLUMNS
+    } else {
+        raw::RAW_MESSAGE_METADATA_SELECT_COLUMNS
+    };
     let sql = format!(
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, content, content_hash, storage_kind, payload_ref,
-                snippet_text, legacy_source, legacy_truncated, metadata_json
+        "SELECT {select_columns}
          FROM lcm_raw_messages
          WHERE store_id IN ({placeholders})"
     );
@@ -337,8 +377,9 @@ async fn load_raw_messages_by_store_ids(
 }
 
 async fn load_summary_nodes_by_ids(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     node_ids: &[String],
+    include_content: bool,
 ) -> Result<BTreeMap<String, LcmSummaryNode>, LcmError> {
     let unique_node_ids = node_ids
         .iter()
@@ -352,8 +393,13 @@ async fn load_summary_nodes_by_ids(
     let placeholders = std::iter::repeat_n("?", unique_node_ids.len())
         .collect::<Vec<_>>()
         .join(", ");
+    let summary_text = if include_content {
+        "summary_text"
+    } else {
+        "'' AS summary_text"
+    };
     let node_sql = format!(
-        "SELECT node_id, provider, conversation_id, session_id, depth, summary_text,
+        "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
                 summary_hash, summary_token_count, source_token_count, source_time_start,
                 source_time_end, expand_hint, metadata_json, created_at
          FROM lcm_summary_nodes

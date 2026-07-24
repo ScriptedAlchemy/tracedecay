@@ -14,7 +14,6 @@ use crate::config::TraceDecayConfig;
 use crate::db::Database;
 use crate::errors::Result;
 use crate::extraction::LanguageRegistry;
-use crate::global_db::GlobalDb;
 use crate::storage::{self, StoreLayout};
 
 mod diagnostics;
@@ -39,6 +38,9 @@ pub use locking::{SyncLockGuard, try_acquire_sync_lock, try_acquire_sync_lock_at
 /// syncing a Rust codebase's semantic knowledge graph.
 pub struct TraceDecay {
     db: Database,
+    profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
+    store_runtime_registry:
+        Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
     configuration_runtime: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
@@ -58,10 +60,28 @@ pub struct TraceDecay {
 }
 
 impl TraceDecay {
+    pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
+        self.db.storage_page_counts().await
+    }
+
+    pub(crate) async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
+        self.db.run_incremental_vacuum(pages).await
+    }
+
     pub(crate) fn configuration_runtime(
         &self,
     ) -> &Arc<crate::application::configuration::ProjectConfigurationRuntime> {
         &self.configuration_runtime
+    }
+
+    pub(crate) fn store_runtime_registry(
+        &self,
+    ) -> &Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1> {
+        &self.store_runtime_registry
+    }
+
+    pub(crate) fn profile_database(&self) -> &Arc<crate::global_db::RegisteredGlobalDb> {
+        &self.profile_database
     }
 
     pub(crate) fn hook_store_layout(&self) -> &StoreLayout {
@@ -110,13 +130,6 @@ impl TraceDecayOpenOptions {
             return Ok(parent.to_path_buf());
         }
         storage::default_profile_root()
-    }
-
-    async fn open_global_db(&self) -> Option<GlobalDb> {
-        match self.global_db_path.as_deref() {
-            Some(path) => GlobalDb::open_at(path).await,
-            None => GlobalDb::open().await,
-        }
     }
 }
 

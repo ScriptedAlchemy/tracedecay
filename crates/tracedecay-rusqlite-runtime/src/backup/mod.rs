@@ -10,6 +10,7 @@ mod model;
 mod orchestrator;
 pub use driver::{
     OnlineBackupError, OnlineBackupSource, RestorePublicationAuthority, SqliteOnlineBackupDriver,
+    verify_sqlite_snapshot,
 };
 pub use filesystem::{
     BackupFilesystemError, BackupRoot, FilesystemBackupStore, PublishedLocatorError,

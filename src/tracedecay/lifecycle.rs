@@ -3,21 +3,24 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
     db_filename, install_configuration_daemon_client_for_project,
-    open_runtime_configuration_for_layout, open_runtime_configuration_for_layout_read_only,
+    open_runtime_configuration_for_registered_database,
+    open_runtime_configuration_for_registered_database_read_only,
 };
-use crate::daemon::store_runtime::driver::{GraphLibsqlCompatDriver, GraphStoreOpenMode};
-use crate::db::{Database, DatabaseAuthority};
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
-use crate::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use crate::global_db::{
+    GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
+};
 use crate::storage::{self, StoreLayout};
+use tracedecay_store::ProjectId;
 
 use super::locking::{
     clear_dirty_sentinel_at, has_dirty_sentinel_at, try_acquire_graph_sync_locks,
@@ -25,6 +28,56 @@ use super::locking::{
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
 impl TraceDecay {
+    fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
+        let project_id =
+            store_layout
+                .identity
+                .project_id
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "registered code runtime requires an authoritative project identity"
+                        .to_owned(),
+                })?;
+        ProjectId::new(project_id.clone()).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid registered project identity: {error}"),
+        })
+    }
+
+    async fn mount_worktree_graph(
+        runtime_registry: &DaemonSessionRuntimeRegistryV1,
+        project_root: &Path,
+        store_layout: &StoreLayout,
+        db_path: &Path,
+        branch_name: Option<&str>,
+        operation: &'static str,
+        access: DatabaseAccessMode,
+    ) -> Result<Database> {
+        let authority = DatabaseAuthority::for_runtime(db_path, operation)?;
+        let project_id = Self::registered_project_id(store_layout)?;
+        if let Some(branch_name) = branch_name {
+            runtime_registry
+                .code_graph_branch(
+                    project_root,
+                    project_id,
+                    branch_name,
+                    db_path.to_path_buf(),
+                    authority,
+                    access,
+                )
+                .await
+        } else {
+            runtime_registry
+                .code_graph_worktree(
+                    project_root,
+                    project_id,
+                    db_path.to_path_buf(),
+                    authority,
+                    access,
+                )
+                .await
+        }
+    }
+
     /// Initializes a new `TraceDecay` project at the given root.
     ///
     /// Initializes the graph and its durable configuration revision. It never
@@ -34,21 +87,37 @@ impl TraceDecay {
     }
 
     pub async fn init_with_options(
+        _project_root: &Path,
+        _open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        Err(configuration_runtime_unavailable())
+    }
+
+    pub(crate) async fn init_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        let store_layout =
-            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let authority = DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "init")?;
-
-        let (db, _migrated) = GraphLibsqlCompatDriver::open(
-            GraphStoreOpenMode::Initialize,
+        let db = Self::mount_worktree_graph(
+            runtime_registry.as_ref(),
+            project_root,
+            &store_layout,
             &store_layout.graph_db_path,
-            &authority,
+            branch::current_branch(project_root).as_deref(),
+            "init",
+            DatabaseAccessMode::ReadWrite,
         )
         .await?;
         let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
-            open_runtime_configuration_for_layout(project_root, &store_layout).await?,
+            open_runtime_configuration_for_registered_database(
+                project_root,
+                &store_layout,
+                configuration_database,
+            )
+            .await?,
         )?);
         let config = configuration_runtime.configuration().config.clone();
         install_configuration_daemon_client_for_project(
@@ -72,6 +141,8 @@ impl TraceDecay {
 
         let ts = Self {
             db,
+            profile_database,
+            store_runtime_registry: runtime_registry,
             config,
             configuration_runtime,
             project_root: project_root.to_path_buf(),
@@ -85,7 +156,7 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
         };
-        ts.register_project_store_in_global_registry().await;
+        ts.register_project_store_in_global_registry().await?;
         Ok(ts)
     }
 
@@ -98,14 +169,35 @@ impl TraceDecay {
         Ok(cg)
     }
 
+    pub(crate) async fn init_and_index_with_registered_configuration(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    ) -> Result<Self> {
+        let cg = Self::init_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+        )
+        .await?;
+        cg.index_all().await?;
+        Ok(cg)
+    }
+
     /// Returns a reference to the underlying database.
     pub fn db(&self) -> &Database {
         &self.db
     }
 
     async fn schema_version(db: &Database, operation: &str) -> Result<u32> {
-        let mut rows = db
-            .conn()
+        let connection = db.engine_conn();
+        let mut rows = connection
             .query("PRAGMA user_version", ())
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -129,22 +221,7 @@ impl TraceDecay {
     }
 
     async fn latest_schema_version() -> Result<u32> {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let db_path = std::env::temp_dir().join(format!(
-            "tracedecay-current-schema-{}-{stamp}.db",
-            std::process::id()
-        ));
-        let authority = DatabaseAuthority::acquire_test(&db_path, "latest schema version")?;
-        let (db, _) =
-            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Initialize, &db_path, &authority)
-                .await?;
-        let version = Self::schema_version(&db, "latest_schema_version").await;
-        db.close();
-        delete_db_files(&db_path);
-        version
+        Ok(crate::db::migrations::LATEST_VERSION)
     }
 
     pub async fn ensure_schema_current(&self) -> Result<()> {
@@ -174,20 +251,78 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_with_identity_migration(project_root, open_options, true).await
+        Self::resolve_store_layout_with_identity_migration(
+            project_root,
+            open_options,
+            true,
+            None,
+            true,
+        )
+        .await
     }
 
     async fn resolve_store_layout_for_project_read_only(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_with_identity_migration(project_root, open_options, false).await
+        Self::resolve_store_layout_with_identity_migration(
+            project_root,
+            open_options,
+            false,
+            None,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn resolve_registered_configuration_layout(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        registry_database: &RegisteredGlobalDb,
+        allow_repair: bool,
+    ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_with_identity_migration(
+            project_root,
+            open_options,
+            allow_repair,
+            Some(registry_database),
+            false,
+        )
+        .await
+    }
+
+    /// Resolves the store layout for a project that has never been enrolled,
+    /// minting a fresh path-derived profile-sharded identity so first-touch
+    /// `init` can bootstrap it under the daemon's authority.
+    ///
+    /// This differs from [`Self::resolve_registered_configuration_layout`] only
+    /// in that a project with no enrollment marker, registry match, or legacy
+    /// shard falls through to a default identity instead of failing closed.
+    /// Ambiguous or conflicting *existing* stores still surface their own
+    /// identity-cutover errors from [`Self::choose_identity_layout`] and never
+    /// reach the default-identity branch, so this never masks a real conflict.
+    pub(crate) async fn resolve_first_touch_configuration_layout(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        registry_database: &RegisteredGlobalDb,
+        allow_repair: bool,
+    ) -> Result<StoreLayout> {
+        Self::resolve_store_layout_with_identity_migration(
+            project_root,
+            open_options,
+            allow_repair,
+            Some(registry_database),
+            true,
+        )
+        .await
     }
 
     async fn resolve_store_layout_with_identity_migration(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
         allow_repair: bool,
+        registry_database: Option<&RegisteredGlobalDb>,
+        allow_default_identity: bool,
     ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
         if storage::read_enrollment_marker(project_root)?.is_some() {
@@ -203,8 +338,8 @@ impl TraceDecay {
             .then(|| crate::worktree::git_common_dir(project_root))
             .flatten();
         if selected.is_none()
-            && let Some(global_db) = open_options.open_global_db().await
-            && let Some(resolution) = global_db
+            && let Some(registry_database) = registry_database
+            && let Some(resolution) = registry_database
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
                 .await?
         {
@@ -233,18 +368,25 @@ impl TraceDecay {
             selected_id,
             selected_layout_is_authoritative,
         )?;
-        Self::choose_identity_layout(
+        let selected = Self::choose_identity_layout(
             project_root,
             selected,
             candidates,
             selected_is_sole_exact_root,
             allow_repair,
         )
-        .await?
-        .map_or_else(
-            || storage::default_profile_sharded_layout(project_root, &profile_root),
-            Ok,
-        )
+        .await?;
+        match selected {
+            Some(layout) => Ok(layout),
+            None if allow_default_identity => {
+                storage::default_profile_sharded_layout(project_root, &profile_root)
+            }
+            None => Err(TraceDecayError::Config {
+                message:
+                    "registered configuration layout requires an enrolled or registry-resolved project identity"
+                        .to_owned(),
+            }),
+        }
     }
 
     async fn choose_identity_layout(
@@ -358,11 +500,20 @@ impl TraceDecay {
     }
 
     pub async fn open_with_options(
+        _project_root: &Path,
+        _open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        Err(configuration_runtime_unavailable())
+    }
+
+    pub(crate) async fn open_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        let store_layout =
-            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let active_branch = branch::current_branch(project_root);
         Self::auto_track_active_branch(
             project_root,
@@ -416,15 +567,22 @@ impl TraceDecay {
             None
         };
         if crashed {
-            let authority = DatabaseAuthority::for_runtime(&db_path, "crash verification")?;
             // FTS-only damage is repairable from the content table on the
             // writable open below; do not force offline recovery for it. The
             // read-only open runs its own integrity validation, so the damage
             // can surface either as its open error or as a problem row here.
-            match GraphLibsqlCompatDriver::open(GraphStoreOpenMode::ReadOnly, &db_path, &authority)
-                .await
+            match Self::mount_worktree_graph(
+                runtime_registry.as_ref(),
+                project_root,
+                &store_layout,
+                &db_path,
+                serving_branch.as_deref(),
+                "crash verification",
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await
             {
-                Ok((verification, _)) => {
+                Ok(verification) => {
                     let integrity = verification.quick_check_report().await;
                     verification.close();
                     match integrity {
@@ -460,9 +618,16 @@ impl TraceDecay {
         // Ordinary opens never replace database files. A daemon or another MCP
         // process may still hold the current DB/WAL/SHM inodes, and deleting
         // them here would split readers and writers across different stores.
-        let authority = DatabaseAuthority::for_runtime(&db_path, "open project store")?;
-        let mut open_result =
-            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Open, &db_path, &authority).await;
+        let mut open_result = Self::mount_worktree_graph(
+            runtime_registry.as_ref(),
+            project_root,
+            &store_layout,
+            &db_path,
+            serving_branch.as_deref(),
+            "open project store",
+            DatabaseAccessMode::ReadWrite,
+        )
+        .await;
         // Open-time validation fails closed on any corruption, including
         // FTS-only damage that is fully derivable from the content table.
         // Rebuild that index under the open's writer authority and retry
@@ -472,29 +637,39 @@ impl TraceDecay {
             && is_fts_only_corruption(&error.to_string())
         {
             eprintln!("[tracedecay] repairing FTS index after interrupted operation ({error})…");
-            match Database::repair_fts_offline(&db_path, &authority).await {
-                Ok(()) => {
-                    open_result = GraphLibsqlCompatDriver::open(
-                        GraphStoreOpenMode::Open,
-                        &db_path,
-                        &authority,
-                    )
-                    .await;
-                }
+            match Self::mount_worktree_graph(
+                runtime_registry.as_ref(),
+                project_root,
+                &store_layout,
+                &db_path,
+                serving_branch.as_deref(),
+                "remount project store for FTS repair",
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await
+            {
+                Ok(database) => match database.repair_fts_after_open().await {
+                    Ok(_) => open_result = Ok(database),
+                    Err(repair_error) => {
+                        print_corruption_warning(&db_path);
+                        return Err(recovery_required_error(&db_path, repair_error));
+                    }
+                },
                 Err(repair_error) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(&db_path, repair_error));
                 }
             }
         }
-        let (db, migrated) = match open_result {
-            Ok(pair) => pair,
+        let db = match open_result {
+            Ok(database) => database,
             Err(e) if Database::is_corruption_error(&e) || crashed => {
                 print_corruption_warning(&db_path);
                 return Err(recovery_required_error(&db_path, &e));
             }
             Err(e) => return Err(e),
         };
+        let migrated = crate::db::migrations::migrate(&db).await?;
 
         // Validation before Database::open cannot observe FTS damage on a
         // retained shared handle because the open reuses that connection.
@@ -555,7 +730,12 @@ impl TraceDecay {
         }
 
         let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
-            open_runtime_configuration_for_layout(project_root, &store_layout).await?,
+            open_runtime_configuration_for_registered_database(
+                project_root,
+                &store_layout,
+                configuration_database,
+            )
+            .await?,
         )?);
         let config = configuration_runtime.configuration().config.clone();
         install_configuration_daemon_client_for_project(
@@ -564,6 +744,8 @@ impl TraceDecay {
         );
         let mut ts = Self {
             db,
+            profile_database,
+            store_runtime_registry: runtime_registry,
             config,
             configuration_runtime,
             project_root: project_root.to_path_buf(),
@@ -605,7 +787,7 @@ impl TraceDecay {
             eprintln!("[tracedecay] re-index complete.");
         }
 
-        ts.register_project_store_in_global_registry().await;
+        ts.register_project_store_in_global_registry().await?;
         Ok(ts)
     }
 
@@ -620,11 +802,20 @@ impl TraceDecay {
     }
 
     pub async fn open_read_only_with_options(
+        _project_root: &Path,
+        _open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        Err(configuration_runtime_unavailable())
+    }
+
+    pub(crate) async fn open_read_only_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        let store_layout =
-            Self::resolve_store_layout_for_project_read_only(project_root, &open_options).await?;
         let active_branch = branch::current_branch(project_root);
 
         let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
@@ -643,12 +834,23 @@ impl TraceDecay {
             });
         }
 
-        let authority = DatabaseAuthority::for_runtime(&db_path, "open project store read-only")?;
-        let (db, _) =
-            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::ReadOnly, &db_path, &authority)
-                .await?;
+        let db = Self::mount_worktree_graph(
+            runtime_registry.as_ref(),
+            project_root,
+            &store_layout,
+            &db_path,
+            serving_branch.as_deref(),
+            "open project store read-only",
+            DatabaseAccessMode::ReadOnly,
+        )
+        .await?;
         let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
-            open_runtime_configuration_for_layout_read_only(project_root, &store_layout).await?,
+            open_runtime_configuration_for_registered_database_read_only(
+                project_root,
+                &store_layout,
+                configuration_database,
+            )
+            .await?,
         )?);
         let config = configuration_runtime.configuration().config.clone();
         install_configuration_daemon_client_for_project(
@@ -657,6 +859,8 @@ impl TraceDecay {
         );
         Ok(Self {
             db,
+            profile_database,
+            store_runtime_registry: runtime_registry,
             config,
             configuration_runtime,
             project_root: project_root.to_path_buf(),
@@ -689,6 +893,106 @@ impl TraceDecay {
         )
         .await?;
         Ok(())
+    }
+
+    pub(crate) async fn track_worktree_branch(
+        &self,
+        worktree_root: &Path,
+        branch_name: &str,
+    ) -> Result<branch::BranchAddOutcome> {
+        let prepared = branch::prepare_branch_tracking_from_database(
+            worktree_root,
+            branch_name,
+            &self.store_layout.data_root,
+            &self.db,
+        )
+        .await?;
+        let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
+            return Ok(match prepared {
+                branch::BranchTrackingPreparation::AlreadyTracked => {
+                    branch::BranchAddOutcome::AlreadyTracked
+                }
+                branch::BranchTrackingPreparation::Deferred => branch::BranchAddOutcome::Deferred,
+                branch::BranchTrackingPreparation::Added(_) => unreachable!(),
+            });
+        };
+
+        let sync_result = self
+            .sync_retained_worktree_branch(worktree_root, branch_name, prepared.database_path())
+            .await;
+        if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
+            return Ok(branch::BranchAddOutcome::Deferred);
+        } else if let Err(error) = sync_result {
+            return match branch::rollback_prepared_branch_tracking(
+                &self.store_layout.data_root,
+                &prepared,
+            ) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(TraceDecayError::Config {
+                    message: format!(
+                        "branch sync failed: {error}; published branch rollback also failed: \
+                         {rollback_error}"
+                    ),
+                }),
+            };
+        }
+
+        branch::finalize_prepared_branch_tracking(&self.store_layout.data_root, &prepared);
+        Ok(branch::BranchAddOutcome::Added)
+    }
+
+    async fn sync_retained_worktree_branch(
+        &self,
+        worktree_root: &Path,
+        branch_name: &str,
+        database_path: &Path,
+    ) -> Result<()> {
+        let db = self
+            .store_runtime_registry
+            .code_graph_branch_registered(
+                worktree_root,
+                Self::registered_project_id(&self.store_layout)?,
+                branch_name,
+                database_path.to_path_buf(),
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await?;
+        let branch_graph = Self {
+            db,
+            profile_database: Arc::clone(&self.profile_database),
+            store_runtime_registry: Arc::clone(&self.store_runtime_registry),
+            config: self.config.clone(),
+            configuration_runtime: Arc::clone(&self.configuration_runtime),
+            project_root: worktree_root
+                .canonicalize()
+                .unwrap_or_else(|_| worktree_root.to_path_buf()),
+            store_layout: self.store_layout.clone(),
+            active_graph_layout: active_graph_layout(database_path),
+            open_options: self.open_options.clone(),
+            registry: LanguageRegistry::new(),
+            active_branch: Some(branch_name.to_owned()),
+            serving_branch: Some(branch_name.to_owned()),
+            fallback_warning: None,
+            read_only: false,
+            context_scout_owner: None,
+        };
+
+        let mut attempts = 0;
+        loop {
+            match branch_graph.sync().await {
+                Ok(_) => {
+                    branch_graph
+                        .register_project_store_in_global_registry()
+                        .await?;
+                    return Ok(());
+                }
+                Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Silently bootstraps/maintains tracedecay branch tracking for `branch_name`.
@@ -869,13 +1173,22 @@ impl TraceDecay {
     }
 
     pub async fn open_branch_with_options(
+        _project_root: &Path,
+        _branch_name: &str,
+        _open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        Err(configuration_runtime_unavailable())
+    }
+
+    pub(crate) async fn open_branch_with_registered_configuration(
         project_root: &Path,
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        let store_layout =
-            Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {
                 message: "no branch tracking configured — run `tracedecay branch add` first"
@@ -898,11 +1211,23 @@ impl TraceDecay {
             });
         }
 
-        let authority = DatabaseAuthority::for_runtime(&db_path, "open branch store")?;
-        let (db, _) =
-            GraphLibsqlCompatDriver::open(GraphStoreOpenMode::Open, &db_path, &authority).await?;
+        let db = Self::mount_worktree_graph(
+            runtime_registry.as_ref(),
+            project_root,
+            &store_layout,
+            &db_path,
+            Some(branch_name),
+            "open branch snapshot",
+            DatabaseAccessMode::ReadOnly,
+        )
+        .await?;
         let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
-            open_runtime_configuration_for_layout(project_root, &store_layout).await?,
+            open_runtime_configuration_for_registered_database_read_only(
+                project_root,
+                &store_layout,
+                configuration_database,
+            )
+            .await?,
         )?);
         let config = configuration_runtime.configuration().config.clone();
         install_configuration_daemon_client_for_project(
@@ -911,6 +1236,8 @@ impl TraceDecay {
         );
         Ok(Self {
             db,
+            profile_database,
+            store_runtime_registry: runtime_registry,
             config,
             configuration_runtime,
             project_root: project_root.to_path_buf(),
@@ -921,7 +1248,7 @@ impl TraceDecay {
             active_branch: Some(branch_name.to_string()),
             serving_branch: Some(branch_name.to_string()),
             fallback_warning: None,
-            read_only: false,
+            read_only: true,
             context_scout_owner: None,
         })
     }
@@ -933,29 +1260,29 @@ impl TraceDecay {
         Some(meta.branches.keys().cloned().collect())
     }
 
-    pub(crate) async fn register_project_store_in_global_registry(&self) {
+    pub(crate) async fn register_project_store_in_global_registry(&self) -> Result<()> {
         static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
         if self.store_layout.storage_mode != storage::StorageMode::ProfileSharded {
-            return;
+            return Ok(());
         }
 
-        let Some(project_id) = self.store_layout.identity.project_id.as_deref() else {
-            return;
-        };
-        let Some(profile_root) = profile_root_for_layout(&self.store_layout) else {
-            return;
-        };
-        let Some(store_relpath) = profile_relative(&profile_root, &self.store_layout.data_root)
-        else {
-            return;
-        };
+        let project_id = self
+            .store_layout
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| {
+                registry_registration_error("profile-sharded store has no project identity")
+            })?;
+        let profile_root = profile_root_for_layout(&self.store_layout)
+            .ok_or_else(|| registry_registration_error("store is outside a profile root"))?;
+        let store_relpath = profile_relative(&profile_root, &self.store_layout.data_root)
+            .ok_or_else(|| registry_registration_error("store root is outside its profile"))?;
 
         let _registry_write = REGISTRY_WRITE_LOCK.lock().await;
 
-        let Some(global_db) = self.open_options.open_global_db().await else {
-            return;
-        };
+        let global_db = self.profile_database.as_ref();
 
         let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
@@ -991,7 +1318,7 @@ impl TraceDecay {
         };
         let registration_root = primary_root.as_deref().unwrap_or(&self.project_root);
 
-        let Some(project) = global_db
+        let project = global_db
             .upsert_code_project(
                 project_id,
                 registration_root,
@@ -1000,29 +1327,21 @@ impl TraceDecay {
                 default_branch,
             )
             .await
-        else {
-            return;
-        };
+            .ok_or_else(|| registry_registration_error("upsert code project failed"))?;
 
-        if let Err(error) =
-            storage::write_repository_identity_marker(&self.project_root, &project.project_id)
-        {
-            eprintln!(
-                "warning: could not persist TraceDecay repository identity for '{}': {error}",
-                self.project_root.display()
-            );
-        }
+        storage::write_repository_identity_marker(&self.project_root, &project.project_id)?;
 
         if let Some(primary_root) = primary_root.as_deref() {
             // The registry now points canonical_root/display_root at the
             // primary checkout; keep this worktree itself resolvable for
             // future lookups by registering its own path as an alias.
-            let _ = global_db
+            global_db
                 .upsert_project_alias(&self.project_root, &project.project_id)
-                .await;
+                .await
+                .ok_or_else(|| registry_registration_error("upsert worktree alias failed"))?;
 
             let repaired_stale_worktree_root = previous_canonical_root.is_some_and(|previous| {
-                previous != crate::global_db::GlobalDb::canonical_project_key(primary_root)
+                previous != RegisteredGlobalDb::canonical_project_key(primary_root)
             });
             if repaired_stale_worktree_root {
                 eprintln!(
@@ -1041,7 +1360,7 @@ impl TraceDecay {
             .as_ref()
             .and_then(|path| profile_relative(&profile_root, path));
         let now = current_timestamp();
-        let Some(store) = global_db
+        let store = global_db
             .upsert_store_instance(StoreInstanceUpsert {
                 store_id,
                 project_id: project.project_id,
@@ -1053,17 +1372,15 @@ impl TraceDecay {
                 last_write_at: Some(now),
             })
             .await
-        else {
-            return;
-        };
+            .ok_or_else(|| registry_registration_error("upsert store instance failed"))?;
 
         if let Some(meta) = meta {
             for (branch_name, entry) in meta.branches {
                 let db_path = self.store_layout.data_root.join(&entry.db_file);
-                let Some(db_relpath) = profile_relative(&profile_root, &db_path) else {
-                    continue;
-                };
-                let _ = global_db
+                let db_relpath = profile_relative(&profile_root, &db_path).ok_or_else(|| {
+                    registry_registration_error("branch database is outside its profile")
+                })?;
+                global_db
                     .upsert_graph_scope(GraphScopeUpsert {
                         graph_scope_id: profile_graph_scope_id(&store.store_id, &branch_name),
                         project_id: store.project_id.clone(),
@@ -1077,7 +1394,8 @@ impl TraceDecay {
                         last_synced_at: entry.last_synced_at.parse::<i64>().ok(),
                         writable: true,
                     })
-                    .await;
+                    .await
+                    .ok_or_else(|| registry_registration_error("upsert graph scope failed"))?;
             }
         }
 
@@ -1121,8 +1439,12 @@ impl TraceDecay {
             );
         }
         for artifact in artifacts {
-            let _ = global_db.upsert_store_artifact(artifact).await;
+            global_db
+                .upsert_store_artifact(artifact)
+                .await
+                .ok_or_else(|| registry_registration_error("upsert store artifact failed"))?;
         }
+        Ok(())
     }
 
     /// Returns `true` if a `TraceDecay` project has been initialized at the given root.
@@ -1209,7 +1531,22 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_with_identity_migration(project_root, open_options, false).await
+        Self::resolve_store_layout_with_identity_migration(
+            project_root,
+            open_options,
+            false,
+            None,
+            true,
+        )
+        .await
+    }
+}
+
+fn configuration_runtime_unavailable() -> TraceDecayError {
+    TraceDecayError::Config {
+        message:
+            "configuration authority unavailable: a registered project session runtime is required"
+                .to_owned(),
     }
 }
 
@@ -1286,26 +1623,21 @@ impl std::fmt::Display for StoreIdentityInventory {
 }
 
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
-    let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
-    let open_result = match authority {
-        Ok(authority) => {
-            GraphLibsqlCompatDriver::open(
-                GraphStoreOpenMode::ReadOnly,
-                &layout.graph_db_path,
-                &authority,
-            )
-            .await
-        }
-        Err(error) => Err(error),
-    };
+    let scratch_root = layout.data_root.join("scratch").join("sqlite-read");
+    let open_result =
+        crate::sqlite_read_snapshot::open_in(&layout.graph_db_path, &scratch_root).await;
     let (graph_health, nodes, files, facts) = match open_result {
-        Ok((db, _)) => {
-            if let Ok(stats) = db.get_stats().await {
-                let facts = count_rows(db.conn(), "memory_facts").await;
-                db.close();
-                ("healthy", stats.node_count, stats.file_count, facts)
+        Ok(snapshot) => {
+            let connection = snapshot.connection();
+            let healthy = quick_check_ok(connection).await && snapshot.validate_source().is_ok();
+            if healthy {
+                (
+                    "healthy",
+                    count_rows(connection, "nodes").await,
+                    count_rows(connection, "files").await,
+                    count_rows(connection, "memory_facts").await,
+                )
             } else {
-                db.close();
                 ("corrupt", 0, 0, 0)
             }
         }
@@ -1313,21 +1645,24 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
         Err(_) => ("missing", 0, 0, 0),
     };
 
-    let (sessions, messages, lcm_rows) = if let Some(db) =
-        crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await
-    {
-        let conn = db.read_connection();
-        let counts = (
-            count_rows(conn, "sessions").await,
-            count_rows(conn, "session_messages").await,
-            count_rows(conn, "lcm_raw_messages").await
-                + count_rows(conn, "lcm_summary_nodes").await,
-        );
-        db.close();
-        counts
-    } else {
-        (0, 0, 0)
-    };
+    let (sessions, messages, lcm_rows) =
+        match crate::sqlite_read_snapshot::open_in(&layout.sessions_db_path, &scratch_root).await {
+            Ok(snapshot) => {
+                let connection = snapshot.connection();
+                let counts = (
+                    count_rows(connection, "sessions").await,
+                    count_rows(connection, "session_messages").await,
+                    count_rows(connection, "lcm_raw_messages").await
+                        + count_rows(connection, "lcm_summary_nodes").await,
+                );
+                if snapshot.validate_source().is_ok() {
+                    counts
+                } else {
+                    (0, 0, 0)
+                }
+            }
+            Err(_) => (0, 0, 0),
+        };
 
     StoreIdentityInventory {
         project_id: layout
@@ -1351,7 +1686,22 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
     }
 }
 
-async fn count_rows(connection: &libsql::Connection, table: &str) -> u64 {
+async fn quick_check_ok(connection: &(impl crate::db::engine::QueryExecutor + ?Sized)) -> bool {
+    let Ok(mut rows) = connection.query("PRAGMA quick_check", ()).await else {
+        return false;
+    };
+    rows.next()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.get::<String>(0).ok())
+        .is_some_and(|result| result == "ok")
+}
+
+async fn count_rows(
+    connection: &(impl crate::db::engine::QueryExecutor + ?Sized),
+    table: &str,
+) -> u64 {
     let Ok(mut rows) = connection
         .query(&format!("SELECT COUNT(*) FROM {table}"), ())
         .await
@@ -1443,6 +1793,13 @@ fn profile_root_for_layout(layout: &StoreLayout) -> Option<PathBuf> {
 
 fn profile_store_id(project_id: &str) -> String {
     format!("store:{project_id}:profile_sharded")
+}
+
+fn registry_registration_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Database {
+        operation: "register project store".to_string(),
+        message: message.into(),
+    }
 }
 
 pub(crate) fn git_remote_url(project_root: &Path) -> Option<String> {

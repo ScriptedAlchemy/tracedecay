@@ -1,4 +1,5 @@
 use tempfile::tempdir;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,
@@ -9,12 +10,27 @@ use tracedecay::automation::run_ledger::{
 };
 use tracedecay::automation::scheduler::{
     AutomationSchedule, AutomationSchedulerControl, AutomationTaskLock, SessionActivity,
-    host_receipt_decision, load_scheduler_control, load_session_activity, parse_schedule,
-    save_scheduler_control, schedule_decision, scheduler_control_path,
+    host_receipt_decision, load_scheduler_control, parse_schedule, save_scheduler_control,
+    schedule_decision, scheduler_control_path,
 };
-use tracedecay::global_db::GlobalDb;
+use tracedecay_domain::ProjectId;
 
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
+
+async fn scheduler_session_runtime(
+    root: &std::path::Path,
+    project_id: &str,
+) -> HostAdmissionTestRuntimeV1 {
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    HostAdmissionTestRuntimeV1::project(
+        root.join(".tracedecay"),
+        project_root,
+        ProjectId::new(project_id).unwrap(),
+    )
+    .await
+    .expect("registered scheduler session runtime")
+}
 
 fn automation_config(schedule: Option<&str>, interval_secs: Option<u64>) -> AutomationConfig {
     AutomationConfig {
@@ -700,15 +716,13 @@ fn scheduler_retries_failed_session_evidence_runs_without_new_activity() {
 #[tokio::test]
 async fn load_session_activity_reads_newest_message_timestamp() {
     let temp = tempdir().unwrap();
-    let db_path = temp.path().join("sessions.db");
-
-    // Missing store: no activity signal.
+    let db = scheduler_session_runtime(temp.path(), "project.scheduler-activity").await;
     assert_eq!(
-        load_session_activity(&db_path).await,
+        db.session_activity_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap(),
         SessionActivity::none()
     );
-
-    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
     seed_session_message_in_db(
         &db,
         temp.path(),
@@ -737,10 +751,10 @@ async fn load_session_activity_reads_newest_message_timestamp() {
         },
     )
     .await;
-    drop(db);
-
     assert_eq!(
-        load_session_activity(&db_path).await,
+        db.session_activity_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap(),
         SessionActivity::at(1_715_000_200)
     );
 }
@@ -748,8 +762,7 @@ async fn load_session_activity_reads_newest_message_timestamp() {
 #[tokio::test]
 async fn load_session_activity_normalizes_millisecond_timestamps() {
     let temp = tempdir().unwrap();
-    let db_path = temp.path().join("sessions.db");
-    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    let db = scheduler_session_runtime(temp.path(), "project.scheduler-millisecond").await;
     seed_session_message_in_db(
         &db,
         temp.path(),
@@ -764,10 +777,10 @@ async fn load_session_activity_normalizes_millisecond_timestamps() {
         },
     )
     .await;
-    drop(db);
-
     assert_eq!(
-        load_session_activity(&db_path).await,
+        db.session_activity_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap(),
         SessionActivity::at(1_715_000_300)
     );
 }
@@ -775,8 +788,7 @@ async fn load_session_activity_normalizes_millisecond_timestamps() {
 #[tokio::test]
 async fn load_session_activity_selects_newest_after_normalizing_mixed_timestamp_units() {
     let temp = tempdir().unwrap();
-    let db_path = temp.path().join("sessions.db");
-    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    let db = scheduler_session_runtime(temp.path(), "project.scheduler-mixed-units").await;
     seed_session_message_in_db(
         &db,
         temp.path(),
@@ -805,10 +817,10 @@ async fn load_session_activity_selects_newest_after_normalizing_mixed_timestamp_
         },
     )
     .await;
-    drop(db);
-
     assert_eq!(
-        load_session_activity(&db_path).await,
+        db.session_activity_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap(),
         SessionActivity::at(1_715_000_200)
     );
 }

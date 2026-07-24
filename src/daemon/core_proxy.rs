@@ -186,8 +186,8 @@ pub(crate) fn reset_proxy_handshake_for_initialize(
 
 pub(crate) async fn resolve_daemon_initialize_route(
     params: Option<&serde_json::Value>,
-    registry: Option<&crate::global_db::GlobalDb>,
-) -> Option<InitializeRouteMetadata> {
+    registry: Option<&crate::global_db::RegisteredGlobalDb>,
+) -> crate::errors::Result<Option<InitializeRouteMetadata>> {
     let roots = crate::mcp::server::initialize_root_paths(params);
     if let Some(registry) = registry {
         for root in &roots {
@@ -195,13 +195,13 @@ pub(crate) async fn resolve_daemon_initialize_route(
             loop {
                 if registry
                     .project_registry_context_by_alias(&candidate)
-                    .await
+                    .await?
                     .is_some()
                 {
-                    return Some(InitializeRouteMetadata {
+                    return Ok(Some(InitializeRouteMetadata {
                         project_path: candidate,
                         allow_init: false,
-                    });
+                    }));
                 }
                 if !candidate.pop() {
                     break;
@@ -211,13 +211,13 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 let git_common_dir = crate::worktree::git_common_dir(&git_root);
                 if registry
                     .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
-                    .await
+                    .await?
                     .is_some()
                 {
-                    return Some(InitializeRouteMetadata {
+                    return Ok(Some(InitializeRouteMetadata {
                         project_path: git_root,
                         allow_init: false,
-                    });
+                    }));
                 }
             }
         }
@@ -225,18 +225,18 @@ pub(crate) async fn resolve_daemon_initialize_route(
     if let Some(project_path) =
         crate::mcp::server::resolve_initialize_roots_project_path(params, registry).await
     {
-        return Some(InitializeRouteMetadata {
+        return Ok(Some(InitializeRouteMetadata {
             project_path,
             allow_init: false,
-        });
+        }));
     }
 
     for root in roots {
         if let Some(project_path) = crate::config::discover_project_root(&root) {
-            return Some(InitializeRouteMetadata {
+            return Ok(Some(InitializeRouteMetadata {
                 project_path,
                 allow_init: false,
-            });
+            }));
         }
         if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
             // An initialize route has no retained configuration authority.
@@ -249,13 +249,13 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 |_| crate::config::SyncConfig::default().auto_init,
                 |config| config.auto_init,
             );
-            return Some(InitializeRouteMetadata {
+            return Ok(Some(InitializeRouteMetadata {
                 project_path: git_root,
                 allow_init,
-            });
+            }));
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(unix)]

@@ -8,7 +8,10 @@
 #![allow(dead_code)] // Plan 25/31 semantic vector storage — test oracle + staged persistence
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex, Weak},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -21,13 +24,14 @@ use tracedecay_domain::{
 pub use tracedecay_domain::VectorGenerationIdV1;
 
 use crate::code_index::projection::verify_batch_receipt;
-use crate::db::Database;
+use crate::db::{Database, engine::params};
 use crate::semantic_code::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, SemanticProjectionErrorV1,
 };
 
 const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-build.v1";
 const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
+const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-reuse.v1";
 const VECTOR_GENERATION_STATE_OPERATION: &str = "persist semantic vector generations";
 const VECTOR_GENERATION_STATE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_generation_state_v1 (
@@ -61,6 +65,86 @@ pub struct VectorProjectionCheckpointV1 {
     pub completed_batches: u64,
     pub last_request_digest: Option<ManifestDigest>,
     pub last_publication_digest: Option<ManifestDigest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+struct PhysicalVectorReuseKeyV1 {
+    canonical_chunk_digest: ContentDigest,
+    projection_key: ProjectionKeyV1,
+    admitted_embedding_key: AdmittedEmbeddingProjectionKeyV1,
+    privacy_domain: tracedecay_domain::PrivacyDomainId,
+    privacy_key_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SharedVectorBytesV1(Arc<[f32]>);
+
+impl Serialize for SharedVectorBytesV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedVectorBytesV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Vec::<f32>::deserialize(deserializer).map(|values| Self(Arc::from(values)))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct PhysicalVectorPayloadV1 {
+    reuse_key: PhysicalVectorReuseKeyV1,
+    values: SharedVectorBytesV1,
+}
+
+type PhysicalVectorPoolMapV1 = BTreeMap<PhysicalVectorReuseKeyV1, Weak<[f32]>>;
+
+/// Process-wide physical byte interner. Complete projection and privacy
+/// authority is part of the key, so sharing cannot cross either boundary.
+#[derive(Clone)]
+pub struct PhysicalVectorBytePoolV1 {
+    entries: Arc<Mutex<PhysicalVectorPoolMapV1>>,
+}
+
+impl Default for PhysicalVectorBytePoolV1 {
+    fn default() -> Self {
+        static ENTRIES: std::sync::OnceLock<Arc<Mutex<PhysicalVectorPoolMapV1>>> =
+            std::sync::OnceLock::new();
+        Self {
+            entries: Arc::clone(ENTRIES.get_or_init(|| Arc::new(Mutex::new(BTreeMap::new())))),
+        }
+    }
+}
+
+impl PhysicalVectorBytePoolV1 {
+    fn intern(
+        &self,
+        reuse_key: &PhysicalVectorReuseKeyV1,
+        values: &[f32],
+    ) -> Result<Arc<[f32]>, VectorGenerationStoreErrorV1> {
+        let mut entries = self.entries.lock().map_err(|_| {
+            VectorGenerationStoreErrorV1::Storage(
+                "physical vector byte pool lock is poisoned".to_string(),
+            )
+        })?;
+        if let Some(shared) = entries.get(reuse_key).and_then(Weak::upgrade) {
+            if shared.as_ref() != values {
+                return Err(VectorGenerationStoreErrorV1::PhysicalVectorConflict);
+            }
+            return Ok(shared);
+        }
+        let shared: Arc<[f32]> = Arc::from(values.to_vec());
+        entries.insert(reuse_key.clone(), Arc::downgrade(&shared));
+        Ok(shared)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -210,6 +294,8 @@ pub enum VectorGenerationStoreErrorV1 {
     StaleActiveGeneration,
     #[error("immutable vector generation identity already has different content")]
     ImmutableGenerationConflict,
+    #[error("physical vector reuse identity already has different bytes")]
+    PhysicalVectorConflict,
     #[error("injected failure before atomic publication swap")]
     InjectedPublicationFailure,
     #[error("project vector generation storage failed: {0}")]
@@ -237,6 +323,11 @@ struct StagedVectorGenerationV1 {
 struct PublishedStateV1 {
     generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
     active_generation: Option<VectorGenerationIdV1>,
+    #[serde(skip, default)]
+    physical_vectors: BTreeMap<ManifestDigest, PhysicalVectorPayloadV1>,
+    #[serde(default)]
+    physical_vector_bindings:
+        BTreeMap<VectorGenerationIdV1, BTreeMap<CodeSearchChunkId, ManifestDigest>>,
 }
 
 /// Deterministic state machine used directly by focused tests and persisted by
@@ -246,6 +337,8 @@ struct PublishedStateV1 {
 pub struct FakeVectorGenerationStoreV1 {
     staged: BTreeMap<VectorGenerationBuildIdV1, StagedVectorGenerationV1>,
     published: PublishedStateV1,
+    #[serde(skip, default)]
+    physical_vector_pool: PhysicalVectorBytePoolV1,
     #[serde(default, skip)]
     fail_before_publication_swap: bool,
 }
@@ -545,6 +638,7 @@ impl FakeVectorGenerationStoreV1 {
         generation.canonicalize_tombstones();
         generation.validate_persisted()?;
         let mut next = self.published.clone();
+        intern_generation_vectors(&self.physical_vector_pool, &mut next, &generation)?;
         let checkpoint = if let Some(existing) = next.generations.get(&generation_id) {
             if !existing.same_vector_content(&generation) {
                 return Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict);
@@ -631,8 +725,26 @@ impl FakeVectorGenerationStoreV1 {
         self.published.generations.get(generation_id)
     }
 
-    #[cfg(test)]
-    pub fn fail_before_publication_swap_once(&mut self) {
+    /// Resolve the shared immutable vector bytes behind one logical generation
+    /// occurrence. The returned allocation is reused only inside the exact
+    /// projection/privacy authority named by the generation.
+    pub fn physical_vector_values(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        chunk_id: &CodeSearchChunkId,
+    ) -> Option<Arc<[f32]>> {
+        let physical_id = self
+            .published
+            .physical_vector_bindings
+            .get(generation_id)?
+            .get(chunk_id)?;
+        self.published
+            .physical_vectors
+            .get(physical_id)
+            .map(|payload| Arc::clone(&payload.values.0))
+    }
+
+    pub(crate) fn fail_before_publication_swap_once(&mut self) {
         self.fail_before_publication_swap = true;
     }
 }
@@ -660,12 +772,12 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let initial_state = serde_json::to_string(&FakeVectorGenerationStoreV1::default())
             .map_err(storage_error)?;
         database
-            .execute_write(
+            .execute_write_engine(
                 VECTOR_GENERATION_STATE_OPERATION,
                 "INSERT OR IGNORE INTO semantic_vector_generation_state_v1 (
                     singleton, revision, state_json
                  ) VALUES (1, 0, ?1)",
-                libsql::params![initial_state],
+                params![initial_state],
             )
             .await
             .map_err(storage_error)?;
@@ -771,6 +883,15 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         Ok(state.generation(generation_id).cloned())
     }
 
+    pub async fn physical_vector_values(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        chunk_id: &CodeSearchChunkId,
+    ) -> Result<Option<Arc<[f32]>>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state.physical_vector_values(generation_id, chunk_id))
+    }
+
     async fn mutate_state<ResultValue>(
         &self,
         mut mutation: impl FnMut(
@@ -783,12 +904,12 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
             let state_json = serde_json::to_string(&state).map_err(storage_error)?;
             let changed = self
                 .database
-                .execute_write(
+                .execute_write_engine(
                     VECTOR_GENERATION_STATE_OPERATION,
                     "UPDATE semantic_vector_generation_state_v1
                      SET revision = revision + 1, state_json = ?1
                      WHERE singleton = 1 AND revision = ?2",
-                    libsql::params![state_json, revision],
+                    params![state_json, revision],
                 )
                 .await
                 .map_err(storage_error)?;
@@ -804,7 +925,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     ) -> Result<(i64, FakeVectorGenerationStoreV1), VectorGenerationStoreErrorV1> {
         let mut rows = self
             .database
-            .conn()
+            .engine_conn()
             .query(
                 "SELECT revision, state_json
                  FROM semantic_vector_generation_state_v1
@@ -821,9 +942,91 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let revision = row.get::<i64>(0).map_err(storage_error)?;
         let state_json = row.get::<String>(1).map_err(storage_error)?;
         drop(rows);
-        let state = serde_json::from_str(&state_json).map_err(storage_error)?;
+        let mut state: FakeVectorGenerationStoreV1 =
+            serde_json::from_str(&state_json).map_err(storage_error)?;
+        state.ensure_physical_reuse_index()?;
         validate_loaded_state(&state)?;
         Ok((revision, state))
+    }
+}
+
+impl FakeVectorGenerationStoreV1 {
+    fn ensure_physical_reuse_index(&mut self) -> Result<(), VectorGenerationStoreErrorV1> {
+        let generations = self
+            .published
+            .generations
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for generation in &generations {
+            intern_generation_vectors(&self.physical_vector_pool, &mut self.published, generation)?;
+        }
+        Ok(())
+    }
+}
+
+fn physical_vector_reuse_key(
+    embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+    vector: &ProjectedChunkVectorV1,
+) -> Result<(ManifestDigest, PhysicalVectorReuseKeyV1), VectorGenerationStoreErrorV1> {
+    if embedding_key.projection_key() != &vector.projection_key {
+        return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
+    }
+    let reuse_key = PhysicalVectorReuseKeyV1 {
+        canonical_chunk_digest: vector.chunk_digest.clone(),
+        projection_key: vector.projection_key.clone(),
+        admitted_embedding_key: embedding_key.clone(),
+        privacy_domain: embedding_key.privacy_domain().clone(),
+        privacy_key_epoch: embedding_key.privacy_key_epoch(),
+    };
+    let physical_id = canonical_sha256(&(PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN, &reuse_key))
+        .map_err(|error| VectorGenerationStoreErrorV1::Storage(error.to_string()))?;
+    Ok((physical_id, reuse_key))
+}
+
+fn intern_generation_vectors(
+    physical_vector_pool: &PhysicalVectorBytePoolV1,
+    published: &mut PublishedStateV1,
+    generation: &PublishedVectorGenerationV1,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    let mut bindings = BTreeMap::new();
+    for (chunk_id, vector) in &generation.vectors {
+        let (physical_id, reuse_key) =
+            physical_vector_reuse_key(&generation.embedding_key, vector)?;
+        match published.physical_vectors.get(&physical_id) {
+            Some(existing)
+                if existing.reuse_key != reuse_key
+                    || existing.values.0.as_ref() != vector.values.as_slice() =>
+            {
+                return Err(VectorGenerationStoreErrorV1::PhysicalVectorConflict);
+            }
+            Some(_) => {}
+            None => {}
+        }
+        let shared = physical_vector_pool.intern(&reuse_key, &vector.values)?;
+        published.physical_vectors.insert(
+            physical_id.clone(),
+            PhysicalVectorPayloadV1 {
+                reuse_key,
+                values: SharedVectorBytesV1(shared),
+            },
+        );
+        bindings.insert(chunk_id.clone(), physical_id);
+    }
+    match published
+        .physical_vector_bindings
+        .get(generation.generation_id())
+    {
+        Some(existing) if existing != &bindings => {
+            Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict)
+        }
+        Some(_) => Ok(()),
+        None => {
+            published
+                .physical_vector_bindings
+                .insert(generation.generation_id().clone(), bindings);
+            Ok(())
+        }
     }
 }
 
@@ -844,6 +1047,46 @@ fn validate_loaded_state(
             ));
         }
         generation.validate_persisted()?;
+        let bindings = state
+            .published
+            .physical_vector_bindings
+            .get(generation_id)
+            .ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Storage(
+                    "published generation has no physical vector bindings".to_string(),
+                )
+            })?;
+        if bindings.len() != generation.vectors.len() {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "published generation physical vector membership is incomplete".to_string(),
+            ));
+        }
+        for (chunk_id, vector) in &generation.vectors {
+            let physical_id = bindings.get(chunk_id).ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Storage(format!(
+                    "published vector {chunk_id} has no physical byte binding"
+                ))
+            })?;
+            let physical = state
+                .published
+                .physical_vectors
+                .get(physical_id)
+                .ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::Storage(format!(
+                        "published vector {chunk_id} has a dangling physical byte binding"
+                    ))
+                })?;
+            let (expected_id, expected_key) =
+                physical_vector_reuse_key(generation.embedding_key(), vector)?;
+            if physical_id != &expected_id
+                || physical.reuse_key != expected_key
+                || physical.values.0.as_ref() != vector.values.as_slice()
+            {
+                return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                    "published vector {chunk_id} physical byte binding drifted"
+                )));
+            }
+        }
     }
     for staged in state.staged.values() {
         if let Some(embedding_key) = &staged.embedding_key {
@@ -1064,6 +1307,253 @@ mod tests {
         }
         .admit()
         .expect("admitted embedding fixture")
+    }
+
+    fn admitted_embedding_for(
+        privacy_domain: &str,
+        privacy_key_epoch: u64,
+        runtime_build_revision: &str,
+    ) -> AdmittedEmbeddingProjectionKeyV1 {
+        let mut key = admitted_embedding().embedding_key().clone();
+        key.privacy_domain = id(privacy_domain);
+        key.privacy_key_epoch = privacy_key_epoch;
+        key.runtime_build_revision = runtime_build_revision.to_owned();
+        key.admit().expect("admitted embedding fixture variant")
+    }
+
+    fn logical_generation(
+        generation_digest: char,
+        embedding_key: AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &str,
+        source_manifest_digest: char,
+        chunk_id: &str,
+        chunk_digest: char,
+        values: Vec<f32>,
+    ) -> PublishedVectorGenerationV1 {
+        let generation_id = VectorGenerationIdV1::new(manifest_digest(generation_digest));
+        let projection_key = embedding_key.projection_key().clone();
+        let source_generation: CodeGenerationId = id(source_generation);
+        let source_manifest_byte = source_manifest_digest;
+        let source_manifest_digest = manifest_digest(source_manifest_digest);
+        let chunk_id: CodeSearchChunkId = id(chunk_id);
+        PublishedVectorGenerationV1 {
+            generation_id: generation_id.clone(),
+            projection_key: projection_key.clone(),
+            source_generation: source_generation.clone(),
+            source_manifest_digest: source_manifest_digest.clone(),
+            base_generation: None,
+            embedding_key,
+            vectors: BTreeMap::from([(
+                chunk_id.clone(),
+                ProjectedChunkVectorV1 {
+                    projection_key: projection_key.clone(),
+                    source_generation: source_generation.clone(),
+                    source_manifest_digest: source_manifest_digest.clone(),
+                    chunk_id,
+                    chunk_digest: content_digest(chunk_digest),
+                    values,
+                    // Physical reuse is keyed independently from the
+                    // occurrence-bound projector receipt digest.
+                    output_digest: content_digest(generation_digest),
+                },
+            )]),
+            tombstones: Vec::new(),
+            tombstone_digests: BTreeMap::new(),
+            receipts: vec![ProjectionBatchReceiptV1 {
+                target_projection_key: projection_key.clone(),
+                request_digest: manifest_digest(generation_digest),
+                source_generation: source_generation.clone(),
+                source_manifest_digest: source_manifest_digest.clone(),
+                receipts: Vec::new(),
+                reused_count: 0,
+                publication_digest: manifest_digest(source_manifest_byte),
+            }],
+            checkpoint: VectorProjectionCheckpointV1 {
+                target_projection_key: projection_key,
+                source_generation,
+                source_manifest_digest,
+                completed_batches: 1,
+                last_request_digest: None,
+                last_publication_digest: None,
+            },
+            manifest_digest: generation_id.as_digest().clone(),
+        }
+    }
+
+    #[test]
+    fn cross_worktree_reuses_physical_bytes_without_reusing_logical_identity() {
+        let embedding = admitted_embedding_for("privacy.reuse-regression-a", 7, "ort-test-rev-1");
+        let first = logical_generation(
+            'a',
+            embedding.clone(),
+            "code-generation.worktree-a",
+            '1',
+            "chunk.v1.worktree-a.alpha",
+            'c',
+            vec![0.25],
+        );
+        let second = logical_generation(
+            'b',
+            embedding.clone(),
+            "code-generation.worktree-b",
+            '2',
+            "chunk.v1.worktree-b.alpha",
+            'c',
+            vec![0.25],
+        );
+        let first_chunk = first.vectors.keys().next().unwrap().clone();
+        let second_chunk = second.vectors.keys().next().unwrap().clone();
+        let first_generation = first.generation_id().clone();
+        let second_generation = second.generation_id().clone();
+        let mut first_store = FakeVectorGenerationStoreV1::new();
+        let mut second_store = FakeVectorGenerationStoreV1::new();
+
+        intern_generation_vectors(
+            &first_store.physical_vector_pool,
+            &mut first_store.published,
+            &first,
+        )
+        .unwrap();
+        first_store
+            .published
+            .generations
+            .insert(first_generation.clone(), first.clone());
+        first_store.published.active_generation = Some(first_generation.clone());
+        intern_generation_vectors(
+            &second_store.physical_vector_pool,
+            &mut second_store.published,
+            &second,
+        )
+        .unwrap();
+        second_store
+            .published
+            .generations
+            .insert(second_generation.clone(), second.clone());
+        second_store.published.active_generation = Some(second_generation.clone());
+
+        let first_values = first_store
+            .physical_vector_values(&first_generation, &first_chunk)
+            .unwrap();
+        let second_values = second_store
+            .physical_vector_values(&second_generation, &second_chunk)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first_values, &second_values));
+        assert_eq!(first_store.published.physical_vectors.len(), 1);
+        assert_eq!(second_store.published.physical_vectors.len(), 1);
+        assert_ne!(first_generation, second_generation);
+        assert_ne!(first.source_generation(), second.source_generation());
+        assert_ne!(first_chunk, second_chunk);
+        assert_ne!(first.receipts(), second.receipts());
+        assert_eq!(first_store.active_generation_id(), Some(&first_generation));
+        assert_eq!(
+            second_store.active_generation_id(),
+            Some(&second_generation),
+            "each worktree retains its own active pointer"
+        );
+
+        for (generation_digest, embedding_key) in [
+            (
+                'd',
+                admitted_embedding_for("privacy.reuse-regression-b", 7, "ort-test-rev-1"),
+            ),
+            (
+                'e',
+                admitted_embedding_for("privacy.reuse-regression-a", 8, "ort-test-rev-1"),
+            ),
+            (
+                'f',
+                admitted_embedding_for("privacy.reuse-regression-a", 7, "ort-test-rev-2"),
+            ),
+        ] {
+            let isolated = logical_generation(
+                generation_digest,
+                embedding_key,
+                &format!("code-generation.isolated-{generation_digest}"),
+                generation_digest,
+                &format!("chunk.v1.isolated-{generation_digest}.alpha"),
+                'c',
+                vec![0.25],
+            );
+            intern_generation_vectors(
+                &second_store.physical_vector_pool,
+                &mut second_store.published,
+                &isolated,
+            )
+            .unwrap();
+            second_store
+                .published
+                .generations
+                .insert(isolated.generation_id().clone(), isolated);
+        }
+        assert_eq!(
+            second_store.published.physical_vectors.len(),
+            4,
+            "privacy domain, key epoch, and any projection-key input isolate physical bytes"
+        );
+
+        let edited_second = logical_generation(
+            '9',
+            embedding.clone(),
+            "code-generation.worktree-b-edited",
+            '9',
+            "chunk.v1.worktree-b.alpha-edited",
+            '9',
+            vec![0.75],
+        );
+        let edited_generation = edited_second.generation_id().clone();
+        let edited_chunk = edited_second.vectors.keys().next().unwrap().clone();
+        intern_generation_vectors(
+            &second_store.physical_vector_pool,
+            &mut second_store.published,
+            &edited_second,
+        )
+        .unwrap();
+        second_store
+            .published
+            .generations
+            .insert(edited_generation.clone(), edited_second);
+        assert_eq!(second_store.published.physical_vectors.len(), 5);
+        assert!(!Arc::ptr_eq(
+            &second_values,
+            &second_store
+                .physical_vector_values(&edited_generation, &edited_chunk)
+                .unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &first_values,
+            &second_store
+                .physical_vector_values(&second_generation, &second_chunk)
+                .unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &first_values,
+            &first_store
+                .physical_vector_values(&first_generation, &first_chunk)
+                .unwrap()
+        ));
+        assert_eq!(first_store.active_generation_id(), Some(&first_generation));
+        assert_eq!(
+            second_store.active_generation_id(),
+            Some(&second_generation)
+        );
+
+        let conflicting = logical_generation(
+            '8',
+            embedding,
+            "code-generation.worktree-c",
+            '8',
+            "chunk.v1.worktree-c.alpha",
+            'c',
+            vec![0.5],
+        );
+        assert_eq!(
+            intern_generation_vectors(
+                &second_store.physical_vector_pool,
+                &mut second_store.published,
+                &conflicting,
+            ),
+            Err(VectorGenerationStoreErrorV1::PhysicalVectorConflict)
+        );
     }
 
     #[test]

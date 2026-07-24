@@ -42,7 +42,7 @@ use thiserror::Error;
 use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
 use crate::application::host_admission::{WireReadOutcome, read_bounded_to_string};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
 pub(crate) use crate::sessions::shared::{
@@ -348,7 +348,7 @@ pub trait TranscriptSource: Send + Sync {
 /// will read in one call (used to keep per-prompt hot paths inside budget);
 /// pass `None` for an unbounded catch-up.
 pub async fn try_ingest_source(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     source: &dyn TranscriptSource,
     project_root: &Path,
     max_new_bytes: Option<u64>,
@@ -375,7 +375,7 @@ pub(crate) async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
 /// Ingest one transcript file: load the prior durable cursor through the store
 /// contract, parse new content, and submit one atomic session/message/cursor
 /// batch. The root adapter extends that write with git evidence in the same
-/// authoritative `GlobalDb` transaction.
+/// authoritative registered session-database transaction.
 async fn ingest_one<S: TranscriptIngestStore>(
     store: &S,
     source: &dyn TranscriptSource,

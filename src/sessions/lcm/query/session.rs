@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn load_session(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: LcmLoadSessionRequest,
 ) -> Result<LcmLoadSessionPage, LcmError> {
     let limit = clamp_limit(request.limit);
@@ -21,12 +21,10 @@ pub(crate) async fn load_session(
         role_clause = format!(" AND role IN ({placeholders})");
         values.extend(roles.into_iter().map(Value::Text));
     }
-    let start_time = util::opt_i64(request.start_time);
-    let end_time = util::opt_i64(request.end_time);
-    values.push(start_time.clone());
-    values.push(start_time);
-    values.push(end_time.clone());
-    values.push(end_time);
+    values.push(request.start_time.map_or(Value::Null, Value::Integer));
+    values.push(request.start_time.map_or(Value::Null, Value::Integer));
+    values.push(request.end_time.map_or(Value::Null, Value::Integer));
+    values.push(request.end_time.map_or(Value::Null, Value::Integer));
     values.push(Value::Integer(fetch_limit as i64));
     let sql = format!(
         "SELECT provider, message_id, session_id, store_id, role, ordinal,
@@ -72,7 +70,7 @@ pub(crate) async fn load_session(
 /// cannot be compared with `store_id`, so recency ordering uses the raw store's
 /// insertion order.
 pub(crate) async fn recent_sessions(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: Option<&str>,
     limit: usize,
 ) -> Result<Vec<LcmRecentSession>, LcmError> {
@@ -112,7 +110,7 @@ pub(crate) async fn recent_sessions(
 /// Lists providers that contain raw messages for an explicit session id,
 /// ordered by most recent ingested activity.
 pub(crate) async fn session_providers(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     session_id: &str,
 ) -> Result<Vec<String>, LcmError> {
     let mut rows = conn
@@ -135,7 +133,7 @@ pub(crate) async fn session_providers(
 /// Loads a bounded turn-ordered replay slice for one session: head turns,
 /// tail turns (deduplicated against the head), and top summary-DAG nodes.
 pub(crate) async fn session_replay_slice(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: &LcmSessionReplayRequest,
 ) -> Result<LcmSessionReplaySlice, LcmError> {
     let mut rows = conn
@@ -175,7 +173,7 @@ enum ReplayDirection {
 }
 
 async fn replay_slice_messages(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: &LcmSessionReplayRequest,
     direction: ReplayDirection,
     after_store_id: Option<i64>,
@@ -223,7 +221,7 @@ async fn replay_slice_messages(
 }
 
 async fn replay_slice_summary_nodes(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: &LcmSessionReplayRequest,
 ) -> Result<Vec<LcmReplaySummaryNode>, LcmError> {
     if request.summary_limit == 0 {

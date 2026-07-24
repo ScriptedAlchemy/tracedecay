@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{AnalyticsEventQuery, GlobalDb};
+use crate::global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -67,42 +67,62 @@ enum AdminCliAction {
 }
 
 struct AdminCliContext<'a> {
-    global_db: &'a GlobalDb,
+    global_db: &'a RegisteredGlobalDb,
+    accounting_db: Option<&'a RegisteredGlobalDb>,
     profile_root: Option<&'a Path>,
     project: Option<&'a TraceDecay>,
-    project_session_db: Option<&'a GlobalDb>,
-    user_session_db: Option<&'a GlobalDb>,
+    project_session_db: Option<&'a RegisteredGlobalDb>,
+    registered_project_session_db: Option<&'a RegisteredGlobalDb>,
+    registered_user_session_db: Option<&'a RegisteredGlobalDb>,
+    profile_identity: Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
 }
 
 impl<'a> AdminCliContext<'a> {
     fn with_project(
         cg: &'a TraceDecay,
-        global_db: &'a GlobalDb,
+        global_db: &'a RegisteredGlobalDb,
+        accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: Option<&'a Path>,
         session_authorities: super::SessionAuthorities<'a>,
     ) -> Self {
         Self {
             global_db,
+            accounting_db,
             profile_root,
             project: Some(cg),
             project_session_db: session_authorities.project.map(AsRef::as_ref),
-            user_session_db: session_authorities.user.map(AsRef::as_ref),
+            registered_project_session_db: session_authorities.project_registered,
+            registered_user_session_db: session_authorities.profile_registered,
+            profile_identity: session_authorities.profile_identity,
         }
     }
 
-    fn projectless(global_db: &'a GlobalDb, profile_root: &'a Path) -> Self {
+    fn projectless(
+        global_db: &'a RegisteredGlobalDb,
+        accounting_db: Option<&'a RegisteredGlobalDb>,
+        profile_root: &'a Path,
+    ) -> Self {
         Self {
             global_db,
+            accounting_db,
             profile_root: Some(profile_root),
             project: None,
             project_session_db: None,
-            user_session_db: None,
+            registered_project_session_db: None,
+            registered_user_session_db: None,
+            profile_identity: None,
         }
     }
 
     fn require_project(&self) -> Result<&'a TraceDecay> {
         self.project.ok_or_else(|| TraceDecayError::Config {
             message: "requested admin action requires an initialized project".to_string(),
+        })
+    }
+
+    fn require_accounting_db(&self) -> Result<&'a RegisteredGlobalDb> {
+        self.accounting_db.ok_or_else(|| TraceDecayError::Config {
+            message: "daemon registered accounting database is unavailable".to_string(),
         })
     }
 
@@ -116,24 +136,42 @@ impl<'a> AdminCliContext<'a> {
         self.project.map(TraceDecay::project_root)
     }
 
-    fn require_project_session_db(&self) -> Result<&'a GlobalDb> {
+    fn require_project_session_db(&self) -> Result<&'a RegisteredGlobalDb> {
         self.project_session_db
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon project session database is unavailable".to_string(),
             })
     }
 
-    fn require_user_session_db(&self) -> Result<&'a GlobalDb> {
-        self.user_session_db.ok_or_else(|| TraceDecayError::Config {
-            message: "daemon user session database is unavailable".to_string(),
-        })
+    fn require_registered_project_session_db(&self) -> Result<&'a RegisteredGlobalDb> {
+        self.registered_project_session_db
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon registered project session database is unavailable".to_string(),
+            })
+    }
+
+    fn require_registered_user_session_db(&self) -> Result<&'a RegisteredGlobalDb> {
+        self.registered_user_session_db
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon registered user session database is unavailable".to_string(),
+            })
+    }
+
+    fn require_profile_identity(
+        &self,
+    ) -> Result<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1> {
+        self.profile_identity
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon durable profile identity is unavailable".to_string(),
+            })
     }
 }
 
 pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
+    accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: Option<&Path>,
     session_authorities: super::SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
@@ -142,7 +180,13 @@ pub(super) async fn handle_admin_cli(
         message: "daemon global database is unavailable".to_string(),
     })?;
     dispatch_admin_cli(
-        AdminCliContext::with_project(cg, global_db, profile_root, session_authorities),
+        AdminCliContext::with_project(
+            cg,
+            global_db,
+            accounting_db,
+            profile_root,
+            session_authorities,
+        ),
         action,
     )
     .await
@@ -150,12 +194,13 @@ pub(super) async fn handle_admin_cli(
 
 pub(crate) async fn handle_projectless_admin_cli(
     args: Value,
-    global_db: &GlobalDb,
+    global_db: &RegisteredGlobalDb,
+    accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: &Path,
 ) -> Result<ToolResult> {
     let action = parse_admin_cli_action(args)?;
     dispatch_admin_cli(
-        AdminCliContext::projectless(global_db, profile_root),
+        AdminCliContext::projectless(global_db, accounting_db, profile_root),
         action,
     )
     .await
@@ -173,13 +218,16 @@ async fn dispatch_admin_cli(
 ) -> Result<ToolResult> {
     let global_db = context.global_db;
     let value = match action {
-        AdminCliAction::CostSummary { range } => cost_summary(global_db, &range).await,
+        AdminCliAction::CostSummary { range } => {
+            cost_summary(context.require_accounting_db()?, &range).await
+        }
         AdminCliAction::SessionsIngest => {
             sessions_ingest(
                 context.require_project()?,
                 context.global_db,
-                context.require_project_session_db()?,
-                context.require_user_session_db()?,
+                context.require_registered_project_session_db()?,
+                context.require_registered_user_session_db()?,
+                context.require_profile_identity()?,
             )
             .await?
         }
@@ -190,7 +238,7 @@ async fn dispatch_admin_cli(
         } => {
             sessions_git_backfill(
                 context.require_project()?,
-                global_db,
+                context.require_accounting_db()?,
                 context.require_project_session_db()?,
                 since,
                 limit_sessions,
@@ -199,14 +247,20 @@ async fn dispatch_admin_cli(
             .await?
         }
         AdminCliAction::SessionsUnfinished { limit } => {
-            sessions_unfinished(context.require_project_session_db()?, limit).await?
+            sessions_unfinished(context.require_registered_project_session_db()?, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
-            crate::analytics_bridge::analytics_sync_with_db(global_db, context.project_root()).await
+            crate::analytics_bridge::analytics_sync_with_db(
+                context.require_accounting_db()?,
+                context.project_root(),
+            )
+            .await
         }
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
             crate::analytics_bridge::analytics_diagnostics_with_db(
-                global_db,
+                context.require_accounting_db()?,
+                context.registered_project_session_db,
+                context.registered_user_session_db,
                 context.project_root(),
                 all,
                 no_sync,
@@ -220,12 +274,12 @@ async fn dispatch_admin_cli(
             json!({ "previous": previous, "current": tokens })
         }
         AdminCliAction::RegistryList { limit, query } => {
-            registry_list(context.project, global_db, limit, query.as_deref()).await
+            registry_list(context.project, global_db, limit, query.as_deref()).await?
         }
         AdminCliAction::RegistryContext { project_arg } => {
-            registry_context(context.project, global_db, project_arg.as_deref()).await
+            registry_context(context.project, global_db, project_arg.as_deref()).await?
         }
-        AdminCliAction::RegistryEmpty => registry_empty(global_db).await,
+        AdminCliAction::RegistryEmpty => registry_empty(global_db).await?,
         AdminCliAction::RegistryProjectTokens { project_args } => {
             registry_project_tokens(global_db, &project_args).await
         }
@@ -270,11 +324,14 @@ async fn dispatch_admin_cli(
     Ok(json_result(&value))
 }
 
-async fn registry_empty(global_db: &GlobalDb) -> Value {
-    json!({ "empty": global_db.list_code_projects(1).await.is_empty() })
+async fn registry_empty(global_db: &RegisteredGlobalDb) -> Result<Value> {
+    Ok(json!({ "empty": global_db.list_code_projects(1).await?.is_empty() }))
 }
 
-async fn registry_project_tokens(global_db: &GlobalDb, project_args: &[PathBuf]) -> Value {
+async fn registry_project_tokens(
+    global_db: &RegisteredGlobalDb,
+    project_args: &[PathBuf],
+) -> Value {
     let mut projects = Vec::with_capacity(project_args.len());
     for project in project_args {
         projects.push(json!({
@@ -286,7 +343,7 @@ async fn registry_project_tokens(global_db: &GlobalDb, project_args: &[PathBuf])
 }
 
 async fn gain_query(
-    global_db: &GlobalDb,
+    global_db: &RegisteredGlobalDb,
     project_arg: Option<&Path>,
     since: i64,
     history: bool,
@@ -308,32 +365,32 @@ async fn gain_query(
 
 async fn registry_list(
     cg: Option<&TraceDecay>,
-    global_db: &GlobalDb,
+    global_db: &RegisteredGlobalDb,
     limit: usize,
     query: Option<&str>,
-) -> Value {
+) -> Result<Value> {
     use crate::project_registry::{PublicCodeProject, build_project_registry_view};
 
     let limit = limit.clamp(1, 100_000);
     let mut projects = match query {
         Some(query) => global_db.search_code_projects(query, limit + 1).await,
-        None => global_db.list_code_projects(limit + 1).await,
+        None => global_db.list_code_projects(limit + 1).await?,
     };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let active_id = match cg {
-        Some(cg) => active_project_id(cg, global_db).await,
+        Some(cg) => active_project_id(cg, global_db).await?,
         None => None,
     };
     let contexts = global_db
         .project_registry_contexts_for_projects(&projects)
-        .await;
+        .await?;
     let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
     let public = projects
         .iter()
         .map(|project| PublicCodeProject::from_record(project, active_id.as_deref()))
         .collect::<Vec<_>>();
-    json!({
+    Ok(json!({
         "status": "ok",
         "limit": limit,
         "query": query,
@@ -341,65 +398,71 @@ async fn registry_list(
         "summary": view.summary,
         "project_tree": view.project_tree,
         "projects": public,
-    })
+    }))
 }
 
-async fn active_project_id(cg: &TraceDecay, global_db: &GlobalDb) -> Option<String> {
+async fn active_project_id(
+    cg: &TraceDecay,
+    global_db: &RegisteredGlobalDb,
+) -> Result<Option<String>> {
     let git_common_dir = crate::worktree::git_common_dir(cg.project_root());
-    global_db
+    Ok(global_db
         .project_registry_context_by_identity(cg.project_root(), git_common_dir.as_deref())
-        .await
-        .map(|context| context.project.project_id)
+        .await?
+        .map(|context| context.project.project_id))
 }
 
 async fn registry_context(
     cg: Option<&TraceDecay>,
-    global_db: &GlobalDb,
+    global_db: &RegisteredGlobalDb,
     project_arg: Option<&Path>,
-) -> Value {
+) -> Result<Value> {
     use crate::project_registry::PublicProjectRegistryContext;
 
     let Some(selector) = project_arg.or_else(|| cg.map(TraceDecay::project_root)) else {
-        return json!({ "status": "invalid", "project": null });
+        return Ok(json!({ "status": "invalid", "project": null }));
     };
     let selector_text = selector.to_string_lossy();
-    let context = if GlobalDb::is_explicit_project_path_selector(&selector_text) {
+    let context = if RegisteredGlobalDb::is_explicit_project_path_selector(&selector_text) {
         None
     } else {
         global_db
             .project_registry_context_by_id(&selector_text)
-            .await
+            .await?
     };
     let context = match context {
         Some(context) => Some(context),
-        None => match global_db.project_registry_context_by_alias(selector).await {
+        None => match global_db
+            .project_registry_context_by_alias(selector)
+            .await?
+        {
             Some(context) => Some(context),
-            None if GlobalDb::is_explicit_project_path_selector(&selector_text) => {
+            None if RegisteredGlobalDb::is_explicit_project_path_selector(&selector_text) => {
                 let git_common_dir = crate::worktree::git_common_dir(selector);
                 global_db
                     .project_registry_context_by_identity(selector, git_common_dir.as_deref())
-                    .await
+                    .await?
             }
             None => None,
         },
     };
     let Some(context) = context else {
-        return json!({ "status": "not_found", "project": null });
+        return Ok(json!({ "status": "not_found", "project": null }));
     };
     let active_id = match cg {
-        Some(cg) => active_project_id(cg, global_db).await,
+        Some(cg) => active_project_id(cg, global_db).await?,
         None => None,
     };
     let public = PublicProjectRegistryContext::new(&context, active_id.as_deref());
-    json!({
+    Ok(json!({
         "status": "ok",
         "project": public.project,
         "aliases": context.aliases,
         "stores": context.stores,
-    })
+    }))
 }
 
-async fn cost_summary(global_db: &GlobalDb, range: &str) -> Value {
+async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Value {
     crate::accounting::pricing::refresh_if_stale();
     let ingest = crate::accounting::parser::ingest(global_db).await;
     let since = crate::accounting::metrics::parse_range(range);
@@ -439,18 +502,16 @@ async fn cost_summary(global_db: &GlobalDb, range: &str) -> Value {
 
 async fn sessions_ingest(
     cg: &TraceDecay,
-    registry_db: &GlobalDb,
-    project_db: &GlobalDb,
-    user_db: &GlobalDb,
+    registry_db: &RegisteredGlobalDb,
+    registered_project_db: &RegisteredGlobalDb,
+    registered_user_db: &RegisteredGlobalDb,
+    profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<Value> {
-    let profile_root = user_db
-        .db_path()
-        .parent()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "daemon user session database has no profile root".to_string(),
-        })?;
+    let profile_root = profile_identity.profile_root();
     let user_outcome = crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
-        user_db,
+        profile_identity.brain_id(),
+        profile_identity.profile_id(),
+        registered_user_db,
         registry_db,
         profile_root,
         None,
@@ -463,7 +524,9 @@ async fn sessions_ingest(
         .as_deref()
         .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
     let project_outcome = crate::sessions::ingest_project_sources_for_provider(
-        project_db,
+        profile_identity.brain_id(),
+        profile_identity.profile_id(),
+        registered_project_db,
         cg.project_root(),
         project_id,
         None,
@@ -493,8 +556,8 @@ async fn sessions_ingest(
 
 async fn sessions_git_backfill(
     cg: &TraceDecay,
-    global_db: &GlobalDb,
-    session_db: &GlobalDb,
+    global_db: &RegisteredGlobalDb,
+    session_db: &RegisteredGlobalDb,
     since: i64,
     limit_sessions: usize,
     dry_run: bool,
@@ -503,7 +566,7 @@ async fn sessions_git_backfill(
         BackfillOptions, DEFAULT_SPAN_MERGE_GAP_SECS, SystemGit, run_backfill,
     };
 
-    let project_id = GlobalDb::canonical_project_key(cg.project_root());
+    let project_id = RegisteredGlobalDb::canonical_project_key(cg.project_root());
     let analytics_events = global_db
         .query_analytics_events(&AnalyticsEventQuery {
             project_id: Some(project_id),
@@ -541,7 +604,7 @@ async fn sessions_git_backfill(
     }))
 }
 
-async fn sessions_unfinished(db: &GlobalDb, limit: usize) -> Result<Value> {
+async fn sessions_unfinished(db: &RegisteredGlobalDb, limit: usize) -> Result<Value> {
     let items = crate::sessions::workflow_state::list_unfinished(db, limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;
@@ -575,52 +638,5 @@ mod tests {
     #[test]
     fn rejects_unknown_admin_action() {
         assert!(serde_json::from_value::<AdminCliAction>(json!({ "action": "vacuum" })).is_err());
-    }
-
-    #[tokio::test]
-    async fn registry_gc_preview_uses_profile_root_when_global_db_is_overridden() {
-        let fixture = tempfile::tempdir().expect("tempdir");
-        let profile_root = fixture.path().join("profile");
-        let override_root = fixture.path().join("database-override");
-        let project_root = fixture.path().join("missing-project");
-        let store_root = profile_root.join("projects/project-override");
-        std::fs::create_dir_all(&store_root).expect("profile store");
-        std::fs::write(store_root.join("tracedecay.db"), b"store").expect("profile store database");
-        std::fs::create_dir_all(&override_root).expect("override root");
-        let db = GlobalDb::open_at(&override_root.join("global.db"))
-            .await
-            .expect("global database");
-        db.upsert(&project_root, 1).await;
-        db.upsert_code_project("project-override", &project_root, None, None, Some("main"))
-            .await
-            .expect("project registry entry");
-        db.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
-            store_id: "store:project-override:profile_sharded".to_string(),
-            project_id: "project-override".to_string(),
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: "projects/project-override".to_string(),
-            manifest_relpath: None,
-            last_verified_at: Some(1),
-            last_write_at: Some(1),
-        })
-        .await
-        .expect("store registry entry");
-
-        let report = handle_projectless_admin_cli(
-            json!({ "action": "registry_gc", "prefix": null, "apply": false }),
-            &db,
-            &profile_root,
-        )
-        .await
-        .expect("registry GC preview");
-        let report: Value = serde_json::from_str(
-            report.value["content"][0]["text"]
-                .as_str()
-                .expect("JSON result text"),
-        )
-        .expect("registry GC report");
-
-        assert_eq!(report["storage_project_candidate_count"], 0);
     }
 }

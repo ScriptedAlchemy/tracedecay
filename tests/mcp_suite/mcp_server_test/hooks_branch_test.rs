@@ -3,7 +3,6 @@
 use crate::mcp_server_test::support::*;
 use serde_json::json;
 use std::fs;
-use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -48,9 +47,20 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         .unwrap();
     target_cg.index_all().await.unwrap();
 
-    let registry_db = tracedecay::global_db::GlobalDb::open_at(&global_db_path)
-        .await
-        .expect("registry opens");
+    let active_project_id = active_cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .expect("active project identity");
+    let registry_db = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        active_project,
+        active_project_id,
+    )
+    .await
+    .expect("registered project runtime opens");
     registry_db
         .upsert_code_project("proj_hook_active", active_project, None, None, Some("main"))
         .await
@@ -59,14 +69,9 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         .upsert_code_project("proj_hook_target", target_project, None, None, Some("main"))
         .await
         .expect("target project registers");
-    let server = McpServer::new_with_dbs_and_host_admission_for_test(
-        active_cg,
-        None,
-        None,
-        Some(Arc::new(registry_db)),
-        false,
-    )
-    .await;
+    let server =
+        McpServer::new_with_host_admission_test_runtime_for_test(active_cg, None, registry_db)
+            .await;
 
     let responses = run_server_with_messages(
         server.clone(),
@@ -373,7 +378,21 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
     // sibling path the parent-alias walk never reaches) resolves back to this
     // project by git-common-dir identity.
     let git_common_dir = tracedecay::worktree::git_common_dir(&project_root);
-    let registry = tracedecay::global_db::GlobalDb::open().await.unwrap();
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .expect("project identity");
+    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let registry = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project_root,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
     registry
         .upsert_code_project(
             "proj_live",
@@ -384,14 +403,7 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         )
         .await
         .unwrap();
-    let server = McpServer::new_with_dbs_and_host_admission_for_test(
-        cg,
-        None,
-        None,
-        Some(Arc::new(registry)),
-        false,
-    )
-    .await;
+    let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, registry).await;
 
     let session_id = "sess-live";
     let main_worktree = project_root.to_string_lossy().to_string();
@@ -440,21 +452,25 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
     .await;
     server.ledger_writes_settled().await;
 
-    // Open the project's sessions.db the same way the live writer resolved it.
-    let db_path = tracedecay::storage::resolve_project_session_db_path(&project_root)
-        .expect("resolve sessions.db path");
-    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
-        .await
-        .expect("open sessions.db");
+    let db = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project_root,
+        project_id,
+    )
+    .await
+    .expect("reopen registered project runtime");
 
     // Span on main exists (scenario 1).
     let on_main = db
-        .git_sessions_for(&SessionsForQuery {
-            git_ref: GitRefFilter::Branch("main".to_string()),
-            since: None,
-            until: None,
-            limit: 10,
-        })
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("main".to_string()),
+                since: None,
+                until: None,
+                limit: 10,
+            },
+            CommitRelationFilter::Produced,
+        )
         .await
         .unwrap();
     assert!(
@@ -464,12 +480,15 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
 
     // A distinct span on feature exists (scenario 2: branch switch).
     let on_feature = db
-        .git_sessions_for(&SessionsForQuery {
-            git_ref: GitRefFilter::Branch("feature".to_string()),
-            since: None,
-            until: None,
-            limit: 10,
-        })
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("feature".to_string()),
+                since: None,
+                until: None,
+                limit: 10,
+            },
+            CommitRelationFilter::Produced,
+        )
         .await
         .unwrap();
     assert!(
@@ -491,10 +510,15 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
     git(&worktree, &["commit", "-m", "feature change"]);
     let sha = git_capture(&worktree, &["rev-parse", "HEAD"]);
 
-    tracedecay::sessions::ingest_global_sources(&db, &project_root).await;
+    db.run_incremental_git_backfill_for_test(
+        &tracedecay::sessions::git_correlation::SystemGit,
+        tracedecay::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+    )
+    .await
+    .unwrap();
 
     let by_commit = db
-        .git_sessions_for_with_relation(
+        .git_sessions_for_for_test(
             &SessionsForQuery {
                 git_ref: GitRefFilter::Commit(sha.clone()),
                 since: None,

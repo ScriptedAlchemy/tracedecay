@@ -458,6 +458,12 @@ pub struct PreparedBranchTracking {
     _branch_lock: std::fs::File,
 }
 
+impl PreparedBranchTracking {
+    pub(crate) fn database_path(&self) -> &Path {
+        &self.new_db_path
+    }
+}
+
 /// Copies the nearest tracked ancestor DB and writes branch metadata.
 ///
 /// The returned [`PreparedBranchTracking`] owns the branch-add lock and must be
@@ -466,6 +472,31 @@ pub async fn prepare_branch_tracking_in_layout(
     project_root: &Path,
     branch_name: &str,
     tracedecay_dir: &Path,
+) -> crate::errors::Result<BranchTrackingPreparation> {
+    prepare_branch_tracking_in_layout_with_source(project_root, branch_name, tracedecay_dir, None)
+        .await
+}
+
+pub(crate) async fn prepare_branch_tracking_from_database(
+    project_root: &Path,
+    branch_name: &str,
+    tracedecay_dir: &Path,
+    source: &crate::db::Database,
+) -> crate::errors::Result<BranchTrackingPreparation> {
+    prepare_branch_tracking_in_layout_with_source(
+        project_root,
+        branch_name,
+        tracedecay_dir,
+        Some(source),
+    )
+    .await
+}
+
+async fn prepare_branch_tracking_in_layout_with_source(
+    project_root: &Path,
+    branch_name: &str,
+    tracedecay_dir: &Path,
+    source: Option<&crate::db::Database>,
 ) -> crate::errors::Result<BranchTrackingPreparation> {
     use crate::branch_meta;
 
@@ -560,7 +591,21 @@ pub async fn prepare_branch_tracking_in_layout(
     // Copy through SQLite rather than cloning the live main file. The
     // branch-add lock serializes metadata changes, but it does not stop other
     // processes from writing or checkpointing the parent WAL.
-    let snapshot_result = create_consistent_branch_snapshot(&parent_db, &new_db_path).await;
+    if let Some(source) = source {
+        let parent_db = parent_db
+            .canonicalize()
+            .unwrap_or_else(|_| parent_db.clone());
+        if source.database_path() != parent_db {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "retained graph '{}' does not own selected parent branch database '{}'",
+                    source.database_path().display(),
+                    parent_db.display()
+                ),
+            });
+        }
+    }
+    let snapshot_result = create_consistent_branch_snapshot(&parent_db, &new_db_path, source).await;
     snapshot_result?;
 
     // Save metadata before the caller opens the new branch DB for sync.
@@ -839,7 +884,11 @@ pub(crate) fn acquire_branch_lock_blocking(
     admin::acquire_branch_add_lock_blocking(tracedecay_dir)
 }
 
-async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::errors::Result<()> {
+async fn create_consistent_branch_snapshot(
+    src: &Path,
+    dst: &Path,
+    retained_source: Option<&crate::db::Database>,
+) -> crate::errors::Result<()> {
     let parent_dir = dst
         .parent()
         .ok_or_else(|| crate::errors::TraceDecayError::Config {
@@ -858,15 +907,31 @@ async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::err
         std::process::id()
     ));
     let result = async {
-        let authority =
-            crate::db::DatabaseAuthority::for_runtime(src, "create branch snapshot")?;
-        let (source, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
-            crate::daemon::store_runtime::driver::GraphStoreOpenMode::Open,
-            src,
-            &authority,
-        )
-        .await?;
-        source.snapshot_to(&temp).await?;
+        if let Some(source) = retained_source {
+            source.snapshot_to(&temp).await?;
+        } else {
+            let source = crate::sqlite_read_snapshot::open_in(src, parent_dir)
+                .await
+                .map_err(|error| crate::errors::TraceDecayError::Database {
+                    message: format!("failed to freeze branch source database: {error}"),
+                    operation: "create branch snapshot".to_owned(),
+                })?;
+            source
+                .backup_to(&temp)
+                .await
+                .map_err(|error| crate::errors::TraceDecayError::Database {
+                    message: format!("failed to back up frozen branch database: {error}"),
+                    operation: "create branch snapshot".to_owned(),
+                })?;
+            source.validate_source().map_err(|error| {
+                crate::errors::TraceDecayError::Database {
+                    message: format!(
+                        "branch source changed while its snapshot was created: {error}"
+                    ),
+                    operation: "create branch snapshot".to_owned(),
+                }
+            })?;
+        }
         std::fs::hard_link(&temp, dst).map_err(|error| {
             crate::errors::TraceDecayError::Config {
                 message: format!(

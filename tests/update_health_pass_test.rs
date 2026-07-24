@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use common::apply_tracedecay_home_env;
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::BRANCH_META_QUARANTINE_PREFIX;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
@@ -266,28 +266,31 @@ async fn post_update_gcs_stale_registry_rows_under_temp_dir_only() {
     std::fs::create_dir_all(&live_root).unwrap();
 
     {
-        let db = GlobalDb::open_at(&profile_root.join("global.db"))
+        let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
             .await
-            .expect("global db should open");
-        db.upsert_code_project(
-            "proj_tmp_gone",
-            &fake_tmp.join("gone-project"),
-            None,
-            None,
-            Some("main"),
-        )
-        .await
-        .expect("stale temp project should upsert");
-        db.upsert_code_project(
-            "proj_elsewhere_gone",
-            &home_root.join("gone-elsewhere"),
-            None,
-            None,
-            Some("main"),
-        )
-        .await
-        .expect("stale non-temp project should upsert");
-        db.upsert_code_project("proj_tmp_live", &live_root, None, None, Some("main"))
+            .expect("registered profile runtime should open");
+        runtime
+            .upsert_code_project(
+                "proj_tmp_gone",
+                &fake_tmp.join("gone-project"),
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("stale temp project should upsert");
+        runtime
+            .upsert_code_project(
+                "proj_elsewhere_gone",
+                &home_root.join("gone-elsewhere"),
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("stale non-temp project should upsert");
+        runtime
+            .upsert_code_project("proj_tmp_live", &live_root, None, None, Some("main"))
             .await
             .expect("live temp project should upsert");
     }
@@ -307,10 +310,10 @@ async fn post_update_gcs_stale_registry_rows_under_temp_dir_only() {
         "stderr should report the temp-root registry GC\nstderr:\n{stderr}"
     );
 
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
-        .expect("global db should reopen");
-    let remaining: Vec<String> = db
+        .expect("registered profile runtime should reopen");
+    let remaining: Vec<String> = runtime
         .list_code_projects(usize::MAX)
         .await
         .into_iter()

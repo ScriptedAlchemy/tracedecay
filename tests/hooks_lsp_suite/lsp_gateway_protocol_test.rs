@@ -3,13 +3,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{Value, json};
 use tracedecay::daemon::lsp_gateway::{
     AdmittedRoot, ClientCapabilities, ContextCoverage, ContextExpansionEnvelope,
-    ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope,
-    ContextProjectionEnvelope, ContextProjectionKind, ContextProjectionOutcome,
-    ContextProjectionPort, ContextProjectionRegistration, ContextProjectionRequest,
-    DaemonLspGateway, DaemonLspProtocolSession, FeedbackCyclePort, FeedbackCycleRequest,
-    FeedbackCycleResponse, GatewayCapabilities, LspRequestId, SemanticProviderPort,
-    TRACEDECAY_CONTEXT_REVISION, UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities,
-    negotiate_capabilities,
+    ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope, ContextFreshness,
+    ContextProducerState, ContextProjectionEnvelope, ContextProjectionIdentity,
+    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
+    ContextProjectionRegistration, ContextProjectionRequest, DaemonLspGateway,
+    DaemonLspProtocolSession, FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse,
+    GatewayCapabilities, LspRequestId, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
+    UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, negotiate_capabilities,
 };
 
 struct Feedback;
@@ -129,6 +129,17 @@ struct PendingContext {
     polls: AtomicUsize,
 }
 
+fn fixture_projection_identity() -> ContextProjectionIdentity {
+    ContextProjectionIdentity {
+        head_commit_id: "0123456789abcdef".to_owned(),
+        code_generation_id: "generation:1".to_owned(),
+        snapshot_digest: format!("sha256:{}", "a".repeat(64)),
+        invalidation_digest: format!("sha256:{}", "b".repeat(64)),
+        snapshot_content_digest: format!("sha256:{}", "c".repeat(64)),
+        document_content_digest: None,
+    }
+}
+
 impl ContextProjectionPort for PendingContext {
     fn registrations(&self) -> Vec<ContextProjectionRegistration> {
         vec![ContextProjectionRegistration {
@@ -159,10 +170,14 @@ impl ContextProjectionPort for PendingContext {
             document_uri: None,
             kind: ContextProjectionKind::diagnostics(),
             generation: 1,
+            identity: fixture_projection_identity(),
+            freshness: ContextFreshness::Current,
+            producer_state: ContextProducerState::Complete,
             coverage: ContextCoverage::Complete,
             revision: TRACEDECAY_CONTEXT_REVISION,
             items: Vec::new(),
             omitted_count: 0,
+            omission_reasons: Vec::new(),
             retrieval_handle: None,
         }))
     }
@@ -182,8 +197,7 @@ impl ContextProjectionPort for PendingContext {
                 generation: 1,
                 scope: ContextExpansionScope {
                     scope_digest: "sha256:scope".to_owned(),
-                    head_commit_id: "0123456789abcdef".to_owned(),
-                    code_generation_id: "generation:1".to_owned(),
+                    identity: fixture_projection_identity(),
                 },
                 expires_at: 10_000,
                 coverage: ContextCoverage::Partial,
@@ -203,8 +217,7 @@ impl ContextProjectionPort for PendingContext {
             generation: 1,
             scope: ContextExpansionScope {
                 scope_digest: "sha256:scope".to_owned(),
-                head_commit_id: "0123456789abcdef".to_owned(),
-                code_generation_id: "generation:1".to_owned(),
+                identity: fixture_projection_identity(),
             },
             expires_at: 10_000,
             coverage: ContextCoverage::Complete,

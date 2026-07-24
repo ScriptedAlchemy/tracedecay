@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use libsql::params;
+use crate::db::engine::{Value, params};
 
 use crate::errors::Result;
 use crate::memory::entities::normalize_entity_alias;
@@ -13,10 +13,10 @@ use super::{MemoryStore, db_error, db_message, relations_conflict, to_json_strin
 
 impl MemoryStore<'_> {
     pub async fn normalize_fact_tags(&self, fact_id: i64, tags: &[String]) -> Result<Vec<String>> {
-        self.with_immediate_tx(
-            "normalize_fact_tags",
-            self.normalize_fact_tags_inner(fact_id, tags),
-        )
+        let tags = tags.to_vec();
+        self.with_immediate_tx("normalize_fact_tags", move |store| {
+            Box::pin(async move { store.normalize_fact_tags_inner(fact_id, &tags).await })
+        })
         .await
     }
 
@@ -59,10 +59,10 @@ impl MemoryStore<'_> {
         entity_id: i64,
         aliases: &[String],
     ) -> Result<Vec<String>> {
-        self.with_immediate_tx(
-            "update_entity_aliases",
-            self.update_entity_aliases_inner(entity_id, aliases),
-        )
+        let aliases = aliases.to_vec();
+        self.with_immediate_tx("update_entity_aliases", move |store| {
+            Box::pin(async move { store.update_entity_aliases_inner(entity_id, &aliases).await })
+        })
         .await
     }
 
@@ -124,10 +124,9 @@ impl MemoryStore<'_> {
         winner_entity_id: i64,
         loser_entity_ids: Vec<i64>,
     ) -> Result<EntityGroomingResult> {
-        self.with_immediate_tx(
-            "merge_entities",
-            self.merge_entities_inner(winner_entity_id, loser_entity_ids),
-        )
+        self.with_immediate_tx("merge_entities", move |store| {
+            Box::pin(store.merge_entities_inner(winner_entity_id, loser_entity_ids))
+        })
         .await
     }
 
@@ -174,24 +173,10 @@ impl MemoryStore<'_> {
                 )
                 .unwrap_or_default(),
             );
-            let mut links = self
-                .conn
-                .query(
-                    "SELECT fact_id FROM memory_fact_entities WHERE entity_id = ?1",
-                    params![entity_id],
-                )
-                .await
-                .map_err(|e| db_error("merge_entities", e))?;
-            while let Some(link) = links
-                .next()
-                .await
-                .map_err(|e| db_error("merge_entities", e))?
-            {
-                fact_ids.insert(
-                    link.get::<i64>(0)
-                        .map_err(|e| db_error("merge_entities", e))?,
-                );
-            }
+            fact_ids.extend(
+                self.fact_ids_for_entity(entity_id, "merge_entities")
+                    .await?,
+            );
         }
         let aliases = self
             .update_entity_aliases_inner(winner_entity_id, &aliases)
@@ -232,11 +217,15 @@ impl MemoryStore<'_> {
         operations: &[MemoryGroomingOperation],
         min_confidence: f64,
     ) -> Result<MemoryGroomingReport> {
+        let operations = operations.to_vec();
         let mut report = self
-            .with_immediate_tx(
-                "apply_grooming_batch",
-                self.apply_grooming_batch_inner(operations, min_confidence),
-            )
+            .with_immediate_tx("apply_grooming_batch", move |store| {
+                Box::pin(async move {
+                    store
+                        .apply_grooming_batch_inner(&operations, min_confidence)
+                        .await
+                })
+            })
             .await?;
         // Derived state is resumable. Keep its CPU-heavy work outside the
         // logical mutation transaction and cap each pass.
@@ -509,8 +498,8 @@ impl MemoryStore<'_> {
             .collect::<Vec<_>>()
             .join(",");
         let mut values = Vec::with_capacity(fact_ids.len() + 1);
-        values.push(libsql::Value::Integer(entity_id));
-        values.extend(fact_ids.iter().copied().map(libsql::Value::Integer));
+        values.push(Value::Integer(entity_id));
+        values.extend(fact_ids.iter().copied().map(Value::Integer));
         let mut rows = self
             .conn
             .query(
@@ -529,25 +518,9 @@ impl MemoryStore<'_> {
     }
 
     async fn mark_entity_fact_banks_dirty(&self, entity_id: i64, invalidate: bool) -> Result<()> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT fact_id FROM memory_fact_entities WHERE entity_id = ?1",
-                params![entity_id],
-            )
-            .await
-            .map_err(|e| db_error("mark_entity_fact_banks_dirty", e))?;
-        let mut fact_ids = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| db_error("mark_entity_fact_banks_dirty", e))?
-        {
-            fact_ids.push(
-                row.get::<i64>(0)
-                    .map_err(|e| db_error("mark_entity_fact_banks_dirty", e))?,
-            );
-        }
+        let fact_ids = self
+            .fact_ids_for_entity(entity_id, "mark_entity_fact_banks_dirty")
+            .await?;
         for fact_id in fact_ids {
             if invalidate {
                 self.invalidate_fact_vector_and_mark_dirty(fact_id).await?;
@@ -556,6 +529,39 @@ impl MemoryStore<'_> {
             }
         }
         Ok(())
+    }
+
+    async fn fact_ids_for_entity(
+        &self,
+        entity_id: i64,
+        operation: &'static str,
+    ) -> Result<Vec<i64>> {
+        const PAGE_SIZE: i64 = 512;
+        let mut fact_ids = Vec::new();
+        let mut cursor = 0_i64;
+        loop {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT fact_id FROM memory_fact_entities
+                     WHERE entity_id = ?1 AND fact_id > ?2
+                     ORDER BY fact_id
+                     LIMIT ?3",
+                    params![entity_id, cursor, PAGE_SIZE],
+                )
+                .await
+                .map_err(|e| db_error(operation, e))?;
+            let mut page_count = 0;
+            while let Some(row) = rows.next().await.map_err(|e| db_error(operation, e))? {
+                cursor = row.get(0).map_err(|e| db_error(operation, e))?;
+                fact_ids.push(cursor);
+                page_count += 1;
+            }
+            if page_count < PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(fact_ids)
     }
 
     async fn invalidate_fact_vector_and_mark_dirty(&self, fact_id: i64) -> Result<()> {

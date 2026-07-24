@@ -15,8 +15,14 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         ),
     ] {
         let tmp = TempDir::new().unwrap();
-        let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
         let message_id = format!("message-rollback-{stage}");
         let searchable = format!("rollback searchable {stage}");
         let candidate = observation(
@@ -28,11 +34,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         );
         persist(&store, candidate.clone(), None).await;
 
-        let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-            .build()
-            .await
-            .unwrap();
-        let raw_conn = raw_db.connect().unwrap();
+        let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
         raw_conn
             .execute_batch(&format!(
                 "CREATE TRIGGER fail_projection_{stage}
@@ -40,7 +42,6 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
                     SELECT RAISE(ABORT, 'injected projection {stage} failure');
                  END;"
             ))
-            .await
             .unwrap();
 
         let error = store
@@ -53,11 +54,13 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         );
 
         drop(raw_conn);
-        drop(raw_db);
-        drop(db);
+        drop(store);
+        drop(runtime);
 
-        let reopened_db = open_lcm_db(&tmp).await;
-        let reopened_store = GlobalDbObservationStore::new(&reopened_db);
+        let reopened_runtime = profile_runtime(&tmp).await;
+        let reopened_store = reopened_runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         assert_eq!(
             reopened_store
                 .projection_checkpoint()
@@ -86,8 +89,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
             "{stage} failure committed projection provenance"
         );
         assert!(
-            reopened_db
-                .search_session_messages("claude", Some("user"), &searchable, 10)
+            search_session_messages(&tmp, &searchable, 10)
                 .await
                 .is_empty(),
             "{stage} failure leaked a searchable message"
@@ -108,17 +110,11 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
             "{stage} failure consumed the queue item"
         );
 
-        let trigger_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-            .build()
-            .await
-            .unwrap();
-        let trigger_conn = trigger_db.connect().unwrap();
+        let trigger_conn = rusqlite::Connection::open(&database_path).unwrap();
         trigger_conn
             .execute_batch(&format!("DROP TRIGGER fail_projection_{stage};"))
-            .await
             .unwrap();
         drop(trigger_conn);
-        drop(trigger_db);
         reopened_store
             .project_observation(candidate.observation_id())
             .await
@@ -126,10 +122,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         let recovered_counts = projection_counts(&tmp).await;
         assert_eq!(recovered_counts, (1, 1, 1, 1, 0, 0));
         assert_eq!(
-            reopened_db
-                .search_session_messages("claude", Some("user"), &searchable, 10)
-                .await
-                .len(),
+            search_session_messages(&tmp, &searchable, 10).await.len(),
             1
         );
         let replay = reopened_store
@@ -147,8 +140,10 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
 #[tokio::test]
 async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let first = observation(
         "session-collision",
         0,
@@ -207,7 +202,7 @@ async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
     );
     assert_eq!(counts_after.5, 0, "the projection queue must converge");
     assert_eq!(
-        db.search_session_messages("claude", Some("user"), "original collision", 10)
+        search_session_messages(&tmp, "original collision", 10)
             .await
             .len(),
         1
@@ -231,8 +226,10 @@ async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
 #[tokio::test]
 async fn authority_reopen_accepts_historical_generation_after_supersession() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let original = observation_in_generation(
         "session-authority-supersession",
         GENERATION,
@@ -261,9 +258,10 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
     )
     .await;
     drain_projection_queue(&store).await;
-    drop(db);
+    drop(store);
+    drop(runtime);
 
-    let reopened = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
         .await
         .expect("historical provenance must validate against the current output owner");
     drop(reopened);
@@ -277,51 +275,51 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
 #[tokio::test]
 async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-update", "message-audit-update").await;
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    drop(runtime);
+    let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
             "UPDATE session_messages SET text = 'tampered projection body'
              WHERE provider = 'claude' AND message_id = 'message-audit-update'",
             (),
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
     assert!(
-        GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
             .await
-            .is_none()
+            .is_err()
     );
 }
 
 #[tokio::test]
 async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-delete", "message-audit-delete").await;
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    drop(runtime);
+    let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
             "DELETE FROM session_messages
              WHERE provider = 'claude' AND message_id = 'message-audit-delete'",
             (),
         )
-        .await
         .unwrap();
     drop(raw_conn);
-    drop(raw_db);
 
     assert!(
-        GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
             .await
-            .is_none()
+            .is_err()
     );
 }

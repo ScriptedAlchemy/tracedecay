@@ -17,13 +17,16 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
+use tracedecay::application::host_admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
+};
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
 
 static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
+static EMPTY_GLOBAL_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
 pub async fn initialize_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
@@ -420,7 +423,7 @@ pub fn sample_node(id: &str, name: &str, file_path: &str) -> Node {
 pub fn create_runtime() -> tokio::runtime::Runtime {
     match tokio::runtime::Builder::new_multi_thread()
         // Dashboard tests issue synchronous ureq calls while the in-process
-        // server and libsql handlers use this same runtime. Two workers can
+        // server and database handlers use this same runtime. Two workers can
         // deadlock under load (one blocked in ureq, one awaiting DB work).
         .worker_threads(4)
         .enable_all()
@@ -792,45 +795,277 @@ pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
 }
 
 pub fn isolated_lcm_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tracedecay").join("sessions.db")
+    tracedecay::sessions::user_sessions_db_path(&tmp.path().join(".tracedecay"))
 }
 
 pub fn isolated_global_db_path(tmp: &TempDir) -> std::path::PathBuf {
     tmp.path().join(".tracedecay").join("global.db")
 }
 
-pub async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = isolated_lcm_db_path(tmp);
-    if !db_path.exists() {
-        seed_lcm_db_from_template(&db_path).await;
-        return GlobalDb::open_at_assuming_schema(&db_path)
-            .await
-            .expect("session db open");
-    }
-    GlobalDb::open_at(&db_path).await.expect("session db open")
+/// Opaque retained profile-session runtime for integration fixtures.
+///
+/// Callers get typed operations only; the registered database handle and
+/// physical path remain owned by the daemon-style session registry.
+pub struct LcmTestRuntime {
+    runtime: HostAdmissionTestRuntimeV1,
 }
 
-/// Writes an empty `GlobalDb`-schema store at `db_path` from the cached
+impl LcmTestRuntime {
+    async fn open(profile_root: &Path) -> Self {
+        Self {
+            runtime: HostAdmissionTestRuntimeV1::profile(profile_root)
+                .await
+                .expect("registered LCM test runtime"),
+        }
+    }
+
+    pub fn close(self) {}
+
+    pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.runtime
+            .upsert_session_for_test(HostAdmissionScope::Profile, session)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
+        self.runtime
+            .upsert_session_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+        self.runtime
+            .lcm_load_raw_message_for_test(provider, message_id)
+            .await
+    }
+
+    pub async fn lcm_insert_summary_node(
+        &self,
+        draft: tracedecay::sessions::lcm::LcmSummaryNodeDraft,
+    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime
+            .lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
+            .await
+    }
+
+    pub async fn lcm_update_lifecycle(
+        &self,
+        update: tracedecay::sessions::lcm::LcmLifecycleUpdate,
+    ) -> Result<tracedecay::sessions::lcm::LcmLifecycleState, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime
+            .lcm_update_lifecycle_for_test(HostAdmissionScope::Profile, update)
+            .await
+    }
+
+    pub async fn lcm_lifecycle_state(
+        &self,
+        provider: &str,
+        conversation_id: &str,
+    ) -> Result<tracedecay::sessions::lcm::LcmLifecycleState, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime
+            .lcm_lifecycle_state_for_test(provider, conversation_id)
+            .await
+    }
+
+    pub async fn lcm_preflight(
+        &self,
+        request: tracedecay::sessions::lcm::LcmPreflightRequest,
+    ) -> Result<tracedecay::sessions::lcm::LcmPreflightResponse, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime.lcm_preflight_for_test(request).await
+    }
+
+    pub async fn lcm_compress(
+        &self,
+        request: tracedecay::sessions::lcm::LcmCompressionRequest,
+    ) -> Result<
+        tracedecay::sessions::lcm::LcmCompressionResponse,
+        tracedecay::sessions::lcm::LcmError,
+    > {
+        self.runtime.lcm_compress_for_test(request).await
+    }
+
+    pub async fn lcm_compress_for_test(
+        &self,
+        request: tracedecay::sessions::lcm::LcmCompressionRequest,
+    ) -> Result<
+        tracedecay::sessions::lcm::LcmCompressionResponse,
+        tracedecay::sessions::lcm::LcmError,
+    > {
+        self.runtime.lcm_compress_for_test(request).await
+    }
+
+    pub async fn lcm_status(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<tracedecay::sessions::lcm::LcmStatus, tracedecay::sessions::lcm::LcmError> {
+        self.runtime.lcm_status_for_test(provider, session_id).await
+    }
+
+    pub async fn lcm_load_session(
+        &self,
+        request: tracedecay::sessions::lcm::LcmLoadSessionRequest,
+    ) -> Result<tracedecay::sessions::lcm::LcmLoadSessionPage, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime.lcm_load_session_for_test(request).await
+    }
+
+    pub async fn lcm_grep(
+        &self,
+        request: tracedecay::sessions::lcm::LcmGrepRequest,
+    ) -> Result<tracedecay::sessions::lcm::LcmGrepOutcome, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime.lcm_grep_for_test(request).await
+    }
+
+    pub async fn lcm_expand(
+        &self,
+        request: tracedecay::sessions::lcm::LcmExpandRequest,
+    ) -> Result<tracedecay::sessions::lcm::LcmExpandResponse, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime.lcm_expand_for_test(request).await
+    }
+
+    pub async fn lcm_expand_summary_node(
+        &self,
+        provider: &str,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<tracedecay::sessions::lcm::LcmSummaryExpansion, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime
+            .lcm_expand_summary_node_for_test(provider, session_id, node_id)
+            .await
+    }
+
+    pub async fn lcm_session_boundary(
+        &self,
+        request: tracedecay::sessions::lcm::LcmSessionBoundaryRequest,
+    ) -> Result<
+        tracedecay::sessions::lcm::LcmSessionBoundaryResponse,
+        tracedecay::sessions::lcm::LcmError,
+    > {
+        self.runtime.lcm_session_boundary_for_test(request).await
+    }
+
+    pub async fn replace_lcm_summary_source_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        node_id: &str,
+        source_node_id: &str,
+    ) -> tracedecay::errors::Result<()> {
+        self.runtime
+            .replace_lcm_summary_source_for_test(scope, node_id, source_node_id)
+            .await
+    }
+
+    pub fn lcm_store(&self, _storage_root: impl AsRef<Path>) -> LcmTestStore<'_> {
+        LcmTestStore {
+            runtime: &self.runtime,
+        }
+    }
+
+    pub fn observation_store(
+        &self,
+    ) -> Result<tracedecay::store::GlobalDbObservationStore<'_>, HostAdmissionOutcome> {
+        self.runtime.observation_store(HostAdmissionScope::Profile)
+    }
+
+    pub fn session_temporal_store(
+        &self,
+    ) -> Result<tracedecay::store::GlobalDbSessionTemporalStore<'_>, HostAdmissionOutcome> {
+        self.runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
+    }
+}
+
+pub struct LcmTestStore<'runtime> {
+    runtime: &'runtime HostAdmissionTestRuntimeV1,
+}
+
+impl LcmTestStore<'_> {
+    pub async fn ingest_raw_message(
+        &self,
+        message: &SessionMessageRecord,
+    ) -> Result<(), tracedecay::sessions::lcm::LcmError> {
+        self.runtime
+            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+    }
+
+    pub async fn lcm_expand_payload(
+        &self,
+        provider: &str,
+        session_id: &str,
+        payload_ref: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<tracedecay::sessions::lcm::LcmExpandResponse, tracedecay::sessions::lcm::LcmError>
+    {
+        self.runtime
+            .lcm_expand_for_test(tracedecay::sessions::lcm::LcmExpandRequest {
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload {
+                    payload_ref: payload_ref.to_string(),
+                },
+                content_slice: Some(tracedecay::sessions::lcm::LcmContentSlice { offset, limit }),
+                source_offset: 0,
+                source_limit: None,
+            })
+            .await
+    }
+}
+
+pub async fn open_lcm_db(tmp: &TempDir) -> LcmTestRuntime {
+    let profile_root = tmp.path().join(".tracedecay");
+    let db_path = tracedecay::sessions::user_sessions_db_path(&profile_root);
+    if !db_path.exists() {
+        seed_lcm_db_from_template(&db_path).await;
+    }
+    LcmTestRuntime::open(&profile_root).await
+}
+
+/// Writes an empty registered-global-schema store at `db_path` from the cached
 /// per-process template, so later opens (fixture seeding, dashboard server
 /// startup) find an existing DB and skip the full schema creation — a large
 /// fixed cost on Windows. The first call in a process pays one real schema
 /// creation to build the template; every further store is a file copy.
 pub async fn write_empty_global_db_schema(db_path: &Path) {
-    seed_lcm_db_from_template(db_path).await;
+    let bytes = if db_path.file_name() == Some(OsStr::new("global.db")) {
+        empty_global_db_template().await
+    } else {
+        empty_lcm_db_template().await
+    };
+    seed_database_from_template(db_path, bytes, "global").await;
 }
 
 async fn seed_lcm_db_from_template(db_path: &Path) {
+    seed_database_from_template(db_path, empty_lcm_db_template().await, "LCM").await;
+}
+
+async fn seed_database_from_template(db_path: &Path, bytes: &[u8], label: &str) {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|err| {
             panic!(
-                "failed to create LCM test DB directory '{}': {err}",
+                "failed to create {label} test DB directory '{}': {err}",
                 parent.display()
             )
         });
     }
-    fs::write(db_path, empty_lcm_db_template().await).unwrap_or_else(|err| {
+    fs::write(db_path, bytes).unwrap_or_else(|err| {
         panic!(
-            "failed to write LCM test DB template '{}': {err}",
+            "failed to write {label} test DB template '{}': {err}",
             db_path.display()
         )
     });
@@ -883,16 +1118,44 @@ async fn empty_lcm_db_template() -> &'static [u8] {
     EMPTY_LCM_DB_TEMPLATE
         .get_or_init(|| async {
             let tmp = tempdir_or_panic();
-            let db_path = isolated_lcm_db_path(&tmp);
-            let db = GlobalDb::open_at(&db_path)
+            let profile_root = tmp.path().join(".tracedecay");
+            let snapshot_path = tmp.path().join("template-session.db");
+            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
                 .await
-                .expect("template session db open");
-            db.checkpoint().await;
-            db.close();
-            fs::read(&db_path).unwrap_or_else(|err| {
+                .expect("template session runtime open");
+            runtime
+                .snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
+                .await
+                .expect("template session database snapshot");
+            drop(runtime);
+            fs::read(&snapshot_path).unwrap_or_else(|err| {
                 panic!(
                     "failed to read LCM test DB template '{}': {err}",
-                    db_path.display()
+                    snapshot_path.display()
+                )
+            })
+        })
+        .await
+}
+
+async fn empty_global_db_template() -> &'static [u8] {
+    EMPTY_GLOBAL_DB_TEMPLATE
+        .get_or_init(|| async {
+            let tmp = tempdir_or_panic();
+            let profile_root = tmp.path().join(".tracedecay");
+            let snapshot_path = tmp.path().join("template-global.db");
+            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .expect("template global runtime open");
+            runtime
+                .snapshot_profile_database_for_test(&snapshot_path)
+                .await
+                .expect("template global database snapshot");
+            drop(runtime);
+            fs::read(&snapshot_path).unwrap_or_else(|err| {
+                panic!(
+                    "failed to read global test DB template '{}': {err}",
+                    snapshot_path.display()
                 )
             })
         })

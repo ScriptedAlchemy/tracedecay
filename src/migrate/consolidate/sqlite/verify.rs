@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use libsql::Connection;
+use crate::db::engine::Executor;
 
 use super::{
-    SessionMergeOffsets, attach_as, build_consolidation_message_map, db_error, db_message,
+    SessionMergeOffsets, attach_snapshot_as, build_consolidation_message_map, db_error, db_message,
     mapped_parent_metadata, mapped_turn_message_id, observation, projection, query_i64,
 };
 use crate::errors::Result;
@@ -35,24 +35,20 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
     conn.execute_batch("PRAGMA temp_store=FILE; PRAGMA cache_size=-32768;")
         .await
         .map_err(|error| db_error("verify_consolidation", error))?;
-    attach_as(
-        conn,
-        input_snapshots
-            .get(source)
-            .map_err(|error| db_error("verify_consolidation", error))?
-            .path(),
-        "source_input",
-    )
-    .await?;
-    attach_as(
-        conn,
-        input_snapshots
-            .get(target)
-            .map_err(|error| db_error("verify_consolidation", error))?
-            .path(),
-        "target_input",
-    )
-    .await?;
+    let source = input_snapshots
+        .get(source)
+        .map_err(|error| db_error("verify_consolidation", error))?;
+    let source_token = source
+        .attach_token()
+        .map_err(|error| db_error("verify_consolidation", error))?;
+    attach_snapshot_as(conn, &source_token, "source_input").await?;
+    let target = input_snapshots
+        .get(target)
+        .map_err(|error| db_error("verify_consolidation", error))?;
+    let target_token = target
+        .attach_token()
+        .map_err(|error| db_error("verify_consolidation", error))?;
+    attach_snapshot_as(conn, &target_token, "target_input").await?;
     build_consolidation_message_map(conn, "source_input", "target_input", source_project_id)
         .await?;
     projection::materialize(conn, "target_input", "source_input").await?;
@@ -69,7 +65,7 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
     result
 }
 
-async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets) -> Result<()> {
+async fn verify_attached_tables(conn: &impl Executor, offsets: &SessionMergeOffsets) -> Result<()> {
     for spec in verification_specs(offsets) {
         verify_table(conn, &spec).await?;
     }
@@ -120,7 +116,7 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
     Ok(())
 }
 
-async fn verify_table(conn: &Connection, spec: &TableVerification) -> Result<()> {
+async fn verify_table(conn: &impl Executor, spec: &TableVerification) -> Result<()> {
     let sql = format!(
         "WITH expected AS ({expected})
          SELECT
@@ -633,7 +629,7 @@ fn custom_owned(
     }
 }
 
-async fn verify_payload_files(conn: &Connection, destination_root: &Path) -> Result<()> {
+async fn verify_payload_files(conn: &impl Executor, destination_root: &Path) -> Result<()> {
     let mut rows = conn
         .query(
             "SELECT payload_ref, content_hash, byte_count FROM lcm_external_payloads",

@@ -13,9 +13,8 @@ use tracedecay_domain::{
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::{CaptureObservationOutcome, ObservationCancellation};
-use crate::global_db::GlobalDb;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::path_belongs_to_project;
 
@@ -42,7 +41,6 @@ use super::store::{
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
 
 struct ComposerIngestContext<'facade, 'db, 'root> {
-    db: &'db GlobalDb,
     facade: &'facade HostAdmissionFacade<'db>,
     scope: ObservationScopeV1,
     project_root: Option<&'root Path>,
@@ -164,13 +162,13 @@ impl CursorComposerSource {
     /// the outcome so far rather than propagating.
     pub async fn ingest(
         &self,
-        db: &GlobalDb,
+        admission: &HostAdmissionFacade<'_>,
         project_root: &Path,
         project_id: ProjectId,
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
         self.ingest_capped(
-            db,
+            admission,
             project_root,
             project_id,
             envelope_cap,
@@ -183,40 +181,13 @@ impl CursorComposerSource {
     /// shared across every composer store discovered during the pass.
     pub async fn ingest_capped(
         &self,
-        db: &GlobalDb,
-        project_root: &Path,
-        project_id: ProjectId,
-        envelope_cap: usize,
-        max_new_bytes: Option<u64>,
-    ) -> CursorComposerSweepOutcome {
-        let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-            db,
-            project_id.clone(),
-        ));
-        self.ingest_capped_with_admission(
-            db,
-            project_root,
-            project_id,
-            &admission,
-            envelope_cap,
-            max_new_bytes,
-        )
-        .await
-    }
-
-    /// Project startup-sweep variant whose authority has already been prepared
-    /// by the caller from the authoritative project identity and privacy policy.
-    pub(crate) async fn ingest_capped_with_admission(
-        &self,
-        db: &GlobalDb,
-        project_root: &Path,
-        project_id: ProjectId,
         admission: &HostAdmissionFacade<'_>,
+        project_root: &Path,
+        project_id: ProjectId,
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
         let context = ComposerIngestContext {
-            db,
             facade: admission,
             scope: ObservationScopeV1::Project { project_id },
             project_root: Some(project_root),
@@ -228,12 +199,12 @@ impl CursorComposerSource {
 
     pub async fn ingest_user(
         &self,
-        db: &GlobalDb,
+        admission: &HostAdmissionFacade<'_>,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
         self.ingest_user_capped(
-            db,
+            admission,
             registered_roots,
             envelope_cap,
             Some(DEFAULT_COMPOSER_SWEEP_BYTES),
@@ -245,15 +216,13 @@ impl CursorComposerSource {
     /// shared across every composer store discovered during the pass.
     pub async fn ingest_user_capped(
         &self,
-        db: &GlobalDb,
+        admission: &HostAdmissionFacade<'_>,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
-        let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
         let context = ComposerIngestContext {
-            db,
-            facade: &admission,
+            facade: admission,
             scope: ObservationScopeV1::Profile,
             project_root: None,
             registered_roots,
@@ -468,10 +437,14 @@ impl CursorComposerSource {
                         continue;
                     };
                     if context
-                        .db
-                        .get_session_message(PROVIDER, &format!("{composer_id}:{bubble_id}"))
+                        .facade
+                        .has_session_message(
+                            &context.scope,
+                            PROVIDER,
+                            &format!("{composer_id}:{bubble_id}"),
+                        )
                         .await
-                        .is_some()
+                        .unwrap_or(true)
                     {
                         continue;
                     }

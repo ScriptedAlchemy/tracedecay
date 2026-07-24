@@ -1,7 +1,7 @@
 //! Aggregation and summary queries for token accounting.
 
 use crate::display::CostRow;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 
 /// Full cost summary with breakdowns.
 pub struct CostSummary {
@@ -18,7 +18,7 @@ pub struct CostSummary {
 /// Quick cost summary for the `tracedecay status` header row.
 /// Returns `None` if no accounting data exists.
 pub async fn quick_cost_summary(
-    gdb: &GlobalDb,
+    gdb: &RegisteredGlobalDb,
     tokens_saved: u64,
     global_tokens_saved: u64,
 ) -> Option<CostRow> {
@@ -50,7 +50,11 @@ pub async fn quick_cost_summary(
 }
 
 /// Build a full cost summary for a given time range.
-pub async fn cost_summary(gdb: &GlobalDb, since: u64, tokens_saved: u64) -> Option<CostSummary> {
+pub async fn cost_summary(
+    gdb: &RegisteredGlobalDb,
+    since: u64,
+    tokens_saved: u64,
+) -> Option<CostSummary> {
     let total_cost = gdb.total_cost_since(since).await?;
     let (total_input, total_output, total_cache_read) =
         gdb.token_breakdown_since(since).await.unwrap_or((0, 0, 0));

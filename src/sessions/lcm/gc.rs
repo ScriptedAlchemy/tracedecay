@@ -2,18 +2,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use libsql::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{LcmError, LcmGcConfig, maintenance, payload, schema, util};
+#[cfg(test)]
+use crate::db::engine::{Connection, TransactionBehavior};
+use crate::db::engine::{Executor, QueryExecutor, params};
+
+use super::{LcmError, LcmGcConfig, maintenance, payload, schema};
 
 mod orphan_scan;
 mod pending_delete;
 use orphan_scan::{payload_file_present, preview_orphan_files, stage_orphan_files};
 pub(crate) use pending_delete::{
-    PayloadDeleteDrain, drain_pending_payload_delete, drain_pending_payload_deletes,
-    stage_payload_delete,
+    PayloadDeleteDrain, drain_pending_payload_delete_in_transaction,
+    drain_pending_payload_deletes_in_transaction, stage_payload_delete,
 };
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
@@ -178,7 +181,7 @@ impl LcmGcReport {
 }
 
 pub async fn referenced_payload_refs(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
@@ -189,7 +192,7 @@ pub async fn referenced_payload_refs(
          FROM lcm_raw_messages
          WHERE (?1 = 'all' OR provider = ?1)
            AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
+            params![provider, session_id],
         )
         .await?;
     while let Some(row) = rows.next().await? {
@@ -303,14 +306,16 @@ fn tombstone_placeholder(placeholder: &str) -> String {
 }
 
 pub async fn payload_metadata_refs_for_scope(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
     maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await
 }
 
-async fn payload_metadata_bytes(conn: &Connection) -> Result<BTreeMap<String, u64>, LcmError> {
+async fn payload_metadata_bytes(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<BTreeMap<String, u64>, LcmError> {
     let mut bytes = BTreeMap::new();
     let mut rows = conn
         .query(
@@ -327,16 +332,84 @@ async fn payload_metadata_bytes(conn: &Connection) -> Result<BTreeMap<String, u6
 }
 
 pub async fn run_payload_gc(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
     cfg: &LcmGcConfig,
     now: i64,
 ) -> Result<LcmGcReport, LcmError> {
-    run_payload_gc_with_apply(conn, storage_root, provider, session_id, cfg, false, now).await
+    run_payload_gc_preview(conn, storage_root, provider, session_id, cfg, now).await
 }
 
+async fn run_payload_gc_preview(
+    conn: &(impl QueryExecutor + ?Sized),
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    cfg: &LcmGcConfig,
+    now: i64,
+) -> Result<LcmGcReport, LcmError> {
+    let cfg = cfg.clone().normalized();
+    let mut report = LcmGcReport::new(provider, session_id, &cfg, false, now);
+    report.last_gc_at = schema::get_gc_meta(conn, "last_gc_at")
+        .await?
+        .and_then(|value| value.parse::<i64>().ok());
+    report.last_error = schema::get_gc_meta(conn, "last_error").await?;
+
+    let dir = payload::existing_payload_dir_opt(storage_root)?;
+    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
+    let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;
+    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
+    let metadata_bytes = payload_metadata_bytes(conn).await?;
+    let mut remaining = cfg.max_batch_size.max(1);
+
+    if let Some(dir) = dir.as_deref() {
+        preview_orphan_files(
+            dir,
+            &all_metadata_refs,
+            now,
+            &cfg,
+            &mut remaining,
+            &mut report,
+        )?;
+    }
+    preview_unreferenced_metadata(
+        conn,
+        &scoped_metadata_refs,
+        &referenced,
+        &metadata_bytes,
+        now,
+        &cfg,
+        &mut remaining,
+        &mut report,
+    )
+    .await?;
+    preview_missing_metadata(
+        conn,
+        storage_root,
+        &all_metadata_refs,
+        &referenced,
+        now,
+        &cfg,
+        &mut remaining,
+        &mut report,
+    )
+    .await?;
+    preview_dangling_placeholders(
+        conn,
+        dir.as_deref(),
+        &all_metadata_refs,
+        provider,
+        session_id,
+        &mut report,
+    )
+    .await?;
+    report.ended_at = now;
+    Ok(report)
+}
+
+#[cfg(test)]
 pub async fn run_payload_gc_with_apply(
     conn: &Connection,
     storage_root: &Path,
@@ -347,19 +420,10 @@ pub async fn run_payload_gc_with_apply(
     now: i64,
 ) -> Result<LcmGcReport, LcmError> {
     if !apply {
-        return run_payload_gc_in_transaction(
-            conn,
-            storage_root,
-            provider,
-            session_id,
-            cfg,
-            false,
-            now,
-        )
-        .await;
+        return run_payload_gc_preview(conn, storage_root, provider, session_id, cfg, now).await;
     }
 
-    let mut drain = prepare_payload_gc_apply(conn, storage_root, cfg).await?;
+    prepare_payload_gc_backup(conn, storage_root, cfg).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -374,32 +438,33 @@ pub async fn run_payload_gc_with_apply(
     )
     .await?;
     transaction.commit().await?;
-    drain.merge(drain_pending_payload_deletes(conn, storage_root).await?);
-    finalize_gc_report(conn, &mut report, drain).await?;
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    let drain = drain_pending_payload_deletes_in_transaction(&transaction, storage_root).await?;
+    finalize_gc_report(&transaction, &mut report, drain).await?;
+    transaction.commit().await?;
     Ok(report)
 }
 
-pub(crate) async fn prepare_payload_gc_apply(
-    conn: &Connection,
+pub(crate) async fn prepare_payload_gc_backup(
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     cfg: &LcmGcConfig,
-) -> Result<PayloadDeleteDrain, LcmError> {
-    // Recover a process that committed metadata deletion but stopped before
-    // unlinking its now-orphaned payload files.
-    let drain = drain_pending_payload_deletes(conn, storage_root).await?;
+) -> Result<(), LcmError> {
     if !cfg.backup_before_reap {
-        return Ok(drain);
+        return Ok(());
     }
     let dir = payload::existing_payload_dir_opt(storage_root)?;
     let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
     if dir.is_some() || !all_metadata_refs.is_empty() {
         maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Gc).await?;
     }
-    Ok(drain)
+    Ok(())
 }
 
 pub(crate) async fn finalize_gc_report(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     report: &mut LcmGcReport,
     drain: PayloadDeleteDrain,
 ) -> Result<(), LcmError> {
@@ -421,7 +486,7 @@ pub(crate) async fn finalize_gc_report(
 }
 
 pub(crate) async fn finalize_gc_report_value(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     report_value: &mut Value,
     drain: PayloadDeleteDrain,
 ) -> Result<(), LcmError> {
@@ -434,7 +499,7 @@ pub(crate) async fn finalize_gc_report_value(
 }
 
 pub(crate) async fn run_payload_gc_in_transaction(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -557,8 +622,112 @@ pub(crate) async fn run_payload_gc_in_transaction(
     Ok(report)
 }
 
-struct ReapUnreferencedMetadataRequest<'a> {
-    conn: &'a Connection,
+async fn preview_unreferenced_metadata(
+    conn: &(impl QueryExecutor + ?Sized),
+    metadata_refs: &BTreeSet<String>,
+    referenced: &BTreeSet<String>,
+    metadata_bytes: &BTreeMap<String, u64>,
+    now: i64,
+    cfg: &LcmGcConfig,
+    remaining: &mut usize,
+    report: &mut LcmGcReport,
+) -> Result<(), LcmError> {
+    for payload_ref in metadata_refs.difference(referenced) {
+        let Some((state, first_seen_at)) = gc_mark(conn, payload_ref).await? else {
+            report.deferred.count += 1;
+            report
+                .deferred
+                .reason
+                .get_or_insert_with(|| "within_grace".to_string());
+            continue;
+        };
+        if state != "unreferenced" || now.saturating_sub(first_seen_at) < cfg.grace_seconds as i64 {
+            report.deferred.count += 1;
+            report
+                .deferred
+                .reason
+                .get_or_insert_with(|| "within_grace".to_string());
+            continue;
+        }
+        if *remaining == 0 {
+            report.batch_cap(1);
+            continue;
+        }
+        report.unreferenced.add(
+            payload_ref,
+            metadata_bytes.get(payload_ref).copied().unwrap_or_default(),
+        );
+        *remaining -= 1;
+    }
+    Ok(())
+}
+
+async fn preview_missing_metadata(
+    conn: &(impl QueryExecutor + ?Sized),
+    storage_root: &Path,
+    metadata_refs: &BTreeSet<String>,
+    referenced: &BTreeSet<String>,
+    now: i64,
+    cfg: &LcmGcConfig,
+    remaining: &mut usize,
+    report: &mut LcmGcReport,
+) -> Result<(), LcmError> {
+    let dir = payload::existing_payload_dir_opt(storage_root)?;
+    for payload_ref in metadata_refs.intersection(referenced) {
+        match payload_file_present(dir.as_deref(), payload_ref) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                report.add_error(payload_ref, "payload_stat_failed", error.to_string());
+                continue;
+            }
+        }
+        report.missing.add(payload_ref, 0);
+        if !cfg.reap_missing_enabled || cfg.reap_missing_after == 0 {
+            continue;
+        }
+        let Some((state, first_seen_at)) = gc_mark(conn, payload_ref).await? else {
+            continue;
+        };
+        if state != "missing" || now.saturating_sub(first_seen_at) < cfg.reap_missing_after as i64 {
+            continue;
+        }
+        if *remaining == 0 {
+            report.batch_cap(1);
+            continue;
+        }
+        *remaining -= 1;
+    }
+    Ok(())
+}
+
+async fn preview_dangling_placeholders(
+    conn: &(impl QueryExecutor + ?Sized),
+    dir: Option<&Path>,
+    metadata_refs: &BTreeSet<String>,
+    provider: &str,
+    session_id: Option<&str>,
+    report: &mut LcmGcReport,
+) -> Result<(), LcmError> {
+    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
+    for payload_ref in referenced.difference(metadata_refs) {
+        match payload_file_present(dir, payload_ref) {
+            Ok(true) => continue,
+            Ok(false) => report.dangling.add(payload_ref, 0),
+            Err(error) => {
+                report.add_error(
+                    payload_ref,
+                    "dangling_payload_stat_failed",
+                    error.to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ReapUnreferencedMetadataRequest<'a, E: Executor + ?Sized> {
+    conn: &'a E,
     storage_root: &'a Path,
     metadata_refs: &'a BTreeSet<String>,
     referenced: &'a BTreeSet<String>,
@@ -570,8 +739,8 @@ struct ReapUnreferencedMetadataRequest<'a> {
     report: &'a mut LcmGcReport,
 }
 
-async fn reap_unreferenced_metadata(
-    request: ReapUnreferencedMetadataRequest<'_>,
+async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
+    request: ReapUnreferencedMetadataRequest<'_, E>,
 ) -> Result<(), LcmError> {
     let ReapUnreferencedMetadataRequest {
         conn,
@@ -671,8 +840,8 @@ async fn reap_unreferenced_metadata(
     Ok(())
 }
 
-struct ReapMissingMetadataRequest<'a> {
-    conn: &'a Connection,
+struct ReapMissingMetadataRequest<'a, E: Executor + ?Sized> {
+    conn: &'a E,
     storage_root: &'a Path,
     metadata_refs: &'a BTreeSet<String>,
     referenced: &'a BTreeSet<String>,
@@ -683,7 +852,9 @@ struct ReapMissingMetadataRequest<'a> {
     report: &'a mut LcmGcReport,
 }
 
-async fn reap_missing_metadata(request: ReapMissingMetadataRequest<'_>) -> Result<(), LcmError> {
+async fn reap_missing_metadata<E: Executor + ?Sized>(
+    request: ReapMissingMetadataRequest<'_, E>,
+) -> Result<(), LcmError> {
     let ReapMissingMetadataRequest {
         conn,
         storage_root,
@@ -763,7 +934,7 @@ async fn reap_missing_metadata(request: ReapMissingMetadataRequest<'_>) -> Resul
 }
 
 pub async fn rewrite_dangling_placeholders(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     dir: Option<&Path>,
     metadata_refs: &BTreeSet<String>,
     provider: &str,
@@ -795,7 +966,7 @@ pub async fn rewrite_dangling_placeholders(
 }
 
 async fn tombstone_dangling_ref_in_transaction(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     payload_ref: &str,
     provider: &str,
     session_id: Option<&str>,
@@ -806,7 +977,7 @@ async fn tombstone_dangling_ref_in_transaction(
              FROM lcm_raw_messages
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
                AND (content LIKE ?3 OR snippet_text LIKE ?3 OR index_text LIKE ?3 OR metadata_json LIKE ?3)",
-        params![provider, util::opt_text(session_id), format!("%{payload_ref}%")],
+        params![provider, session_id, format!("%{payload_ref}%")],
     )
     .await?;
     let mut updates = Vec::new();
@@ -858,10 +1029,10 @@ async fn tombstone_dangling_ref_in_transaction(
              WHERE store_id = ?1",
             params![
                 store_id,
-                util::opt_text(content.as_deref()),
+                content.as_deref(),
                 snippet_text,
                 index_text,
-                util::opt_text(metadata_json.as_deref())
+                metadata_json.as_deref()
             ],
         )
         .await?;
@@ -870,7 +1041,10 @@ async fn tombstone_dangling_ref_in_transaction(
     Ok(total)
 }
 
-async fn gc_mark(conn: &Connection, payload_ref: &str) -> Result<Option<(String, i64)>, LcmError> {
+async fn gc_mark(
+    conn: &(impl QueryExecutor + ?Sized),
+    payload_ref: &str,
+) -> Result<Option<(String, i64)>, LcmError> {
     let mut rows = conn
         .query(
             "SELECT state, first_seen_at FROM lcm_gc_marks WHERE payload_ref = ?1",
@@ -885,7 +1059,7 @@ async fn gc_mark(conn: &Connection, payload_ref: &str) -> Result<Option<(String,
 }
 
 async fn upsert_gc_mark(
-    conn: &Connection,
+    conn: &(impl Executor + ?Sized),
     payload_ref: &str,
     state: &str,
     now: i64,

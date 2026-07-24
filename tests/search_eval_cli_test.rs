@@ -48,3 +48,23 @@ fn validate_reports_the_direct_checked_in_workload() {
             .is_some_and(|digest| digest.starts_with("sha256:"))
     );
 }
+
+#[test]
+fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
+    let output = run(&["compare", "--profiles", "hybrid-reranked"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = stdout_json(&output);
+    assert_eq!(payload["command"], "compare");
+    assert_eq!(payload["status"], "pending");
+    for profile in payload["profiles"].as_array().expect("profiles array") {
+        assert_eq!(profile["status"], "pending");
+        assert_eq!(profile["resource_status"], "pending");
+        assert_eq!(profile["optional_stages"]["semantic"], "pending");
+        assert_eq!(profile["optional_stages"]["rerank"], "pending");
+    }
+}

@@ -3,7 +3,6 @@
 //! Split out of the former single-file `schema` module as a pure mechanical
 //! move; contents are unchanged.
 
-use crate::db::engine::Executor;
 use crate::errors::Result;
 
 use super::super::{MemoryV2Executor, db_error};

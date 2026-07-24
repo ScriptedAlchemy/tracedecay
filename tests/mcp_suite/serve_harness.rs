@@ -11,7 +11,7 @@ use std::process::{Output, Stdio};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 #[cfg(unix)]
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
 
 use crate::common::{canonical_existing_path, tracedecay_command_with_home};
@@ -53,17 +53,19 @@ pub async fn register_global_project(home: &Path, project: &Path) {
     use std::hash::{Hash, Hasher};
 
     let home = canonical_existing_path(home);
-    let db_path = home.join(".tracedecay/global.db");
-    let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let canonical = GlobalDb::canonical_project_key(project);
+    let runtime = HostAdmissionTestRuntimeV1::profile(home.join(".tracedecay"))
+        .await
+        .unwrap();
+    let canonical = HostAdmissionTestRuntimeV1::canonical_project_key(project);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canonical.hash(&mut hasher);
     let project_id = format!("test_{:016x}", hasher.finish());
-    db.upsert_code_project(&project_id, project, None, None, None)
+    runtime
+        .upsert_code_project(&project_id, project, None, None, None)
         .await
         .expect("register checked test project identity");
-    db.upsert(project, 0).await;
-    db.checkpoint().await;
+    runtime.upsert(project, 0).await;
+    runtime.checkpoint_profile_database_for_test().await;
 }
 
 /// Spawns `tracedecay serve` from `cwd` (optionally with `--path`), drives an

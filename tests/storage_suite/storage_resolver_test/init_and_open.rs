@@ -35,6 +35,7 @@ async fn trace_decay_init_registers_default_profile_shard_globally() {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn registered() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
@@ -42,7 +43,9 @@ async fn trace_decay_init_registers_default_profile_shard_globally() {
     let project_id = default_profile_project_id(&project);
 
     TraceDecay::init(&project).await.unwrap();
-    let db = GlobalDb::open().await.unwrap();
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
     let resolution = db.resolve_project_store_by_alias(&project).await.unwrap();
 
     assert_eq!(resolution.project.project_id, project_id);

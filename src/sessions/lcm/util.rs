@@ -1,5 +1,6 @@
-use libsql::{Connection, Value, params::IntoParams};
 use sha2::{Digest, Sha256};
+
+use crate::db::engine::{IntoParams, QueryExecutor, Value, params};
 
 use super::LcmError;
 
@@ -34,7 +35,7 @@ pub(crate) fn sha256_hex(content: &[u8]) -> String {
 }
 
 pub(crate) async fn fetch_i64(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     sql: &str,
     params: impl IntoParams,
     empty_message: &str,
@@ -48,7 +49,7 @@ pub(crate) async fn fetch_i64(
 }
 
 pub(crate) async fn count_by_provider_session(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     table: &str,
     provider: &str,
     session_id: Option<&str>,
@@ -59,7 +60,7 @@ pub(crate) async fn count_by_provider_session(
     fetch_i64(
         conn,
         &sql,
-        libsql::params![provider, opt_text(session_id)],
+        params![provider, opt_text(session_id)],
         "count query returned no rows",
     )
     .await

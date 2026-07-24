@@ -6,11 +6,13 @@
 
 pub mod configuration;
 pub mod diagnostics;
+pub mod evidence_assembly;
 pub mod external_source;
 pub mod git_index_transactions;
 pub mod memory;
 pub mod observation;
 pub mod projection;
+pub mod retrieval_anchor;
 pub mod runtime;
 pub mod session;
 pub mod transcript;
@@ -22,6 +24,27 @@ pub use configuration::{
 pub use diagnostics::{
     DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1, DiagnosticStore,
     DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,
+};
+pub use evidence_assembly::{
+    CanonicalSourceOccurrenceSetIdentityProjectionV1, CanonicalSourceOccurrenceSetRecordV1,
+    EvidenceAssemblyDrilldownPageV1, EvidenceAssemblyIdempotencyKeyV1, EvidenceAssemblyOwnerV1,
+    EvidenceAssemblyPublicationIdentityProjectionV1, EvidenceAssemblyPublicationOutcomeV1,
+    EvidenceAssemblyPublicationReceiptV1, EvidenceAssemblyReadOperationV1,
+    EvidenceAssemblyReadResultV1, EvidenceAssemblyStore, EvidenceAssemblyStoreError,
+    EvidenceAssemblyStoreResult, EvidenceAssemblyWriteV1, EvidenceSourceOccurrenceRecordV1,
+    EvidenceSourceTimelineV1, EvidenceSpanCatalogBindingV1, EvidenceSpanHorizonV1,
+    EvidenceSpanIdentityProjectionV1, EvidenceSpanMemberReceiptBindingV1,
+    EvidenceSpanProjectionReceiptIdentityProjectionV1, EvidenceSpanProjectionReceiptV1,
+    EvidenceSpanRecordV1, EvidenceSpanRunV1, MAX_EVIDENCE_ASSEMBLY_MEMBERS_V1,
+    PrivacyBoundRequestDigestV1, PrivacyBoundRequestEnvelopeV1,
+    RetrieverContributionIdentityProjectionV1, RetrieverContributionRecordV1, RetrieverIdentityV1,
+    RetrieverWatermarkBindingV1, SanitizedObservationByteRangeV1, SourceCapabilityCatalogBindingV1,
+    SourceOccurrenceCoordinateV1, SourceOccurrenceIdentityProjectionV1, SourceOccurrenceKindV1,
+    SourceOccurrenceRelationV1, SourceOccurrenceSanitizationV1, SourceTimelineKeyV1,
+    VerifiedSourceOrderingProofV1, derive_canonical_source_occurrence_set_id_v1,
+    derive_evidence_assembly_publication_receipt_id_v1, derive_evidence_span_id_v1,
+    derive_evidence_span_projection_receipt_id_v1, derive_retriever_contribution_id_v1,
+    derive_source_occurrence_id_v1,
 };
 pub use external_source::{
     MAX_SOURCE_COMMIT_OBSERVATIONS_V1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
@@ -83,10 +106,11 @@ pub use memory::{
     PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 pub use observation::{
-    AnchoredObservationWrite, ObservationCommitReceipt, ObservationPersistOutcome,
-    ObservationProjectionStatus, ObservationReplayRequest, ObservationStore, ObservationStoreError,
-    ObservationStoreResult, ObservationWrite, ObservedEvidenceAnchorResolution,
-    RepositoryProvenanceAttachmentV1, StoredObservation,
+    AnchoredObservationWrite, CursorAdvanceOutcome, ObservationCommitReceipt,
+    ObservationCoverageReason, ObservationCoverageV1, ObservationCursorAdvance,
+    ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
+    ObservationStore, ObservationStoreError, ObservationStoreResult, ObservationWrite,
+    ObservedEvidenceAnchorResolution, RepositoryProvenanceAttachmentV1, StoredObservation,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
     build_scope_resolution_authorization_v1,
 };
@@ -99,6 +123,12 @@ pub use projection::{
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
     SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, WorkflowFactProjection,
     WorkflowFactRecord,
+};
+pub use retrieval_anchor::{
+    AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,
+    AnchorDispositionStateV1, RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
+    RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1, RetrievalAnchorStoreError,
+    RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1, StoredRetrievalAnchorRecordV1,
 };
 pub use runtime::*;
 pub use session::{

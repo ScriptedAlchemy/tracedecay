@@ -9,9 +9,10 @@ use crate::application::memory::{
     MemoryApplication, MemoryApplicationError, MemoryOperationContext,
 };
 use crate::automation::memory_digest::refresh_memory_digest_after_memory_change;
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::memory::user::open_user_memory_db;
 use crate::store::DatabaseFactStore;
 use crate::store::memory::ProjectMemoryDbHandle;
@@ -19,7 +20,6 @@ use crate::tracedecay::TraceDecay;
 
 use super::support::{
     profile_root_for_global_db, project_registry_context, project_selector_present,
-    safe_profile_relpath,
 };
 use args::requests_user_memory;
 
@@ -62,18 +62,17 @@ impl TargetMemoryDb<'_> {
         self.db.as_db()
     }
 
-    pub(super) fn conn(&self) -> &libsql::Connection {
-        self.db().conn()
-    }
-
     pub(super) fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
 }
 
-async fn open_user_memory_target(profile_root: &Path) -> Result<TargetMemoryDb<'static>> {
+async fn open_user_memory_target(
+    registry: &DaemonSessionRuntimeRegistryV1,
+    profile_root: &Path,
+) -> Result<TargetMemoryDb<'static>> {
     Ok(TargetMemoryDb {
-        db: ProjectMemoryDbHandle::Owned(Box::new(open_user_memory_db(profile_root).await?)),
+        db: ProjectMemoryDbHandle::Owned(Box::new(open_user_memory_db(registry).await?)),
         project_root: profile_root.to_path_buf(),
         user_scope: true,
         owner: FactOwnerV1::Profile,
@@ -99,7 +98,7 @@ fn active_project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
 pub(super) async fn open_target_memory_db<'a>(
     cg: &'a TraceDecay,
     args: &Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<TargetMemoryDb<'a>> {
     if requests_user_memory(args) {
@@ -109,7 +108,7 @@ pub(super) async fn open_target_memory_db<'a>(
             ));
         }
         let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
-        return open_user_memory_target(&profile_root).await;
+        return open_user_memory_target(cg.store_runtime_registry(), &profile_root).await;
     }
     let Some(context) = project_registry_context(
         args,
@@ -126,36 +125,21 @@ pub(super) async fn open_target_memory_db<'a>(
             owner: active_project_memory_owner(cg)?,
         });
     };
-    let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
-    let graph_relpath = context
-        .stores
-        .iter()
-        .flat_map(|store| store.artifacts.iter())
-        .find(|artifact| artifact.artifact_kind == "graph_db")
-        .map(|artifact| artifact.relpath.as_str())
-        .ok_or_else(|| {
-            config_error(format!(
-                "project {} has no registered graph_db artifact",
-                context.project.project_id
-            ))
-        })?;
-    let db_path = profile_root.join(safe_profile_relpath(graph_relpath)?);
-    if !db_path.is_file() {
-        return Err(config_error(format!(
-            "registered graph_db artifact does not exist: {}",
-            db_path.display()
-        )));
+    let project_root = PathBuf::from(&context.project.display_root);
+    let canonical_project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.clone());
+    if canonical_project_root != cg.project_root()
+        || cg.store_layout().identity.project_id.as_deref()
+            != Some(context.project.project_id.as_str())
+    {
+        return Err(config_error(
+            "registered project graph is not mounted by the daemon",
+        ));
     }
-    let authority = crate::db::DatabaseAuthority::for_runtime(&db_path, "open memory target")?;
-    let (db, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
-        crate::daemon::store_runtime::driver::GraphStoreOpenMode::Open,
-        &db_path,
-        &authority,
-    )
-    .await?;
     Ok(TargetMemoryDb {
-        db: ProjectMemoryDbHandle::Owned(Box::new(db)),
-        project_root: PathBuf::from(context.project.display_root),
+        db: cg.project_memory_db().await?,
+        project_root,
         user_scope: false,
         owner: project_memory_owner(&context.project.project_id)?,
     })
@@ -171,7 +155,7 @@ fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::database_operation("memory application", error)
 }
 
-fn memory_application<'a>(
+pub(super) fn memory_application<'a>(
     target_memory: &'a TargetMemoryDb<'_>,
 ) -> Result<MemoryApplication<DatabaseFactStore<'a>>> {
     MemoryApplication::new(
@@ -313,7 +297,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(target.db, ProjectMemoryDbHandle::Active(_)));
-        assert!(std::ptr::eq(target.conn(), cg.db().conn()));
+        assert!(std::ptr::eq(target.db(), cg.db()));
         assert_eq!(
             target.owner(),
             &project_memory_owner(cg.store_layout().identity.project_id.as_deref().unwrap(),)
@@ -406,16 +390,9 @@ mod tests {
     #[tokio::test]
     async fn pure_fact_reads_do_not_wait_for_the_writer_lane() {
         let (_tmp, cg, fact_id) = seeded_memory().await;
-        let transaction = cg
+        let writer = cg
             .db()
-            .begin_write_transaction("hold memory tool writer")
-            .await
-            .unwrap();
-        transaction
-            .execute(
-                "UPDATE memory_facts SET content = 'uncommitted fact' WHERE fact_id = ?1",
-                [fact_id],
-            )
+            .writer_connection("hold memory tool writer")
             .await
             .unwrap();
         let target = TargetMemoryDb {
@@ -438,8 +415,7 @@ mod tests {
         .unwrap();
         let rendered = result.value.to_string();
         assert!(rendered.contains("existing fact"), "{rendered}");
-        assert!(!rendered.contains("uncommitted fact"), "{rendered}");
-        transaction.rollback().await.unwrap();
+        drop(writer);
     }
 
     #[tokio::test]

@@ -38,49 +38,57 @@ async fn compatibility_bank_rows(
     owner: &FactOwnerV1,
 ) -> Vec<(String, Vec<u8>, i64, i64)> {
     let (kind, project_id, owner_json) = compatibility_owner_scope(owner);
-    let mut rows = db
-        .conn()
-        .query(
+    let conn = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT bank_name, vector, fact_count, updated_at
              FROM memory_v2_compatibility_banks
              WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
                AND source_store_id = 'legacy-memory-v1'
              ORDER BY bank_name",
-            libsql::params![kind, project_id, owner_json],
         )
-        .await
         .unwrap();
-    let mut banks = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        banks.push((
-            row.get::<String>(0).unwrap(),
-            row.get::<Vec<u8>>(1).unwrap(),
-            row.get::<i64>(2).unwrap(),
-            row.get::<i64>(3).unwrap(),
-        ));
-    }
-    banks
+    statement
+        .query_map(rusqlite::params![kind, project_id, owner_json], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
 }
 
 async fn compatibility_dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Vec<(String, i64)> {
     let (kind, project_id, owner_json) = compatibility_owner_scope(owner);
-    let mut rows = db
-        .conn()
-        .query(
+    let conn = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut statement = conn
+        .prepare(
             "SELECT bank_name, updated_at
              FROM memory_v2_compatibility_bank_dirty
              WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
                AND source_store_id = 'legacy-memory-v1'
              ORDER BY bank_name",
-            libsql::params![kind, project_id, owner_json],
         )
-        .await
         .unwrap();
-    let mut banks = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        banks.push((row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap()));
-    }
-    banks
+    statement
+        .query_map(rusqlite::params![kind, project_id, owner_json], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -104,15 +112,13 @@ async fn compatibility_repair_rebuilds_only_requested_owner_banks() {
         MemoryCategory::Tool,
     )
     .await;
-    db.execute_write(
-        "corrupt owner-scoped compatibility repair fixture",
+    execute_sql(
+        &db,
         "UPDATE memory_facts
          SET hrr_vector = NULL, hrr_algebra = 'broken', hrr_dim = 0, hrr_precision = 'broken'
          WHERE fact_id IN (?1, ?2)",
-        libsql::params![fact_a.fact_id, fact_b.fact_id],
-    )
-    .await
-    .unwrap();
+        rusqlite::params![fact_a.fact_id, fact_b.fact_id],
+    );
 
     assert_eq!(
         memory_b
@@ -319,29 +325,30 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
     let history_state = |label: &'static str| {
         let db = &db;
         async move {
-            let mut rows = db
-                .conn()
-                .query(
-                    "SELECT COUNT(*),
+            rusqlite::Connection::open_with_flags(
+                db.database_path(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*),
                             COUNT(source), COUNT(note),
                             SUM(CASE WHEN details_availability = 'available' THEN 1 ELSE 0 END)
                      FROM memory_v2_feedback_history
                      WHERE fact_id = (
                          SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
                      )",
-                    libsql::params![fact.fact_id],
-                )
-                .await
-                .unwrap();
-            let row = rows.next().await.unwrap().unwrap_or_else(|| {
-                panic!("{label}: feedback history row must exist");
-            });
-            (
-                row.get::<i64>(0).unwrap(),
-                row.get::<i64>(1).unwrap(),
-                row.get::<i64>(2).unwrap(),
-                row.get::<i64>(3).unwrap(),
+                rusqlite::params![fact.fact_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
             )
+            .unwrap_or_else(|_| panic!("{label}: feedback history row must exist"))
         }
     };
     let (rows, sources, notes, available) = history_state("before remove").await;
@@ -382,27 +389,23 @@ async fn compatibility_repair_skips_malformed_unavailable_vectors() {
         MemoryCategory::Project,
     )
     .await;
-    db.execute_write(
-        "corrupt unavailable compatibility vector fixture",
+    execute_sql(
+        &db,
         "UPDATE memory_facts
          SET hrr_vector = X'00', hrr_algebra = 'amari_fhrr', hrr_dim = 2048,
              hrr_precision = 'f32'
          WHERE fact_id = ?1",
-        libsql::params![fact.fact_id],
-    )
-    .await
-    .unwrap();
-    db.execute_write(
-        "mark malformed compatibility fixture unavailable",
+        rusqlite::params![fact.fact_id],
+    );
+    execute_sql(
+        &db,
         "UPDATE memory_v2_current_facts
          SET payload_access = 'quarantined'
          WHERE fact_id = (
              SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
          )",
-        libsql::params![fact.fact_id],
-    )
-    .await
-    .unwrap();
+        rusqlite::params![fact.fact_id],
+    );
 
     let repair = memory
         .dashboard_repair_v1(
@@ -454,26 +457,22 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
         )
         .await;
     }
-    db.execute_write(
-        "mark fixed repair batch unavailable",
+    execute_sql(
+        &db,
         "UPDATE memory_v2_current_facts
          SET payload_access = 'unavailable'
          WHERE fact_id <> (
              SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
          )",
-        libsql::params![eligible.fact_id],
-    )
-    .await
-    .unwrap();
-    db.execute_write(
-        "corrupt fixed repair batch vectors",
+        rusqlite::params![eligible.fact_id],
+    );
+    execute_sql(
+        &db,
         "UPDATE memory_facts
          SET hrr_vector = NULL, hrr_algebra = 'broken', hrr_dim = 0, hrr_precision = 'broken',
              updated_at = CASE WHEN fact_id = ?1 THEN 1 ELSE 2 END",
-        libsql::params![eligible.fact_id],
-    )
-    .await
-    .unwrap();
+        rusqlite::params![eligible.fact_id],
+    );
 
     assert_eq!(
         memory

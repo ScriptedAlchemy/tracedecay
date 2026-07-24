@@ -3,22 +3,13 @@ use super::*;
 #[tokio::test]
 async fn describe_gives_session_overview_without_full_payload_bodies() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tracedecay");
-    let db = open_lcm_db(&tmp).await;
-    let store_ids = insert_raw_messages(
-        &db,
-        &isolated_db_path(&tmp),
-        "cursor",
-        "session-1",
-        &["alpha".to_string()],
-    )
-    .await;
+    let db = registered_lcm_runtime(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha".to_string()]).await;
     let payload = format!("describe secret body\n{}", "D".repeat(300_000));
     let mut external = raw_message("cursor", "tool-describe", "session-1", 2, &payload);
     external.role = "tool".to_string();
     external.kind = Some("tool_result".to_string());
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&external)
+    db.lcm_ingest_raw_message(&external)
         .await
         .expect("external payload should ingest");
     let summary = db
@@ -34,7 +25,7 @@ async fn describe_gives_session_overview_without_full_payload_bodies() {
         .expect("summary should insert");
 
     let description = db
-        .lcm_describe(LcmDescribeRequest {
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             target: LcmDescribeTarget::Session,
@@ -60,11 +51,9 @@ async fn describe_gives_session_overview_without_full_payload_bodies() {
 #[tokio::test]
 async fn describe_node_and_external_payload_return_metadata_without_body_leaks() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tracedecay");
-    let db = open_lcm_db(&tmp).await;
+    let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        &isolated_db_path(&tmp),
         "cursor",
         "session-1",
         &[
@@ -77,12 +66,11 @@ async fn describe_node_and_external_payload_return_metadata_without_body_leaks()
     let mut external = raw_message("cursor", "tool-describe-target", "session-1", 3, &payload);
     external.role = "tool".to_string();
     external.kind = Some("tool_result".to_string());
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&external)
+    db.lcm_ingest_raw_message(&external)
         .await
         .expect("external payload should ingest");
     let payload_ref = db
-        .lcm_load_raw_message("cursor", "tool-describe-target")
+        .lcm_load_raw_message_for_test("cursor", "tool-describe-target")
         .await
         .unwrap()
         .payload_ref
@@ -117,7 +105,7 @@ async fn describe_node_and_external_payload_return_metadata_without_body_leaks()
         .expect("parent summary should insert");
 
     let node_description = db
-        .lcm_describe(LcmDescribeRequest {
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             target: LcmDescribeTarget::SummaryNode {
@@ -140,7 +128,7 @@ async fn describe_node_and_external_payload_return_metadata_without_body_leaks()
     );
 
     let payload_description = db
-        .lcm_describe(LcmDescribeRequest {
+        .lcm_describe_for_test(LcmDescribeRequest {
             provider: "cursor".into(),
             session_id: "session-1".into(),
             target: LcmDescribeTarget::ExternalPayload {

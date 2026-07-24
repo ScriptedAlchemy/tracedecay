@@ -1,11 +1,13 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_domain::FactOwnerV1;
 #[cfg(test)]
-use tracedecay_domain::{ActorId, FactOwnerV1, SessionId, TemporalCoverageCountsV1};
+use tracedecay_domain::{ActorId, SessionId, TemporalCoverageCountsV1};
 
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
@@ -36,14 +38,15 @@ use crate::application::session::{
     SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalExecutionPort,
 };
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDb;
 #[cfg(test)]
 use crate::query::temporal::TemporalKernelResult;
 #[cfg(test)]
 use crate::query::temporal::context::VersionedTokenEstimator;
 #[cfg(test)]
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
-use crate::sessions::user_sessions_db_path;
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
@@ -51,6 +54,8 @@ mod evidence;
 mod retrieval;
 mod session_reflector;
 mod skill_writer;
+#[cfg(test)]
+mod user_scope_tests;
 
 use evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome, SkillWriterEvidenceBundle,
@@ -79,20 +84,21 @@ use retrieval::{
 use session_reflector::{auto_apply_session_fact_proposals, validate_session_fact_proposals};
 
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
+pub(crate) use retrieval::registered_project_automation_retrieval;
 pub use retrieval::{
     AuthorizedAutomationSessionRetrieval, AutomationSessionRetrieval,
     AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
 };
+pub(crate) use session_reflector::run_user_session_reflector_with_backend_and_retrieval;
 pub use session_reflector::{
     SessionReflectorAutomationOptions, SessionReflectorAutomationRun,
     run_session_reflector_with_backend, run_session_reflector_with_backend_and_retrieval,
-    run_user_session_reflector_with_backend, run_user_session_reflector_with_backend_and_retrieval,
 };
 pub use skill_writer::{SkillWriterAutomationOptions, SkillWriterAutomationRun};
 
+pub(crate) use super::memory_curator::run_user_memory_curator_with_backend;
 pub use super::memory_curator::{
     MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, run_memory_curator_with_backend,
-    run_user_memory_curator_with_backend,
 };
 
 const USER_AUTOMATION_DIR: &str = "user-automation";
@@ -100,6 +106,19 @@ const USER_AUTOMATION_DIR: &str = "user-automation";
 /// Profile-level artifact, ledger, and lock root for projectless automation.
 pub fn user_automation_root(profile_root: &std::path::Path) -> PathBuf {
     profile_root.join(USER_AUTOMATION_DIR)
+}
+
+pub(super) async fn project_automation_sessions(
+    cg: &TraceDecay,
+) -> Result<Arc<RegisteredGlobalDb>> {
+    let FactOwnerV1::Project { project_id } = cg.project_memory_owner()? else {
+        return Err(TraceDecayError::Config {
+            message: "project automation requires authoritative project session scope".to_string(),
+        });
+    };
+    cg.store_runtime_registry()
+        .project_sessions(project_id, [cg.store_layout().project_root.clone()])
+        .await
 }
 
 /// One callable projectless post-session review suitable for host hooks.
@@ -120,8 +139,9 @@ pub struct UserSessionAutomationRun {
     pub skill_writer: SkillWriterAutomationRun,
 }
 
-pub async fn run_user_session_automation_with_backend(
+pub(crate) async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
+    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: UserSessionAutomationOptions,
@@ -129,6 +149,7 @@ pub async fn run_user_session_automation_with_backend(
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_session_automation_with_backend_and_retrieval(
         profile_root,
+        session_registry,
         config,
         backend,
         retrieval.as_ref(),
@@ -137,8 +158,9 @@ pub async fn run_user_session_automation_with_backend(
     .await
 }
 
-pub async fn run_user_session_automation_with_backend_and_retrieval(
+pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
     profile_root: &std::path::Path,
+    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -146,17 +168,24 @@ pub async fn run_user_session_automation_with_backend_and_retrieval(
 ) -> Result<UserSessionAutomationRun> {
     let session_reflector = run_user_session_reflector_with_backend_and_retrieval(
         profile_root,
+        Arc::clone(&session_registry),
         config,
         backend,
         retrieval,
         options.session_reflector,
     )
     .await?;
-    let memory_curator =
-        run_user_memory_curator_with_backend(profile_root, config, backend, options.memory_curator)
-            .await?;
+    let memory_curator = run_user_memory_curator_with_backend(
+        profile_root,
+        Arc::clone(&session_registry),
+        config,
+        backend,
+        options.memory_curator,
+    )
+    .await?;
     let skill_writer = run_user_skill_writer_with_backend_and_retrieval(
         profile_root,
+        session_registry,
         config,
         backend,
         retrieval,
@@ -188,9 +217,10 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
     retrieval: &dyn AutomationSessionRetrieval,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
+    let sessions_db = project_automation_sessions(cg).await?;
     run_skill_writer_for_store(
         cg.store_layout().dashboard_root.clone(),
-        cg.store_layout().sessions_db_path.clone(),
+        sessions_db,
         retrieval,
         Some(cg.project_root()),
         config,
@@ -201,8 +231,9 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
 }
 
 /// Runs skill writing from profile-level projectless session evidence.
-pub async fn run_user_skill_writer_with_backend(
+pub(crate) async fn run_user_skill_writer_with_backend(
     profile_root: &std::path::Path,
+    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
@@ -210,6 +241,7 @@ pub async fn run_user_skill_writer_with_backend(
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_skill_writer_with_backend_and_retrieval(
         profile_root,
+        session_registry,
         config,
         backend,
         retrieval.as_ref(),
@@ -218,17 +250,19 @@ pub async fn run_user_skill_writer_with_backend(
     .await
 }
 
-pub async fn run_user_skill_writer_with_backend_and_retrieval(
+pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
     profile_root: &std::path::Path,
+    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     mut options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
     options.profile_root = Some(profile_root.to_path_buf());
+    let sessions_db = session_registry.profile_sessions().await?;
     run_skill_writer_for_store(
         user_automation_root(profile_root),
-        user_sessions_db_path(profile_root),
+        sessions_db,
         retrieval,
         None,
         config,
@@ -240,7 +274,7 @@ pub async fn run_user_skill_writer_with_backend_and_retrieval(
 
 async fn run_skill_writer_for_store(
     dashboard_root: PathBuf,
-    sessions_db_path: PathBuf,
+    sessions_db: Arc<RegisteredGlobalDb>,
     retrieval: &dyn AutomationSessionRetrieval,
     analytics_project_root: Option<&std::path::Path>,
     config: &AutomationConfig,
@@ -249,7 +283,7 @@ async fn run_skill_writer_for_store(
 ) -> Result<SkillWriterAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
-        sessions_db_path.clone(),
+        sessions_db,
         options.run_id.clone(),
         "skill_writer",
         options.trigger,
@@ -261,21 +295,27 @@ async fn run_skill_writer_for_store(
     {
         return Ok(rejected_skill_writer_run(&run, config, reason, None));
     }
-    let evidence_bundle =
-        match build_skill_writer_evidence(retrieval, analytics_project_root, options).await? {
-            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-            SkillWriterEvidenceOutcome::Skipped {
+    let evidence_bundle = match build_skill_writer_evidence(
+        retrieval,
+        analytics_project_root,
+        None,
+        options,
+    )
+    .await?
+    {
+        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+        SkillWriterEvidenceOutcome::Skipped {
+            reason,
+            evidence_hash,
+        } => {
+            return Ok(rejected_skill_writer_run(
+                &run,
+                config,
                 reason,
                 evidence_hash,
-            } => {
-                return Ok(rejected_skill_writer_run(
-                    &run,
-                    config,
-                    reason,
-                    evidence_hash,
-                ));
-            }
-        };
+            ));
+        }
+    };
     let SkillWriterEvidenceBundle {
         profile_root,
         evidence,
@@ -605,7 +645,7 @@ async fn run_combined_review_for_retrieval(
         });
     }
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    let sessions_db = project_automation_sessions(cg).await?;
     let memory =
         MemoryApplication::new(cg.project_memory_owner()?, DatabaseFactStore::new(cg.db()))
             .map_err(|error| TraceDecayError::Config {
@@ -623,7 +663,7 @@ async fn run_combined_review_for_retrieval(
             }
         };
     let skill_bundle =
-        match build_skill_writer_evidence(retrieval, None, options.skill_writer).await? {
+        match build_skill_writer_evidence(retrieval, None, None, options.skill_writer).await? {
             SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
             SkillWriterEvidenceOutcome::Skipped { .. } => {
                 return Ok(CombinedReviewDispatch::NotCombined {
@@ -635,7 +675,7 @@ async fn run_combined_review_for_retrieval(
     let (reflector_gate, _) = task_run_gate(
         config,
         &dashboard_root,
-        &sessions_db_path,
+        sessions_db.as_ref(),
         AgentTaskKind::SessionReflector,
         options.trigger,
     )
@@ -651,7 +691,7 @@ async fn run_combined_review_for_retrieval(
     let (skill_gate, _) = task_run_gate(
         config,
         &dashboard_root,
-        &sessions_db_path,
+        sessions_db.as_ref(),
         AgentTaskKind::SkillWriter,
         options.trigger,
     )
@@ -930,7 +970,7 @@ fn build_combined_review_prompt(reflector_evidence: &Value, skill_evidence: &Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Database, DatabaseAuthority};
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use std::path::PathBuf;
 
     struct DenyAutomationAuthorizer;
@@ -1323,9 +1363,13 @@ mod tests {
         let authority =
             crate::db::DatabaseAuthority::acquire_test(&path, "automation validation writer lane")
                 .unwrap();
-        let (db, _) = crate::db::Database::initialize(&path, &authority)
-            .await
-            .unwrap();
+        let (db, _) = crate::db::Database::publish_test_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let owner = FactOwnerV1::Profile;
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
         let existing_fact_id = memory
@@ -1415,9 +1459,13 @@ mod tests {
             "automation proposal digest disposition test",
         )
         .unwrap();
-        let (database, _) = Database::initialize(&database_path, &authority)
-            .await
-            .unwrap();
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let memory =
             MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
                 .unwrap();
@@ -1492,9 +1540,13 @@ mod tests {
             "automation proposal partial digest refresh test",
         )
         .unwrap();
-        let (database, _) = Database::initialize(&database_path, &authority)
-            .await
-            .unwrap();
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let owner = FactOwnerV1::Profile;
         let memory =
             MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();

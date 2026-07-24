@@ -24,9 +24,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::application::host_admission::HostAdmissionFacade;
 #[cfg(test)]
-use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionOutcome, HostAdmissionStatus,
-};
+use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::application::observation::ObservationCancellation;
 #[cfg(test)]
 use crate::privacy::parse_normalized_observation_record_v1;
@@ -367,6 +365,27 @@ pub(crate) async fn capture_kiro_snapshot_observations(
             .await?;
     }
     Ok(runner.finish())
+}
+
+/// Kiro snapshot admission through an already registered host facade.
+pub async fn admit_kiro_snapshot_observations(
+    facade: &HostAdmissionFacade<'_>,
+    source: &KiroSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<()> {
+    capture_kiro_snapshot_observations(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+    )
+    .await
+    .map(|_| ())
 }
 
 fn ensure_bounded_snapshot(path: &Path, byte_cap: u64) -> TranscriptIngestResult<()> {
@@ -1124,10 +1143,12 @@ mod observation_tests {
         let first_bytes = source.snapshot_input_bytes(&first_path).unwrap();
         let second_bytes = source.snapshot_input_bytes(&second_path).unwrap();
 
-        let db = crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .expect("open observation db");
-        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+            temp.path().join("profile"),
+        )
+        .await
+        .expect("open registered observation runtime");
+        let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
 
         let deferred = capture_kiro_snapshot_observations(
@@ -1195,10 +1216,12 @@ mod observation_tests {
             workspace_storage_dir,
             user_registered_roots: None,
         };
-        let db = crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .expect("open observation db");
-        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+            temp.path().join("profile"),
+        )
+        .await
+        .expect("open registered observation runtime");
+        let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
@@ -1271,10 +1294,12 @@ mod observation_tests {
         let first_bytes = source.snapshot_input_bytes(&paths[0]).unwrap();
         let second_bytes = source.snapshot_input_bytes(&paths[1]).unwrap();
         let full_cap = first_bytes.saturating_add(second_bytes);
-        let db = crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .expect("open observation db");
-        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+            temp.path().join("profile"),
+        )
+        .await
+        .expect("open registered observation runtime");
+        let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
 
         let first = capture_kiro_snapshot_observations(

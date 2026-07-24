@@ -9,10 +9,10 @@ use tracedecay::agents::host_bundle_registry::{
     default_components, verified_embedded_default_host_component_set, verified_embedded_host_bundle,
 };
 use tracedecay::agents::host_bundle_v2::{
-    HostBundleComponentDoctorStateV1, HostBundleComponentV1, HostBundleInstallReceiptV1,
-    HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1,
-    HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1, HostBundleWriterV1,
-    HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
+    HostBundleComponentDoctorStateV1, HostBundleComponentV1, HostBundleError,
+    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1,
+    HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1,
+    HostBundleWriterV1, HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
     HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostKindV1,
     inspect_installed_host_bundle_components_at, stock_host_kinds,
 };
@@ -362,15 +362,63 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 .unwrap();
         let mut registration = CurrentRegistration;
 
-        let install = HostComponentSetTransactionV1::new(&mut writer)
-            .execute(
+        let install_request = request(HostBundleLifecycleOpV1::Install, 41);
+        let install_preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(
                 &component_set.component_set,
-                &request(HostBundleLifecycleOpV1::Install, 41),
+                &install_request,
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        let install = HostComponentSetTransactionV1::new(&mut writer)
+            .execute_confirmed(
+                &component_set.component_set,
+                &install_request,
+                &install_preview,
                 &component_set,
                 &mut registration,
             )
             .unwrap();
         assert_eq!(install.component_receipts.len(), expected_components.len());
+        assert_eq!(
+            install.confirmed_plan_digest,
+            Some(install_preview.plan_digest)
+        );
+        assert_eq!(
+            install.base_registration_revision,
+            Some(install_preview.base_registration_revision)
+        );
+        assert_eq!(
+            install.current_registration_revision,
+            Some(install_preview.current_registration_revision)
+        );
+        assert_eq!(
+            install.artifact_state_revision,
+            Some(install_preview.artifact_state_revision)
+        );
+        let replay = HostComponentSetTransactionV1::new(&mut writer)
+            .execute_confirmed(
+                &component_set.component_set,
+                &install_request,
+                &install_preview,
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        assert_eq!(replay, install);
+        let mut wrong_preview = install_preview.clone();
+        wrong_preview.plan_digest[0] ^= 1;
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
+                &component_set.component_set,
+                &install_request,
+                &wrong_preview,
+                &component_set,
+                &mut registration,
+            ),
+            Err(HostBundleError::StalePreview)
+        );
         assert!(
             inspect_installed_host_bundle_components_at(
                 artifacts.path(),
@@ -383,10 +431,20 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
             .all(|component| component.state == HostBundleComponentDoctorStateV1::Current)
         );
 
-        let update = HostComponentSetTransactionV1::new(&mut writer)
-            .execute(
+        let update_request = request(HostBundleLifecycleOpV1::Update, 42);
+        let update_preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(
                 &component_set.component_set,
-                &request(HostBundleLifecycleOpV1::Update, 42),
+                &update_request,
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        let update = HostComponentSetTransactionV1::new(&mut writer)
+            .execute_confirmed(
+                &component_set.component_set,
+                &update_request,
+                &update_preview,
                 &component_set,
                 &mut registration,
             )
@@ -402,10 +460,20 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
             .relative_path
             .clone();
         fs::write(artifacts.path().join(repair_target), b"corrupted").unwrap();
-        let repair = HostComponentSetTransactionV1::new(&mut writer)
-            .execute(
+        let repair_request = request(HostBundleLifecycleOpV1::Repair, 43);
+        let repair_preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(
                 &component_set.component_set,
-                &request(HostBundleLifecycleOpV1::Repair, 43),
+                &repair_request,
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        let repair = HostComponentSetTransactionV1::new(&mut writer)
+            .execute_confirmed(
+                &component_set.component_set,
+                &repair_request,
+                &repair_preview,
                 &component_set,
                 &mut registration,
             )
@@ -428,10 +496,20 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
             .all(|component| component.state == HostBundleComponentDoctorStateV1::Current)
         );
 
-        let uninstall = HostComponentSetTransactionV1::new(&mut writer)
-            .execute(
+        let uninstall_request = request(HostBundleLifecycleOpV1::Uninstall, 44);
+        let uninstall_preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(
                 &component_set.component_set,
-                &request(HostBundleLifecycleOpV1::Uninstall, 44),
+                &uninstall_request,
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        let uninstall = HostComponentSetTransactionV1::new(&mut writer)
+            .execute_confirmed(
+                &component_set.component_set,
+                &uninstall_request,
+                &uninstall_preview,
                 &component_set,
                 &mut registration,
             )

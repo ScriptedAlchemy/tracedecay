@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::RefId;
 use tracedecay_store::{CodeShardScopeV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
-use crate::db::engine::{Executor as _, QueryExecutor as _, params};
+use crate::db::engine::params;
 use evidence::{GraphStoreEvidence, InputReadEvidence, capture_input_evidence};
 #[cfg(test)]
 use files::sqlite_sidecar;
@@ -1347,7 +1347,7 @@ fn validate_applied_retirement_authority(
 
 async fn retire_legacy_registry_owners(
     db: &RegisteredGlobalDb,
-    profile_root: &Path,
+    _profile_root: &Path,
     ledger: &ConsolidationLedger,
 ) -> Result<usize> {
     let transaction = db
@@ -1358,7 +1358,7 @@ async fn retire_legacy_registry_owners(
 
     #[cfg(test)]
     {
-        let ledger_root = profile_root.join(LEDGER_DIR);
+        let ledger_root = _profile_root.join(LEDGER_DIR);
         let injected_failure = ledger_root.join(".fail-registry-retirement-once");
         if injected_failure.is_file() {
             let _ = fs::remove_file(injected_failure);

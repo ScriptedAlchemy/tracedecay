@@ -16,7 +16,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState,
 };
 use super::worker::run_session_temporal_refresh_scheduler;
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 
 #[derive(Default, Debug, Eq, PartialEq)]
 pub(super) struct SessionTemporalRefreshPassReport {
@@ -118,7 +118,7 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
 impl SessionTemporalRefreshSchedulerRegistry {
     fn spawn_entry(
         &self,
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
         route: Option<SessionTemporalRefreshWake>,
     ) -> SessionTemporalRefreshSchedulerEntry {
         let state = Arc::new(SessionTemporalRefreshWakeState::default());
@@ -175,7 +175,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub(in crate::daemon) async fn ensure_project(
         &self,
         owner: StoreOwnerKey,
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
     ) -> SessionTemporalRefreshWake {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
@@ -223,7 +223,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub(in crate::daemon) async fn ensure_profile(
         &self,
         database_path: std::path::PathBuf,
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
     ) -> SessionTemporalRefreshWake {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
@@ -265,7 +265,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         &self,
         old_owner: &StoreOwnerKey,
         new_owner: StoreOwnerKey,
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
     ) {
         if old_owner == &new_owner {
             self.ensure_project(new_owner, database).await;

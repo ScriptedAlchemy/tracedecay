@@ -1,4 +1,49 @@
 use super::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::sessions::workflow_index::RegisteredWorkflowIndexSnapshot;
+
+static WORKFLOW_TEST_NONCE: AtomicU64 = AtomicU64::new(1);
+
+struct WorkflowTestStore {
+    database: Arc<RegisteredGlobalDb>,
+    project_id: ProjectId,
+    _registry: DaemonSessionRuntimeRegistryV1,
+    _scope: crate::db::DaemonDatabaseScope,
+    _profile: tempfile::TempDir,
+}
+
+async fn workflow_test_store(project_root: &Path) -> WorkflowTestStore {
+    let profile = tempfile::tempdir().unwrap();
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&profile.path().join("profile")).unwrap();
+    let nonce = WORKFLOW_TEST_NONCE.fetch_add(1, Ordering::Relaxed);
+    let scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        nonce,
+        &format!("workflow-ingest-test-{nonce}"),
+    )
+    .unwrap();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .unwrap();
+    let project_id = ProjectId::new(format!("project.workflow-ingest-{nonce}")).unwrap();
+    let database = registry
+        .project_sessions(project_id.clone(), [project_root.to_path_buf()])
+        .await
+        .unwrap();
+    WorkflowTestStore {
+        database,
+        project_id,
+        _registry: registry,
+        _scope: scope,
+        _profile: profile,
+    }
+}
 
 fn sample_meta() -> Value {
     serde_json::json!({
@@ -305,32 +350,33 @@ async fn sweep_ingests_runs_scoped_to_project_and_is_incremental() {
     let project_root = project.path().canonicalize().unwrap();
     let projects = write_fixture(home.path(), "sess-1", &project_root);
 
-    let db_file = tempfile::NamedTempFile::new().unwrap();
-    let db = GlobalDb::open_at(db_file.path()).await.unwrap();
+    let store = workflow_test_store(&project_root).await;
 
-    let stats = ingest_workflow_runs_from(&db, &project_root, &projects).await;
+    let stats = ingest_workflow_runs_from(
+        store.database.as_ref(),
+        &store.project_id,
+        &project_root,
+        &projects,
+    )
+    .await;
     // Both the meta run and the dir-only run land.
     assert_eq!(stats.runs_ingested, 2);
     // Meta run: 2 agents; orphan run: 1 agent.
     assert_eq!(stats.agents_ingested, 3);
 
     // The meta run is owned by sess-1 and reads as completed with its roster.
-    let runs = db.workflow_runs_for_session("sess-1", 10).await.unwrap();
+    let reader = RegisteredWorkflowIndexSnapshot::new(store.database.as_ref())
+        .await
+        .unwrap();
+    let runs = reader.runs_for_session("sess-1", 10).await.unwrap();
     let ids: Vec<&str> = runs.iter().map(|r| r.run_id.as_str()).collect();
     assert!(ids.contains(&"wf_d0bf6fa4-48f")); // runId from meta, not dir name
     assert!(ids.contains(&"wf_orphan"));
 
-    let meta_run = db
-        .workflow_run_for_id("wf_d0bf6fa4-48f")
-        .await
-        .unwrap()
-        .unwrap();
+    let meta_run = reader.run_for_id("wf_d0bf6fa4-48f").await.unwrap().unwrap();
     assert_eq!(meta_run.parent_session_id, "sess-1");
     assert_eq!(meta_run.status, WorkflowStatus::Completed);
-    let agents = db
-        .workflow_agents_for_run("wf_d0bf6fa4-48f", 10)
-        .await
-        .unwrap();
+    let agents = reader.agents_for_run("wf_d0bf6fa4-48f", 10).await.unwrap();
     assert_eq!(agents.len(), 2);
     // The first agent's transcript enriched tokens (100+40) and its path.
     let enriched = agents
@@ -346,12 +392,18 @@ async fn sweep_ingests_runs_scoped_to_project_and_is_incremental() {
             .ends_with("agent-a17141dbe5a308242.jsonl")
     );
 
-    let orphan = db.workflow_run_for_id("wf_orphan").await.unwrap().unwrap();
+    let orphan = reader.run_for_id("wf_orphan").await.unwrap().unwrap();
     assert_eq!(orphan.status, WorkflowStatus::Running);
 
     // Re-sweep with nothing changed: the watermark short-circuits every run,
     // so no rows are re-ingested.
-    let again = ingest_workflow_runs_from(&db, &project_root, &projects).await;
+    let again = ingest_workflow_runs_from(
+        store.database.as_ref(),
+        &store.project_id,
+        &project_root,
+        &projects,
+    )
+    .await;
     assert_eq!(again, WorkflowIngestStats::default());
 }
 
@@ -366,13 +418,22 @@ async fn sweep_skips_runs_owned_by_a_different_project() {
     let target = tempfile::tempdir().unwrap();
     let target_root = target.path().canonicalize().unwrap();
 
-    let db_file = tempfile::NamedTempFile::new().unwrap();
-    let db = GlobalDb::open_at(db_file.path()).await.unwrap();
+    let store = workflow_test_store(&target_root).await;
 
-    let stats = ingest_workflow_runs_from(&db, &target_root, &projects).await;
+    let stats = ingest_workflow_runs_from(
+        store.database.as_ref(),
+        &store.project_id,
+        &target_root,
+        &projects,
+    )
+    .await;
     assert_eq!(stats, WorkflowIngestStats::default());
+    let reader = RegisteredWorkflowIndexSnapshot::new(store.database.as_ref())
+        .await
+        .unwrap();
     assert!(
-        db.workflow_runs_for_session("sess-x", 10)
+        reader
+            .runs_for_session("sess-x", 10)
             .await
             .unwrap()
             .is_empty()
@@ -430,15 +491,24 @@ async fn other_project_run_does_not_advance_watermark() {
         FUTURE,
     );
 
-    let db_file = tempfile::NamedTempFile::new().unwrap();
-    let db = GlobalDb::open_at(db_file.path()).await.unwrap();
+    let store = workflow_test_store(&target_root).await;
 
     // Sweep the target project only. The in-scope (target) runs are ingested;
     // the out-of-scope (other) runs are not.
-    let stats = ingest_workflow_runs_from(&db, &target_root, &projects).await;
+    let stats = ingest_workflow_runs_from(
+        store.database.as_ref(),
+        &store.project_id,
+        &target_root,
+        &projects,
+    )
+    .await;
     assert_eq!(stats.runs_ingested, 2); // target's wf_meta + wf_orphan
+    let reader = RegisteredWorkflowIndexSnapshot::new(store.database.as_ref())
+        .await
+        .unwrap();
     assert!(
-        db.workflow_runs_for_session("sess-other", 10)
+        reader
+            .runs_for_session("sess-other", 10)
             .await
             .unwrap()
             .is_empty()
@@ -448,7 +518,8 @@ async fn other_project_run_does_not_advance_watermark() {
     // well below the out-of-project run's far-future mtime. On the buggy
     // path (watermark advanced before the scope filter) it would equal
     // FUTURE, and the next sweep would strand every target run.
-    let watermark = read_ingest_watermark(db.read_connection(), INGEST_WATERMARK_KEY).await;
+    let snapshot = store.database.read_snapshot().await.unwrap();
+    let watermark = read_ingest_watermark(&snapshot, INGEST_WATERMARK_KEY).await;
     assert!(
         watermark > 0 && watermark < i64::try_from(FUTURE).unwrap(),
         "out-of-project run advanced the watermark to {watermark} (>= {FUTURE})"
@@ -467,7 +538,13 @@ async fn other_project_run_does_not_advance_watermark() {
     );
     set_mtime(&orphan_dir, u64::try_from(watermark).unwrap() + 60);
 
-    let again = ingest_workflow_runs_from(&db, &target_root, &projects).await;
+    let again = ingest_workflow_runs_from(
+        store.database.as_ref(),
+        &store.project_id,
+        &target_root,
+        &projects,
+    )
+    .await;
     assert_eq!(
         again.runs_ingested, 1,
         "the still-Running target run must be re-ingested, not stranded"

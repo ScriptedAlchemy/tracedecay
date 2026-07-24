@@ -9,10 +9,6 @@ use std::future::Future;
 use std::sync::Arc;
 
 use hmac::{Hmac, KeyInit, Mac};
-use libsql::Connection;
-#[cfg(test)]
-use libsql::TransactionBehavior;
-use libsql::{Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
@@ -53,7 +49,10 @@ use crate::application::configuration::{
 };
 use crate::config::registry::ConfigurationRegistry;
 use crate::config::resolver::{ConfigurationResolutionV1, registry_default_candidate};
-use crate::global_db::{GlobalDb, GlobalDbReadSnapshot, GlobalDbWriteTransaction};
+#[cfg(test)]
+use crate::db::engine::{Connection, TestConnection, TransactionBehavior};
+use crate::db::engine::{Executor, QueryExecutor, Row, params};
+use crate::global_db::RegisteredGlobalDb;
 
 mod audit;
 mod read;
@@ -68,12 +67,12 @@ pub enum ConfigurationStorageError {
     #[error("configuration schema error: {0}")]
     Schema(#[from] ConfigurationSchemaError),
     #[error("configuration storage error: {0}")]
-    Sql(#[from] libsql::Error),
+    Sql(#[from] crate::db::engine::Error),
     #[error("configuration storage encoded invalid data: {0}")]
     Encoding(String),
 }
 
-/// Connection-local SQL helper used only behind `GlobalDb`'s owned writer and
+/// Connection-local SQL helper used only behind the registered database's writer and
 /// read-snapshot lanes. It is deliberately not a public authority surface.
 #[cfg(test)]
 struct ConfigurationSqlStore<'a> {
@@ -195,7 +194,7 @@ impl ConfigurationMigrationStore for ConfigurationSqlStore<'_> {
 }
 
 async fn commit_initial_migration_transaction(
-    transaction: &libsql::Transaction,
+    transaction: &impl Executor,
     receipt: &ConfigurationMigrationReceiptV1,
     resolution: &ConfigurationResolutionV1,
     quarantine: &[ConfigurationMigrationQuarantineEntryV1],
@@ -332,7 +331,7 @@ async fn commit_initial_migration_transaction(
 }
 
 async fn migration_receipt_exists(
-    transaction: &libsql::Transaction,
+    transaction: &impl QueryExecutor,
     receipt_name: &str,
     source_snapshot_digest: &ManifestDigest,
     initial_revision_id: &ConfigurationRevisionId,
@@ -371,7 +370,7 @@ async fn migration_receipt_exists(
 }
 
 async fn migration_receipt_from_transaction(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     receipt_name: &str,
     source_snapshot_digest: &ManifestDigest,
 ) -> Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError> {
@@ -548,36 +547,8 @@ fn invalid_store_data(message: impl Into<String>) -> ConfigurationStoreError {
     ConfigurationStoreError::InvalidData(message.into())
 }
 
-fn unavailable_store(_error: libsql::Error) -> ConfigurationStoreError {
+fn unavailable_store<E>(_error: E) -> ConfigurationStoreError {
     ConfigurationStoreError::Unavailable
-}
-
-trait ConfigurationQueryExecutor {
-    fn query_connection(&self) -> &Connection;
-}
-
-impl ConfigurationQueryExecutor for Connection {
-    fn query_connection(&self) -> &Connection {
-        self
-    }
-}
-
-impl ConfigurationQueryExecutor for Transaction {
-    fn query_connection(&self) -> &Connection {
-        self
-    }
-}
-
-impl ConfigurationQueryExecutor for GlobalDbWriteTransaction<'_> {
-    fn query_connection(&self) -> &Connection {
-        self
-    }
-}
-
-impl ConfigurationQueryExecutor for GlobalDbReadSnapshot {
-    fn query_connection(&self) -> &Connection {
-        self
-    }
 }
 
 fn decode_id<T>(value: String, field: &'static str) -> ConfigurationStoreResult<T>
@@ -623,6 +594,7 @@ fn source_kind_projection(source_kind: SourceKindV1) -> &'static str {
         SourceKindV1::Claude => "claude",
         SourceKindV1::Codex => "codex",
         SourceKindV1::Cursor => "cursor",
+        SourceKindV1::GitHub => "github",
         SourceKindV1::Hermes => "hermes",
         SourceKindV1::Kiro => "kiro",
     }
@@ -636,7 +608,7 @@ fn rule_effect_projection(effect: RuleEffect) -> &'static str {
 }
 
 async fn insert_configuration_projections(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     revision_id: &ConfigurationRevisionId,
     snapshot: &ConfigurationSnapshotV1,
 ) -> ConfigurationStoreResult<()> {
@@ -870,7 +842,7 @@ async fn insert_configuration_projections(
 }
 
 async fn insert_revision(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     revision: &ConfigurationRevisionRecordV1,
 ) -> ConfigurationStoreResult<()> {
     revision.validate().map_err(ConfigurationStoreError::from)?;
@@ -1008,7 +980,7 @@ fn decode_plan_row(row: &Row) -> ConfigurationStoreResult<ConfigurationProtected
 }
 
 async fn insert_dry_run_audit_event(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     record: &ConfigurationProtectedPlanRecordV1,
 ) -> ConfigurationStoreResult<()> {
     let event_kind = match &record.operation {
@@ -1146,7 +1118,7 @@ fn decode_audit_row(
 }
 
 async fn read_audit_event_from_transaction(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     event_id: &ConfigurationAuditEventId,
 ) -> ConfigurationStoreResult<Option<ConfigurationAuditEvent>> {
     let mut rows = transaction
@@ -1174,7 +1146,7 @@ async fn read_audit_event_from_transaction(
 }
 
 async fn insert_audit_event_with_receipt_digest(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     event: &ConfigurationAuditEvent,
     receipt_digest: Option<&ManifestDigest>,
     sealed_target_reference: Option<&[u8]>,
@@ -1231,7 +1203,7 @@ fn is_terminal_plan_event(event_kind: &str) -> bool {
 }
 
 async fn append_terminal_plan_event(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     plan: &ProtectedChangePlan,
     audit_event: &ConfigurationAuditEvent,
 ) -> ConfigurationStoreResult<()> {
@@ -1300,7 +1272,7 @@ async fn append_terminal_plan_event(
 }
 
 async fn has_matching_terminal_plan_event(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     plan: &ProtectedChangePlan,
     audit_event: &ConfigurationAuditEvent,
 ) -> ConfigurationStoreResult<bool> {
@@ -1417,7 +1389,7 @@ fn decode_stored_mutation_receipt(row: &Row) -> ConfigurationStoreResult<StoredM
 }
 
 async fn receipt_for_idempotency_from_transaction(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     actor_id: &ActorId,
     idempotency_key: &ConfigurationIdempotencyKey,
 ) -> ConfigurationStoreResult<Option<StoredMutationReceipt>> {
@@ -1452,7 +1424,7 @@ fn authorization_policy_digest_for_commit(commit: &ConfigurationCommitV1) -> Str
 }
 
 async fn insert_mutation_receipt(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     commit: &ConfigurationCommitV1,
 ) -> ConfigurationStoreResult<()> {
     commit
@@ -1582,7 +1554,7 @@ fn decode_component_activation_state(
 }
 
 async fn latest_component_activation_states(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
 ) -> ConfigurationStoreResult<Vec<StoredComponentActivationState>> {
     let mut rows = transaction
         .query(
@@ -1608,7 +1580,7 @@ async fn latest_component_activation_states(
 }
 
 async fn latest_component_activation_state(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     component: &str,
 ) -> ConfigurationStoreResult<Option<StoredComponentActivationState>> {
     let mut rows = transaction
@@ -1636,7 +1608,7 @@ async fn latest_component_activation_state(
 }
 
 async fn insert_component_activation_event(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     state: &StoredComponentActivationState,
     occurred_at: UtcMicros,
 ) -> ConfigurationStoreResult<()> {
@@ -1670,7 +1642,7 @@ async fn insert_component_activation_event(
 }
 
 async fn advance_component_desired_state(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     desired_revision_id: &ConfigurationRevisionId,
     occurred_at: UtcMicros,
 ) -> ConfigurationStoreResult<()> {
@@ -1736,7 +1708,7 @@ fn validate_commit_bindings(commit: &ConfigurationCommitV1) -> ConfigurationStor
 }
 
 async fn replay_matches_commit(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     stored: &StoredMutationReceipt,
     commit: &ConfigurationCommitV1,
 ) -> ConfigurationStoreResult<bool> {
@@ -1772,7 +1744,7 @@ async fn replay_matches_commit(
 }
 
 async fn commit_configuration_transaction(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     commit: &ConfigurationCommitV1,
     fault_after_revision: bool,
     sealed_target_reference: Option<&[u8]>,
@@ -2268,7 +2240,7 @@ struct ConfigurationCommitDraft<'a, T> {
 }
 
 async fn build_configuration_commit<T: Serialize>(
-    transaction: &Transaction,
+    transaction: &impl Executor,
     draft: ConfigurationCommitDraft<'_, T>,
 ) -> Result<(ConfigurationCommitV1, Vec<u8>), ConfigurationError> {
     let ConfigurationCommitDraft {
@@ -2404,7 +2376,7 @@ fn validate_plan_evidence(
 }
 
 async fn audit_from_transaction(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     after: Option<&ConfigurationAuditEventId>,
     limit: usize,
 ) -> ConfigurationStoreResult<Vec<ConfigurationAuditEvent>> {
@@ -2513,7 +2485,7 @@ fn rollback_redacted_changes(
 }
 
 async fn current_state_from_transaction(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
 ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
     let revision_id = current_revision_id_from_executor(transaction)
         .await
@@ -2531,7 +2503,7 @@ async fn current_state_from_transaction(
 }
 
 async fn replay_control_receipt(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     actor_id: &ActorId,
     idempotency_key: &ConfigurationIdempotencyKey,
     expected_base_revision_id: &ConfigurationRevisionId,
@@ -2570,7 +2542,7 @@ async fn replay_control_receipt(
 }
 
 async fn credential_reference_from_transaction(
-    transaction: &Transaction,
+    transaction: &impl QueryExecutor,
     reference_id: &CredentialReferenceId,
 ) -> Result<Option<CredentialReferenceMetadataV1>, ConfigurationError> {
     let mut rows = transaction
@@ -2629,16 +2601,16 @@ async fn credential_reference_from_transaction(
     Ok(Some(metadata))
 }
 
-/// Concrete control-plane adapter over the one already-open `GlobalDb`. It
-/// never accepts an arbitrary connection, opens a fallback database, or owns
-/// policy resolution; every write obtains `GlobalDb`'s serialized immediate
-/// transaction and commits all durable effects together.
+/// Concrete control-plane adapter over one already-open owned session store.
+/// It never accepts an arbitrary connection, opens a fallback database, or
+/// owns policy resolution; every write obtains the selected store's serialized
+/// immediate transaction and commits all durable effects together.
 pub struct GlobalDbConfigurationControlStore<'db> {
-    db: &'db GlobalDb,
+    db: &'db RegisteredGlobalDb,
 }
 
 impl<'db> GlobalDbConfigurationControlStore<'db> {
-    pub const fn new(db: &'db GlobalDb) -> Self {
+    pub(crate) const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
     }
 
@@ -2821,27 +2793,27 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
 /// without opening another database or resolving configuration independently.
 #[derive(Clone)]
 pub struct OwnedGlobalDbConfigurationControlStore {
-    /// The retained project-runtime database handle, or `None` when the store
-    /// has no durable sessions.db yet (a read-only open of a never-writable
-    /// store). Every operation fails closed with [`ConfigurationError::Unavailable`]
-    /// while the store is absent.
-    db: Option<Arc<GlobalDb>>,
+    /// The exact daemon-registered project-runtime database handle. Production
+    /// composition always supplies it at construction; no later attachment,
+    /// path reopen, or authority substitution is available.
+    db: Arc<RegisteredGlobalDb>,
 }
 
 impl OwnedGlobalDbConfigurationControlStore {
-    /// Retains an existing daemon project-runtime database handle, or an absent
-    /// (`None`) handle for a read-only open with no durable configuration store.
-    pub fn from_project_runtime_db(db: Option<Arc<GlobalDb>>) -> Self {
+    pub(crate) fn from_registered_project_runtime_db(db: Arc<RegisteredGlobalDb>) -> Self {
         Self { db }
+    }
+
+    fn database(&self) -> Arc<RegisteredGlobalDb> {
+        Arc::clone(&self.db)
     }
 }
 
 impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
     fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
-        let db = self.db.clone();
+        let db = self.database();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store.current().await
         })
     }
@@ -2851,12 +2823,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         operation: &ProtectedChange,
     ) -> ConfigurationOperationFuture<'_, ()> {
-        let db = self.db.clone();
+        let db = self.database();
         let plan = plan.clone();
         let operation = operation.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store.save_plan(&plan, &operation).await
         })
     }
@@ -2865,11 +2836,10 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         &self,
         plan_id: &ChangePlanId,
     ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
-        let db = self.db.clone();
+        let db = self.database();
         let plan_id = plan_id.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store.load_plan(&plan_id).await
         })
     }
@@ -2880,13 +2850,12 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         mutation: &DirectConfigurationMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = self.db.clone();
+        let db = self.database();
         let authority = authority.clone();
         let mutation = mutation.clone();
         let expected_revision = expected_revision.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store
                 .commit_direct(&authority, &mutation, &expected_revision)
                 .await
@@ -2900,14 +2869,13 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = self.db.clone();
+        let db = self.database();
         let authority = authority.clone();
         let request = request.clone();
         let plan = plan.clone();
         let evidence = evidence.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store
                 .commit_protected(&authority, &request, &plan, &evidence)
                 .await
@@ -2920,12 +2888,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         rollback: &ConfigurationRollbackRequest,
         now: UtcMicros,
     ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        let db = self.db.clone();
+        let db = self.database();
         let authority = authority.clone();
         let rollback = rollback.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store.dry_run_rollback(&authority, &rollback, now).await
         })
     }
@@ -2937,14 +2904,13 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = self.db.clone();
+        let db = self.database();
         let authority = authority.clone();
         let request = request.clone();
         let plan = plan.clone();
         let evidence = evidence.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store
                 .apply_rollback(&authority, &request, &plan, &evidence)
                 .await
@@ -2956,12 +2922,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         actor: &AuthorizedActor,
         query: &ConfigurationAuditQuery,
     ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
-        let db = self.db.clone();
+        let db = self.database();
         let actor = actor.clone();
         let query = query.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             ConfigurationControlStore::audit(&store, &actor, &query).await
         })
     }
@@ -2970,11 +2935,10 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         &self,
         actor: &AuthorizedActor,
     ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
-        let db = self.db.clone();
+        let db = self.database();
         let actor = actor.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store.observed_state(&actor).await
         })
     }
@@ -2987,18 +2951,104 @@ impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
         write: &WriteOnlyCredentialMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        let db = self.db.clone();
+        let db = self.database();
         let authority = authority.clone();
         let write = write.clone();
         let expected_revision = expected_revision.clone();
         Box::pin(async move {
-            let db = db.ok_or(ConfigurationError::Unavailable)?;
-            let store = GlobalDbConfigurationControlStore::new(db.as_ref());
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store
                 .write_reference(&authority, &write, &expected_revision)
                 .await
         })
     }
+}
+
+pub(crate) struct ConfigurationDirectCommitOutcomeV1 {
+    pub receipt: ConfigurationMutationReceipt,
+    pub current: ConfigurationCurrentStateV1,
+}
+
+pub(crate) async fn commit_direct_in_transaction<E>(
+    transaction: &E,
+    authority: &ConfigurationMutationAuthority,
+    mutation: &DirectConfigurationMutation,
+    expected_revision: &ConfigurationRevisionId,
+) -> Result<ConfigurationDirectCommitOutcomeV1, ConfigurationError>
+where
+    E: QueryExecutor + Executor + Sync,
+{
+    authority.validate_integrity()?;
+    expected_revision
+        .validate()
+        .map_err(ConfigurationError::validation)?;
+    validate_direct_control_mutation(mutation)?;
+    if authority.receipt.scope_digest != mutation.target_scope_digest()? {
+        return Err(ConfigurationError::MutationAuthorityRejected);
+    }
+    let operation_digest = direct_operation_digest(mutation)?;
+    let idempotency_key = direct_idempotency_key(authority, &operation_digest)?;
+    let next_revision_id =
+        result_revision_id(expected_revision, &idempotency_key, &operation_digest)?;
+    if let Some(receipt) = replay_control_receipt(
+        transaction,
+        &authority.receipt.actor_id,
+        &idempotency_key,
+        expected_revision,
+        &operation_digest,
+        None,
+    )
+    .await?
+    {
+        let current = current_state_from_transaction(transaction).await?;
+        return Ok(ConfigurationDirectCommitOutcomeV1 { receipt, current });
+    }
+    let current = current_state_from_transaction(transaction).await?;
+    if &current.revision_id != expected_revision {
+        return Err(ConfigurationError::RevisionConflict);
+    }
+    let snapshot = apply_direct_mutation_to_snapshot(
+        &current.snapshot,
+        mutation,
+        &next_revision_id,
+        &ConfigurationRegistry::core().map_err(ConfigurationError::validation)?,
+    )?;
+    let audit_target = redacted_direct_audit_target(mutation)?;
+    let (commit, sealed_target_reference) = build_configuration_commit(
+        transaction,
+        ConfigurationCommitDraft {
+            expected_base_revision_id: expected_revision,
+            next_revision_id,
+            snapshot,
+            actor_id: &authority.receipt.actor_id,
+            operation_kind: "direct_mutation",
+            operation_digest,
+            idempotency_key,
+            change_plan: None,
+            event_kind: ConfigurationAuditEventKindV1::Applied,
+            created_at: authority.receipt.issued_at,
+            target: &audit_target,
+        },
+    )
+    .await?;
+    let receipt = commit_configuration_transaction(
+        transaction,
+        &commit,
+        false,
+        Some(&sealed_target_reference),
+    )
+    .await
+    .map_err(map_store_error)?;
+    let receipt = ConfigurationMutationReceipt {
+        receipt_id: receipt.receipt_id,
+        base_revision_id: receipt.base_revision_id,
+        result_revision_id: receipt.result_revision_id,
+        snapshot_id: commit.next_revision.snapshot.snapshot_id,
+        operation_digest: receipt.operation_digest,
+        created_at: receipt.created_at,
+    };
+    let current = current_state_from_transaction(transaction).await?;
+    Ok(ConfigurationDirectCommitOutcomeV1 { receipt, current })
 }
 
 impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
@@ -3088,87 +3138,23 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
         let mutation = mutation.clone();
         let expected_revision = expected_revision.clone();
         Box::pin(async move {
-            authority.validate_integrity()?;
-            expected_revision
-                .validate()
-                .map_err(ConfigurationError::validation)?;
-            validate_direct_control_mutation(&mutation)?;
-            if authority.receipt.scope_digest != mutation.target_scope_digest()? {
-                return Err(ConfigurationError::MutationAuthorityRejected);
-            }
-            let operation_digest = direct_operation_digest(&mutation)?;
-            let idempotency_key = direct_idempotency_key(&authority, &operation_digest)?;
-            let next_revision_id =
-                result_revision_id(&expected_revision, &idempotency_key, &operation_digest)?;
             let transaction = self
                 .db
                 .begin_write_transaction()
                 .await
                 .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = async {
-                if let Some(receipt) = replay_control_receipt(
-                    &transaction,
-                    &authority.receipt.actor_id,
-                    &idempotency_key,
-                    &expected_revision,
-                    &operation_digest,
-                    None,
-                )
-                .await?
-                {
-                    return Ok(receipt);
-                }
-                let current = current_state_from_transaction(&transaction).await?;
-                if current.revision_id != expected_revision {
-                    return Err(ConfigurationError::RevisionConflict);
-                }
-                let snapshot = apply_direct_mutation_to_snapshot(
-                    &current.snapshot,
-                    &mutation,
-                    &next_revision_id,
-                    &ConfigurationRegistry::core().map_err(ConfigurationError::validation)?,
-                )?;
-                let audit_target = redacted_direct_audit_target(&mutation)?;
-                let (commit, sealed_target_reference) = build_configuration_commit(
-                    &transaction,
-                    ConfigurationCommitDraft {
-                        expected_base_revision_id: &expected_revision,
-                        next_revision_id,
-                        snapshot,
-                        actor_id: &authority.receipt.actor_id,
-                        operation_kind: "direct_mutation",
-                        operation_digest,
-                        idempotency_key,
-                        change_plan: None,
-                        event_kind: ConfigurationAuditEventKindV1::Applied,
-                        created_at: authority.receipt.issued_at,
-                        target: &audit_target,
-                    },
-                )
-                .await?;
-                let receipt = commit_configuration_transaction(
-                    &transaction,
-                    &commit,
-                    false,
-                    Some(&sealed_target_reference),
-                )
-                .await
-                .map_err(map_store_error)?;
-                Ok(ConfigurationMutationReceipt {
-                    receipt_id: receipt.receipt_id,
-                    base_revision_id: receipt.base_revision_id,
-                    result_revision_id: receipt.result_revision_id,
-                    snapshot_id: commit.next_revision.snapshot.snapshot_id,
-                    operation_digest: receipt.operation_digest,
-                    created_at: receipt.created_at,
-                })
-            }
+            let outcome = commit_direct_in_transaction(
+                &transaction,
+                &authority,
+                &mutation,
+                &expected_revision,
+            )
             .await;
             match outcome {
-                Ok(receipt) => transaction
+                Ok(outcome) => transaction
                     .commit()
                     .await
-                    .map(|()| receipt)
+                    .map(|()| outcome.receipt)
                     .map_err(|_| ConfigurationError::Unavailable),
                 Err(error) => Err(error),
             }
@@ -3933,13 +3919,10 @@ impl ConfigurationMigrationStore for GlobalDbConfigurationControlStore<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
     use super::*;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::resolve_configuration;
-    use crate::global_db::GlobalDb;
     use tracedecay_domain::configuration::{
         AccessRuleId, AuthorityRef, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
         ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
@@ -3953,18 +3936,14 @@ mod tests {
     use tracedecay_domain::research::CapabilityId;
     use tracedecay_domain::{AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros};
 
-    async fn setup() -> (tempfile::TempDir, libsql::Connection) {
+    async fn setup() -> (tempfile::TempDir, TestConnection) {
         let directory = tempfile::tempdir().unwrap();
-        let database = libsql::Builder::new_local(directory.path().join("configuration.db"))
-            .build()
-            .await
-            .unwrap();
-        let connection = database.connect().unwrap();
+        let connection = TestConnection::open(&directory.path().join("configuration.db"));
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .await
             .unwrap();
-        ensure_configuration_schema(&connection).await.unwrap();
+        ensure_configuration_schema(&*connection).await.unwrap();
         (directory, connection)
     }
 
@@ -4151,18 +4130,28 @@ mod tests {
 
     async fn global_setup() -> (
         tempfile::TempDir,
-        PathBuf,
-        GlobalDb,
+        HostAdmissionTestRuntimeV1,
         ConfigurationRevisionRecordV1,
     ) {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("global.db");
-        let db = GlobalDb::open_at(&path).await.expect("open global DB");
+        let profile_root = directory.path().join("profile");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            &profile_root,
+            &project_root,
+            ProjectId::new("project.configuration-store.fixture").unwrap(),
+        )
+        .await
+        .expect("registered configuration runtime");
+        let db = runtime
+            .registered_database(HostAdmissionScope::Project)
+            .expect("registered project database");
         let root = root_revision();
         let transaction = db.begin_write_transaction().await.unwrap();
         insert_revision(&transaction, &root).await.unwrap();
         transaction.commit().await.unwrap();
-        (directory, path, db, root)
+        (directory, runtime, root)
     }
 
     fn policy_digest(byte: char) -> AccessPolicyDigest {
@@ -4341,8 +4330,11 @@ mod tests {
 
     #[tokio::test]
     async fn partial_rollback_is_typed_unavailable_until_selective_restore_exists() {
-        let (_directory, _path, db, root) = global_setup().await;
-        let store = GlobalDbConfigurationControlStore::new(&db);
+        let (_directory, runtime, root) = global_setup().await;
+        let db = runtime
+            .registered_database(HostAdmissionScope::Project)
+            .unwrap();
+        let store = GlobalDbConfigurationControlStore::new_registered(db);
         let authority = control_authority(
             ConfigurationMutationOperationV1::RollbackDryRun,
             &root.revision_id,
@@ -4362,8 +4354,11 @@ mod tests {
 
     #[tokio::test]
     async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
-        let (_directory, _path, db, root) = global_setup().await;
-        let store = GlobalDbConfigurationControlStore::new(&db);
+        let (_directory, runtime, root) = global_setup().await;
+        let db = runtime
+            .registered_database(HostAdmissionScope::Project)
+            .unwrap();
+        let store = GlobalDbConfigurationControlStore::new_registered(db);
         let authority = control_authority(
             ConfigurationMutationOperationV1::DirectMutation,
             &root.revision_id,
@@ -4463,12 +4458,11 @@ mod tests {
 
     #[tokio::test]
     async fn owned_global_control_adapter_retains_runtime_db_and_preserves_cas() {
-        let (_directory, _path, db, root) = global_setup().await;
-        let runtime_db = Arc::new(db);
-        let store = OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(Some(
-            Arc::clone(&runtime_db),
-        ));
-        drop(runtime_db);
+        let (_directory, runtime, root) = global_setup().await;
+        let store = runtime
+            .project_configuration_control_store_for_test()
+            .unwrap();
+        drop(runtime);
 
         assert_eq!(store.current().await.unwrap().revision_id, root.revision_id);
 
@@ -4512,8 +4506,11 @@ mod tests {
 
     #[tokio::test]
     async fn direct_audit_target_never_persists_sensitive_setting_values() {
-        let (_directory, _path, db, root) = global_setup().await;
-        let store = GlobalDbConfigurationControlStore::new(&db);
+        let (_directory, runtime, root) = global_setup().await;
+        let db = runtime
+            .registered_database(HostAdmissionScope::Project)
+            .unwrap();
+        let store = GlobalDbConfigurationControlStore::new_registered(db);
         let authority = control_authority(
             ConfigurationMutationOperationV1::DirectMutation,
             &root.revision_id,
@@ -4554,8 +4551,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_operation_survives_restart_populates_projections_and_rolls_back() {
-        let (_directory, path, db, root) = global_setup().await;
+    async fn protected_operation_survives_adapter_rebuild_populates_projections_and_rolls_back() {
+        let (_directory, runtime, root) = global_setup().await;
+        let db = runtime
+            .registered_database(HostAdmissionScope::Project)
+            .unwrap();
         let actor_id: ActorId = id("actor.configuration.fixture");
         let source_change = ProtectedChange::BindSource(
             ScopeSourceBinding::new(
@@ -4572,12 +4572,11 @@ mod tests {
             &root.revision_id,
             &source_change,
         );
-        let store = GlobalDbConfigurationControlStore::new(&db);
-        store.save_plan(&source_plan, &source_change).await.unwrap();
-        drop(db);
-
-        let db = GlobalDb::open_at(&path).await.expect("reopen global DB");
-        let store = GlobalDbConfigurationControlStore::new(&db);
+        {
+            let store = GlobalDbConfigurationControlStore::new_registered(db);
+            store.save_plan(&source_plan, &source_change).await.unwrap();
+        }
+        let store = GlobalDbConfigurationControlStore::new_registered(db);
         let apply_authority = control_authority(
             ConfigurationMutationOperationV1::ProtectedApply,
             &root.revision_id,
@@ -4728,8 +4727,11 @@ mod tests {
 
     #[tokio::test]
     async fn credential_references_are_opaque_and_activation_failure_preserves_last_working() {
-        let (_directory, _path, db, root) = global_setup().await;
-        let store = GlobalDbConfigurationControlStore::new(&db);
+        let (_directory, runtime, root) = global_setup().await;
+        let db = runtime
+            .registered_database(HostAdmissionScope::Project)
+            .unwrap();
+        let store = GlobalDbConfigurationControlStore::new_registered(db);
         store
             .record_component_activation(
                 "gateway".to_owned(),
@@ -4971,12 +4973,7 @@ mod tests {
         drop(transaction);
         drop(connection);
 
-        let reopened_database =
-            libsql::Builder::new_local(directory.path().join("configuration.db"))
-                .build()
-                .await
-                .unwrap();
-        let connection = reopened_database.connect().unwrap();
+        let connection = TestConnection::open(&directory.path().join("configuration.db"));
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .await
@@ -5130,11 +5127,7 @@ mod tests {
         drop(transaction);
         drop(connection);
 
-        let database = libsql::Builder::new_local(directory.path().join("configuration.db"))
-            .build()
-            .await
-            .unwrap();
-        let connection = database.connect().unwrap();
+        let connection = TestConnection::open(&directory.path().join("configuration.db"));
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .await

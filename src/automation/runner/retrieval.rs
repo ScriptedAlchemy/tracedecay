@@ -6,7 +6,6 @@ use super::evidence::{
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +16,7 @@ use tracedecay_domain::{
     ActorId, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
     TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
 };
+use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 
 use crate::application::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
@@ -29,20 +29,20 @@ use crate::application::session::{
     SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalExecutionPort, SessionTemporalQuery,
 };
+use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext};
+use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::query::temporal::TemporalKernelResult;
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::lcm::LcmScope;
-use crate::sessions::user_sessions_db_path;
 use crate::tracedecay::TraceDecay;
 
 pub(super) const AUTOMATION_SESSION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const AUTOMATION_SESSION_MAX_RESULTS: u64 = 128;
 const AUTOMATION_SESSION_MAX_WORK_UNITS: u64 = 100_000;
 const AUTOMATION_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
-const AUTOMATION_RETRIEVAL_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATION_SESSION_ESTIMATOR_VERSION: &str = "automation-words-v1";
 const AUTOMATION_SESSION_ACTOR_ID: &str = "automation.session-evidence";
 const AUTOMATION_SESSION_SCHEMA_VERSION: u32 = 1;
@@ -112,7 +112,7 @@ enum AutomationRetrievalStoreScope {
 }
 
 struct ProductionAutomationSessionRetrieval {
-    database: Arc<GlobalDb>,
+    database: Arc<RegisteredGlobalDb>,
     identity: ResolvedSessionIdentity,
     anchor_session_id: SessionId,
     store_scope: AutomationRetrievalStoreScope,
@@ -236,7 +236,7 @@ impl AutomationSessionRetrieval for ProductionAutomationSessionRetrieval {
                     provider: query.provider().map(str::to_owned),
                     grant_id,
                 },
-                GlobalDbSessionTemporalExecution::new(self.database.as_ref()),
+                RegisteredGlobalDbSessionTemporalExecution::new(self.database.as_ref()),
                 AutomationWordEstimator,
                 configuration,
             );
@@ -485,7 +485,25 @@ fn authorized_temporal_payloads(rendered: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-async fn active_automation_anchor(database: &GlobalDb) -> Option<SessionId> {
+fn registered_scope_matches(
+    shard: &StoreShardIdV1,
+    brain_id: &tracedecay_domain::BrainId,
+    profile_id: &tracedecay_domain::UserProfileId,
+    project_id: Option<&ProjectId>,
+) -> bool {
+    if &shard.brain_id != brain_id || &shard.profile_id != profile_id {
+        return false;
+    }
+    match (&shard.scope, project_id) {
+        (StoreShardScopeV1::ProfileSessions, None) => true,
+        (StoreShardScopeV1::ProjectSessions { project_id: actual }, Some(expected)) => {
+            actual == expected
+        }
+        _ => false,
+    }
+}
+
+async fn active_registered_automation_anchor(database: &RegisteredGlobalDb) -> Option<SessionId> {
     let snapshot = database.read_snapshot().await.ok()?;
     let mut rows = snapshot
         .query(
@@ -502,89 +520,120 @@ async fn active_automation_anchor(database: &GlobalDb) -> Option<SessionId> {
     SessionId::new(session_id).ok()
 }
 
-fn project_automation_identity(
-    cg: &TraceDecay,
-    registry: &GlobalDb,
-    context: &ProjectRegistryContext,
+fn profile_id(profile_identity: &LocalProfileIdentityAuthorityV1) -> Option<ProfileId> {
+    ProfileId::new(profile_identity.profile_id().as_str().to_string()).ok()
+}
+
+fn session_store_id(shard: &StoreShardIdV1) -> Option<SessionStoreId> {
+    let encoded = serde_json::to_vec(shard).ok()?;
+    let digest = Sha256::digest(encoded);
+    SessionStoreId::new(format!("store.sessions.{}", hex::encode(&digest[..16]))).ok()
+}
+
+fn profile_automation_identity(
+    shard: &StoreShardIdV1,
+    profile_identity: &LocalProfileIdentityAuthorityV1,
 ) -> Option<ResolvedSessionIdentity> {
-    let profile_root = registry.db_path().parent()?;
-    let serving_db = cg.db_path();
-    let mut selected = None;
-    for store in &context.stores {
-        for scope in &store.graph_scopes {
-            if scope.writable
-                && scope.project_id == context.project.project_id
-                && scope.store_id == store.store.store_id
-                && profile_root.join(&scope.db_relpath) == serving_db
-            {
-                if selected.is_some() {
-                    return None;
-                }
-                selected = Some((store.store.store_id.clone(), scope.graph_scope_id.clone()));
-            }
-        }
-    }
-    let (store_id, graph_scope_id) = selected?;
+    Some(ResolvedSessionIdentity::for_profile(
+        profile_id(profile_identity)?,
+        session_store_id(shard)?,
+        SessionRootId::new(format!(
+            "root.sessions.profile.{}",
+            profile_identity.profile_id().as_str()
+        ))
+        .ok()?,
+    ))
+}
+
+fn project_automation_identity(
+    shard: &StoreShardIdV1,
+    profile_identity: &LocalProfileIdentityAuthorityV1,
+    project_id: &ProjectId,
+) -> Option<ResolvedSessionIdentity> {
     Some(ResolvedSessionIdentity::for_project(
-        ProfileId::new("profile.primary").ok()?,
-        ProjectId::new(context.project.project_id.clone()).ok()?,
-        SessionStoreId::new(store_id).ok()?,
-        SessionRootId::new(graph_scope_id.clone()).ok()?,
+        profile_id(profile_identity)?,
+        project_id.clone(),
+        session_store_id(shard)?,
+        SessionRootId::new(format!("root.sessions.project.{}", project_id.as_str())).ok()?,
         ResolvedGitRoute::new(
-            RepositoryId::new(context.project.git_common_dir.clone()?).ok()?,
-            WorktreeId::new(context.project.canonical_root.clone()).ok()?,
-            BranchId::new(graph_scope_id).ok()?,
+            RepositoryId::new(format!("repository.project.{}", project_id.as_str())).ok()?,
+            WorktreeId::new(format!("worktree.project.{}", project_id.as_str())).ok()?,
+            BranchId::new(format!("branch.project.{}", project_id.as_str())).ok()?,
         ),
     ))
 }
 
-fn profile_automation_identity() -> Option<ResolvedSessionIdentity> {
-    Some(ResolvedSessionIdentity::for_profile(
-        ProfileId::new("profile.primary").ok()?,
-        SessionStoreId::new("store.profile.primary").ok()?,
-        SessionRootId::new("root.profile.primary").ok()?,
-    ))
-}
-
-fn project_registry_db_path(cg: &TraceDecay) -> Option<PathBuf> {
-    cg.open_options()
-        .global_db_path
-        .or_else(crate::global_db::global_db_path)
-}
-
-pub(super) async fn production_project_automation_retrieval(
-    cg: &TraceDecay,
-) -> Box<dyn AutomationSessionRetrieval> {
-    match tokio::time::timeout(
-        AUTOMATION_RETRIEVAL_OPEN_TIMEOUT,
-        open_project_automation_retrieval(cg),
-    )
-    .await
-    {
-        Ok(Some(retrieval)) => retrieval,
-        Ok(None) | Err(_) => {
-            unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
-        }
+pub(crate) async fn registered_project_automation_retrieval(
+    database: Arc<RegisteredGlobalDb>,
+    profile_identity: &LocalProfileIdentityAuthorityV1,
+    project_id: &ProjectId,
+) -> Result<Box<dyn AutomationSessionRetrieval>> {
+    let shard = &database.binding().shard_id;
+    if !registered_scope_matches(
+        shard,
+        profile_identity.brain_id(),
+        profile_identity.profile_id(),
+        Some(project_id),
+    ) {
+        return Err(TraceDecayError::Config {
+            message: "registered project session runtime authority mismatch".to_string(),
+        });
     }
-}
-
-async fn open_project_automation_retrieval(
-    cg: &TraceDecay,
-) -> Option<Box<dyn AutomationSessionRetrieval>> {
-    let database = GlobalDb::open_read_only_at(&cg.store_layout().sessions_db_path).await?;
-    let registry_path = project_registry_db_path(cg)?;
-    let registry = GlobalDb::open_read_only_at(&registry_path).await?;
-    let project_id = cg.store_layout().identity.project_id.as_deref()?;
-    let context = registry.project_registry_context_by_id(project_id).await?;
-    let identity = project_automation_identity(cg, &registry, &context)?;
-    let database = Arc::new(database);
-    let anchor_session_id = active_automation_anchor(database.as_ref()).await?;
-    Some(Box::new(ProductionAutomationSessionRetrieval {
+    let Some(identity) = project_automation_identity(shard, profile_identity, project_id) else {
+        return Err(TraceDecayError::Config {
+            message: "invalid registered project session retrieval identity".to_string(),
+        });
+    };
+    let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
+        return Ok(unavailable_automation_retrieval(
+            "session_evidence_retrieval_unavailable",
+        ));
+    };
+    Ok(Box::new(ProductionAutomationSessionRetrieval {
         database,
         identity,
         anchor_session_id,
         store_scope: AutomationRetrievalStoreScope::Project,
     }))
+}
+
+pub(crate) async fn registered_profile_automation_retrieval(
+    database: Arc<RegisteredGlobalDb>,
+    profile_identity: &LocalProfileIdentityAuthorityV1,
+) -> Result<Box<dyn AutomationSessionRetrieval>> {
+    let shard = &database.binding().shard_id;
+    if !registered_scope_matches(
+        shard,
+        profile_identity.brain_id(),
+        profile_identity.profile_id(),
+        None,
+    ) {
+        return Err(TraceDecayError::Config {
+            message: "registered profile session runtime authority mismatch".to_string(),
+        });
+    }
+    let Some(identity) = profile_automation_identity(shard, profile_identity) else {
+        return Err(TraceDecayError::Config {
+            message: "invalid registered profile session retrieval identity".to_string(),
+        });
+    };
+    let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
+        return Ok(unavailable_automation_retrieval(
+            "session_evidence_retrieval_unavailable",
+        ));
+    };
+    Ok(Box::new(ProductionAutomationSessionRetrieval {
+        database,
+        identity,
+        anchor_session_id,
+        store_scope: AutomationRetrievalStoreScope::Profile,
+    }))
+}
+
+pub(super) async fn production_project_automation_retrieval(
+    _cg: &TraceDecay,
+) -> Box<dyn AutomationSessionRetrieval> {
+    unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
 }
 
 fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationSessionRetrieval> {
@@ -598,33 +647,115 @@ fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationS
 }
 
 pub(super) async fn production_user_automation_retrieval(
-    profile_root: &std::path::Path,
+    _profile_root: &std::path::Path,
 ) -> Box<dyn AutomationSessionRetrieval> {
-    match tokio::time::timeout(
-        AUTOMATION_RETRIEVAL_OPEN_TIMEOUT,
-        open_user_automation_retrieval(profile_root),
-    )
-    .await
-    {
-        Ok(Some(retrieval)) => retrieval,
-        Ok(None) | Err(_) => {
-            unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
-        }
-    }
+    unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
 }
 
-async fn open_user_automation_retrieval(
-    profile_root: &std::path::Path,
-) -> Option<Box<dyn AutomationSessionRetrieval>> {
-    let sessions_db_path = user_sessions_db_path(profile_root);
-    let database = GlobalDb::open_read_only_at(&sessions_db_path).await?;
-    let identity = profile_automation_identity()?;
-    let database = Arc::new(database);
-    let anchor_session_id = active_automation_anchor(database.as_ref()).await?;
-    Some(Box::new(ProductionAutomationSessionRetrieval {
-        database,
-        identity,
-        anchor_session_id,
-        store_scope: AutomationRetrievalStoreScope::Profile,
-    }))
+#[cfg(test)]
+mod authority_tests {
+    use tempfile::tempdir;
+    use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
+    use tracedecay_store::StoreShardIdV1;
+
+    use super::*;
+
+    #[test]
+    fn registered_automation_scope_rejects_profile_and_project_mismatches() {
+        let brain = BrainId::new("brain.automation").expect("brain id");
+        let profile = UserProfileId::new("profile.automation").expect("profile id");
+        let other_profile =
+            UserProfileId::new("profile.automation.other").expect("other profile id");
+        let project = ProjectId::new("project.automation").expect("project id");
+        let other_project = ProjectId::new("project.automation.other").expect("other project id");
+        let profile_sessions = StoreShardIdV1::profile_sessions(brain.clone(), profile.clone());
+        let project_sessions =
+            StoreShardIdV1::project_sessions(brain.clone(), profile.clone(), project.clone());
+
+        assert!(registered_scope_matches(
+            &profile_sessions,
+            &brain,
+            &profile,
+            None,
+        ));
+        assert!(registered_scope_matches(
+            &project_sessions,
+            &brain,
+            &profile,
+            Some(&project),
+        ));
+        assert!(!registered_scope_matches(
+            &profile_sessions,
+            &brain,
+            &profile,
+            Some(&project),
+        ));
+        assert!(!registered_scope_matches(
+            &project_sessions,
+            &brain,
+            &profile,
+            None,
+        ));
+        assert!(!registered_scope_matches(
+            &project_sessions,
+            &brain,
+            &profile,
+            Some(&other_project),
+        ));
+        assert!(!registered_scope_matches(
+            &project_sessions,
+            &brain,
+            &other_profile,
+            Some(&project),
+        ));
+    }
+
+    #[tokio::test]
+    async fn convenience_retrieval_does_not_create_a_profile_session_database() {
+        let directory = tempdir().expect("temporary profile");
+        let database_path = directory.path().join("user-sessions.db");
+        assert!(!database_path.exists());
+
+        let retrieval = production_user_automation_retrieval(directory.path()).await;
+
+        assert!(!database_path.exists());
+        assert!(matches!(
+            retrieval
+                .retrieve(
+                    SessionTemporalQuery::new(
+                        SessionId::new("session.automation.test").expect("session id"),
+                        None,
+                        "test",
+                        None,
+                        TemporalModeV1::Forensic,
+                        RetrievalGrainV1::LogicalMessage,
+                        1,
+                        DiversityLimits {
+                            per_logical_message: 1,
+                            per_turn: 1,
+                            per_session: 1,
+                            per_source: 1,
+                            per_evidence_role: 1,
+                        },
+                        ContextBudget {
+                            max_bytes: 1024,
+                            max_tokens: 256,
+                            estimator_version: AUTOMATION_SESSION_ESTIMATOR_VERSION.to_string(),
+                        },
+                    )
+                    .expect("bounded query"),
+                )
+                .await,
+            AutomationTemporalRetrieval::Rejected("session_evidence_retrieval_unavailable")
+        ));
+    }
+
+    #[test]
+    fn automation_retrieval_contains_no_path_open_fallback() {
+        let source = include_str!("retrieval.rs");
+        assert!(!source.contains("open_read_only_at"));
+        assert!(!source.contains("open_project_automation_retrieval"));
+        assert!(!source.contains("open_user_automation_retrieval"));
+        assert!(!source.contains("\"profile.primary\""));
+    }
 }

@@ -11,7 +11,6 @@ use crate::tracedecay::TraceDecay;
 use super::branch_admin::MaintenanceReaperKind;
 use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
-    open_existing_project_with_options,
 };
 
 pub(super) fn scheduler_task_log_fields(
@@ -411,7 +410,7 @@ impl DaemonEngine {
                 if !owner_is_current {
                     return;
                 }
-                self.start_automation_scheduler(key, project_path, handshake)
+                self.start_automation_scheduler(key, project_path, handshake, cg)
                     .await;
             })
             .await;
@@ -492,12 +491,10 @@ impl DaemonEngine {
         let configured = if forced_configured {
             true
         } else {
-            match Box::pin(automation_scheduler_has_work_for_project(
-                &project_path,
-                &handshake,
-            ))
-            .await
-            {
+            let Some(cg) = retained_project_graph(self, &key).await else {
+                return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
+            };
+            match automation_scheduler_has_work_for_project(&cg, &handshake).await {
                 Ok(configured) => configured,
                 Err(e) => {
                     log_daemon_event(
@@ -581,7 +578,10 @@ impl DaemonEngine {
             ));
         }
 
-        self.start_automation_scheduler(key, project_path, handshake)
+        let Some(cg) = retained_project_graph(self, &key).await else {
+            return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
+        };
+        self.start_automation_scheduler(key, project_path, handshake, cg)
             .await
     }
 
@@ -612,6 +612,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
+        cg: Arc<TraceDecay>,
     ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
         use crate::dashboard::AutomationSchedulerReconcileOutcome;
 
@@ -676,6 +677,7 @@ impl DaemonEngine {
             Box::pin(run_automation_scheduler_loop(
                 project_path,
                 handshake,
+                cg,
                 loop_wake,
                 scheduler_engine,
                 loop_key,
@@ -716,6 +718,7 @@ impl DaemonEngine {
         key: &ProjectServerKey,
         project_path: &Path,
         handshake: &DaemonHandshake,
+        cg: &TraceDecay,
         completion: &Arc<()>,
         observed_generation: u64,
     ) -> bool {
@@ -740,25 +743,21 @@ impl DaemonEngine {
                     handle.lifecycle = AutomationSchedulerLifecycle::Exiting;
                 }
 
-                let still_configured = match automation_scheduler_has_work_for_project(
-                    project_path,
-                    handshake,
-                )
-                .await
-                {
-                    Ok(configured) => configured,
-                    Err(error) => {
-                        log_daemon_event(
-                            "scheduler_project_open",
-                            &[
-                                ("project", project_path.display().to_string()),
-                                ("outcome", "error".to_string()),
-                                ("error", error.to_string()),
-                            ],
-                        );
-                        true
-                    }
-                };
+                let still_configured =
+                    match automation_scheduler_has_work_for_project(cg, handshake).await {
+                        Ok(configured) => configured,
+                        Err(error) => {
+                            log_daemon_event(
+                                "scheduler_project_open",
+                                &[
+                                    ("project", project_path.display().to_string()),
+                                    ("outcome", "error".to_string()),
+                                    ("error", error.to_string()),
+                                ],
+                            );
+                            true
+                        }
+                    };
                 let mut schedulers = self
                     .store_administration
                     .automation_schedulers()
@@ -906,10 +905,25 @@ fn observed_scheduler_lifecycle(
     }
 }
 
+async fn retained_project_graph(
+    engine: &DaemonEngine,
+    key: &ProjectServerKey,
+) -> Option<Arc<TraceDecay>> {
+    let server = {
+        let servers = engine.store_administration.project_servers().lock().await;
+        let owner = servers
+            .keys()
+            .find(|candidate| same_scheduler_owner(candidate, key))?;
+        servers.get(owner).cloned()
+    }?;
+    Some(server.cg().await)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,
+    cg: Arc<TraceDecay>,
     wake: Arc<tokio::sync::Notify>,
     engine: DaemonEngine,
     key: ProjectServerKey,
@@ -919,12 +933,7 @@ async fn run_automation_scheduler_loop(
 ) {
     loop {
         let observed_generation = generation.load(std::sync::atomic::Ordering::Acquire);
-        match Box::pin(automation_scheduler_has_work_for_project(
-            &project_path,
-            &handshake,
-        ))
-        .await
-        {
+        match automation_scheduler_has_work_for_project(&cg, &handshake).await {
             Ok(true) => {}
             Ok(false) => {
                 #[cfg(test)]
@@ -936,6 +945,7 @@ async fn run_automation_scheduler_loop(
                         &key,
                         &project_path,
                         &handshake,
+                        &cg,
                         &completion,
                         observed_generation,
                     )
@@ -987,7 +997,14 @@ async fn run_automation_scheduler_loop(
                 ("outcome", "start".to_string()),
             ],
         );
-        if let Err(e) = Box::pin(run_automation_scheduler_tick(&project_path, &handshake)).await {
+        if let Err(e) = Box::pin(run_automation_scheduler_tick(
+            &project_path,
+            &cg,
+            &handshake,
+            &engine,
+        ))
+        .await
+        {
             log_daemon_event(
                 "scheduler_tick",
                 &[
@@ -997,7 +1014,14 @@ async fn run_automation_scheduler_loop(
                 ],
             );
         }
-        if let Err(error) = Box::pin(run_host_receipt_review(&project_path, &handshake)).await {
+        if let Err(error) = Box::pin(run_host_receipt_review(
+            &project_path,
+            &cg,
+            &handshake,
+            &engine,
+        ))
+        .await
+        {
             log_daemon_event(
                 "host_receipt_review",
                 &[
@@ -1007,11 +1031,7 @@ async fn run_automation_scheduler_loop(
                 ],
             );
         }
-        let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(
-            &project_path,
-            &handshake,
-        ))
-        .await;
+        let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(&cg, &handshake)).await;
         log_daemon_event(
             "scheduler_sleep",
             &[
@@ -1031,7 +1051,9 @@ async fn run_automation_scheduler_loop(
                         () = wake.notified() => {}
                     }
                 }
-                if let Err(error) = Box::pin(run_host_receipt_review(&project_path, &handshake)).await {
+                if let Err(error) =
+                    Box::pin(run_host_receipt_review(&project_path, &cg, &handshake, &engine)).await
+                {
                     log_daemon_event(
                         "host_receipt_review",
                         &[
@@ -1047,49 +1069,24 @@ async fn run_automation_scheduler_loop(
 }
 
 async fn automation_scheduler_has_work_for_project(
-    project_path: &Path,
+    cg: &TraceDecay,
     handshake: &DaemonHandshake,
 ) -> Result<bool> {
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
-    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    automation_scheduler_has_work(&cg, &config).await
+    let config = effective_automation_config_for_project(cg, &handshake.client_identity).await?;
+    automation_scheduler_has_work(cg, &config).await
 }
 
 pub(super) async fn automation_scheduler_tick_secs_for_project(
-    project_path: &Path,
+    cg: &TraceDecay,
     handshake: &DaemonHandshake,
 ) -> u64 {
-    match Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await
-    {
-        Ok(cg) => {
-            match effective_automation_config_for_project(&cg, &handshake.client_identity).await {
-                Ok(config) => config.scheduler_tick_secs,
-                Err(e) => {
-                    log_daemon_event(
-                        "scheduler_config",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "error".to_string()),
-                            ("error", e.to_string()),
-                        ],
-                    );
-                    crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
-                }
-            }
-        }
+    match effective_automation_config_for_project(cg, &handshake.client_identity).await {
+        Ok(config) => config.scheduler_tick_secs,
         Err(e) => {
             log_daemon_event(
-                "scheduler_project_open",
+                "scheduler_config",
                 &[
-                    ("project", project_path.display().to_string()),
+                    ("project", cg.project_root().display().to_string()),
                     ("outcome", "error".to_string()),
                     ("error", e.to_string()),
                 ],
@@ -1104,60 +1101,128 @@ pub(super) async fn automation_scheduler_tick_secs_for_project(
 /// this often no matter how many projects are active.
 const RETENTION_MIN_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
-static LAST_GLOBAL_RETENTION: std::sync::Mutex<Option<std::time::Instant>> =
-    std::sync::Mutex::new(None);
+#[derive(Debug, Default)]
+struct GlobalRetentionCadence {
+    last_success: Option<std::time::Instant>,
+    in_flight: bool,
+}
 
-/// Returns whether a retention pass is due, recording `now` as the last run
-/// when it is. The gate is process-global so N project loops do not each run
-/// their own retention every tick.
-fn global_retention_pass_due(now: std::time::Instant) -> bool {
-    let mut guard = match LAST_GLOBAL_RETENTION.lock() {
+impl GlobalRetentionCadence {
+    fn reserve(&mut self, now: std::time::Instant) -> bool {
+        if self.in_flight
+            || self.last_success.is_some_and(|last| {
+                now.saturating_duration_since(last)
+                    < Duration::from_secs(RETENTION_MIN_INTERVAL_SECS)
+            })
+        {
+            return false;
+        }
+        self.in_flight = true;
+        true
+    }
+
+    fn finish(&mut self, now: std::time::Instant, succeeded: bool) {
+        self.in_flight = false;
+        if succeeded {
+            self.last_success = Some(now);
+        }
+    }
+}
+
+static GLOBAL_RETENTION_CADENCE: std::sync::Mutex<GlobalRetentionCadence> =
+    std::sync::Mutex::new(GlobalRetentionCadence {
+        last_success: None,
+        in_flight: false,
+    });
+
+#[cfg(test)]
+mod global_retention_cadence_tests {
+    use super::{GlobalRetentionCadence, RETENTION_MIN_INTERVAL_SECS};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn failed_pass_is_immediately_retryable() {
+        let mut cadence = GlobalRetentionCadence::default();
+        let now = Instant::now();
+        assert!(cadence.reserve(now));
+        cadence.finish(now, false);
+        assert!(cadence.reserve(now));
+    }
+
+    #[test]
+    fn successful_pass_advances_cadence_and_blocks_overlap() {
+        let mut cadence = GlobalRetentionCadence::default();
+        let now = Instant::now();
+        assert!(cadence.reserve(now));
+        assert!(
+            !cadence.reserve(now),
+            "in-flight pass must be single-flight"
+        );
+        cadence.finish(now, true);
+        assert!(!cadence.reserve(now));
+        assert!(cadence.reserve(now + Duration::from_secs(RETENTION_MIN_INTERVAL_SECS)));
+    }
+}
+
+struct GlobalRetentionReservation {
+    active: bool,
+}
+
+impl GlobalRetentionReservation {
+    fn finish(mut self, now: std::time::Instant, succeeded: bool) {
+        finish_global_retention(now, succeeded);
+        self.active = false;
+    }
+}
+
+impl Drop for GlobalRetentionReservation {
+    fn drop(&mut self) {
+        if self.active {
+            finish_global_retention(std::time::Instant::now(), false);
+        }
+    }
+}
+
+fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionReservation> {
+    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let due = guard.is_none_or(|last| {
-        now.duration_since(last) >= Duration::from_secs(RETENTION_MIN_INTERVAL_SECS)
-    });
-    if due {
-        *guard = Some(now);
-    }
-    due
+    guard
+        .reserve(now)
+        .then_some(GlobalRetentionReservation { active: true })
+}
+
+fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
+    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.finish(now, succeeded);
 }
 
 /// Applies the configured retention windows to the global telemetry tables,
 /// at most once per [`RETENTION_MIN_INTERVAL_SECS`]. Best-effort: retention is
 /// housekeeping, so failures are logged and never abort a scheduler tick.
 async fn maybe_run_global_retention(
-    project_path: &Path,
+    database: &crate::global_db::RegisteredGlobalDb,
     config: &crate::automation::config::AutomationConfig,
 ) {
-    if !global_retention_pass_due(std::time::Instant::now()) {
+    let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
         return;
-    }
-    let db = match crate::global_db::GlobalDb::try_open().await {
-        Ok(Some(db)) => db,
-        Ok(None) => return,
-        Err(error) => {
-            log_daemon_event(
-                "retention_prune",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "open_rejected".to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-            return;
-        }
     };
     let now_secs = crate::tracedecay::current_timestamp();
-    match db.prune_global_retention(&config.retention, now_secs).await {
+    let succeeded = match database
+        .prune_global_retention(&config.retention, now_secs)
+        .await
+    {
         Ok(reports) => {
             for report in reports {
                 if report.applied && report.rows > 0 {
                     log_daemon_event(
                         "retention_prune",
                         &[
-                            ("project", project_path.display().to_string()),
+                            ("scope", "global".to_string()),
                             ("table", report.table.to_string()),
                             ("rows", report.rows.to_string()),
                             (
@@ -1170,38 +1235,39 @@ async fn maybe_run_global_retention(
                     );
                 }
             }
+            true
         }
-        Err(e) => {
+        Err(_) => {
             log_daemon_event(
                 "retention_prune",
                 &[
-                    ("project", project_path.display().to_string()),
+                    ("scope", "global".to_string()),
                     ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
+                    ("failure", "retention_pass_failed".to_string()),
                 ],
             );
+            false
         }
-    }
+    };
+    reservation.finish(std::time::Instant::now(), succeeded);
 }
 
 pub(super) async fn run_automation_scheduler_tick(
     project_path: &Path,
+    cg: &TraceDecay,
     handshake: &DaemonHandshake,
+    engine: &DaemonEngine,
 ) -> Result<()> {
     use crate::automation::backend::{AgentTaskKind, CodexAppServerBackend};
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
         CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        run_combined_review_with_backend, run_memory_curator_with_backend,
-        run_session_reflector_with_backend, run_skill_writer_with_backend,
+        registered_project_automation_retrieval, run_combined_review_with_backend_and_retrieval,
+        run_memory_curator_with_backend, run_session_reflector_with_backend_and_retrieval,
+        run_skill_writer_with_backend_and_retrieval,
     };
 
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
     let control =
         crate::automation::scheduler::load_scheduler_control(&cg.store_layout().dashboard_root)
             .await?;
@@ -1228,8 +1294,39 @@ pub(super) async fn run_automation_scheduler_tick(
         );
         return Ok(());
     }
-    maybe_run_global_retention(project_path, &config).await;
+    if let Ok(profile_database) = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+    {
+        maybe_run_global_retention(profile_database.as_ref(), &config).await;
+    }
     let backend = CodexAppServerBackend::from_automation_config(&config);
+    let authoritative_project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "automation scheduler requires an authoritative project identity".to_string(),
+        })?;
+    let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "automation scheduler has an invalid authoritative project identity: {error}"
+            ),
+        })?;
+    let session_database = engine
+        .store_administration
+        .registered_project_session_database(
+            authoritative_project_id,
+            [project_path.to_path_buf(), cg.project_root().to_path_buf()],
+        )
+        .await?;
+    let profile_identity = engine.store_administration.profile_identity()?.clone();
+    let retrieval =
+        registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
+            .await?;
     let mut first_error: Option<TraceDecayError> = None;
     let mut any_succeeded = false;
 
@@ -1262,10 +1359,11 @@ pub(super) async fn run_automation_scheduler_tick(
     let mut combined_handled = false;
     if config.combine_due_tasks {
         log_scheduler_task_start(project_path, AgentTaskKind::CombinedReview);
-        match run_combined_review_with_backend(
+        match run_combined_review_with_backend_and_retrieval(
             &cg,
             &config,
             &backend,
+            retrieval.as_ref(),
             CombinedReviewAutomationOptions::default(),
         )
         .await
@@ -1308,10 +1406,11 @@ pub(super) async fn run_automation_scheduler_tick(
     }
     if !combined_handled {
         log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
-        match run_session_reflector_with_backend(
+        match run_session_reflector_with_backend_and_retrieval(
             &cg,
             &config,
             &backend,
+            retrieval.as_ref(),
             SessionReflectorAutomationOptions {
                 trigger: AutomationTrigger::Scheduler,
                 ..SessionReflectorAutomationOptions::default()
@@ -1330,10 +1429,11 @@ pub(super) async fn run_automation_scheduler_tick(
             }
         }
         log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
-        match run_skill_writer_with_backend(
+        match run_skill_writer_with_backend_and_retrieval(
             &cg,
             &config,
             &backend,
+            retrieval.as_ref(),
             SkillWriterAutomationOptions {
                 trigger: AutomationTrigger::Scheduler,
                 ..SkillWriterAutomationOptions::default()
@@ -1370,19 +1470,20 @@ pub(super) async fn run_automation_scheduler_tick(
     }
 }
 
-async fn run_host_receipt_review(project_path: &Path, handshake: &DaemonHandshake) -> Result<()> {
+async fn run_host_receipt_review(
+    project_path: &Path,
+    cg: &TraceDecay,
+    handshake: &DaemonHandshake,
+    engine: &DaemonEngine,
+) -> Result<()> {
     use crate::automation::backend::CodexAppServerBackend;
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
         CombinedReviewAutomationOptions, CombinedReviewDispatch, SessionReflectorAutomationOptions,
-        SkillWriterAutomationOptions, run_combined_review_with_backend,
+        SkillWriterAutomationOptions, registered_project_automation_retrieval,
+        run_combined_review_with_backend_and_retrieval,
     };
 
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
         return Ok(());
@@ -1399,25 +1500,63 @@ async fn run_host_receipt_review(project_path: &Path, handshake: &DaemonHandshak
         .route
         .as_ref()
         .and_then(|route| route.session_id.clone());
-    let Some(session_db) =
-        crate::global_db::GlobalDb::open_read_only_at(&cg.store_layout().sessions_db_path).await
-    else {
+    let Some(authoritative_project_id) = cg.store_layout().identity.project_id.as_deref() else {
         return Ok(());
     };
-    if session_db
-        .lcm_load_raw_message("hermes", &ready.transcript_watermark)
+    let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "host receipt review has an invalid authoritative project identity: {error}"
+            ),
+        })?;
+    let session_database = engine
+        .store_administration
+        .registered_project_session_database(
+            authoritative_project_id,
+            [project_path.to_path_buf(), cg.project_root().to_path_buf()],
+        )
+        .await?;
+    let snapshot =
+        session_database
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("host receipt session snapshot unavailable: {error}"),
+            })?;
+    let mut rows = snapshot
+        .query(
+            "SELECT 1
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2
+             LIMIT 1",
+            crate::db::engine::params!["hermes", ready.transcript_watermark.as_str()],
+        )
         .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark query failed: {error}"),
+        })?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark read failed: {error}"),
+        })?
         .is_none()
     {
         // Never review a terminal receipt until the exact completed-turn
         // watermark is durable in LCM.
         return Ok(());
     }
+    let profile_identity = engine.store_administration.profile_identity()?.clone();
+    let retrieval =
+        registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
+            .await?;
     let backend = CodexAppServerBackend::from_automation_config(&config);
-    let result = run_combined_review_with_backend(
+    let result = run_combined_review_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        retrieval.as_ref(),
         CombinedReviewAutomationOptions {
             run_id: Some(format!("host_receipt_{}", pending.generation)),
             session_reflector: SessionReflectorAutomationOptions {

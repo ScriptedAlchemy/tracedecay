@@ -15,7 +15,7 @@ pub(super) fn contains_cjk(value: &str) -> bool {
 }
 
 pub(crate) async fn grep(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: LcmGrepRequest,
     retrieval_filters: LcmGrepFilters,
 ) -> Result<LcmGrepOutcome, LcmError> {
@@ -176,7 +176,7 @@ fn hit_is_inventory(hit: &LcmGrepHit) -> bool {
 }
 
 pub(super) async fn raw_grep_hits(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
@@ -237,7 +237,7 @@ pub(super) async fn raw_grep_hits(
 }
 
 pub(super) async fn summary_grep_hits(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
@@ -291,7 +291,7 @@ pub(super) async fn summary_grep_hits(
 }
 
 async fn raw_like_grep_hits(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
@@ -357,7 +357,7 @@ async fn raw_like_grep_hits(
 }
 
 async fn summary_like_grep_hits(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
@@ -574,7 +574,7 @@ struct RawGrepCandidate {
 }
 
 fn raw_hit_candidate_from_row(
-    row: &libsql::Row,
+    row: &crate::db::engine::Row,
     like_terms: &[String],
 ) -> Result<RawGrepCandidate, LcmError> {
     let snippet: String = row.get(4)?;
@@ -611,7 +611,10 @@ fn dedupe_related_raw_hits(candidates: Vec<RawGrepCandidate>) -> Vec<LcmGrepHit>
     .collect()
 }
 
-fn summary_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmGrepHit, LcmError> {
+fn summary_hit_from_row(
+    row: &crate::db::engine::Row,
+    like_terms: &[String],
+) -> Result<LcmGrepHit, LcmError> {
     let summary_text: String = row.get(3)?;
     Ok(LcmGrepHit {
         kind: "summary_node".to_string(),

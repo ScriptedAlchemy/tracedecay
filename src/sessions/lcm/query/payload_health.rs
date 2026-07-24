@@ -4,7 +4,7 @@ use std::path::Path;
 use super::*;
 
 pub(crate) async fn payload_health_detail(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -259,7 +259,7 @@ pub(crate) struct PayloadHealthDetail {
 }
 
 async fn payload_byte_counts_for_scope(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeMap<String, u64>, LcmError> {
@@ -269,7 +269,7 @@ async fn payload_byte_counts_for_scope(
              FROM lcm_external_payloads
              WHERE (?1 = 'all' OR provider = ?1)
                AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
+            params![provider, session_id],
         )
         .await?;
     let mut bytes = BTreeMap::new();
@@ -282,7 +282,7 @@ async fn payload_byte_counts_for_scope(
 }
 
 async fn payload_ref_locations_for_scope(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeMap<String, PayloadRefLocation>, LcmError> {
@@ -292,7 +292,7 @@ async fn payload_ref_locations_for_scope(
              FROM lcm_raw_messages
              WHERE (?1 = 'all' OR provider = ?1)
                AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
+            params![provider, session_id],
         )
         .await?;
     let mut refs = BTreeMap::new();
@@ -355,8 +355,8 @@ fn payload_ref_location(
     }
 }
 
-struct PayloadUnreferencedSamplesRequest<'a> {
-    conn: &'a Connection,
+struct PayloadUnreferencedSamplesRequest<'a, Q: ?Sized> {
+    conn: &'a Q,
     metadata_refs: &'a BTreeSet<String>,
     referenced_refs: &'a BTreeSet<String>,
     metadata_bytes: &'a BTreeMap<String, u64>,
@@ -366,8 +366,8 @@ struct PayloadUnreferencedSamplesRequest<'a> {
     sample_limit: usize,
 }
 
-async fn payload_unreferenced_samples(
-    request: PayloadUnreferencedSamplesRequest<'_>,
+async fn payload_unreferenced_samples<Q: QueryExecutor + ?Sized>(
+    request: PayloadUnreferencedSamplesRequest<'_, Q>,
 ) -> Result<Vec<PayloadRefStatusSample>, LcmError> {
     let PayloadUnreferencedSamplesRequest {
         conn,
@@ -405,7 +405,7 @@ async fn payload_unreferenced_samples(
 }
 
 async fn gc_eligible_at_for_unreferenced(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
     grace_seconds: i64,
 ) -> Result<Option<i64>, LcmError> {
@@ -424,14 +424,17 @@ async fn gc_eligible_at_for_unreferenced(
     Ok(Some(first_seen_at.saturating_add(grace_seconds)))
 }
 
-async fn gc_meta_i64(conn: &Connection, key: &str) -> Result<Option<i64>, LcmError> {
+async fn gc_meta_i64(
+    conn: &(impl QueryExecutor + ?Sized),
+    key: &str,
+) -> Result<Option<i64>, LcmError> {
     Ok(schema::get_gc_meta(conn, key)
         .await?
         .and_then(|value| value.parse::<i64>().ok()))
 }
 
 async fn tombstoned_count(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
@@ -453,7 +456,7 @@ async fn tombstoned_count(
                )",
             params![
                 provider,
-                util::opt_text(session_id),
+                session_id,
                 "%[gc'd externalized payload:%",
                 "%[gc'd externalized tool output:%",
             ],
@@ -467,7 +470,7 @@ async fn tombstoned_count(
 }
 
 async fn placeholder_payload_status(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -518,7 +521,7 @@ struct PlaceholderPayloadStatus {
 }
 
 async fn placeholder_refs_for_scope(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
@@ -538,7 +541,7 @@ async fn placeholder_refs_for_scope(
            AND (? IS NULL OR session_id = ?)
            AND ({placeholder_predicates})"
     );
-    let session_value = util::opt_text(session_id);
+    let session_value = session_id.map_or(Value::Null, |value| Value::Text(value.to_string()));
     let mut values = vec![
         Value::Text(provider.to_string()),
         Value::Text(provider.to_string()),
@@ -576,7 +579,7 @@ async fn payload_has_integrity_mismatch(
     storage_root: &Path,
     payload_ref: &str,
     _exists_in_metadata: bool,
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<bool, LcmError> {
     let metadata = match payload::load_payload_metadata(conn, payload_ref).await {
         Ok(metadata) => metadata,

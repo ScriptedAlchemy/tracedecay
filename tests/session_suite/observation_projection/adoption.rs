@@ -3,8 +3,14 @@ use super::*;
 #[tokio::test]
 async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let candidate = observation(
         "session-v1",
         0,
@@ -14,18 +20,13 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
     );
     persist(&store, candidate.clone(), None).await;
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = raw_db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
     conn.execute(
         "INSERT INTO sessions
             (provider, session_id, project_key, project_path, title, is_subagent)
          VALUES (?1, ?2, 'legacy-project', '/legacy/project', 'V1 title', 0)",
-        libsql::params!["claude", "session-v1"],
+        rusqlite::params!["claude", "session-v1"],
     )
-    .await
     .unwrap();
     let metadata_json = serde_json::to_string(&json!({
         "source": "claude_transcript",
@@ -38,7 +39,7 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
             (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
              tool_names, source_path, source_offset, metadata_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        libsql::params![
+        rusqlite::params![
             "claude",
             "message-v1",
             "session-v1",
@@ -54,8 +55,8 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
             metadata_json,
         ],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     store
         .project_observation(candidate.observation_id())
@@ -69,25 +70,37 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
     rebuild_projection_to_completion(&store, 1).await;
     assert_eq!(projection_ownership_rows(&tmp).await, vec![0]);
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let row = conn
+        .query_row(
             "SELECT project_key, project_path, title FROM sessions
              WHERE provider = 'claude' AND session_id = 'session-v1'",
             (),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
-        .await
         .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "legacy-project");
-    assert_eq!(row.get::<String>(1).unwrap(), "/legacy/project");
-    assert_eq!(row.get::<String>(2).unwrap(), "V1 title");
+    assert_eq!(row.0, "legacy-project");
+    assert_eq!(row.1, "/legacy/project");
+    assert_eq!(row.2, "V1 title");
 }
 
 #[tokio::test]
 async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     let original = observation_in_generation(
         "session-adopted-rollover",
         GENERATION,
@@ -119,18 +132,13 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
     )
     .await;
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = raw_db.connect().unwrap();
+    let conn = rusqlite::Connection::open(database_path).unwrap();
     conn.execute(
         "INSERT INTO sessions
             (provider, session_id, project_key, project_path, is_subagent)
          VALUES ('claude', 'session-adopted-rollover', 'user', 'user', 0)",
         (),
     )
-    .await
     .unwrap();
     let metadata_json = serde_json::to_string(&json!({
         "source": "claude_transcript",
@@ -143,7 +151,7 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
             (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
              tool_names, source_path, source_offset, metadata_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        libsql::params![
+        rusqlite::params![
             "claude",
             "message-adopted-rollover",
             "session-adopted-rollover",
@@ -160,8 +168,8 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
             metadata_json,
         ],
     )
-    .await
     .unwrap();
+    drop(conn);
 
     drain_projection_queue(&store).await;
     assert_eq!(projection_ownership_rows(&tmp).await, vec![0, 0]);
@@ -191,8 +199,10 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
 #[tokio::test]
 async fn reused_message_id_across_sources_converges_without_adoption() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     let first = observation_in_generation(
         "session-reused-id-a",
         GENERATION,

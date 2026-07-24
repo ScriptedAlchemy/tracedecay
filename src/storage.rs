@@ -13,6 +13,7 @@ use crate::errors::{Result, TraceDecayError};
 
 pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
+pub const PROFILE_IDENTITY_FILENAME: &str = "profile-identity.json";
 pub const IDENTITY_CUTOVER_BACKUP_MANIFEST_FILENAME: &str =
     "store_manifest.identity-cutover-backup.json";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
@@ -26,7 +27,7 @@ pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
 /// Checks the fixed 16-byte `SQLite` header without opening the database.
 ///
-/// This is deliberately file-only: libsql may create or rewrite WAL/SHM
+/// This is deliberately file-only: opening SQLite may create or rewrite WAL/SHM
 /// sidecars before reporting that the main file is not a database. Recovery
 /// paths use this preflight to preserve the complete on-disk recovery set.
 pub(crate) fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
@@ -137,7 +138,7 @@ pub fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
 
 pub async fn try_classify_project_storage_with_registry(
     project_root: &Path,
-    global_db: &crate::global_db::GlobalDb,
+    global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
 ) -> Result<ProjectStorageLocation> {
     let location = classify_project_storage(project_root);

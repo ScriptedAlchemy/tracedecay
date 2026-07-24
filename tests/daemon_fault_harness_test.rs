@@ -33,6 +33,11 @@ use common::{isolated_lcm_db_path, open_lcm_db, spawn_tracedecay_daemon_with, te
 
 const GENERATION: u64 = 23;
 
+fn observation_store(db: &common::LcmTestRuntime) -> GlobalDbObservationStore<'_> {
+    db.observation_store()
+        .expect("registered profile observation store")
+}
+
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 const OBSERVATION_PERSIST_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_OBSERVATION_PERSIST_BARRIER_DIR";
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
@@ -199,7 +204,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
         initialized.close();
         set_statement_fault(&tmp, stage, table, true).await;
         let db = open_lcm_db(&tmp).await;
-        let store = GlobalDbObservationStore::new(&db);
+        let store = observation_store(&db);
         let error = store
             .persist_observation(write(stage, candidate.clone()))
             .await
@@ -212,7 +217,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
 
         assert_eq!(observation_state_counts(&tmp).await, [0, 0, 0, 0]);
         let restarted = open_lcm_db(&tmp).await;
-        let restarted_store = GlobalDbObservationStore::new(&restarted);
+        let restarted_store = observation_store(&restarted);
         assert!(
             restarted_store
                 .get_observation(candidate.observation_id())
@@ -242,7 +247,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
         restarted.close();
         set_statement_fault(&tmp, stage, table, false).await;
         let retry = open_lcm_db(&tmp).await;
-        let retry_store = GlobalDbObservationStore::new(&retry);
+        let retry_store = observation_store(&retry);
         let committed = match retry_store
             .persist_observation(write(stage, candidate.clone()))
             .await
@@ -256,7 +261,7 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
         retry.close();
 
         let replayed = open_lcm_db(&tmp).await;
-        let replayed_store = GlobalDbObservationStore::new(&replayed);
+        let replayed_store = observation_store(&replayed);
         let duplicate = replayed_store
             .persist_observation(write(stage, candidate.clone()))
             .await

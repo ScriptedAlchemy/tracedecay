@@ -1,21 +1,22 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::global_db::ParseOffset;
+use tracedecay::sessions::SessionProvider;
 use tracedecay::sessions::claude::ClaudeSource;
-use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::git_correlation::{
     CommitEvidence, CommitRelation, GitRefFilter, SessionsForQuery, SpanOverlapKind,
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::sessions::source::TranscriptSource;
-use tracedecay::sessions::source::try_ingest_source;
-use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
-use crate::restart_atomicity::{durable_table_count, mark_test_project};
+use crate::restart_atomicity::{
+    durable_table_count, ingest_global_sources_for_provider, mark_test_project,
+    open_project_session_db, try_ingest_source,
+};
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, run_git, setup};
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
@@ -155,15 +156,17 @@ async fn claude_non_utf8_cursor_key_replays_unbound_legacy_offset() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let legacy_key = path.to_string_lossy().into_owned();
-    db.set_parse_offset(
-        &legacy_key,
-        ParseOffset {
-            byte_offset: prefix.len() as u64,
-            mtime: 0,
-            file_id: 0,
-        },
-    )
-    .await;
+    db.runtime()
+        .set_project_parse_offset_for_test(
+            &legacy_key,
+            ParseOffset {
+                byte_offset: prefix.len() as u64,
+                mtime: 0,
+                file_id: 0,
+            },
+        )
+        .await
+        .unwrap();
 
     let source = ClaudeSource::with_home(&home);
     let stats = try_ingest_source(&db, &source, &project, None)
@@ -233,43 +236,76 @@ async fn claude_user_scope_excludes_registered_project_rows() {
         })],
     );
 
-    let db = GlobalDb::open_at(&profile.join("user-sessions.db"))
-        .await
-        .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
     let source = ClaudeSource::with_home(&home).for_user_scope(None, vec![registered.clone()]);
-    let stats = try_ingest_source(&db, &source, &profile, None)
+    let stats = runtime
+        .ingest_profile_transcript_source_for_test(&source, &profile, None)
         .await
         .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 2);
     assert_eq!(
-        db.get_session("claude", "mixed-session")
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "claude", "mixed-session")
             .await
+            .unwrap()
             .unwrap()
             .project_path,
         "user"
     );
     assert!(
-        db.search_session_messages("claude", None, "registered project secret", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "registered project secret",
+                10,
+            )
             .await
+            .unwrap()
             .is_empty(),
         "registered-project evidence must never enter user-sessions.db"
     );
     assert_eq!(
-        db.search_session_messages("claude", None, "preference", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "preference",
+                10,
+            )
             .await
+            .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        db.search_session_messages("claude", None, "locationless", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "locationless",
+                10,
+            )
             .await
+            .unwrap()
             .len(),
         1
     );
     assert!(
-        db.search_session_messages("claude", None, "registered session fallback", 10)
+        runtime
+            .search_session_messages_for_test(
+                HostAdmissionScope::Profile,
+                "claude",
+                None,
+                "registered session fallback",
+                10,
+            )
             .await
+            .unwrap()
             .is_empty(),
         "rows without cwd inherit the registered session cwd"
     );
@@ -294,17 +330,28 @@ async fn claude_user_scope_live_filter_only_ingests_requested_session() {
             })],
         );
     }
-    let db = GlobalDb::open_at(&profile.join("user-sessions.db"))
-        .await
-        .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
     let source = ClaudeSource::with_home(&home).for_user_scope(Some("wanted".into()), vec![]);
-    let stats = try_ingest_source(&db, &source, &profile, None)
+    let stats = runtime
+        .ingest_profile_transcript_source_for_test(&source, &profile, None)
         .await
         .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
-    assert!(db.get_session("claude", "wanted").await.is_some());
-    assert!(db.get_session("claude", "other").await.is_none());
+    assert!(
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "claude", "wanted")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        runtime
+            .session_for_test(HostAdmissionScope::Profile, "claude", "other")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn write_claude_subagent_transcript(
@@ -699,6 +746,7 @@ async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
         metadata_a["claude_message_location_provenance"].as_str(),
         Some("transcript_record")
     );
+    drop(db_a);
 
     let db_b = open_project_session_db(&project_b).await.unwrap();
     let stats_b = try_ingest_source(&db_b, &source, &project_b, None)
@@ -1557,7 +1605,8 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
     assert_eq!(metadata["produced_commit_kind"], "committed");
 
     let hits = db
-        .git_sessions_for(&SessionsForQuery {
+        .runtime()
+        .project_git_sessions_for_test(&SessionsForQuery {
             git_ref: GitRefFilter::Commit(sha[..8].to_string()),
             since: None,
             until: None,
@@ -1574,7 +1623,8 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
         Some("commit-result-1")
     );
     let branch_hits = db
-        .git_sessions_for(&SessionsForQuery {
+        .runtime()
+        .project_git_sessions_for_test(&SessionsForQuery {
             git_ref: GitRefFilter::Branch("main".to_string()),
             since: None,
             until: None,
@@ -1607,7 +1657,7 @@ async fn claude_observation_path_conflicting_redelivery_does_not_overwrite() {
             .messages_upserted,
         2
     );
-    assert!(durable_table_count(&project, "observations").await >= 1);
+    assert!(durable_table_count(&db, "observations").await >= 1);
     let original = db
         .search_session_messages("claude", None, "fixed", 10)
         .await;

@@ -63,6 +63,43 @@ fn test_handshake_defaults() -> DaemonHandshake {
     }
 }
 
+#[test]
+fn search_request_controls_distinguish_cancellation_and_timeout() {
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancellation.search-test")
+            .expect("cancellation");
+    let deadline =
+        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
+
+    assert_eq!(
+        super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 9),
+        None
+    );
+    assert_eq!(
+        super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 10),
+        Some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::TimedOut)
+    );
+    cancellation.cancel(tracedecay_domain::UtcMicros(8));
+    assert_eq!(
+        super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 10),
+        Some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Cancelled)
+    );
+}
+
+#[test]
+fn search_scope_resolution_failure_is_authority_unavailable() {
+    assert!(matches!(
+        super::code_index_scope_unavailable(),
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+            crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                reason:
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                ..
+            }
+        )
+    ));
+}
+
 #[cfg(unix)]
 fn test_automation_scheduler_handle(task: JoinHandle<()>) -> AutomationSchedulerHandle {
     AutomationSchedulerHandle::for_test(task)

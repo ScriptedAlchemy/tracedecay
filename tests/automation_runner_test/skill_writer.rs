@@ -117,17 +117,14 @@ async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
 }
 
 // Every test below that reaches evidence building holds `ENV_LOCK` and pins
-// `TRACEDECAY_GLOBAL_DB` at its own session store via `isolate_global_db`:
-// see that helper's docs for why (Windows CI global-DB contention).
+// its profile database override at the isolated session store.
 #[tokio::test]
 async fn skill_writer_default_provider_searches_all_providers() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(&cg).await;
     seed_session_message_in_db(
         &db,
         cg.project_root(),
@@ -168,9 +165,7 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
+    let db = project_session_runtime(&cg).await;
     // Deliberately avoids every keyword in the default skill writer query so
     // the grep channel returns nothing and only session replay surfaces it.
     seed_session_message_in_db(
@@ -251,9 +246,7 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let project_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("project session db open");
+    let project_db = project_session_runtime(&cg).await;
     seed_session_message_in_db(
         &project_db,
         cg.project_root(),
@@ -525,11 +518,11 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     approve_managed_skill(&profile_root, "automation-run-review")
         .await
         .unwrap();
-    let global_db = GlobalDb::open().await.expect("global db should open");
+    let global_db = project_session_runtime(&cg).await;
     global_db
-        .append_analytics_event(&tracedecay::global_db::AnalyticsEventInsert {
+        .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
             provider: "codex".to_string(),
-            project_id: GlobalDb::canonical_project_key(cg.project_root()),
+            project_id: HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root()),
             session_id: Some("skill-writer-analytics".to_string()),
             timestamp: 1_715_000_111,
             event_kind: "mcp_tool_call".to_string(),

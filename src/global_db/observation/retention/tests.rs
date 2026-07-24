@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Connection, TestConnection, params};
 
 use super::*;
 // `super::*` re-exports the crate's one-argument `errors::Result` alias; the
@@ -12,13 +12,9 @@ const OWNER: &str = "{\"owner\":\"o1\"}";
 const GEN: &str = "projection.gen.v1";
 const OTHER_GEN: &str = "projection.gen.v2";
 
-async fn test_store() -> Result<(tempfile::TempDir, Connection), String> {
+async fn test_store() -> Result<(tempfile::TempDir, TestConnection), String> {
     let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
-    let db = libsql::Builder::new_local(temp.path().join("obs.db"))
-        .build()
-        .await
-        .map_err(|err| format!("build db: {err}"))?;
-    let conn = db.connect().map_err(|err| format!("connect: {err}"))?;
+    let conn = TestConnection::open(&temp.path().join("obs.db"));
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .await
         .map_err(|err| format!("enable fks: {err}"))?;
@@ -167,6 +163,127 @@ fn is_released(json: &str) -> bool {
     json.contains("__retention_released")
 }
 
+async fn run_apply(
+    conn: &Connection,
+    generation: Option<&str>,
+    config: &ObservationRetentionConfig,
+) -> Result<ObservationRetentionReport, String> {
+    run_observation_retention_authorized(
+        conn,
+        generation,
+        config,
+        RetentionMode::Apply,
+        NOW,
+        &|_| Ok(()),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tokio::test]
+async fn authority_loss_before_commit_rolls_back_observation_release() -> Result<(), String> {
+    let (temp, conn) = test_store().await?;
+    seed_evidence(&conn, "anchor-revoked", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-revoked", "deleted", NOW - 90 * DAY, None).await?;
+    let scope = std::sync::Mutex::new(Some(
+        crate::db::enter_daemon_database_scope(
+            temp.path(),
+            1,
+            "observation-retention-revocation-test",
+        )
+        .map_err(|error| error.to_string())?,
+    ));
+    let authority = crate::db::DatabaseAuthority::for_runtime(
+        &temp.path().join("sessions.db"),
+        "observation retention revocation test",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let error = run_observation_retention_authorized(
+        &conn,
+        None,
+        &released_config(),
+        RetentionMode::Apply,
+        NOW,
+        &|intent| {
+            if intent == "commit anchor retention pass" {
+                drop(
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(),
+                );
+            }
+            authority.require_active_write_scope(intent)
+        },
+    )
+    .await
+    .expect_err("authority loss must reject observation retention commit");
+
+    assert!(error.to_string().contains("active daemon"));
+    assert!(!is_released(
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors
+             WHERE anchor_id = 'anchor-revoked'"
+        )
+        .await?
+    ));
+    assert!(!is_released(
+        &fetch_str(
+            &conn,
+            "SELECT observation_json FROM observations
+             WHERE observation_id = 'obs-anchor-revoked'"
+        )
+        .await?
+    ));
+    assert!(!is_released(
+        &fetch_str(
+            &conn,
+            "SELECT availability_json FROM observation_repository_provenance
+             WHERE observation_id = 'obs-anchor-revoked'"
+        )
+        .await?
+    ));
+    assert!(
+        conn.execute(
+            "UPDATE retrieval_anchors SET anchor_json = '{}'
+             WHERE anchor_id = 'anchor-revoked'",
+            (),
+        )
+        .await
+        .is_err(),
+        "rollback restores the anchor immutability trigger"
+    );
+    assert!(
+        conn.execute(
+            "UPDATE observation_repository_provenance SET availability_json = '{}'
+             WHERE observation_id = 'obs-anchor-revoked'",
+            (),
+        )
+        .await
+        .is_err(),
+        "provenance immutability trigger remains installed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unauthorised_entry_rejects_apply() -> Result<(), String> {
+    let (_temp, conn) = test_store().await?;
+    let error =
+        run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
+            .await
+            .expect_err("apply must require the authority-bound entry point");
+
+    assert!(
+        error
+            .to_string()
+            .contains("authority-bound observation retention entry point")
+    );
+    Ok(())
+}
+
 // superseded and deleted dispositions release their storage: all three fat
 // payloads collapse to the compact marker and the reclaim is measurable.
 #[tokio::test]
@@ -183,10 +300,7 @@ async fn superseded_and_deleted_dispositions_release_storage() -> Result<(), Str
         seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
         set_disposition(&conn, "anchor-1", state, NOW - 90 * DAY, successor).await?;
 
-        let report =
-            run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-                .await
-                .map_err(|e| e.to_string())?;
+        let report = run_apply(&conn, None, &released_config()).await?;
 
         assert_eq!(report.anchors_released.acted, 1, "{state}: anchor released");
         assert_eq!(
@@ -232,10 +346,7 @@ async fn active_and_unavailable_dispositions_retain_storage() -> Result<(), Stri
         seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
         set_disposition(&conn, "anchor-1", state, NOW - 90 * DAY, None).await?;
 
-        let report =
-            run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-                .await
-                .map_err(|e| e.to_string())?;
+        let report = run_apply(&conn, None, &released_config()).await?;
 
         assert_eq!(report.anchors_released.acted, 0, "{state}: anchor retained");
         assert_eq!(report.observations_released.acted, 0);
@@ -269,10 +380,7 @@ async fn latest_disposition_wins() -> Result<(), String> {
     // A later, higher-sequence entry restores the anchor to active.
     set_disposition(&conn, "anchor-1", "active", NOW - 80 * DAY, None).await?;
 
-    let report =
-        run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-            .await
-            .map_err(|e| e.to_string())?;
+    let report = run_apply(&conn, None, &released_config()).await?;
 
     assert_eq!(
         report.anchors_released.acted, 0,
@@ -291,10 +399,7 @@ async fn window_is_honored() -> Result<(), String> {
     set_disposition(&conn, "recent", "deleted", NOW - 10 * DAY, None).await?;
     set_disposition(&conn, "old", "deleted", NOW - 90 * DAY, None).await?;
 
-    let report =
-        run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-            .await
-            .map_err(|e| e.to_string())?;
+    let report = run_apply(&conn, None, &released_config()).await?;
 
     assert_eq!(
         report.anchors_released.acted, 1,
@@ -331,6 +436,11 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
 
     assert_eq!(report.anchors_released.eligible, 1);
     assert_eq!(report.anchors_released.acted, 0, "dry run acts on nothing");
+    assert_eq!(
+        report.anchors_released.oldest_eligible_at,
+        Some(NOW - 90 * DAY),
+        "backlog age comes from the governing disposition"
+    );
     assert!(report.bytes_reclaimed() > 4096, "dry run still measures");
     assert!(!is_released(
         &fetch_str(
@@ -349,6 +459,84 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
     Ok(())
 }
 
+// Every observation has exactly one immutable anchor binding. Retention counts
+// and releases each eligible observation once.
+#[tokio::test]
+async fn released_observations_are_counted_once_each() -> Result<(), String> {
+    let (_temp, conn) = test_store().await?;
+    seed_evidence(&conn, "anchor-primary", GEN, 4096).await?;
+    seed_evidence(&conn, "anchor-secondary", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-primary", "deleted", NOW - 90 * DAY, None).await?;
+    set_disposition(&conn, "anchor-secondary", "deleted", NOW - 60 * DAY, None).await?;
+    let config = ObservationRetentionConfig {
+        enabled: true,
+        observation_release_after_days: Some(30),
+        ..ObservationRetentionConfig::default()
+    };
+
+    let report = run_apply(&conn, None, &config).await?;
+
+    assert_eq!(report.observations_released.eligible, 2);
+    assert_eq!(report.observations_released.acted, 2);
+    assert_eq!(
+        report.observations_released.oldest_eligible_at,
+        Some(NOW - 90 * DAY)
+    );
+    assert!(is_released(
+        &fetch_str(
+            &conn,
+            "SELECT observation_json FROM observations
+             WHERE observation_id = 'obs-anchor-primary'"
+        )
+        .await?
+    ));
+    assert!(is_released(
+        &fetch_str(
+            &conn,
+            "SELECT observation_json FROM observations
+             WHERE observation_id = 'obs-anchor-secondary'"
+        )
+        .await?
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_observation_in_other_generation_remains_live() -> Result<(), String> {
+    let (_temp, conn) = test_store().await?;
+    seed_evidence(&conn, "anchor-primary", GEN, 4096).await?;
+    seed_evidence(&conn, "anchor-active", OTHER_GEN, 4096).await?;
+    set_disposition(&conn, "anchor-primary", "deleted", NOW - 90 * DAY, None).await?;
+    set_disposition(&conn, "anchor-active", "active", NOW - 60 * DAY, None).await?;
+    let config = ObservationRetentionConfig {
+        enabled: true,
+        observation_release_after_days: Some(30),
+        ..ObservationRetentionConfig::default()
+    };
+
+    let report = run_apply(&conn, Some(GEN), &config).await?;
+
+    assert_eq!(report.observations_released.eligible, 1);
+    assert_eq!(report.observations_released.acted, 1);
+    assert!(is_released(
+        &fetch_str(
+            &conn,
+            "SELECT observation_json FROM observations
+             WHERE observation_id = 'obs-anchor-primary'"
+        )
+        .await?
+    ));
+    assert!(!is_released(
+        &fetch_str(
+            &conn,
+            "SELECT observation_json FROM observations
+             WHERE observation_id = 'obs-anchor-active'"
+        )
+        .await?
+    ));
+    Ok(())
+}
+
 // Reclaim is measurable via payload-count and page/free-list metrics.
 #[tokio::test]
 async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
@@ -359,10 +547,7 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
         set_disposition(&conn, &anchor, "deleted", NOW - 90 * DAY, None).await?;
     }
 
-    let report =
-        run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-            .await
-            .map_err(|e| e.to_string())?;
+    let report = run_apply(&conn, None, &released_config()).await?;
 
     assert_eq!(report.anchor_payloads_before, 8);
     assert_eq!(
@@ -389,15 +574,7 @@ async fn retention_is_generation_scoped() -> Result<(), String> {
     set_disposition(&conn, "gen-a", "deleted", NOW - 90 * DAY, None).await?;
     set_disposition(&conn, "gen-b", "deleted", NOW - 90 * DAY, None).await?;
 
-    let report = run_observation_retention(
-        &conn,
-        Some(GEN),
-        &released_config(),
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = run_apply(&conn, Some(GEN), &released_config()).await?;
 
     assert_eq!(report.anchors_released.acted, 1, "only GEN released");
     assert!(is_released(
@@ -429,9 +606,7 @@ async fn disabled_config_is_a_no_op() -> Result<(), String> {
         anchor_release_after_days: Some(1),
         ..ObservationRetentionConfig::default()
     };
-    let report = run_observation_retention(&conn, None, &config, RetentionMode::Apply, NOW)
-        .await
-        .map_err(|e| e.to_string())?;
+    let report = run_apply(&conn, None, &config).await?;
 
     assert_eq!(report.anchors_released.acted, 0);
     assert!(!is_released(
@@ -452,16 +627,10 @@ async fn rerun_is_idempotent() -> Result<(), String> {
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
     set_disposition(&conn, "anchor-1", "deleted", NOW - 90 * DAY, None).await?;
 
-    let first =
-        run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-            .await
-            .map_err(|e| e.to_string())?;
+    let first = run_apply(&conn, None, &released_config()).await?;
     assert_eq!(first.anchors_released.acted, 1);
 
-    let second =
-        run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-            .await
-            .map_err(|e| e.to_string())?;
+    let second = run_apply(&conn, None, &released_config()).await?;
     assert_eq!(second.anchors_released.acted, 0, "already-released skipped");
     assert_eq!(second.observations_released.acted, 0);
     assert_eq!(second.provenance_released.acted, 0);
@@ -479,9 +648,7 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
     let ledger_before =
         fetch_i64(&conn, "SELECT COUNT(*) FROM retrieval_anchor_dispositions").await?;
 
-    run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-        .await
-        .map_err(|e| e.to_string())?;
+    run_apply(&conn, None, &released_config()).await?;
 
     // Immutability triggers are back in force.
     assert!(

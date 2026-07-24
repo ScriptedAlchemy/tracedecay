@@ -19,7 +19,7 @@ use tracedecay_store::{
     ObservationPersistOutcome, ObservationStoreError, ProjectionStoreError, TranscriptStoreError,
 };
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
@@ -33,9 +33,8 @@ use crate::sessions::shared::{StoredCursor, TranscriptIngestStats};
 use crate::sessions::snapshot_observation::host_admission_error;
 use crate::sessions::source::{
     JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptSource, load_transcript_cursor,
+    TranscriptSource,
 };
-use crate::store::GlobalDbTranscriptStore;
 
 pub(crate) const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
 /// Every pass, including startup recovery, bounds its raw and parsed backlog.
@@ -437,7 +436,6 @@ fn scanned_segments(
 }
 
 struct SourceProcessingContext<'a, 'authority> {
-    db: &'a crate::global_db::GlobalDb,
     admission: &'a HostAdmissionFacade<'authority>,
     source_adapter: &'a ClaudeSource,
     project_root: &'a Path,
@@ -463,15 +461,26 @@ async fn prepare_source(
         SessionId::new(identity.session_id.clone())?,
         SessionId::new(identity.source_id.clone())?,
     )?;
-    let transcript_store = GlobalDbTranscriptStore::new(context.db);
-    let loaded = load_transcript_cursor(&transcript_store, identity.cursor_key.clone()).await?;
+    let cursor_path = identity.cursor_key.store_path();
+    let durable_cursor = context
+        .admission
+        .get_parse_offset(context.scope, cursor_path.to_string_lossy().as_ref())
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?
+        .unwrap_or_default();
     let observation_cursor = context
         .admission
         .get_source_cursor(&source, context.scope)
         .await
         .map_err(|outcome| host_admission_error("claude", outcome))?;
-    let previous =
-        authoritative_scanner_cursor(loaded.checkpoint.state, observation_cursor.as_ref());
+    let previous = authoritative_scanner_cursor(
+        StoredCursor {
+            position: durable_cursor.byte_offset,
+            mtime: durable_cursor.mtime,
+            file_id: durable_cursor.file_id,
+        },
+        observation_cursor.as_ref(),
+    );
     let resume_state = observation_cursor.as_ref().and_then(|cursor| {
         Some(JsonlResumeState {
             generation: cursor.generation().file_id(),
@@ -712,7 +721,8 @@ fn frontier_store_error(
 }
 
 async fn scheduled_source_paths(
-    db: &crate::global_db::GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
     source: &ClaudeSource,
     project_root: &Path,
 ) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
@@ -725,8 +735,8 @@ async fn scheduled_source_paths(
     if paths.is_empty() {
         return Ok((paths, 0));
     }
-    let frontier = db
-        .get_parse_offset_result(CLAUDE_SOURCE_FRONTIER_KEY)
+    let frontier = admission
+        .get_parse_offset(scope, CLAUDE_SOURCE_FRONTIER_KEY)
         .await
         .map_err(|error| frontier_store_error("read Claude source frontier", error))?
         .unwrap_or_default();
@@ -741,61 +751,35 @@ async fn scheduled_source_paths(
 }
 
 async fn advance_source_frontier(
-    db: &crate::global_db::GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
     processed: usize,
 ) -> Result<(), ClaudeObservationIngestError> {
     if processed == 0 {
         return Ok(());
     }
-    let previous = db
-        .get_parse_offset_result(CLAUDE_SOURCE_FRONTIER_KEY)
+    let previous = admission
+        .get_parse_offset(scope, CLAUDE_SOURCE_FRONTIER_KEY)
         .await
         .map_err(|error| frontier_store_error("read Claude source frontier", error))?
         .unwrap_or_default();
     let processed = u64::try_from(processed).unwrap_or(u64::MAX);
-    db.advance_parse_offset_result(
-        CLAUDE_SOURCE_FRONTIER_KEY,
-        crate::global_db::ParseOffset {
-            byte_offset: previous.byte_offset.saturating_add(processed),
-            mtime: 0,
-            file_id: 1,
-        },
-    )
-    .await
-    .map_err(|error| frontier_store_error("advance Claude source frontier", error))
-}
-
-/// Ingest one Claude source against an already-open authoritative database.
-pub(crate) async fn ingest_source_with_observations(
-    db: &crate::global_db::GlobalDb,
-    source: &ClaudeSource,
-    project_root: &Path,
-    scope: ObservationScopeV1,
-    max_new_bytes: Option<u64>,
-    cancellation: ObservationCancellation,
-) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-    let authorities = match &scope {
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
-        ObservationScopeV1::Project { project_id } => {
-            HostAdmissionAuthorities::for_project(db, project_id.clone())
-        }
-    };
-    let admission = HostAdmissionFacade::new(authorities);
-    ingest_source_with_observations_with_admission(
-        db,
-        source,
-        project_root,
-        scope,
-        &admission,
-        max_new_bytes,
-        cancellation,
-    )
-    .await
+    admission
+        .advance_parse_offset(
+            scope,
+            CLAUDE_SOURCE_FRONTIER_KEY,
+            crate::global_db::ParseOffset {
+                byte_offset: previous.byte_offset.saturating_add(processed),
+                mtime: 0,
+                file_id: 1,
+            },
+        )
+        .await
+        .map_err(|error| frontier_store_error("advance Claude source frontier", error))
 }
 
 /// Ingest one Claude source through caller-prepared project admission authority.
 pub(crate) async fn ingest_source_with_observations_with_admission(
-    db: &crate::global_db::GlobalDb,
     source: &ClaudeSource,
     project_root: &Path,
     scope: ObservationScopeV1,
@@ -807,14 +791,13 @@ pub(crate) async fn ingest_source_with_observations_with_admission(
         return Err(ObservationApplicationError::Cancelled.into());
     }
     let processing_context = SourceProcessingContext {
-        db,
         admission,
         source_adapter: source,
         project_root,
         scope: &scope,
         cancellation: &cancellation,
     };
-    let (paths, deferred) = scheduled_source_paths(db, source, project_root).await?;
+    let (paths, deferred) = scheduled_source_paths(admission, &scope, source, project_root).await?;
     let scheduled_source_count = paths.len();
     let mut stats = ClaudeObservationIngestStats {
         deferred_sources: u64::try_from(deferred).unwrap_or(u64::MAX),
@@ -856,7 +839,7 @@ pub(crate) async fn ingest_source_with_observations_with_admission(
         stats = stats.merge(outcome);
     }
     if deferred > 0 || attempted_sources < scheduled_source_count {
-        advance_source_frontier(db, attempted_sources).await?;
+        advance_source_frontier(admission, &scope, attempted_sources).await?;
     }
     let projection_stats = drain_projection_queue(admission, &scope, &cancellation).await?;
     if let Some((failed_sources, first_reason_code, first_retryable)) = source_failures {
@@ -869,12 +852,11 @@ pub(crate) async fn ingest_source_with_observations_with_admission(
     Ok(stats.merge(projection_stats))
 }
 
-/// Production profile-scope Claude path used by hooks and startup recovery.
-pub(crate) async fn ingest_user_sessions(
-    db: &crate::global_db::GlobalDb,
+pub(crate) async fn ingest_user_sessions_with_admission(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
@@ -882,11 +864,11 @@ pub(crate) async fn ingest_user_sessions(
         return Ok(ClaudeObservationIngestStats::default());
     };
     let source = source.for_user_scope(session_id, registered_roots);
-    ingest_source_with_observations(
-        db,
+    ingest_source_with_observations_with_admission(
         &source,
         profile_root,
         ObservationScopeV1::Profile,
+        admission,
         max_new_bytes,
         cancellation,
     )
@@ -905,11 +887,10 @@ mod tests {
     };
 
     use super::*;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use crate::application::observation::{ObservationApplication, ReplayObservationsRequest};
     use crate::privacy::ClaudeRecordSanitizerV1;
     use crate::sessions::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
-    use crate::store::GlobalDbObservationStore;
-
     const INGEST_STATE_TABLES: &[&str] = &[
         "sanitization_receipts",
         "observations",
@@ -923,8 +904,6 @@ mod tests {
         "session_messages_fts",
     ];
 
-    fn assert_stats_future(_future: impl std::future::Future<Output = TranscriptIngestStats>) {}
-
     #[test]
     fn production_ingest_borrows_host_admission_authority() {
         let production = include_str!("claude_observation.rs")
@@ -932,12 +911,13 @@ mod tests {
             .expect("test module boundary")
             .0;
 
-        assert!(!production.contains("GlobalDb::open"));
+        assert!(!production.contains("open_at("));
+        assert!(!production.contains("try_open"));
         assert!(!production.contains("GlobalDbObservationStore::new"));
         assert!(!production.contains("ObservationApplication::new"));
         assert!(!production.contains("ClaudeRecordSanitizerV1::"));
-        assert!(production.contains("HostAdmissionAuthorities::for_profile"));
-        assert!(production.contains("HostAdmissionAuthorities::for_project"));
+        assert!(!production.contains("HostAdmissionAuthorities::unregistered_"));
+        assert!(production.contains(".get_parse_offset("));
         assert!(production.contains(".drain_projection_queue("));
     }
 
@@ -946,7 +926,7 @@ mod tests {
         home: PathBuf,
         profile: PathBuf,
         transcript: PathBuf,
-        db: crate::global_db::GlobalDb,
+        runtime: HostAdmissionTestRuntimeV1,
     }
 
     impl Fixture {
@@ -960,16 +940,22 @@ mod tests {
             fs::create_dir_all(transcript.parent().expect("transcript parent"))
                 .expect("create Claude fixture tree");
             fs::create_dir_all(&profile).expect("create profile root");
-            let db = crate::global_db::GlobalDb::open_at(&profile.join("sessions.db"))
+            let runtime = HostAdmissionTestRuntimeV1::profile(&profile)
                 .await
-                .expect("open authoritative session database");
+                .expect("open registered observation runtime");
             Self {
                 temp,
                 home,
                 profile,
                 transcript,
-                db,
+                runtime,
             }
+        }
+
+        fn registered(&self) -> &crate::global_db::RegisteredGlobalDb {
+            self.runtime
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile session database")
         }
 
         fn source(&self, session_id: &str) -> ClaudeSource {
@@ -1000,11 +986,12 @@ mod tests {
             max_new_bytes: Option<u64>,
             cancellation: ObservationCancellation,
         ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-            ingest_source_with_observations(
-                &self.db,
+            let admission = self.runtime.facade();
+            ingest_source_with_observations_with_admission(
                 source,
                 &self.profile,
                 ObservationScopeV1::Profile,
+                &admission,
                 max_new_bytes,
                 cancellation,
             )
@@ -1013,16 +1000,14 @@ mod tests {
     }
 
     async fn ingest_state_counts(fixture: &Fixture) -> Vec<i64> {
-        let database = libsql::Builder::new_local(fixture.profile.join("sessions.db"))
-            .build()
+        let snapshot = fixture
+            .runtime
+            .read_snapshot(HostAdmissionScope::Profile)
             .await
-            .expect("open observation state database");
-        let connection = database
-            .connect()
-            .expect("connect observation state database");
+            .expect("open registered observation state snapshot");
         let mut counts = Vec::with_capacity(INGEST_STATE_TABLES.len());
         for table in INGEST_STATE_TABLES {
-            let mut rows = connection
+            let mut rows = snapshot
                 .query(&format!("SELECT COUNT(*) FROM {table}"), ())
                 .await
                 .expect("count observation state rows");
@@ -1039,14 +1024,12 @@ mod tests {
     }
 
     async fn persisted_observation_authority_json(fixture: &Fixture) -> Vec<String> {
-        let database = libsql::Builder::new_local(fixture.profile.join("sessions.db"))
-            .build()
+        let snapshot = fixture
+            .runtime
+            .read_snapshot(HostAdmissionScope::Profile)
             .await
-            .expect("open observation authority database");
-        let connection = database
-            .connect()
-            .expect("connect observation authority database");
-        let mut rows = connection
+            .expect("open registered observation authority snapshot");
+        let mut rows = snapshot
             .query(
                 "SELECT observation_json FROM observations
                  UNION ALL SELECT receipt_json FROM sanitization_receipts
@@ -1060,6 +1043,19 @@ mod tests {
             documents.push(row.get(0).expect("decode authority JSON"));
         }
         documents
+    }
+
+    async fn matching_message_count(fixture: &Fixture, marker: &str) -> i64 {
+        let snapshot = fixture.registered().read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM session_messages
+                 WHERE provider = 'claude' AND role = 'user' AND text LIKE ?1",
+                (format!("%{marker}%"),),
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get(0).unwrap()
     }
 
     fn observation_source(path: &Path) -> ClaudeSourceIdentityV1 {
@@ -1108,7 +1104,10 @@ mod tests {
         fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
         let source_adapter = fixture.source(session_id);
         let source = observation_source(&fixture.transcript);
-        let store = GlobalDbObservationStore::new(&fixture.db);
+        let store = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         let before = ingest_state_counts(&fixture).await;
 
         let stats = fixture
@@ -1189,7 +1188,10 @@ mod tests {
         assert_eq!(first.projections_completed, 1);
         assert_eq!(first.deferred_sources, u64::from(!non_durable_covered));
 
-        let store = GlobalDbObservationStore::new(&fixture.db);
+        let store = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         let source_cursor = store
             .get_source_cursor(&source, &ObservationScopeV1::Profile)
             .await
@@ -1204,12 +1206,15 @@ mod tests {
             }
         );
         let identity = identify_claude_source(&fixture.transcript).unwrap();
-        let transcript_store = GlobalDbTranscriptStore::new(&fixture.db);
-        let transcript_cursor = load_transcript_cursor(&transcript_store, identity.cursor_key)
+        let cursor_path = identity.cursor_key.store_path();
+        let transcript_cursor = fixture
+            .registered()
+            .get_parse_offset_result(cursor_path.to_string_lossy().as_ref())
             .await
-            .expect("valid prefix transcript cursor");
+            .expect("read valid prefix transcript cursor")
+            .unwrap_or_default();
         assert_eq!(
-            transcript_cursor.checkpoint.state.position, 0,
+            transcript_cursor.byte_offset, 0,
             "observation ingestion must not advance the legacy V1 cursor"
         );
         assert_eq!(
@@ -1220,14 +1225,7 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(
-            fixture
-                .db
-                .search_session_messages("claude", Some("user"), &marker, 10)
-                .await
-                .len(),
-            1
-        );
+        assert_eq!(matching_message_count(&fixture, &marker).await, 1);
 
         let committed = ingest_state_counts(&fixture).await;
         let retry = fixture
@@ -1251,9 +1249,15 @@ mod tests {
             source.transcript_paths(&fixture.profile),
             vec![fixture.transcript.clone()]
         );
-        let (scheduled, deferred) = scheduled_source_paths(&fixture.db, &source, &fixture.profile)
-            .await
-            .unwrap();
+        let admission = fixture.runtime.facade();
+        let (scheduled, deferred) = scheduled_source_paths(
+            &admission,
+            &ObservationScopeV1::Profile,
+            &source,
+            &fixture.profile,
+        )
+        .await
+        .unwrap();
         assert_eq!(scheduled, vec![fixture.transcript.clone()]);
         assert_eq!(deferred, 0);
         let identity = identify_claude_source(&fixture.transcript).unwrap();
@@ -1278,14 +1282,17 @@ mod tests {
         assert_eq!(stats.deferred_sources, 0, "{stats:?}");
         assert!(
             fixture
-                .db
+                .registered()
                 .get_parse_offset_result(CLAUDE_SOURCE_FRONTIER_KEY)
                 .await
                 .unwrap()
                 .is_none(),
             "a fully covered source set does not need a durable scheduling frontier"
         );
-        let store = GlobalDbObservationStore::new(&fixture.db);
+        let store = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         let observations = store
             .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
             .await
@@ -1315,11 +1322,8 @@ mod tests {
                     .all(|document| !document.contains(&raw_path_hex))
             );
         }
-        let hits = fixture
-            .db
-            .search_session_messages("claude", Some("user"), "production vertical searchable", 10)
-            .await;
-        assert_eq!(hits.len(), 1);
+        let hits = matching_message_count(&fixture, "production vertical searchable").await;
+        assert_eq!(hits, 1);
         let cursor = store
             .get_source_cursor(
                 observations[0].observation().source(),
@@ -1347,38 +1351,125 @@ mod tests {
         assert_eq!(retry.source_bytes_scanned, 0);
         assert_eq!(ingest_state_counts(&fixture).await, committed);
         assert_eq!(
-            fixture
-                .db
-                .search_session_messages(
-                    "claude",
-                    Some("user"),
-                    "production vertical searchable",
-                    10,
-                )
-                .await,
+            matching_message_count(&fixture, "production vertical searchable").await,
             hits
         );
     }
 
     #[tokio::test]
-    async fn legacy_claude_ingest_api_routes_through_observation_authority() {
+    async fn native_observation_id_survives_identical_transcript_relocation() {
+        let fixture = Fixture::new("relocated-native-session").await;
+        fixture.write_record("relocated native observation", "relocation-secret");
+        let source = fixture.source("relocated-native-session");
+
+        let first = fixture
+            .ingest(&source, None, ObservationCancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(first.observations_committed, 1);
+        let store = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let before = store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap();
+        let before_id = before[0].observation().observation_id().clone();
+
+        let relocated = fixture
+            .home
+            .join(".claude/projects/relocated-scope/relocated-native-session.jsonl");
+        fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+        fs::copy(&fixture.transcript, &relocated).unwrap();
+        fs::remove_file(&fixture.transcript).unwrap();
+
+        let second = fixture
+            .ingest(&source, None, ObservationCancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(second.observations_committed, 0);
+        assert_eq!(second.observation_duplicates, 1);
+        let after = store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].observation().observation_id(), &before_id);
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_charges_the_source_scan_budget() {
+        let fixture = Fixture::new("budget-failure-0").await;
+        fixture.write_record(
+            "first source is deliberately longer than the later source",
+            "budget-failure-secret",
+        );
+        let later = fixture
+            .transcript
+            .parent()
+            .unwrap()
+            .join("budget-failure-1.jsonl");
+        fs::write(
+            &later,
+            format!(
+                "{}\n",
+                json!({
+                    "type": "user",
+                    "sessionId": "budget-failure-1",
+                    "uuid": "budget-failure-message-1",
+                    "timestamp": "2026-07-15T00:00:00Z",
+                    "message": {"role": "user", "content": "short"}
+                })
+            ),
+        )
+        .unwrap();
+        let budget = fs::metadata(&fixture.transcript).unwrap().len();
+        assert!(fs::metadata(&later).unwrap().len() < budget);
+        let connection = rusqlite::Connection::open(
+            fixture
+                .runtime
+                .database_path(HostAdmissionScope::Profile)
+                .unwrap(),
+        )
+        .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_observation_insert
+                 BEFORE INSERT ON observations
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced observation failure');
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+        let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
+
+        let error = fixture
+            .ingest(&source, Some(budget), ObservationCancellation::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClaudeObservationIngestError::SourceFailures {
+                failed_sources: 1,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn registered_claude_ingest_api_routes_through_observation_authority() {
         let fixture = Fixture::new("legacy-api-session").await;
         fixture.write_record("legacy API searchable", "legacy-api-secret");
-        let source = fixture.source("legacy-api-session");
-        assert_stats_future(crate::sessions::claude::ingest_user_sessions(
-            &fixture.db,
+        let admission = fixture.runtime.facade();
+        let stats = crate::sessions::claude::ingest_user_sessions_with_admission(
             &fixture.profile,
             Some("legacy-api-session".to_string()),
             Vec::new(),
-        ));
-
-        let stats = crate::sessions::claude::try_ingest_user_sessions_with_source(
-            &fixture.db,
-            &fixture.profile,
-            &source,
+            &admission,
         )
-        .await
-        .expect("legacy API must use the observation coordinator");
+        .await;
 
         assert_eq!(stats.messages_upserted, 1);
         let state = ingest_state_counts(&fixture).await;
@@ -1389,7 +1480,10 @@ mod tests {
         assert_eq!(state[6], 1, "projection provenance");
         assert_eq!(state[7], 1, "projected V1 session");
         assert_eq!(state[8], 1, "projected V1 message");
-        let observations = GlobalDbObservationStore::new(&fixture.db)
+        let observations = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap()
             .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
             .await
             .unwrap();
@@ -1442,7 +1536,10 @@ mod tests {
         assert_eq!(first.source_bytes_scanned, expected_source_bytes);
         assert_eq!(first.deferred_sources, 0);
 
-        let observations = GlobalDbObservationStore::new(&fixture.db)
+        let observations = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap()
             .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
             .await
             .unwrap();
@@ -1508,12 +1605,10 @@ mod tests {
         let fixture = Fixture::new("queued-before-bad-source").await;
         fixture.write_record("queued before bad source", "queued-secret");
         let seed_source = fixture.source("queued-before-bad-source");
-        let authorities = HostAdmissionAuthorities::for_profile(&fixture.db);
-        let admission = HostAdmissionFacade::new(authorities);
+        let admission = fixture.runtime.facade();
         let scope = ObservationScopeV1::Profile;
         let cancellation = ObservationCancellation::default();
         let processing_context = SourceProcessingContext {
-            db: &fixture.db,
             admission: &admission,
             source_adapter: &seed_source,
             project_root: &fixture.profile,
@@ -1586,7 +1681,10 @@ mod tests {
 
         let source_adapter = fixture.source("bounded-recovery-session");
         let source = observation_source(&fixture.transcript);
-        let store = GlobalDbObservationStore::new(&fixture.db);
+        let store = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
 
         let first = fixture
             .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -1637,13 +1735,15 @@ mod tests {
             SessionId::new(identity.source_id).unwrap(),
         )
         .unwrap();
-        let store = GlobalDbObservationStore::new(&fixture.db);
+        let store = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
         let application = ObservationApplication::new(
             store,
             ClaudeRecordSanitizerV1::claude_v1().expect("Claude V1 sanitizer"),
         );
-        let authorities = HostAdmissionAuthorities::for_profile(&fixture.db);
-        let admission = HostAdmissionFacade::new(authorities);
+        let admission = fixture.runtime.facade();
         let capture = capture_frame(
             &admission,
             scan.frames.first_mut().expect("retry frame"),
@@ -1702,19 +1802,18 @@ mod tests {
             home,
             profile,
             transcript,
-            db,
+            runtime,
         } = fixture;
-        drop(db);
-        let reopened = crate::global_db::GlobalDb::open_at(&profile.join("sessions.db"))
-            .await
-            .unwrap();
+        drop(runtime);
+        let restarted_runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
         let restarted_source =
             ClaudeSource::with_home(&home).for_user_scope(Some(raw_session_id.clone()), Vec::new());
-        let second = ingest_source_with_observations(
-            &reopened,
+        let admission = restarted_runtime.facade();
+        let second = ingest_source_with_observations_with_admission(
             &restarted_source,
             &profile,
             ObservationScopeV1::Profile,
+            &admission,
             None,
             ObservationCancellation::default(),
         )
@@ -1724,11 +1823,24 @@ mod tests {
         assert_eq!(second.source_bytes_scanned, 0);
 
         let source = observation_source(&transcript);
-        let cursor = GlobalDbObservationStore::new(&reopened)
-            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        let snapshot = restarted_runtime
+            .read_snapshot(HostAdmissionScope::Profile)
             .await
-            .unwrap()
             .unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT cursor_json FROM source_cursors
+                 WHERE source_json = ?1 AND scope_json = ?2",
+                (
+                    serde_json::to_string(&source).unwrap(),
+                    serde_json::to_string(&ObservationScopeV1::Profile).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let cursor: ClaudeSourceCursorV1 =
+            serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
         assert!(cursor.byte_offset() > 0);
         let durable = serde_json::to_string(cursor.source()).unwrap();
         assert!(!durable.contains(&raw_session_id));
@@ -1759,7 +1871,10 @@ mod tests {
                 ObservationApplicationError::Cancelled
             ))
         ));
-        let observations = GlobalDbObservationStore::new(&fixture.db)
+        let observations = fixture
+            .runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap()
             .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
             .await
             .unwrap();

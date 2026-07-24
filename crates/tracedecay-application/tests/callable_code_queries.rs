@@ -33,8 +33,12 @@ fn meta() -> RetrievalRequestMeta {
 }
 
 fn scope() -> CodeQueryScope {
+    scope_for("generation.fixture")
+}
+
+fn scope_for(generation: &str) -> CodeQueryScope {
     CodeQueryScope::new(
-        common::id::<CodeGenerationId>("generation.fixture"),
+        common::id::<CodeGenerationId>(generation),
         Some("crates/tracedecay-application".to_owned()),
     )
     .unwrap()
@@ -81,6 +85,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 #[derive(Clone, Copy)]
 enum ExactPortScenario {
     Valid,
+    ResolvedGeneration,
     MissingGeneration,
     MismatchedPageCounts,
     InvalidFallback,
@@ -96,6 +101,11 @@ impl ExactOnlyPort {
         &self,
         generation: &CodeGenerationId,
     ) -> RetrievalPortOutcome<CodeQueryPage<ExactOccurrenceRecord>> {
+        let generation = if matches!(self.scenario, ExactPortScenario::ResolvedGeneration) {
+            common::id::<CodeGenerationId>("generation.resolved")
+        } else {
+            generation.clone()
+        };
         let mut pr9_fallback = fallback();
         if matches!(self.scenario, ExactPortScenario::InvalidFallback) {
             pr9_fallback.digest = common::id(common::SHA256_B);
@@ -181,6 +191,13 @@ impl CallableCodeQueryPort for ExactOnlyPort {
 fn execute_exact(
     scenario: ExactPortScenario,
 ) -> tracedecay_application::ApplicationResult<CodeQueryPage<ExactOccurrenceRecord>> {
+    execute_exact_in_scope(scenario, scope())
+}
+
+fn execute_exact_in_scope(
+    scenario: ExactPortScenario,
+    scope: CodeQueryScope,
+) -> tracedecay_application::ApplicationResult<CodeQueryPage<ExactOccurrenceRecord>> {
     let operations = callable_code_operations().unwrap();
     let context = common::context(operations.get(CallableCodeOperationKind::ExactOccurrence));
     let service = CallableCodeQueryService::new(
@@ -193,7 +210,7 @@ fn execute_exact(
     );
     block_on(service.exact_occurrence(
         &context,
-        ExactOccurrenceRequest::new("ApplicationOperation", None, scope(), meta()).unwrap(),
+        ExactOccurrenceRequest::new("ApplicationOperation", None, scope, meta()).unwrap(),
         UtcMicros(2),
     ))
 }
@@ -233,6 +250,42 @@ fn callable_code_requests_are_generation_bound_and_bounded() {
 #[test]
 fn callable_code_service_requires_generation_bound_temporal_evidence() {
     let problem = execute_exact(ExactPortScenario::MissingGeneration).unwrap_err();
+    assert_eq!(problem.problem.kind(), ApplicationProblemKind::Stale);
+}
+
+#[test]
+fn callable_code_service_accepts_concrete_generation_for_unpinned_marker() {
+    let result = execute_exact_in_scope(
+        ExactPortScenario::ResolvedGeneration,
+        scope_for("code-generation:unpinned-latest.v1"),
+    )
+    .unwrap();
+    let ApplicationOutcome::Evidence(packet) = result.outcome else {
+        panic!("resolved unpinned query must return evidence");
+    };
+    assert_eq!(
+        packet.temporal.source_generation.as_ref().unwrap().as_str(),
+        "generation.resolved"
+    );
+    assert_eq!(
+        packet.payload.unwrap().generation.as_str(),
+        "generation.resolved"
+    );
+}
+
+#[test]
+fn callable_code_service_rejects_unresolved_unpinned_marker_outcome() {
+    let problem = execute_exact_in_scope(
+        ExactPortScenario::Valid,
+        scope_for("code-generation:unpinned-latest.v1"),
+    )
+    .unwrap_err();
+    assert_eq!(problem.problem.kind(), ApplicationProblemKind::Stale);
+}
+
+#[test]
+fn callable_code_service_preserves_exact_equality_for_pinned_request() {
+    let problem = execute_exact(ExactPortScenario::ResolvedGeneration).unwrap_err();
     assert_eq!(problem.problem.kind(), ApplicationProblemKind::Stale);
 }
 

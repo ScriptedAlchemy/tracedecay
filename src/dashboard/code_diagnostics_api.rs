@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -131,7 +132,7 @@ async fn refresh_one_reconciled(
             "no code diagnostics adapter registered for language '{language}'"
         )));
     };
-    let files = indexed_files(&state.graph_conn)
+    let files = indexed_files(&state.mem_db)
         .await
         .map_err(|err| internal_error(&err))?;
     let documents = documents_for_adapter(&state.project_root, &adapter, files)
@@ -175,11 +176,11 @@ async fn refresh_one_reconciled(
                 {
                     let mut broker = state_for_refresh.code_diagnostics.write().await;
                     let _ = broker.finish_refresh(completed);
-                    let graph_conn = state_for_refresh.graph_conn.clone();
+                    let graph_db = Arc::clone(&state_for_refresh.mem_db);
                     broker
                         .resolve_enclosing_nodes(move |file| {
-                            let graph_conn = graph_conn.clone();
-                            async move { node_spans_for_file(&graph_conn, &file).await }
+                            let graph_db = Arc::clone(&graph_db);
+                            async move { node_spans_for_file(&graph_db, &file).await }
                         })
                         .await;
                     let snapshot = broker.snapshot();
@@ -284,7 +285,7 @@ fn backfill_languages(snapshot: &DiagnosticsSnapshot) -> Vec<String> {
 async fn reconcile_project_language_activity(
     state: &DashboardState,
 ) -> std::result::Result<(), JsonError> {
-    let files = indexed_files(&state.graph_conn)
+    let files = indexed_files(&state.mem_db)
         .await
         .map_err(|err| internal_error(&err))?;
     let adapters = {
@@ -309,42 +310,27 @@ async fn reconcile_project_language_activity(
 /// to its smallest enclosing node. Returns an empty vec (leaving the diagnostic
 /// unattributed) when the file isn't indexed or the query fails — the enclosing
 /// node is a best-effort annotation, never a hard dependency of a refresh.
-async fn node_spans_for_file(conn: &libsql::Connection, file: &str) -> Vec<NodeSpan> {
-    let mut spans = Vec::new();
-    let Ok(mut rows) = conn
-        .query(
-            "SELECT start_line, end_line, qualified_name FROM nodes WHERE file_path = ?1",
-            libsql::params![file],
-        )
+async fn node_spans_for_file(db: &crate::db::Database, file: &str) -> Vec<NodeSpan> {
+    db.get_nodes_by_file(file)
         .await
-    else {
-        return spans;
-    };
-    while let Ok(Some(row)) = rows.next().await {
-        let (Ok(start_line), Ok(end_line), Ok(qualified_name)) =
-            (row.get::<i64>(0), row.get::<i64>(1), row.get::<String>(2))
-        else {
-            continue;
-        };
-        spans.push(NodeSpan {
-            start_line: start_line.max(0) as u32,
-            end_line: end_line.max(0) as u32,
-            qualified_name,
-        });
-    }
-    spans
+        .unwrap_or_default()
+        .into_iter()
+        .map(|node| NodeSpan {
+            start_line: node.start_line,
+            end_line: node.end_line,
+            qualified_name: node.qualified_name,
+        })
+        .collect()
 }
 
-async fn indexed_files(conn: &libsql::Connection) -> crate::errors::Result<Vec<String>> {
-    let mut rows = conn
-        .query("SELECT path FROM files ORDER BY path ASC", ())
-        .await?;
-    let mut files = Vec::new();
-    while let Some(row) = rows.next().await? {
-        if let Ok(path) = row.get::<String>(0) {
-            files.push(path);
-        }
-    }
+async fn indexed_files(db: &crate::db::Database) -> crate::errors::Result<Vec<String>> {
+    let mut files = db
+        .get_all_files()
+        .await?
+        .into_iter()
+        .map(|file| file.path)
+        .collect::<Vec<_>>();
+    files.sort();
     Ok(files)
 }
 

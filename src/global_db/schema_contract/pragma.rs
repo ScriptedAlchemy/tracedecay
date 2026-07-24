@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use libsql::{Connection, params};
+use crate::db::engine::{QueryExecutor, params};
 
 use super::super::global_db_operation_error;
 
@@ -44,7 +44,7 @@ pub(super) struct ActualIndex {
 }
 
 pub(super) async fn read_columns(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     table: &str,
 ) -> crate::errors::Result<HashMap<String, ActualColumn>> {
     let mut rows = conn
@@ -90,7 +90,7 @@ pub(super) async fn read_columns(
 }
 
 pub(super) async fn read_foreign_keys(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     table: &str,
 ) -> crate::errors::Result<Vec<ActualForeignKey>> {
     let mut rows = conn
@@ -138,7 +138,7 @@ pub(super) async fn read_foreign_keys(
 }
 
 pub(super) async fn read_indexes(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     table: &str,
 ) -> crate::errors::Result<Vec<ActualIndex>> {
     let mut rows = conn

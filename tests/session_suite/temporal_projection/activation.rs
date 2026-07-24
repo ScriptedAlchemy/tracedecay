@@ -3,16 +3,22 @@ use super::*;
 #[tokio::test]
 async fn activation_rejects_omitted_canonical_assertion_lineage() {
     let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.omitted-relations");
     let first = occurrence(
         &session_id,
-        &persist_observation(&db, &session_id, 0, "first").await,
+        &persist_observation(&observation_store, &session_id, 0, "first").await,
     );
     let second = occurrence(
         &session_id,
         &persist_observation_with_lineage(
-            &db,
+            &observation_store,
             &session_id,
             1,
             "second",
@@ -22,7 +28,6 @@ async fn activation_rejects_omitted_canonical_assertion_lineage() {
         )
         .await,
     );
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
     store
         .persist_session_temporal_projection_batch(batch(
@@ -54,17 +59,23 @@ async fn activation_rejects_omitted_canonical_assertion_lineage() {
 #[tokio::test]
 async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.complete");
     let first = occurrence(
         &session_id,
-        &persist_observation(&db, &session_id, 0, "first").await,
+        &persist_observation(&observation_store, &session_id, 0, "first").await,
     );
     let second = occurrence(
         &session_id,
         &persist_observation_with_lineage(
-            &db,
+            &observation_store,
             &session_id,
             1,
             "second",
@@ -74,7 +85,6 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
         )
         .await,
     );
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
     store
         .persist_session_temporal_projection_batch(batch(
@@ -115,17 +125,23 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
 #[tokio::test]
 async fn supersession_derivatives_resolve_transitive_current_state() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.transitive-supersession");
     let first = occurrence(
         &session_id,
-        &persist_observation(&db, &session_id, 0, "first").await,
+        &persist_observation(&observation_store, &session_id, 0, "first").await,
     );
     let mut second = occurrence(
         &session_id,
         &persist_observation_with_lineage(
-            &db,
+            &observation_store,
             &session_id,
             1,
             "second",
@@ -141,7 +157,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
     let mut third = occurrence(
         &session_id,
         &persist_observation_with_lineage(
-            &db,
+            &observation_store,
             &session_id,
             2,
             "third",
@@ -157,7 +173,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
     let mut fourth = occurrence(
         &session_id,
         &persist_observation_with_lineage(
-            &db,
+            &observation_store,
             &session_id,
             3,
             "fourth",
@@ -176,7 +192,6 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
         assertion(&fourth, &third),
     ];
     let terminal_assertion_id = assertions[2].assertion_id.as_str().to_owned();
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 4).await;
 
     store
@@ -244,10 +259,12 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
 #[tokio::test]
 async fn failed_activation_leaves_the_prior_generation_active() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
     let session_id = session("session.temporal.activation-failure");
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     begin_candidate(&store, &session_id, 2, 0).await;
 
     assert!(
@@ -278,11 +295,19 @@ async fn failed_activation_leaves_the_prior_generation_active() {
 #[tokio::test]
 async fn activation_is_pinned_to_the_snapshot_active_generation() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.pinning");
-    let observation = persist_observation(&db, &session_id, 0, "pinning").await;
-    let store = GlobalDbSessionTemporalStore::new(&db);
+    let observation = persist_observation(&observation_store, &session_id, 0, "pinning").await;
     begin_candidate(&store, &session_id, 2, 1).await;
     store
         .persist_session_temporal_projection_batch(batch(
@@ -296,8 +321,7 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
         .await
         .unwrap();
 
-    let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
         "UPDATE session_temporal_generations
          SET state = 'superseded', completed_at = activated_at
@@ -316,7 +340,6 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
         session_id.as_str(),
         session_id.as_str()
     ))
-    .await
     .unwrap();
 
     assert!(matches!(
@@ -347,14 +370,22 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
 #[tokio::test]
 async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
     let tmp = TempDir::new().unwrap();
-    let path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
     let session_id = session("session.temporal.frontier-digest");
-    let first = persist_observation(&db, &session_id, 0, "one").await;
-    let second = persist_observation(&db, &session_id, 1, "two").await;
+    let first = persist_observation(&observation_store, &session_id, 0, "one").await;
+    let second = persist_observation(&observation_store, &session_id, 1, "two").await;
     let first = occurrence(&session_id, &first);
     let second = occurrence(&session_id, &second);
-    let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
     store
         .persist_session_temporal_projection_batch(batch(
@@ -403,15 +434,13 @@ async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
         ))
         .await
         .unwrap();
-    let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
-    let conn = raw_db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute(
         "UPDATE session_occurrences
          SET snippet_text = 'tampered'
          WHERE session_id = ?1 AND generation = 3",
-        libsql::params![session_id.as_str()],
+        rusqlite::params![session_id.as_str()],
     )
-    .await
     .unwrap();
     assert!(
         store

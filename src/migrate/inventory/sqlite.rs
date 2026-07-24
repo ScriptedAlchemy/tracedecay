@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use libsql::{Builder, OpenFlags};
-
 use super::model::{GlobalDbInventory, InventoryIntegrityMode};
-use crate::global_db;
+use crate::db::engine::QueryExecutor;
+use crate::db::engine::params;
+use crate::global_db::{self, RegisteredGlobalDb};
 
 pub(super) async fn inspect_global_db(
     path: &Path,
@@ -23,29 +23,21 @@ pub(super) async fn inspect_global_db(
             ));
         }
         if authority.is_ok() {
-            let db_result = Builder::new_local(path)
-                .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .build()
-                .await;
-            match db_result {
-                Ok(db) => match db.connect() {
-                    Ok(conn) => {
-                        return inventory_from_connection(
-                            path,
-                            path_overridden,
-                            &conn,
-                            warnings,
-                            integrity,
-                        )
-                        .await;
-                    }
-                    Err(err) => warnings.push(format!(
-                        "could not inspect global DB '{}': {err}",
-                        path.display()
-                    )),
-                },
-                Err(err) => warnings.push(format!(
-                    "could not inspect global DB '{}': {err}",
+            drop(authority);
+            let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
+            match crate::sqlite_read_snapshot::open_in(path, scratch_root).await {
+                Ok(db) => {
+                    return inventory_from_connection(
+                        path,
+                        path_overridden,
+                        db.connection(),
+                        warnings,
+                        integrity,
+                    )
+                    .await;
+                }
+                Err(error) => warnings.push(format!(
+                    "could not snapshot global DB '{}': {error}",
                     path.display()
                 )),
             }
@@ -68,28 +60,44 @@ pub(super) async fn inspect_global_db(
 }
 
 pub(super) async fn inspect_daemon_global_db(
-    global_db: &global_db::GlobalDb,
+    global_db: &RegisteredGlobalDb,
     path_overridden: bool,
     integrity: InventoryIntegrityMode,
 ) -> GlobalDbInventory {
     let path = global_db.db_path();
-    inventory_from_connection(
-        path,
-        path_overridden,
-        global_db.read_connection(),
-        Vec::new(),
-        integrity,
-    )
-    .await
+    match global_db.read_snapshot().await {
+        Ok(snapshot) => {
+            inventory_from_connection(path, path_overridden, &snapshot, Vec::new(), integrity).await
+        }
+        Err(error) => GlobalDbInventory {
+            path: path.to_path_buf(),
+            exists: path.is_file(),
+            path_overridden,
+            accounting_mode: global_db::global_accounting_mode().as_str().to_string(),
+            legacy_home_fallback: false,
+            project_count: 0,
+            session_count: 0,
+            lcm_raw_message_count: 0,
+            token_cache_present: false,
+            registered_project_paths: Vec::new(),
+            warnings: vec![format!(
+                "could not snapshot global DB '{}': {error}",
+                path.display()
+            )],
+        },
+    }
 }
 
-async fn inventory_from_connection(
+async fn inventory_from_connection<Q>(
     path: &Path,
     path_overridden: bool,
-    conn: &libsql::Connection,
+    conn: &Q,
     mut warnings: Vec<String>,
     integrity: InventoryIntegrityMode,
-) -> GlobalDbInventory {
+) -> GlobalDbInventory
+where
+    Q: QueryExecutor + ?Sized,
+{
     if should_verify_integrity(integrity) && !sqlite_quick_check_connection(conn).await {
         warnings.push(format!("global DB '{}' failed quick_check", path.display()));
     }
@@ -113,25 +121,23 @@ fn should_verify_integrity(integrity: InventoryIntegrityMode) -> bool {
 }
 
 pub(super) async fn sqlite_quick_check(path: &Path) -> bool {
-    let Ok(_authority) =
+    let Ok(authority) =
         crate::db::DatabaseAuthority::for_runtime(path, "quick-check SQLite database offline")
     else {
         return false;
     };
-    let Ok(db) = Builder::new_local(path)
-        .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
-        .await
-    else {
+    drop(authority);
+    let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let Ok(db) = crate::sqlite_read_snapshot::open_in(path, scratch_root).await else {
         return false;
     };
-    let Ok(conn) = db.connect() else {
-        return false;
-    };
-    sqlite_quick_check_connection(&conn).await
+    sqlite_quick_check_connection(db.connection()).await
 }
 
-async fn sqlite_quick_check_connection(conn: &libsql::Connection) -> bool {
+async fn sqlite_quick_check_connection<Q>(conn: &Q) -> bool
+where
+    Q: QueryExecutor + ?Sized,
+{
     let Ok(mut rows) = conn.query("PRAGMA quick_check", ()).await else {
         return false;
     };
@@ -141,7 +147,10 @@ async fn sqlite_quick_check_connection(conn: &libsql::Connection) -> bool {
     row.get::<String>(0).is_ok_and(|value| value == "ok")
 }
 
-async fn table_count(conn: &libsql::Connection, table: &str) -> u64 {
+async fn table_count<Q>(conn: &Q, table: &str) -> u64
+where
+    Q: QueryExecutor + ?Sized,
+{
     if !table_exists(conn, table).await {
         return 0;
     }
@@ -155,11 +164,14 @@ async fn table_count(conn: &libsql::Connection, table: &str) -> u64 {
     row.get::<i64>(0).unwrap_or(0).max(0) as u64
 }
 
-async fn table_exists(conn: &libsql::Connection, table: &str) -> bool {
+async fn table_exists<Q>(conn: &Q, table: &str) -> bool
+where
+    Q: QueryExecutor + ?Sized,
+{
     let Ok(mut rows) = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            libsql::params![table],
+            params![table],
         )
         .await
     else {
@@ -168,7 +180,10 @@ async fn table_exists(conn: &libsql::Connection, table: &str) -> bool {
     matches!(rows.next().await, Ok(Some(_)))
 }
 
-async fn project_paths(conn: &libsql::Connection) -> Vec<PathBuf> {
+async fn project_paths<Q>(conn: &Q) -> Vec<PathBuf>
+where
+    Q: QueryExecutor + ?Sized,
+{
     if !table_exists(conn, "projects").await {
         return Vec::new();
     }

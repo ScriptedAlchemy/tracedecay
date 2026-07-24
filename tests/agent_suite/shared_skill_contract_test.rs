@@ -372,6 +372,11 @@ fn generated_cursor_agents_are_present_and_clean() {
         if raw.contains('\r') || !raw.ends_with('\n') {
             violations.push(format!("{}: line-ending hygiene", file));
         }
+        if file == "agents/session-historian.md" && raw.contains("after_store_id") {
+            violations.push(format!(
+                "{file}: must teach only opaque session continuation cursors"
+            ));
+        }
     }
     assert_no_violations("generated cursor agents", &violations);
 }

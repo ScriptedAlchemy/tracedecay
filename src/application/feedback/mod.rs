@@ -16,10 +16,11 @@ pub mod runtime;
 
 pub use cycle_production::{
     ProductionFeedbackCycleOpenV1, ProductionFeedbackCyclePartsV1,
-    resolve_production_feedback_cycle_parts,
+    ProductionFeedbackCycleProximityPortV1, resolve_production_feedback_cycle_parts,
 };
 pub use cycle_runtime::{
-    Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput, Pr12FeedbackCycleLspRegistration,
-    Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError, open_pr12_feedback_cycle_runtime,
+    Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
+    Pr12FeedbackCycleLspRegistration, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
+    Pr12FeedbackFindingHandlesV1, open_pr12_feedback_cycle_runtime,
 };
 pub use production::ProductionFeedbackRuntimeStateV1;

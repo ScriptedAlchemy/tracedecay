@@ -13,10 +13,10 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, DiversityPolicy,
     ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile, FusionProfileId, PrincipalId,
-    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId, RetrievalCursor,
-    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1,
-    VectorWatermark,
+    PrivacyDomainId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId,
+    RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
+    TemporalModeV1, VectorWatermark,
 };
 
 use super::CodeIndexSchedulerRegistryV1;
@@ -31,7 +31,7 @@ use crate::query::retrieval::lexical::{
 };
 use crate::query::retrieval::{
     AuthorizedPr9FallbackV1, Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1, RawRetrievalRequestV1,
-    RetrievalPortError,
+    RetrievalPortError, SanitizedRetrievalRequestV1,
 };
 
 /// Immutable evidence that a configured authority accepted one exact PR9
@@ -69,6 +69,7 @@ pub(in crate::daemon) trait Pr9AuthorityProviderV1: Send + Sync {
     fn accepted_authorities(
         &self,
         scope: &ResolvedScope,
+        privacy_domain: &PrivacyDomainId,
     ) -> Result<Vec<Pr9AuthorityMaterialV1>, Pr9AuthorityProviderErrorV1>;
 }
 
@@ -88,6 +89,10 @@ pub(in crate::daemon) enum Pr9RuntimeMountErrorV1 {
     EvaluationStale,
     #[error("PR9 process-local query/cursor key is unavailable")]
     KeyUnavailable,
+    #[error("PR9 query/cursor key privacy domain does not match the published generation")]
+    PrivacyDomainMismatch,
+    #[error("no complete current code generation exists for the exact admitted scope")]
+    GenerationUnavailable,
     #[error(transparent)]
     Authority(#[from] Pr9QueryAuthorityErrorV1),
     #[error("PR9 authority mount failed: {0}")]
@@ -100,12 +105,16 @@ pub(in crate::daemon) enum Pr9RuntimeMountErrorV1 {
 /// report precise configuration failures before changing mounted state.
 pub(in crate::daemon) fn prepare_pr9_query_authority(
     scope: &ResolvedScope,
+    privacy_domain: &PrivacyDomainId,
     provider: &dyn Pr9AuthorityProviderV1,
 ) -> Result<Arc<Pr9QueryAuthorityV1>, Pr9RuntimeMountErrorV1> {
     scope
         .validate()
         .map_err(|_| Pr9RuntimeMountErrorV1::ScopeMismatch)?;
-    let mut candidates = provider.accepted_authorities(scope)?;
+    privacy_domain
+        .validate()
+        .map_err(|_| Pr9RuntimeMountErrorV1::PrivacyDomainMismatch)?;
+    let mut candidates = provider.accepted_authorities(scope, privacy_domain)?;
     if candidates.is_empty() {
         return Err(Pr9RuntimeMountErrorV1::AuthorityMissing);
     }
@@ -136,6 +145,9 @@ pub(in crate::daemon) fn prepare_pr9_query_authority(
     let keyring = material
         .keyring
         .ok_or(Pr9RuntimeMountErrorV1::KeyUnavailable)?;
+    if keyring.privacy_domain() != privacy_domain {
+        return Err(Pr9RuntimeMountErrorV1::PrivacyDomainMismatch);
+    }
     Ok(Arc::new(Pr9QueryAuthorityV1::new(
         material.profile,
         material.diversity,
@@ -152,7 +164,12 @@ pub(in crate::daemon) async fn mount_pr9_query_authority_on_project_open(
     scope: &ResolvedScope,
     provider: &dyn Pr9AuthorityProviderV1,
 ) -> Result<(), Pr9RuntimeMountErrorV1> {
-    let authority = prepare_pr9_query_authority(scope, provider)?;
+    let latest = registry
+        .latest_complete_fresh_for_scope(scope)
+        .await
+        .ok_or(Pr9RuntimeMountErrorV1::GenerationUnavailable)?;
+    let privacy_domain = latest.generation.manifest().privacy_domain.clone();
+    let authority = prepare_pr9_query_authority(scope, &privacy_domain, provider)?;
     registry
         .mount_pr9_query_authority(project_root, scope, authority)
         .await
@@ -218,6 +235,7 @@ pub(in crate::daemon) struct Pr9SearchExecutionPolicyV1 {
 pub(in crate::daemon) struct ExecutedPr9SearchV1 {
     pub generation: CodeGenerationId,
     pub authorized: AuthorizedPr9FallbackV1,
+    pub sanitized: SanitizedRetrievalRequestV1,
 }
 
 #[derive(Debug, Error)]
@@ -357,6 +375,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(ExecutedPr9SearchV1 {
             generation,
             authorized,
+            sanitized,
         })
     }
 }
@@ -465,8 +484,8 @@ mod tests {
     use tracedecay_application::ResolvedScope;
     use tracedecay_domain::{
         CalibrationProfileId, ComponentRevision, DiversityPolicy, FusionProfile, ManifestDigest,
-        RefId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
-        RetrieverKind, WorktreeId,
+        PrivacyDomainId, RefId, RepositoryId, RetrievalAnchorId, RetrievalBudget,
+        RetrievalCursorKeyId, RetrieverKind, WorktreeId,
     };
 
     use super::{
@@ -483,6 +502,7 @@ mod tests {
         fn accepted_authorities(
             &self,
             _scope: &ResolvedScope,
+            _privacy_domain: &PrivacyDomainId,
         ) -> Result<Vec<Pr9AuthorityMaterialV1>, Pr9AuthorityProviderErrorV1> {
             Ok(self
                 .candidates
@@ -547,6 +567,10 @@ mod tests {
         }
     }
 
+    fn privacy_domain() -> PrivacyDomainId {
+        id("privacy.pr9.fixture")
+    }
+
     fn material(scope: ResolvedScope) -> Pr9AuthorityMaterialV1 {
         let profile = profile();
         let evaluation = AcceptedPr9EvaluationV1 {
@@ -572,7 +596,7 @@ mod tests {
             ranking_revision: id::<ComponentRevision>("ranking.pr9.accepted.v1"),
             keyring: Some(
                 RetrievalCursorKeyringV1::new(
-                    id("privacy.pr9.fixture"),
+                    privacy_domain(),
                     id::<RetrievalCursorKeyId>("retrieval-key.pr9.fixture"),
                     1,
                     vec![7_u8; 32],
@@ -590,7 +614,8 @@ mod tests {
             candidates: Mutex::new(Some(vec![material(scope.clone())])),
         };
 
-        let authority = prepare_pr9_query_authority(&scope, &provider).expect("accepted authority");
+        let authority = prepare_pr9_query_authority(&scope, &privacy_domain(), &provider)
+            .expect("accepted authority");
 
         assert_eq!(authority.profile().profile_id, profile().profile_id);
     }
@@ -602,7 +627,7 @@ mod tests {
             candidates: Mutex::new(Some(Vec::new())),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &missing),
+            prepare_pr9_query_authority(&scope, &privacy_domain(), &missing),
             Err(Pr9RuntimeMountErrorV1::AuthorityMissing)
         ));
 
@@ -610,22 +635,22 @@ mod tests {
             candidates: Mutex::new(Some(vec![material(scope.clone()), material(scope.clone())])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &ambiguous),
+            prepare_pr9_query_authority(&scope, &privacy_domain(), &ambiguous),
             Err(Pr9RuntimeMountErrorV1::AuthorityAmbiguous)
         ));
     }
 
     #[test]
     fn non_pass_stale_scope_and_missing_key_fail_closed() {
-        let scope = scope("main");
+        let active_scope = scope("main");
 
-        let mut pending = material(scope.clone());
+        let mut pending = material(active_scope.clone());
         pending.evaluation.status = crate::search_eval::DirectEvaluationStatusV1::Pending;
         let provider = OneShotProvider {
             candidates: Mutex::new(Some(vec![pending])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &provider),
+            prepare_pr9_query_authority(&active_scope, &privacy_domain(), &provider),
             Err(Pr9RuntimeMountErrorV1::EvaluationNotPassed)
         ));
 
@@ -633,17 +658,17 @@ mod tests {
             candidates: Mutex::new(Some(vec![material(scope("other"))])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &provider),
+            prepare_pr9_query_authority(&active_scope, &privacy_domain(), &provider),
             Err(Pr9RuntimeMountErrorV1::ScopeMismatch)
         ));
 
-        let mut missing_key = material(scope.clone());
+        let mut missing_key = material(active_scope.clone());
         missing_key.keyring = None;
         let provider = OneShotProvider {
             candidates: Mutex::new(Some(vec![missing_key])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &provider),
+            prepare_pr9_query_authority(&active_scope, &privacy_domain(), &provider),
             Err(Pr9RuntimeMountErrorV1::KeyUnavailable)
         ));
     }
@@ -659,7 +684,7 @@ mod tests {
         };
 
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &provider),
+            prepare_pr9_query_authority(&scope, &privacy_domain(), &provider),
             Err(Pr9RuntimeMountErrorV1::EvaluationStale)
         ));
 
@@ -670,8 +695,25 @@ mod tests {
             candidates: Mutex::new(Some(vec![stale_scope_evaluation])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &provider),
+            prepare_pr9_query_authority(&scope, &privacy_domain(), &provider),
             Err(Pr9RuntimeMountErrorV1::EvaluationStale)
+        ));
+    }
+
+    #[test]
+    fn cursor_key_privacy_domain_must_match_published_generation() {
+        let scope = scope("main");
+        let provider = OneShotProvider {
+            candidates: Mutex::new(Some(vec![material(scope.clone())])),
+        };
+
+        assert!(matches!(
+            prepare_pr9_query_authority(
+                &scope,
+                &id::<PrivacyDomainId>("privacy.pr9.other"),
+                &provider,
+            ),
+            Err(Pr9RuntimeMountErrorV1::PrivacyDomainMismatch)
         ));
     }
 }

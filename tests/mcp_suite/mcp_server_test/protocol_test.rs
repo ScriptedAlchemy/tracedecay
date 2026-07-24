@@ -67,8 +67,21 @@ async fn initialize_roots_route_registered_reader_tools_without_explicit_selecto
         .unwrap();
     target.index_all().await.unwrap();
 
-    let registry = tracedecay::global_db::GlobalDb::open().await.unwrap();
-    registry
+    let project_id = active
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .expect("active project identity");
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        tracedecay::storage::default_profile_root().unwrap(),
+        active.project_root(),
+        project_id,
+    )
+    .await
+    .unwrap();
+    runtime
         .upsert_code_project(
             "proj_active",
             active.project_root(),
@@ -78,7 +91,7 @@ async fn initialize_roots_route_registered_reader_tools_without_explicit_selecto
         )
         .await
         .unwrap();
-    registry
+    runtime
         .upsert_code_project(
             "proj_target",
             target.project_root(),
@@ -88,7 +101,8 @@ async fn initialize_roots_route_registered_reader_tools_without_explicit_selecto
         )
         .await
         .unwrap();
-    let server = McpServer::new_with_dbs(active, None, None, Some(Arc::new(registry)), false).await;
+    let server =
+        McpServer::new_with_host_admission_test_runtime_for_test(active, None, runtime).await;
     let target_root_uri = url::Url::from_file_path(target.project_root())
         .expect("target project has a portable file URI")
         .to_string();
@@ -1836,30 +1850,35 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // Stamp a sentinel applied_at; only a re-run of the migrations would
     // rewrite it (the version-gate fast path and the per-process ensured
     // flag both leave the row untouched).
-    let db_path = tracedecay::sessions::cursor::project_session_db_path(dir.path());
-    let applied_at = |db_path: std::path::PathBuf| async move {
-        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        let mut rows = conn
-            .query(
-                "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
-                (),
-            )
-            .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
-    };
-    {
-        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        conn.execute(
-            "UPDATE session_schema_migrations SET applied_at = 123 WHERE name = 'lcm'",
-            (),
+    let marker = tracedecay::storage::read_repository_identity_marker(dir.path())
+        .unwrap()
+        .expect("test project identity marker");
+    let project_id = tracedecay_domain::ProjectId::new(marker.project_id).unwrap();
+    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        dir.path(),
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .set_lcm_schema_migration_applied_at_for_test(
+            tracedecay::application::host_admission::HostAdmissionScope::Project,
+            123,
         )
         .await
         .unwrap();
-    }
-    assert_eq!(applied_at(db_path.clone()).await, 123);
+    assert_eq!(
+        runtime
+            .lcm_schema_migration_applied_at_for_test(
+                tracedecay::application::host_admission::HostAdmissionScope::Project,
+            )
+            .await
+            .unwrap(),
+        Some(123)
+    );
+    drop(runtime);
 
     // A second serve session over the same project in the same process.
     // The write-path boundary call is the one that would re-run migrations
@@ -1885,9 +1904,21 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             .unwrap_or_else(|| panic!("missing response for id={id} in second session"));
         assert!(resp["error"].is_null(), "second-session lcm call id={id}");
     }
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        dir.path(),
+        project_id,
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        applied_at(db_path).await,
-        123,
+        runtime
+            .lcm_schema_migration_applied_at_for_test(
+                tracedecay::application::host_admission::HostAdmissionScope::Project,
+            )
+            .await
+            .unwrap(),
+        Some(123),
         "repeated serve-mode LCM calls must not re-run the LCM migrations"
     );
 }

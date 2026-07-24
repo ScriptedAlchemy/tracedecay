@@ -1,6 +1,4 @@
 use crate::db::engine;
-#[cfg(test)]
-use crate::db::engine::QueryExecutor as _;
 
 #[derive(Clone, Copy)]
 pub(super) enum TemporalSqlRead<'a> {

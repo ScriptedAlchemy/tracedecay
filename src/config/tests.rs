@@ -301,6 +301,11 @@ fn semantic_config_rejects_uncataloged_model_ids() {
 fn semantic_config_accepts_only_explicit_local_installed_profiles() {
     let local = super::SemanticProfileSelection {
         profile_id: "code-embedding.v1".to_owned(),
+        accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
+            "sha256:{}",
+            "1".repeat(64)
+        ))
+        .unwrap(),
         artifact_digest: "a".repeat(64),
         artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
     };
@@ -308,6 +313,11 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
         active_profile: Some(local.clone()),
         rollback_profile: Some(super::SemanticProfileSelection {
             profile_id: "code-embedding.previous".to_owned(),
+            accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{}",
+                "2".repeat(64)
+            ))
+            .unwrap(),
             artifact_digest: "b".repeat(64),
             artifact_path: std::path::PathBuf::from(
                 "/var/lib/tracedecay/models/code-embedding-previous",
@@ -515,7 +525,10 @@ async fn discover_project_root_with_identity_resolves_global_only_store() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
 
-    let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+    let gdb =
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -590,7 +603,10 @@ async fn discover_project_root_with_identity_resolves_global_only_store() {
 async fn config_path_with_identity_uses_registered_store_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
-    let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+    let gdb =
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -659,7 +675,10 @@ async fn config_path_with_identity_uses_registered_store_without_enrollment() {
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
-    let gdb = crate::global_db::GlobalDb::open().await.unwrap();
+    let gdb =
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap();
 
     let parent_dir = TempDir::new().unwrap();
     let parent_root = parent_dir.path().canonicalize().unwrap();
@@ -1387,6 +1406,7 @@ mod runtime_configuration_cutover {
     };
 
     use crate::application::configuration::DirectConfigurationMutation;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::registry::legacy_decoder::{
         LegacyConfigurationDecodeTargetV1, decode_legacy_configuration_inputs,
@@ -1398,9 +1418,8 @@ mod runtime_configuration_cutover {
         RuntimeConfigurationFuture, RuntimeConfigurationTarget, TraceDecayConfig,
         cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
         commit_runtime_configuration_mutation, direct_mutation_for_runtime_config_diff,
-        ensure_runtime_configuration_for_layout, install_pinned_runtime_configuration,
-        load_runtime_configuration_for_layout_read_only, mutate_pinned_runtime_configuration,
-        resolve_runtime_configuration_for_layout, runtime_configuration_for_layout,
+        install_pinned_runtime_configuration, mutate_pinned_runtime_configuration,
+        runtime_configuration_for_layout,
     };
 
     fn project_id(value: &str) -> ProjectId {
@@ -1546,6 +1565,11 @@ mod runtime_configuration_cutover {
         let mut after = before.clone();
         after.semantic.active_profile = Some(crate::config::SemanticProfileSelection {
             profile_id: "code-embedding.v1".to_owned(),
+            accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{}",
+                "1".repeat(64)
+            ))
+            .unwrap(),
             artifact_digest: "a".repeat(64),
             artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
         });
@@ -1819,7 +1843,15 @@ mod runtime_configuration_cutover {
             "fail-closed lookup must reject an unpublished project"
         );
 
-        let pinned = ensure_runtime_configuration_for_layout(root.path(), &layout)
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id("proj_ensure_runtime_bootstrap"),
+        )
+        .await
+        .expect("open retained project runtime");
+        let pinned = runtime
+            .ensure_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("cold open persists and publishes a resolved revision");
         assert_eq!(
@@ -1836,7 +1868,8 @@ mod runtime_configuration_cutover {
             "initial resolution must be committed to the retained project store"
         );
 
-        let reopened = ensure_runtime_configuration_for_layout(root.path(), &layout)
+        let reopened = runtime
+            .ensure_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("reopen loads the durable current revision");
         assert_eq!(reopened.revision_id, pinned.revision_id);
@@ -1874,7 +1907,15 @@ mod runtime_configuration_cutover {
 
         // The daemon authority path resolves and pins on demand instead of
         // erroring, so branch administration and other daemon operations run.
-        let pinned = resolve_runtime_configuration_for_layout(root.path(), &layout)
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id("proj_resolve_cold_cache"),
+        )
+        .await
+        .expect("open retained project runtime");
+        let pinned = runtime
+            .resolve_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("daemon resolve pins a registered project on demand");
         assert_eq!(pinned.target.project_id.as_str(), "proj_resolve_cold_cache");
@@ -1887,7 +1928,8 @@ mod runtime_configuration_cutover {
         );
 
         // A second resolve is idempotent and returns the same authority.
-        let reresolved = resolve_runtime_configuration_for_layout(root.path(), &layout)
+        let reresolved = runtime
+            .resolve_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("second daemon resolve reuses the published pin");
         assert_eq!(reresolved.revision_id, pinned.revision_id);
@@ -1910,12 +1952,20 @@ mod runtime_configuration_cutover {
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
 
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id("proj_resolve_unresolvable"),
+        )
+        .await
+        .expect("open retained project runtime");
         // Strip the authoritative project identity: a layout with no project id
         // has no configuration authority to resolve, and on-demand resolution
         // must surface a typed error rather than fabricate one.
         layout.identity.project_id = None;
 
-        let error = resolve_runtime_configuration_for_layout(root.path(), &layout)
+        let error = runtime
+            .resolve_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect_err("a layout without project identity has no resolvable authority");
         assert!(
@@ -1946,20 +1996,19 @@ mod runtime_configuration_cutover {
         // Materialize the durable store schema without ever seeding a
         // configuration revision — the state a consolidated destination store is
         // left in after a repository move, when its configuration authority was
-        // never migrated in. Opening then dropping the writable handle creates
-        // the configuration tables but leaves them empty.
-        {
-            let database = crate::global_db::GlobalDb::try_open_at(&layout.sessions_db_path)
-                .await
-                .expect("open durable store")
-                .expect("durable store is created");
-            drop(database);
-        }
-
+        // never migrated in.
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id("proj_read_only_uninitialized"),
+        )
+        .await
+        .expect("open retained project runtime");
         // A read-only reopen must degrade to the registry-default snapshot rather
         // than hard-erroring on the absent current revision. This is what lets a
         // moved, consolidated project be inspected read-only.
-        let configuration = load_runtime_configuration_for_layout_read_only(root.path(), &layout)
+        let configuration = runtime
+            .load_runtime_configuration_read_only_for_test(root.path(), &layout)
             .await
             .expect("read-only open serves registry defaults for an uninitialized store");
         assert_eq!(
@@ -1995,6 +2044,7 @@ mod retention_config_tests {
             retention.compaction.is_none(),
             "compaction disabled by default"
         );
+        assert!(retention.store_soft_budgets_bytes.is_empty());
         // A default SyncConfig carries the inert retention tree.
         assert_eq!(SyncConfig::default().retention, retention);
     }
@@ -2014,6 +2064,7 @@ mod retention_config_tests {
             "observation": { "enabled": true, "anchor_release_after_days": 45 },
             "orphan_store_gc_days": 14,
             "compaction": { "free_page_ratio_threshold": 0.25, "minimum_reclaimable_bytes": 1000000 },
+            "store_soft_budgets_bytes": { "sessions.db": 2000000000 },
             "interval_hours": 12
         }"#;
         let retention: RetentionConfig = serde_json::from_str(json).unwrap();
@@ -2026,6 +2077,10 @@ mod retention_config_tests {
         let compaction = retention.compaction.expect("compaction configured");
         assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
         assert_eq!(compaction.minimum_reclaimable_bytes, 1_000_000);
+        assert_eq!(
+            retention.store_soft_budgets_bytes.get("sessions.db"),
+            Some(&2_000_000_000)
+        );
 
         // Re-serialize and re-parse: the tree is stable across a round trip.
         let reserialized = serde_json::to_string(&retention).unwrap();

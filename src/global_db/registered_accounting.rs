@@ -1,0 +1,416 @@
+use std::path::Path;
+
+use super::{RegisteredGlobalDb, SavingsDay, SavingsTotal};
+
+impl RegisteredGlobalDb {
+    pub(crate) async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
+        let path = super::project_path_alias_key(project_path);
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return;
+        };
+        let write = transaction
+            .execute(
+                "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET
+                    tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
+                crate::db::engine::params![path, tokens_saved as i64],
+            )
+            .await;
+        if write.is_ok() {
+            let _ = transaction.commit().await;
+        }
+    }
+
+    pub(crate) async fn get_project_tokens(&self, project_path: &Path) -> u64 {
+        let path = super::project_path_alias_key(project_path);
+        let Ok(snapshot) = self.read_snapshot().await else {
+            return 0;
+        };
+        let Ok(mut rows) = snapshot
+            .query(
+                "SELECT tokens_saved FROM projects WHERE path = ?1",
+                crate::db::engine::params![path],
+            )
+            .await
+        else {
+            return 0;
+        };
+        match rows.next().await {
+            Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
+            _ => 0,
+        }
+    }
+
+    pub(crate) async fn global_tokens_saved(&self) -> Option<u64> {
+        let snapshot = self.read_snapshot().await.ok()?;
+        let mut rows = snapshot
+            .query("SELECT COALESCE(SUM(tokens_saved), 0) FROM projects", ())
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        Some(row.get::<i64>(0).ok()?.max(0) as u64)
+    }
+
+    pub(crate) async fn record_savings(
+        &self,
+        project_path: &str,
+        tool_name: &str,
+        before_tokens: u64,
+        after_tokens: u64,
+        timestamp: i64,
+    ) {
+        let project_path = RegisteredGlobalDb::canonical_project_key(Path::new(project_path));
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return;
+        };
+        let write = transaction
+            .execute(
+                "INSERT INTO savings_ledger
+                     (ts, project_path, tool_name, before_tokens, after_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                crate::db::engine::params![
+                    timestamp,
+                    project_path,
+                    tool_name,
+                    before_tokens as i64,
+                    after_tokens as i64
+                ],
+            )
+            .await;
+        if write.is_ok() {
+            let _ = transaction.commit().await;
+        }
+        if let Err(error) = write {
+            eprintln!("[tracedecay] savings_ledger insert failed: {error}");
+        }
+    }
+
+    pub(crate) async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
+        let project =
+            project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
+        let Ok(snapshot) = self.read_snapshot().await else {
+            return SavingsTotal {
+                saved_tokens: 0,
+                calls: 0,
+            };
+        };
+        let rows = match project.as_deref() {
+            Some(project) => {
+                snapshot
+                    .query(
+                        "SELECT COALESCE(SUM(CASE
+                                WHEN before_tokens > after_tokens
+                                THEN before_tokens - after_tokens
+                                ELSE 0 END), 0),
+                                COUNT(*)
+                         FROM savings_ledger
+                         WHERE project_path = ?1 AND ts >= ?2",
+                        crate::db::engine::params![project, since],
+                    )
+                    .await
+            }
+            None => {
+                snapshot
+                    .query(
+                        "SELECT COALESCE(SUM(CASE
+                                WHEN before_tokens > after_tokens
+                                THEN before_tokens - after_tokens
+                                ELSE 0 END), 0),
+                                COUNT(*)
+                         FROM savings_ledger
+                         WHERE ts >= ?1",
+                        crate::db::engine::params![since],
+                    )
+                    .await
+            }
+        };
+        let Ok(mut rows) = rows else {
+            return SavingsTotal {
+                saved_tokens: 0,
+                calls: 0,
+            };
+        };
+        match rows.next().await {
+            Ok(Some(row)) => SavingsTotal {
+                saved_tokens: row.get::<i64>(0).unwrap_or(0).max(0) as u64,
+                calls: row.get::<i64>(1).unwrap_or(0).max(0) as u64,
+            },
+            _ => SavingsTotal {
+                saved_tokens: 0,
+                calls: 0,
+            },
+        }
+    }
+
+    pub(crate) async fn savings_history(
+        &self,
+        project: Option<&str>,
+        since: i64,
+    ) -> Vec<SavingsDay> {
+        let project =
+            project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
+        let Ok(snapshot) = self.read_snapshot().await else {
+            return Vec::new();
+        };
+        let rows = match project.as_deref() {
+            Some(project) => {
+                snapshot
+                    .query(
+                        "SELECT (ts / 86400) * 86400 AS day,
+                                COALESCE(SUM(CASE
+                                    WHEN before_tokens > after_tokens
+                                    THEN before_tokens - after_tokens
+                                    ELSE 0 END), 0),
+                                COUNT(*)
+                         FROM savings_ledger
+                         WHERE project_path = ?1 AND ts >= ?2
+                         GROUP BY day ORDER BY day DESC",
+                        crate::db::engine::params![project, since],
+                    )
+                    .await
+            }
+            None => {
+                snapshot
+                    .query(
+                        "SELECT (ts / 86400) * 86400 AS day,
+                                COALESCE(SUM(CASE
+                                    WHEN before_tokens > after_tokens
+                                    THEN before_tokens - after_tokens
+                                    ELSE 0 END), 0),
+                                COUNT(*)
+                         FROM savings_ledger
+                         WHERE ts >= ?1
+                         GROUP BY day ORDER BY day DESC",
+                        crate::db::engine::params![since],
+                    )
+                    .await
+            }
+        };
+        let Ok(mut rows) = rows else {
+            return Vec::new();
+        };
+        let mut history = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            history.push(SavingsDay {
+                day: row.get::<i64>(0).unwrap_or(0),
+                saved_tokens: row.get::<i64>(1).unwrap_or(0).max(0) as u64,
+                calls: row.get::<i64>(2).unwrap_or(0).max(0) as u64,
+            });
+        }
+        history
+    }
+
+    pub(crate) async fn insert_turn(&self, turn: &crate::types::CostTurn) -> bool {
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return false;
+        };
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO turns
+                     (message_id, project_hash, session_id, model, timestamp,
+                      input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                      cost_usd, category, tool_names)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                turn_params(turn),
+            )
+            .await
+            .is_ok_and(|rows| rows > 0);
+        if inserted {
+            transaction.commit().await.is_ok()
+        } else {
+            false
+        }
+    }
+
+    pub(crate) async fn insert_turns(&self, turns: &[crate::types::CostTurn]) -> usize {
+        if turns.is_empty() {
+            return 0;
+        }
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return 0;
+        };
+        let mut inserted = 0;
+        for turn in turns {
+            match transaction
+                .execute(
+                    "INSERT OR IGNORE INTO turns
+                         (message_id, project_hash, session_id, model, timestamp,
+                          input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                          cost_usd, category, tool_names)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    turn_params(turn),
+                )
+                .await
+            {
+                Ok(rows) => inserted += rows as usize,
+                Err(_) => return 0,
+            }
+        }
+        if transaction.commit().await.is_ok() {
+            inserted
+        } else {
+            0
+        }
+    }
+
+    /// Atomically imports accounting turns and advances the source cursor.
+    ///
+    /// A cursor failure rolls back every turn from the same scanned frontier,
+    /// so retry cannot duplicate a partially acknowledged file segment.
+    pub(crate) async fn insert_turns_with_cursor(
+        &self,
+        turns: &[crate::types::CostTurn],
+        cursor_path: &str,
+        cursor: super::ParseOffset,
+    ) -> Result<(usize, f64, u64), String> {
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| format!("failed to begin accounting import transaction: {error}"))?;
+        let mut inserted = 0usize;
+        let mut cost_usd = 0.0;
+        let mut tokens = 0u64;
+        for turn in turns {
+            let rows = transaction
+                .execute(
+                    "INSERT OR IGNORE INTO turns
+                         (message_id, project_hash, session_id, model, timestamp,
+                          input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+                          cost_usd, category, tool_names)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    turn_params(turn),
+                )
+                .await
+                .map_err(|error| format!("failed to append accounting turn: {error}"))?;
+            if rows > 0 {
+                inserted = inserted.saturating_add(rows as usize);
+                cost_usd += turn.cost_usd;
+                tokens = tokens.saturating_add(turn.input_tokens + turn.output_tokens);
+            }
+        }
+        super::transcript::set_parse_offset(&transaction, cursor_path, cursor)
+            .await
+            .map_err(|error| format!("failed to persist accounting import cursor: {error}"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit accounting import transaction: {error}"))?;
+        Ok((inserted, cost_usd, tokens))
+    }
+
+    pub(crate) async fn total_cost_since(&self, since: u64) -> Option<f64> {
+        let snapshot = self.read_snapshot().await.ok()?;
+        let mut rows = snapshot
+            .query(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM turns WHERE timestamp >= ?1",
+                crate::db::engine::params![since as i64],
+            )
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        Some(row.get::<f64>(0).unwrap_or(0.0))
+    }
+
+    pub(crate) async fn total_tokens_since(&self, since: u64) -> Option<u64> {
+        let snapshot = self.read_snapshot().await.ok()?;
+        let mut rows = snapshot
+            .query(
+                "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
+                 FROM turns WHERE timestamp >= ?1",
+                crate::db::engine::params![since as i64],
+            )
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        Some(row.get::<i64>(0).unwrap_or(0) as u64)
+    }
+
+    pub(crate) async fn token_breakdown_since(&self, since: u64) -> Option<(u64, u64, u64)> {
+        let snapshot = self.read_snapshot().await.ok()?;
+        let mut rows = snapshot
+            .query(
+                "SELECT COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cache_read_tokens), 0)
+                 FROM turns WHERE timestamp >= ?1",
+                crate::db::engine::params![since as i64],
+            )
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        Some((
+            row.get::<i64>(0).unwrap_or(0) as u64,
+            row.get::<i64>(1).unwrap_or(0) as u64,
+            row.get::<i64>(2).unwrap_or(0) as u64,
+        ))
+    }
+
+    pub(crate) async fn cost_by_model_since(&self, since: u64) -> Vec<(String, f64, u64)> {
+        let Ok(snapshot) = self.read_snapshot().await else {
+            return Vec::new();
+        };
+        let Ok(mut rows) = snapshot
+            .query(
+                "SELECT model, SUM(cost_usd), SUM(input_tokens + output_tokens)
+                 FROM turns WHERE timestamp >= ?1
+                 GROUP BY model ORDER BY SUM(cost_usd) DESC",
+                crate::db::engine::params![since as i64],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            out.push((
+                row.get::<String>(0).unwrap_or_default(),
+                row.get::<f64>(1).unwrap_or(0.0),
+                row.get::<i64>(2).unwrap_or(0) as u64,
+            ));
+        }
+        out
+    }
+
+    pub(crate) async fn cost_by_category_since(&self, since: u64) -> Vec<(String, f64, u64)> {
+        let Ok(snapshot) = self.read_snapshot().await else {
+            return Vec::new();
+        };
+        let Ok(mut rows) = snapshot
+            .query(
+                "SELECT category, SUM(cost_usd), COUNT(*)
+                 FROM turns WHERE timestamp >= ?1
+                 GROUP BY category ORDER BY SUM(cost_usd) DESC",
+                crate::db::engine::params![since as i64],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            out.push((
+                row.get::<String>(0).unwrap_or_default(),
+                row.get::<f64>(1).unwrap_or(0.0),
+                row.get::<i64>(2).unwrap_or(0) as u64,
+            ));
+        }
+        out
+    }
+}
+
+fn turn_params(turn: &crate::types::CostTurn) -> crate::db::engine::Params {
+    crate::db::engine::params![
+        turn.message_id.as_str(),
+        turn.project_hash.as_str(),
+        turn.session_id.as_str(),
+        turn.model.as_str(),
+        turn.timestamp as i64,
+        turn.input_tokens as i64,
+        turn.output_tokens as i64,
+        turn.cache_write_tokens as i64,
+        turn.cache_read_tokens as i64,
+        turn.cost_usd,
+        turn.category.as_str(),
+        turn.tool_names.as_str(),
+    ]
+}

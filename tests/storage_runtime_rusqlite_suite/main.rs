@@ -1,9 +1,8 @@
-//! In-process rusqlite storage-runtime cutover coverage (S5–S10).
+//! In-process SQLite storage-runtime cutover coverage (S5–S10).
 //!
-//! These cases open bundled/private rusqlite connections in-process. They must
-//! not share a test binary with the libsql-backed graph/session parity suite:
-//! libsql and rusqlite configure incompatible SQLite threading modes, and the
-//! first initializer poisons the process-wide singleton for the other.
+//! These cases exercise the bundled/private SQLite engine in-process and stay
+//! separate from the subprocess parity suite so process-isolation behavior is
+//! covered independently.
 
 mod cutover_support;
 

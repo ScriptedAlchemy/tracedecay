@@ -14,7 +14,7 @@ async fn observation_store_resolver_uses_repository_marker_after_checkout_move()
     init_repo_with_commit(&project);
     let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
     let project_id = "proj_marker_only";
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     let (store_root, database_path) = register_observation_store(
@@ -29,7 +29,10 @@ async fn observation_store_resolver_uses_repository_marker_after_checkout_move()
 
     fs::rename(&project, &moved).unwrap();
     assert!(
-        db.project_registry_context_by_alias(&moved).await.is_none(),
+        db.project_registry_context_by_alias(&moved)
+            .await
+            .unwrap()
+            .is_none(),
         "the moved checkout must not already have a canonical path alias"
     );
     assert_ne!(
@@ -48,7 +51,6 @@ async fn observation_store_resolver_uses_repository_marker_after_checkout_move()
         resolution.database_path(),
         database_path.canonicalize().unwrap()
     );
-    db.close();
 }
 
 #[tokio::test]
@@ -64,7 +66,7 @@ async fn observation_store_resolver_rejects_conflicting_path_common_dir_and_mark
     fs::write(project.join("src/lib.rs"), "pub fn ambiguous() {}\n").unwrap();
     init_repo_with_commit(&project);
     let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
 
@@ -106,7 +108,6 @@ async fn observation_store_resolver_rejects_conflicting_path_common_dir_and_mark
             "proj_path".to_string(),
         ]
     );
-    db.close();
 }
 
 #[tokio::test]
@@ -160,30 +161,37 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     branch.close();
     git(&project, &["checkout", "main"]);
 
-    let sessions = GlobalDb::open_at(&current_root.join("sessions.db"))
-        .await
-        .unwrap();
+    let sessions = HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project,
+        ProjectId::new(current_project_id.clone()).unwrap(),
+    )
+    .await
+    .unwrap();
     assert!(
         sessions
-            .upsert_session(&SessionRecord {
-                provider: "codex".to_string(),
-                session_id: "legacy-session-sentinel".to_string(),
-                project_key: current_project_id,
-                project_path: project.to_string_lossy().to_string(),
-                title: Some("legacy session sentinel".to_string()),
-                started_at: Some(1_800_000_001),
-                ended_at: Some(1_800_000_002),
-                transcript_path: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
+            .upsert_session_for_test(
+                tracedecay::application::host_admission::HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "codex".to_string(),
+                    session_id: "legacy-session-sentinel".to_string(),
+                    project_key: current_project_id,
+                    project_path: project.to_string_lossy().to_string(),
+                    title: Some("legacy session sentinel".to_string()),
+                    started_at: Some(1_800_000_001),
+                    ended_at: Some(1_800_000_002),
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                },
+            )
             .await
+            .unwrap()
     );
-    sessions.checkpoint().await;
-    sessions.close();
+    drop(sessions);
 
     let automation_sentinel = current_root.join("automation/migration-sentinel.json");
     fs::create_dir_all(automation_sentinel.parent().unwrap()).unwrap();
@@ -213,19 +221,28 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
         r#"{"preserved":true}"#
     );
 
-    let sessions = GlobalDb::open_at(&legacy_root.join("sessions.db"))
-        .await
-        .unwrap();
+    let sessions = HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project,
+        ProjectId::new(legacy_project_id).unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         sessions
-            .get_session("codex", "legacy-session-sentinel")
+            .session_for_test(
+                tracedecay::application::host_admission::HostAdmissionScope::Project,
+                "codex",
+                "legacy-session-sentinel",
+            )
             .await
+            .unwrap()
             .unwrap()
             .title
             .as_deref(),
         Some("legacy session sentinel")
     );
-    sessions.close();
+    drop(sessions);
 
     let branch = TraceDecay::open_branch(&project, "feature/legacy-sentinel")
         .await
@@ -441,28 +458,37 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     let cutover_project_id = cutover.identity.project_id.clone().unwrap();
     initialize_empty_profile_layout(&cutover).await;
     fs::write(&cutover.graph_db_path, b"not a sqlite database").unwrap();
-    let sessions = GlobalDb::open_at(&cutover.sessions_db_path).await.unwrap();
+    let sessions = HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project,
+        ProjectId::new(cutover_project_id.clone()).unwrap(),
+    )
+    .await
+    .unwrap();
     assert!(
         sessions
-            .upsert_session(&SessionRecord {
-                provider: "codex".to_string(),
-                session_id: "new-cutover-session".to_string(),
-                project_key: cutover_project_id.clone(),
-                project_path: project.to_string_lossy().to_string(),
-                title: Some("new cutover session".to_string()),
-                started_at: Some(1_800_000_010),
-                ended_at: None,
-                transcript_path: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
+            .upsert_session_for_test(
+                tracedecay::application::host_admission::HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "codex".to_string(),
+                    session_id: "new-cutover-session".to_string(),
+                    project_key: cutover_project_id.clone(),
+                    project_path: project.to_string_lossy().to_string(),
+                    title: Some("new cutover session".to_string()),
+                    started_at: Some(1_800_000_010),
+                    ended_at: None,
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                },
+            )
             .await
+            .unwrap()
     );
-    sessions.checkpoint().await;
-    sessions.close();
+    drop(sessions);
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
 
     let error = TraceDecay::resolve_store_layout_for_identity(&project)

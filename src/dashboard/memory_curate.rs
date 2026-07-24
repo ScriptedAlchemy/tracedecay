@@ -23,6 +23,8 @@ use super::memory_service::{
 };
 use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
 use crate::db::Database;
+#[cfg(test)]
+use crate::db::TestDatabaseRuntimeMode;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{MemoryGroomingOperation, MemoryRepairStats};
 use crate::tracedecay::TraceDecay;
@@ -128,17 +130,17 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
     let store_layout = cg.store_layout();
     Ok(DashboardState {
         project_id: store_layout.identity.project_id.clone(),
+        project_graph: None,
+        project_graph_resolver: None,
         memory_owner: super::project_memory_owner(cg)?,
-        graph_conn: cg.dashboard_connection(),
+        graph_conn: mem_db.engine_conn(),
         _database_guards: vec![mem_db.clone()],
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_db,
         mem_db_path,
-        lcm_conn: None,
         lcm_db: None,
         lcm_db_path: String::new(),
         lcm_scope: storage_mode_label(&store_layout.storage_mode).to_string(),
-        allow_direct_session_open: true,
         savings_db: None,
         savings_db_path: String::new(),
         project_root: cg.project_root().to_path_buf(),
@@ -166,21 +168,20 @@ fn user_state(
     profile_root: &std::path::Path,
     dashboard_root: &std::path::Path,
 ) -> DashboardState {
-    let conn = memory_db.conn().clone();
     let mem_db = Arc::new(memory_db.clone());
     DashboardState {
         project_id: None,
+        project_graph: None,
+        project_graph_resolver: None,
         memory_owner: tracedecay_domain::FactOwnerV1::Profile,
-        graph_conn: conn.clone(),
+        graph_conn: memory_db.engine_conn(),
         _database_guards: vec![mem_db.clone()],
         graph_db_path: memory_db_path.display().to_string(),
         mem_db,
         mem_db_path: memory_db_path.display().to_string(),
-        lcm_conn: None,
         lcm_db: None,
         lcm_db_path: String::new(),
         lcm_scope: "user".to_string(),
-        allow_direct_session_open: false,
         savings_db: None,
         savings_db_path: String::new(),
         project_root: profile_root.to_path_buf(),
@@ -903,9 +904,13 @@ mod tests {
         let authority =
             crate::db::DatabaseAuthority::acquire_test(&memory_path, "memory curation test")
                 .unwrap();
-        let (db, _) = Database::initialize(&memory_path, &authority)
-            .await
-            .unwrap();
+        let (db, _) = Database::publish_test_runtime(
+            &memory_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
         let owner = tracedecay_domain::FactOwnerV1::Profile;
         let memory = crate::application::memory::MemoryApplication::new(
             owner.clone(),

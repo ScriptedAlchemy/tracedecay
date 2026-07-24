@@ -2,6 +2,7 @@
 //! store.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -58,10 +59,10 @@ pub struct BranchDiagnostics {
 }
 
 impl TraceDecay {
-    /// Raw connection to the project database for crate-internal read layers
-    /// (the dashboard HTTP server). Honors whatever branch DB `open` selected.
-    pub(crate) fn dashboard_connection(&self) -> libsql::Connection {
-        self.db.conn().clone()
+    /// Driver-neutral project-database reader for crate-internal read layers.
+    /// Honors whatever branch database `open` selected.
+    pub(crate) fn dashboard_connection(&self) -> crate::db::DatabaseEngineConnection {
+        self.db.engine_conn()
     }
 
     pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
@@ -144,7 +145,15 @@ impl TraceDecay {
     /// bound to the correct branch DB. Use after [`branch_drifted`](Self::branch_drifted)
     /// reports drift so subsequent reads and writes target the right DB.
     pub async fn reopen_for_current_branch(&self) -> Result<Self> {
-        Self::open_with_options(&self.project_root, self.open_options.clone()).await
+        Self::open_with_registered_configuration(
+            &self.project_root,
+            self.open_options.clone(),
+            self.store_layout.clone(),
+            self.configuration_runtime.registered_database(),
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self.store_runtime_registry),
+        )
+        .await
     }
 
     /// Recompute the on-disk path to the `SQLite` DB this instance is
@@ -174,31 +183,11 @@ impl TraceDecay {
                     .to_string(),
             });
         }
-        let authority = crate::db::DatabaseAuthority::for_runtime(
-            &self.store_layout.graph_db_path,
-            "open diagnostics project store",
-        )?;
-        let (db, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
-            crate::daemon::store_runtime::driver::GraphStoreOpenMode::Open,
-            &self.store_layout.graph_db_path,
-            &authority,
-        )
-        .await?;
-        Ok(db)
+        Ok(self.db.clone())
     }
 
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
-        let authority = crate::db::DatabaseAuthority::for_runtime(
-            &self.store_layout.graph_db_path,
-            "open diagnostics project store read-only",
-        )?;
-        let (db, _) = crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
-            crate::daemon::store_runtime::driver::GraphStoreOpenMode::ReadOnly,
-            &self.store_layout.graph_db_path,
-            &authority,
-        )
-        .await?;
-        Ok(db)
+        Ok(self.db.clone())
     }
 
     fn build_branch_diagnostics(
