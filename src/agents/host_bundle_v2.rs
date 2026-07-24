@@ -561,7 +561,7 @@ pub fn plan_verified_complete_lifecycle_mutation(
     )
 }
 
-fn validate_identifier(value: &str) -> Result<(), HostBundleError> {
+pub(super) fn validate_identifier(value: &str) -> Result<(), HostBundleError> {
     if value.is_empty()
         || value.len() > MAX_IDENTIFIER_BYTES
         || !value
@@ -1879,7 +1879,7 @@ pub fn inspect_installed_host_bundle_components_at(
             0,
         )
         .ok()
-        .is_none_or(|bundle| {
+        .is_some_and(|bundle| {
             bundle.manifest.canonical_digest() == Ok(receipt.manifest_digest)
                 && receipt.artifacts.len() == bundle.manifest.artifacts.len()
                 && receipt.artifacts.iter().all(|artifact| {
@@ -2411,6 +2411,10 @@ where
     ) -> Result<FeedbackPathRestoreReceiptV1, HostBundleError> {
         if !request.lifecycle.explicit_confirmation {
             return Err(HostBundleError::ConfirmationRequired);
+        }
+        validate_receipt(&switch_receipt.apply_receipt)?;
+        if switch_receipt.apply_receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed {
+            return Err(HostBundleError::ReceiptCorrupted);
         }
         if previous_manifest.host != switch_receipt.host
             || previous_manifest.component != HostBundleComponentV1::Core
@@ -4966,6 +4970,27 @@ mod tests {
                 &[],
             )
             .unwrap();
+        let mut corrupted_apply = apply.clone();
+        corrupted_apply.apply_receipt.operation_id = [0; 16];
+        assert_eq!(
+            switch.feedback_rollback_switch_restore(
+                &corrupted_apply,
+                &previous,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Repair,
+                    33,
+                    true,
+                ),
+                &content(b"previous"),
+                &[],
+            ),
+            Err(HostBundleError::ReceiptCorrupted)
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"target"
+        );
         let restore = switch
             .feedback_rollback_switch_restore(
                 &apply,
@@ -5306,6 +5331,40 @@ mod tests {
         )
         .unwrap();
         assert!(uninstalled.components.is_empty());
+    }
+
+    #[test]
+    fn receipt_doctor_never_treats_unknown_embedded_bundle_as_current() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let manifest = manifest(HostKindV1::CursorCloud, b"unsupported");
+        let mut writer =
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap();
+        writer
+            .execute(
+                &manifest,
+                &execution(
+                    HostKindV1::CursorCloud,
+                    HostBundleLifecycleOpV1::Install,
+                    16,
+                    true,
+                ),
+                &content(b"unsupported"),
+                &verifier(&manifest),
+            )
+            .unwrap();
+
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Repairable
+        );
     }
 
     #[test]
