@@ -207,9 +207,8 @@ impl SnapshotDatabase {
 
     pub(crate) fn attach_token(&self) -> io::Result<SnapshotAttachToken<'_>> {
         let file_identity =
-            crate::sessions::source::sqlite_generation_identity(&self.identity_path).map_err(
-                |_| io::Error::other("could not identify immutable SQLite snapshot"),
-            )?;
+            crate::sessions::source::sqlite_generation_identity(&self.identity_path)
+                .map_err(|_| io::Error::other("could not identify immutable SQLite snapshot"))?;
         Ok(SnapshotAttachToken {
             snapshot: self,
             file_identity,

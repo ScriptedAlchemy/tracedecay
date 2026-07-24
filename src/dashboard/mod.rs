@@ -1050,10 +1050,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/storage/telemetry",
             get(storage_telemetry_api::telemetry),
         )
-        .route(
-            "/api/storage/findings",
-            get(storage_findings_api::findings),
-        )
+        .route("/api/storage/findings", get(storage_findings_api::findings))
         .route(
             "/api/code-index/freshness",
             get(code_index_freshness_api::freshness),
