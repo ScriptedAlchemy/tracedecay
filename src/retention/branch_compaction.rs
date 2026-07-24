@@ -45,9 +45,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
 use tracedecay_application::storage::compaction::CompactionTriggerPolicyV1;
-use tracedecay_application::storage::identity::{
-    FreePageRatioV1, StorageByteSizeV1, StoreKeyV1,
-};
+use tracedecay_application::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
 use tracedecay_application::storage::telemetry::StoreSizeSampleV1;
 use tracedecay_domain::UtcMicros;
 
@@ -321,9 +319,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        connection
-            .execute_batch("DELETE FROM fixture;")
-            .unwrap();
+        connection.execute_batch("DELETE FROM fixture;").unwrap();
     }
 
     #[test]
@@ -358,7 +354,10 @@ mod tests {
         let candidates = select_branch_db_candidates(dir.path(), &meta, &active);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].branch, "feature");
-        assert_eq!(candidates[0].db_path, dir.path().join("branches/feature.db"));
+        assert_eq!(
+            candidates[0].db_path,
+            dir.path().join("branches/feature.db")
+        );
     }
 
     #[test]
@@ -532,11 +531,8 @@ mod tests {
 
         // The mounted handle names the file through `real/`; branch-meta
         // rebuilds it through the symlinked `linked/`.
-        let candidates = select_branch_db_candidates(
-            &linked,
-            &meta,
-            &real.join(crate::config::DB_FILENAME),
-        );
+        let candidates =
+            select_branch_db_candidates(&linked, &meta, &real.join(crate::config::DB_FILENAME));
 
         assert!(
             candidates.is_empty(),

@@ -1034,6 +1034,11 @@ mod backstop {
                                     compaction,
                                 )
                                 .await;
+                            // Every tracked branch other than the one this
+                            // handle has mounted — best-effort, never fails
+                            // the maintenance tick (plan 38 §6).
+                            super::store_maintenance::run_branch_compaction(graph, compaction)
+                                .await;
                         }
                     }
                     session_succeeded && orphan_succeeded && compaction_succeeded
