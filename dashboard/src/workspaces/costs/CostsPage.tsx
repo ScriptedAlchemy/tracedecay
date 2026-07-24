@@ -27,7 +27,12 @@ export function CostsPage() {
           .slice(0, 12);
         const projectMax = projects[0]?.tokens_saved ?? 1;
         return (
-          <div className="flex h-full flex-col overflow-auto">
+          <div
+            className="flex h-full flex-col overflow-auto"
+            tabIndex={0}
+            role="region"
+            aria-label="Costs content"
+          >
             <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
               <h1 className="text-sm font-semibold tracking-tight">Costs</h1>
               <span className="text-2xs text-text-muted">
