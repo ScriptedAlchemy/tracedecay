@@ -50,6 +50,26 @@ export function formatStamp(epochSeconds: number | null | undefined): string {
   );
 }
 
+/** Elide a path from its FRONT, keeping whole segments.
+ *
+ * A dense row truncates the tail by default, which throws away the only part
+ * of a path anyone reads: "dashboard/src/workspac…" identifies nothing, while
+ * "…/workspaces/code/CodePage.tsx" identifies the file exactly. The leading
+ * ellipsis marks the elision, and callers keep the untruncated string on the
+ * element's `title` so nothing is actually lost. */
+export function elideStart(path: string | null | undefined, max = 34): string {
+  if (!path) return '';
+  if (path.length <= max) return path;
+  const segments = path.split('/');
+  let kept = segments[segments.length - 1] ?? path;
+  for (let i = segments.length - 2; i >= 0; i -= 1) {
+    const next = `${segments[i]}/${kept}`;
+    if (next.length + 2 > max) break;
+    kept = next;
+  }
+  return `…/${kept}`;
+}
+
 /** Byte magnitudes with the unit split out for the same reason. */
 export function splitBytes(bytes: number | null | undefined): {
   value: string;

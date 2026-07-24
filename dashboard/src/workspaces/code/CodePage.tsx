@@ -6,10 +6,11 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { Meter, Readout } from '../../ui/instrument.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
-import { formatCount } from '../../ui/format.ts';
+import { elideStart, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
@@ -113,17 +114,43 @@ export function CodePage() {
                 .map((k) => ({ label: k.kind, value: k.count, hint: 'nodes' }));
               return (
                 <div className="flex flex-col gap-3">
-                  <div className="grid grid-cols-1 gap-1.5">
-                    <StatTile dense label="nodes" value={formatCount(data.totals.nodes)} />
-                    <StatTile dense label="edges" value={formatCount(data.totals.edges)} />
-                    <StatTile dense label="files" value={formatCount(data.totals.files)} />
+                  {/* Node count is the headline of this whole product -- a
+                   * graph of millions of symbols -- and it was set at 12px in
+                   * a stack of three identical tiles. It takes the display
+                   * tier; edges and files support it on one shared bezel. */}
+                  <div className="flex flex-col">
+                    <div className="td-raised border border-edge-subtle px-3 py-3">
+                      <Readout
+                        label="nodes"
+                        size="xl"
+                        value={splitCount(data.totals.nodes).value}
+                        unit={splitCount(data.totals.nodes).unit}
+                        note={`${data.totals.nodes.toLocaleString()} symbols indexed`}
+                      />
+                    </div>
+                    <div className="flex border-x border-b border-edge-subtle bg-surface-1">
+                      <div className="min-w-0 flex-1 px-3 py-2">
+                        <Readout
+                          label="edges"
+                          size="sm"
+                          value={splitCount(data.totals.edges).value}
+                          unit={splitCount(data.totals.edges).unit}
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
+                        <Readout
+                          label="files"
+                          size="sm"
+                          value={splitCount(data.totals.files).value}
+                          unit={splitCount(data.totals.files).unit}
+                        />
+                      </div>
+                    </div>
                   </div>
                   {kinds.length > 0 ? (
-                    <figure className="flex flex-col gap-1">
-                      <figcaption className="text-2xs text-text-muted">
-                        node composition by kind
-                      </figcaption>
-                      <ActivityColumns buckets={kinds} height={40} />
+                    <figure className="flex flex-col gap-1.5">
+                      <figcaption className="td-legend">composition by kind</figcaption>
+                      <ActivityColumns buckets={kinds} height={56} />
                     </figure>
                   ) : null}
                 </div>
@@ -169,12 +196,16 @@ export function CodePage() {
                   </p>
                 );
               const capped = data.total != null && data.total > rows.length;
+              const degreeCeiling = rows.reduce(
+                (max, node) => Math.max(max, node.degree ?? 0),
+                0,
+              );
               return (
                 <VirtualList
                   items={rows}
                   getKey={(node) => node.id}
                   header={
-                    <p className="border-b border-edge-subtle px-3 py-1.5 text-2xs text-text-muted">
+                    <p className="td-legend border-b border-edge-subtle px-3 py-2">
                       {capped
                         ? `${rows.length} of ${data.total} matches`
                         : `${data.total ?? rows.length} matches`}
@@ -183,6 +214,7 @@ export function CodePage() {
                   renderItem={(node) => (
                     <SymbolRow
                       node={node}
+                      degreeCeiling={degreeCeiling}
                       selected={selected?.id === node.id}
                       onSelect={() => setSelected(node)}
                     />
@@ -243,12 +275,18 @@ function TopConnectedList({
               search the code graph to see symbols
             </p>
           );
+        // The hub list is already sorted by degree, so the ceiling is the
+        // first row: every bar below reads as a fraction of the busiest hub.
+        const degreeCeiling = hubs.reduce(
+          (max, row) => Math.max(max, (row as GraphNode).degree ?? 0),
+          0,
+        );
         return (
           <VirtualList
             items={hubs}
             getKey={(row, i) => String((row as GraphNode).id ?? i)}
             header={
-              <p className="border-b border-edge-subtle px-3 py-1.5 text-2xs text-text-muted">
+              <p className="td-legend border-b border-edge-subtle px-3 py-2">
                 most connected symbols
               </p>
             }
@@ -257,6 +295,7 @@ function TopConnectedList({
               return (
                 <SymbolRow
                   node={node}
+                  degreeCeiling={degreeCeiling}
                   selected={selected?.id === node.id}
                   onSelect={() => onSelect(node)}
                 />
@@ -271,26 +310,41 @@ function TopConnectedList({
 
 function SymbolRow({
   node,
+  degreeCeiling,
   selected,
   onSelect,
 }: {
   node: GraphNode;
+  degreeCeiling: number;
   selected: boolean;
   onSelect: () => void;
 }) {
   return (
     <DataRow selected={selected} onSelect={onSelect}>
-      <span className="w-20 shrink-0 truncate text-2xs text-text-muted">{node.kind}</span>
-      <span className="min-w-0 flex-1 truncate font-mono">
+      <span className="td-legend w-16 shrink-0 truncate">{node.kind}</span>
+      <span className="td-value min-w-0 flex-1 truncate text-text-primary">
         {node.qualified_name ?? node.name ?? node.id}
       </span>
       {node.degree != null ? (
-        <span className="tabular w-14 shrink-0 text-right text-2xs text-text-muted">
-          {node.degree} deg
+        <span className="flex w-20 shrink-0 flex-col items-end gap-1">
+          <span
+            className="td-value text-2xs leading-none text-text-secondary"
+            data-cell="numeric"
+          >
+            {node.degree}
+            <span className="td-unit ml-1">deg</span>
+          </span>
+          <Meter
+            fraction={degreeCeiling > 0 ? node.degree / degreeCeiling : null}
+            className="h-[3px] w-full"
+          />
         </span>
       ) : null}
-      <span className="w-44 shrink-0 truncate text-right font-mono text-2xs text-text-muted">
-        {node.file_path ?? ''}
+      <span
+        className="td-value w-52 shrink-0 truncate text-right text-2xs text-text-muted"
+        title={node.file_path ?? undefined}
+      >
+        {elideStart(node.file_path, 32)}
       </span>
     </DataRow>
   );
