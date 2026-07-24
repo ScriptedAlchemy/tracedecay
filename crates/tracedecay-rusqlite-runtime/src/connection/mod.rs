@@ -379,17 +379,32 @@ pub fn open_immutable_health_reader(path: &Path) -> Result<Connection, Connectio
 }
 
 fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
-    let raw = path.to_str().ok_or_else(|| ConnectionPolicyError {
-        stage: "immutable uri",
-        source: rusqlite::Error::InvalidPath(path.to_path_buf()),
-    })?;
-    let mut encoded = String::with_capacity(raw.len() + 24);
-    for ch in raw.chars() {
-        match ch {
-            '?' => encoded.push_str("%3f"),
-            '#' => encoded.push_str("%23"),
-            '%' => encoded.push_str("%25"),
-            other => encoded.push(other),
+    #[cfg(unix)]
+    let raw = {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes()
+    };
+    #[cfg(not(unix))]
+    let raw = path
+        .to_str()
+        .ok_or_else(|| ConnectionPolicyError {
+            stage: "immutable uri",
+            source: rusqlite::Error::InvalidPath(path.to_path_buf()),
+        })?
+        .as_bytes();
+
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(raw.len().saturating_mul(3).saturating_add(24));
+    for byte in raw {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                encoded.push(*byte as char)
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
         }
     }
     Ok(format!("file:{encoded}?immutable=1&mode=ro"))
