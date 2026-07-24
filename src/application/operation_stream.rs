@@ -25,9 +25,9 @@ use tracedecay_application::{
     StreamFrontier, StreamGap, StreamTermination,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, CommitId, ProjectId, RetrievalGrainV1, SessionCursorKeyIdV1,
-    SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros,
-    canonical_sha256,
+    ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
+    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
+    UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -126,6 +126,7 @@ enum OperationAuthorization {
         root_uri: String,
         head_commit_id: Option<CommitId>,
         code_generation_id: Option<CodeGenerationId>,
+        document_content_digests: BTreeMap<String, ContentDigest>,
         deadline: Deadline,
     },
 }
@@ -286,6 +287,7 @@ pub(crate) struct ManagedTestRunSnapshot {
     pub(crate) generation: u64,
     pub(crate) head_commit_id: Option<CommitId>,
     pub(crate) code_generation_id: Option<CodeGenerationId>,
+    pub(crate) document_content_digests: BTreeMap<String, ContentDigest>,
     pub(crate) deadline: Deadline,
     pub(crate) results: Vec<ManagedTestRunResult>,
     pub(crate) completed: u64,
@@ -584,6 +586,7 @@ impl OperationEventAuthority {
         request_id: RequestId,
         head_commit_id: Option<CommitId>,
         code_generation_id: Option<CodeGenerationId>,
+        document_content_digests: BTreeMap<String, ContentDigest>,
         deadline: Deadline,
     ) -> Result<OperationEmitter, OperationEventError> {
         if root_uri.len() > 4_096 || !root_uri.starts_with("file:") {
@@ -599,6 +602,7 @@ impl OperationEventAuthority {
                 root_uri,
                 head_commit_id,
                 code_generation_id,
+                document_content_digests,
                 deadline,
             },
         };
@@ -724,6 +728,13 @@ impl OperationEventAuthority {
                     code_generation_id, ..
                 } => code_generation_id.clone(),
                 OperationAuthorization::Request { .. } => None,
+            },
+            document_content_digests: match &record.binding.authorization {
+                OperationAuthorization::ProjectRoot {
+                    document_content_digests,
+                    ..
+                } => document_content_digests.clone(),
+                OperationAuthorization::Request { .. } => BTreeMap::new(),
             },
             deadline: match &record.binding.authorization {
                 OperationAuthorization::ProjectRoot { deadline, .. } => deadline.clone(),
@@ -1026,6 +1037,18 @@ impl OperationEmitter {
                 return;
             }
         }
+    }
+
+    pub(crate) async fn request_managed_test_cancellation(
+        &self,
+    ) -> Result<OperationCancelOutcome, OperationEventError> {
+        let OperationAuthorization::ProjectRoot { root_uri, .. } = &self.binding.authorization
+        else {
+            return Err(OperationEventError::NotFoundOrNotAuthorized);
+        };
+        self.authority
+            .cancel_managed_test_run(self.binding.operation_id(), root_uri)
+            .await
     }
 
     pub async fn progress(
@@ -1354,6 +1377,8 @@ fn operation_resume_verification_error(error: CursorError) -> OperationEventErro
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use tracedecay_application::{ApplicationProblemKind, Deadline, RequestId};
     use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
 
@@ -1390,6 +1415,7 @@ mod tests {
                     CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit"),
                 ),
                 Some(CodeGenerationId::new("generation.test.current").expect("code generation")),
+                BTreeMap::new(),
                 Deadline::new(UtcMicros(10_000)).expect("deadline"),
             )
             .await
@@ -1432,6 +1458,7 @@ mod tests {
                 request_id,
                 None,
                 None,
+                BTreeMap::new(),
                 Deadline::new(UtcMicros(10_000)).expect("deadline"),
             )
             .await

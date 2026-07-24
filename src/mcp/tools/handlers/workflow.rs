@@ -4,9 +4,9 @@
 //! to the code graph, so an agent receives diagnostics and test results
 //! already attached to the symbols they affect.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracedecay_application::{
-    CancellationObservation, CancellationStage, Deadline, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, RequestId,
+    CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
+    OperationReceipt, OperationTermination, RequestId,
 };
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
@@ -436,8 +436,12 @@ fn severity_string(s: Severity) -> &'static str {
 }
 
 /// Handles `tracedecay_run_affected_tests`.
-pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    handle_run_affected_tests_with_runner(cg, args, run_cargo_tests).await
+pub(super) async fn handle_run_affected_tests(
+    cg: &TraceDecay,
+    args: Value,
+    cancellation: Option<CancellationSignal>,
+) -> Result<ToolResult> {
+    handle_run_affected_tests_with_runner(cg, args, cancellation, run_cargo_tests).await
 }
 
 #[derive(Debug)]
@@ -474,6 +478,7 @@ async fn run_cargo_tests(
 async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     cg: &TraceDecay,
     args: Value,
+    cancellation: Option<CancellationSignal>,
     runner: Runner,
 ) -> Result<ToolResult>
 where
@@ -516,7 +521,7 @@ where
         ),
     ))
     .map_err(test_run_contract_error)?;
-    let emitter = begin_test_run(cg, effective_deadline.clone()).await?;
+    let emitter = begin_test_run(cg, &changed_paths, effective_deadline.clone()).await?;
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
@@ -527,10 +532,11 @@ where
         Duration::from_secs(run_args.timeout_secs),
     );
     tokio::pin!(run);
-    let mut cancellation = emitter.clone();
+    let cancellation = wait_for_test_run_cancellation(emitter.clone(), cancellation);
+    tokio::pin!(cancellation);
     let run_result = tokio::select! {
         result = &mut run => result,
-        _ = cancellation.cancelled() => {
+        _ = &mut cancellation => {
             finish_test_run(
                 &emitter,
                 started_at,
@@ -616,7 +622,30 @@ where
     ))
 }
 
-async fn begin_test_run(cg: &TraceDecay, deadline: Deadline) -> Result<OperationEmitter> {
+async fn wait_for_test_run_cancellation(
+    mut emitter: OperationEmitter,
+    cancellation: Option<CancellationSignal>,
+) {
+    loop {
+        if cancellation
+            .as_ref()
+            .is_some_and(CancellationSignal::is_cancelled)
+        {
+            let _ = emitter.request_managed_test_cancellation().await;
+            return;
+        }
+        tokio::select! {
+            () = emitter.cancelled() => return,
+            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+    }
+}
+
+async fn begin_test_run(
+    cg: &TraceDecay,
+    changed_paths: &[String],
+    deadline: Deadline,
+) -> Result<OperationEmitter> {
     let root = cg
         .project_root()
         .canonicalize()
@@ -636,16 +665,58 @@ async fn begin_test_run(cg: &TraceDecay, deadline: Deadline) -> Result<Operation
     let code_generation_id = DiagnosticsStore::new(database.conn())
         .current_generation()
         .await?;
+    let document_content_digests =
+        managed_test_document_content_digests(&root, changed_paths).await?;
     operation_event_authority()
         .begin_managed_test_run(
             root_uri,
             request_id,
             head_commit_id,
             code_generation_id,
+            document_content_digests,
             deadline,
         )
         .await
         .map_err(test_run_event_error)
+}
+
+async fn managed_test_document_content_digests(
+    root: &Path,
+    changed_paths: &[String],
+) -> Result<BTreeMap<String, tracedecay_domain::ContentDigest>> {
+    let mut digests = BTreeMap::new();
+    for changed_path in changed_paths {
+        let relative = Path::new(changed_path);
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(TraceDecayError::Config {
+                message: format!("managed test-run path is invalid: {changed_path}"),
+            });
+        }
+        let absolute = root.join(relative);
+        let bytes = match tokio::fs::read(&absolute).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "managed test-run source is unavailable for {changed_path}: {error}"
+                    ),
+                });
+            }
+        };
+        let uri = Url::from_file_path(&absolute).map_err(|()| TraceDecayError::Config {
+            message: format!("managed test-run source URI is invalid: {changed_path}"),
+        })?;
+        digests.insert(
+            uri.to_string(),
+            crate::code_index::intake::content_digest(&bytes),
+        );
+    }
+    Ok(digests)
 }
 
 fn current_head_commit_id(root: &Path) -> Option<CommitId> {
@@ -1013,7 +1084,7 @@ mod tests {
     #[allow(dead_code)]
     fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
         fn assert_send<T: Send>(_: T) {}
-        assert_send(begin_test_run(cg, deadline));
+        assert_send(begin_test_run(cg, &[], deadline));
     }
 
     #[tokio::test]
@@ -1046,6 +1117,7 @@ mod tests {
                 "max_tests": 5,
                 "format": "json"
             }),
+            None,
             move |root, profile, tests, timeout_duration| async move {
                 assert_eq!(root, expected_root);
                 assert_eq!(profile, "debug");

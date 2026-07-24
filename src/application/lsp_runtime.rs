@@ -2087,6 +2087,8 @@ mod context_expansion_tests {
 
 #[cfg(test)]
 mod projection_tests {
+    use std::collections::BTreeMap;
+
     use super::{
         LspFeedbackProjectionScope, feedback_content_is_current, finding_item, test_run_projection,
     };
@@ -2190,6 +2192,7 @@ mod projection_tests {
             generation: 7,
             head_commit_id: None,
             code_generation_id: None,
+            document_content_digests: BTreeMap::new(),
             deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
             results: Vec::new(),
             completed: 0,
@@ -2215,6 +2218,7 @@ mod projection_tests {
             generation: 7,
             head_commit_id: Some(scope.head_commit_id.clone()),
             code_generation_id: Some(scope.code_generation_id.clone()),
+            document_content_digests: BTreeMap::new(),
             deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
             results: vec![ManagedTestRunResult {
                 test: "suite::passes".to_owned(),
@@ -2246,6 +2250,7 @@ mod projection_tests {
             generation: 7,
             head_commit_id: Some(scope.head_commit_id.clone()),
             code_generation_id: Some(scope.code_generation_id.clone()),
+            document_content_digests: BTreeMap::new(),
             deadline: Deadline::new(UtcMicros(1)).expect("deadline"),
             results: Vec::new(),
             completed: 0,
@@ -2290,6 +2295,7 @@ mod projection_tests {
                 generation: 7,
                 head_commit_id: Some(scope.head_commit_id.clone()),
                 code_generation_id: Some(scope.code_generation_id.clone()),
+                document_content_digests: BTreeMap::new(),
                 deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
                 results: Vec::new(),
                 completed: 0,
