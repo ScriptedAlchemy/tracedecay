@@ -11,17 +11,20 @@ use tracedecay_application::{
     PageRequest, RequestContext, RequestId, ResolvedScope, StreamEvent,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
+    SanitizerRevision, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    DEFAULT_DEADLINE_MICROS, FeedbackSurfaceRequest, HttpCancellationRegistry,
-    HttpDisconnectCancellation, HttpOperationEventState,
-    application_surface_dispatch_input_with_controls, current_micros, http_operation_event_router,
-    parse_application_surface_request, plan26_sse_stream_event,
-    resolve_authenticated_http_request_context, surface_rejection_metadata,
+    APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceAdapterError,
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
+    FeedbackSurfaceRequest, HttpCancellationRegistry, HttpDisconnectCancellation,
+    HttpOperationEventState, PrimitiveCodeSurfaceRequest, application_negotiated_features,
+    application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
+    http_operation_event_router, parse_application_surface_request, plan26_sse_stream_event,
+    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
+    surface_rejection_metadata,
 };
 use crate::application::feedback::observations::{
     Plan26ArgumentRejectionClassV1, Plan26FeedbackOutcomeV1, Plan26RejectedArgumentV1,
@@ -29,7 +32,7 @@ use crate::application::feedback::observations::{
 use crate::application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
 };
-use crate::application::primitives::Pr12PrimitiveRequest;
+use crate::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
 use crate::daemon_client::RequestedOutputFormat;
 
 fn operation_context(project_id: &ProjectId) -> RequestContext {
@@ -133,8 +136,8 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
                         profile_id: profile_id.clone(),
                         operation: tracedecay_tool_catalog::SurfaceOperationName::new(name)
                             .expect("operation"),
-                        protocol_revision: 1,
-                        negotiated_features: BTreeSet::new(),
+                        protocol_revision: APPLICATION_PROTOCOL_REVISION,
+                        negotiated_features: application_negotiated_features(),
                     },
                 )
                 .is_some(),
@@ -153,6 +156,406 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
 }
 
 #[test]
+fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
+    let catalog = super::application_surface_catalog().expect("application catalog");
+    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .expect("application profile");
+
+    for operation in APPLICATION_SURFACE_OPERATIONS {
+        let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
+            .expect("operation name");
+        for (surface, surface_name) in [
+            (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
+            (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+        ] {
+            let binding = crate::daemon_client::BindingResolver::resolve_binding(
+                &resolver,
+                surface,
+                &crate::daemon_client::BindingResolution {
+                    profile_id: profile_id.clone(),
+                    operation: operation_name.clone(),
+                    protocol_revision: APPLICATION_PROTOCOL_REVISION,
+                    negotiated_features: application_negotiated_features(),
+                },
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} must resolve through the current {surface:?} catalog",
+                    operation.as_str()
+                )
+            });
+            assert_eq!(
+                binding.binding_id.as_str(),
+                format!("binding.{surface_name}.{}.v1", operation.as_str())
+            );
+            assert_eq!(binding.request_schema.revision(), 1);
+            assert_eq!(binding.result_schema.revision(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn execution_rejects_a_direct_operation_binding_bypass() {
+    let dispatched = resolve_application_surface_dispatch(
+        tracedecay_tool_catalog::BindingSurface::Cli,
+        ApplicationSurfaceOperation::FeedbackList,
+        RequestId::new("request.binding-bypass").expect("request"),
+        ApplicationSurfaceRequest::Feedback(
+            FeedbackSurfaceRequest::new("feedback-handle.fixture".to_owned()).expect("handle"),
+        ),
+        RequestedOutputFormat::Json,
+    )
+    .expect("canonical list dispatch");
+
+    let result = execute_application_surface(
+        ApplicationSurfaceOperation::FeedbackDiagnostics,
+        dispatched,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
+    ));
+}
+
+fn callable_code_request_body(extra: Value) -> Value {
+    let mut request = serde_json::json!({
+        "scope": {
+            "generation": "generation.callable-surface",
+            "path_prefix": "src"
+        },
+        "meta": {
+            "projection": "evidence",
+            "order": "source_position"
+        }
+    });
+    request
+        .as_object_mut()
+        .expect("request object")
+        .extend(extra.as_object().expect("extra object").clone());
+    request
+}
+
+fn callable_symbol_graph_request_body(extra: Value) -> Value {
+    let mut request = serde_json::json!({
+        "scope": {
+            "path_prefix": "src"
+        },
+        "meta": {
+            "projection": "evidence",
+            "order": "source_position"
+        }
+    });
+    request
+        .as_object_mut()
+        .expect("request object")
+        .extend(extra.as_object().expect("extra object").clone());
+    request
+}
+
+#[test]
+fn callable_code_operations_parse_distinct_application_requests() {
+    let exact = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeExactOccurrence,
+        callable_code_request_body(serde_json::json!({
+            "literal": "ApplicationSurfaceOperation",
+            "kind": "whole_symbol"
+        })),
+    )
+    .expect("exact occurrence request");
+    assert!(matches!(
+        exact,
+        ApplicationSurfaceRequest::CallableCode(
+            CallableCodeSurfaceRequest::ExactOccurrence(request)
+        ) if request.literal == "ApplicationSurfaceOperation"
+    ));
+
+    let phrase = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodePhraseSearch,
+        callable_code_request_body(serde_json::json!({
+            "query": "callable application surface",
+            "phrases": ["callable application", "surface"]
+        })),
+    )
+    .expect("phrase search request");
+    let ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::PhraseSearch(phrase)) =
+        phrase
+    else {
+        panic!("phrase search must remain a distinct callable-code request");
+    };
+    let phrase = phrase
+        .into_application_request(
+            SanitizerRevision::new("sanitizer.surface-test.v1").expect("sanitizer revision"),
+            QueryNormalizationRevision::new("normalization.surface-test.v1")
+                .expect("normalization revision"),
+            PageRequest::first(25).expect("page"),
+        )
+        .expect("validated phrase request");
+    assert_eq!(phrase.query.as_str(), "callable application surface");
+
+    let callees = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeCallees,
+        callable_code_request_body(serde_json::json!({
+            "node_id": "node.application-surface",
+            "maximum_depth": 3,
+            "resolve_trait_dispatch": true
+        })),
+    )
+    .expect("callees request");
+    assert!(matches!(
+        callees,
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Callees(request))
+            if request.node_id == "node.application-surface"
+    ));
+}
+
+#[test]
+fn callable_symbol_graph_operations_reuse_primitive_requests() {
+    let symbol_search = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        callable_symbol_graph_request_body(serde_json::json!({
+            "query": "ApplicationSurfaceOperation",
+            "lazy_index_ignored_dependencies": false
+        })),
+    )
+    .expect("symbol search request");
+    assert!(matches!(
+        &symbol_search,
+        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(request))
+            if request.query == "ApplicationSurfaceOperation"
+    ));
+    let ApplicationSurfaceRequest::PrimitiveCode(symbol_search) = symbol_search else {
+        unreachable!("parsed symbol search uses the primitive-code adapter");
+    };
+    let sanitizer_revision =
+        SanitizerRevision::new("sanitizer.daemon-owned-test.v1").expect("sanitizer revision");
+    let normalization_revision =
+        QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
+            .expect("normalization revision");
+    let Pr12PrimitiveRequest::SymbolSearch(symbol_search) = symbol_search
+        .into_primitive(
+            sanitizer_revision.clone(),
+            normalization_revision.clone(),
+            PageRequest::first(25).expect("page"),
+        )
+        .expect("daemon revisions create the primitive request")
+    else {
+        unreachable!("symbol search preserves its primitive kind");
+    };
+    assert_eq!(
+        symbol_search.query.sanitizer_revision(),
+        &sanitizer_revision
+    );
+    assert_eq!(
+        symbol_search.query.normalization_revision(),
+        &normalization_revision
+    );
+
+    let signature_search = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeSignatureSearch,
+        callable_symbol_graph_request_body(serde_json::json!({
+            "returns": "ApplicationResult",
+            "params": ["RequestContext"],
+            "is_async": true
+        })),
+    )
+    .expect("signature search request");
+    assert!(matches!(
+        signature_search,
+        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::SignatureSearch(request))
+            if request.returns.as_deref() == Some("ApplicationResult")
+    ));
+
+    let implementations = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeImplementations,
+        callable_symbol_graph_request_body(serde_json::json!({
+            "selector": {"selector": "trait", "name": "HttpApplicationOwners"}
+        })),
+    )
+    .expect("implementations request");
+    assert!(matches!(
+        implementations,
+        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::Implementations(_))
+    ));
+
+    let type_hierarchy = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeTypeHierarchy,
+        callable_symbol_graph_request_body(serde_json::json!({
+            "node_id": "node.application-surface",
+            "maximum_depth": 3
+        })),
+    )
+    .expect("type hierarchy request");
+    assert!(matches!(
+        type_hierarchy,
+        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::TypeHierarchy(request))
+            if request.node_id == "node.application-surface"
+    ));
+
+    let callers = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeCallers,
+        callable_symbol_graph_request_body(serde_json::json!({
+            "node_id": "node.application-surface",
+            "maximum_depth": 3,
+            "resolve_trait_dispatch": true
+        })),
+    )
+    .expect("callers request");
+    assert!(matches!(
+        callers,
+        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::Callers(request))
+            if request.resolve_trait_dispatch
+    ));
+}
+
+#[test]
+fn feedback_cycle_projections_require_the_canonical_handle() {
+    for operation in [
+        ApplicationSurfaceOperation::FeedbackImpact,
+        ApplicationSurfaceOperation::AffectedTests,
+    ] {
+        let request = parse_application_surface_request(
+            operation,
+            serde_json::json!({"request_handle": "rh_feedback-cycle.fixture"}),
+        )
+        .expect("canonical feedback-cycle request");
+        match request {
+            ApplicationSurfaceRequest::FeedbackImpact(request) => {
+                assert_eq!(request.request_handle, "rh_feedback-cycle.fixture");
+            }
+            ApplicationSurfaceRequest::AffectedTests(request) => {
+                assert_eq!(request.request_handle, "rh_feedback-cycle.fixture");
+            }
+            other => panic!("unexpected feedback-cycle request: {other:?}"),
+        }
+
+        assert!(matches!(
+            parse_application_surface_request(operation, serde_json::json!({"node_id": "node"})),
+            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        ));
+        assert!(matches!(
+            parse_application_surface_request(
+                operation,
+                serde_json::json!({"files": ["src/lib.rs"]})
+            ),
+            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        ));
+        assert!(matches!(
+            parse_application_surface_request(
+                operation,
+                serde_json::json!({"request_handle": " invalid"})
+            ),
+            Err(ApplicationSurfaceAdapterError::InvalidRequestHandle)
+        ));
+    }
+}
+
+#[test]
+fn callable_code_page_is_transport_owned() {
+    let rejected = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeExactOccurrence,
+        callable_code_request_body(serde_json::json!({
+            "literal": "ApplicationSurfaceOperation",
+            "kind": "whole_symbol",
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "page": { "page_size": 25, "cursor": null }
+            }
+        })),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    ));
+
+    let rejected = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        callable_symbol_graph_request_body(serde_json::json!({
+            "query": "ApplicationSurfaceOperation",
+            "lazy_index_ignored_dependencies": false,
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "page": { "page_size": 25, "cursor": null }
+            }
+        })),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    ));
+}
+
+#[test]
+fn primitive_requests_must_match_the_catalog_operation() {
+    let request = ApplicationSurfaceRequest::Primitive(Pr12PrimitiveRequest::StorageStatus(
+        StorageStatusPrimitiveRequest {
+            include_details: false,
+        },
+    ));
+    assert!(request.matches(ApplicationSurfaceOperation::StorageStatus));
+    assert!(!request.matches(ApplicationSurfaceOperation::QualifiedName));
+}
+
+#[test]
+fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
+    for (operation, name) in [
+        (
+            ApplicationSurfaceOperation::CodeExactOccurrence,
+            "code_exact_occurrence",
+        ),
+        (
+            ApplicationSurfaceOperation::CodePhraseSearch,
+            "code_phrase_search",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeSymbolSearch,
+            "code_symbol_search",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeSignatureSearch,
+            "code_signature_search",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeImplementations,
+            "code_implementations",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeTypeHierarchy,
+            "code_type_hierarchy",
+        ),
+        (ApplicationSurfaceOperation::CodeCallers, "code_callers"),
+        (ApplicationSurfaceOperation::CodeCallees, "code_callees"),
+    ] {
+        assert_eq!(operation.as_str(), name);
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")),
+            Some(operation)
+        );
+    }
+    for primitive_alias in [
+        "exact_occurrence",
+        "phrase_search",
+        "symbol_search",
+        "signature_search",
+        "implementations",
+        "type_hierarchy",
+        "callers",
+        "callees",
+    ] {
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name(primitive_alias),
+            None
+        );
+    }
+}
+
+#[test]
 fn sse_item_maps_to_content_free_delivery_lifecycle() {
     let event = StreamEvent::item(7, "content-is-not-observed").expect("stream item");
     assert_eq!(
@@ -166,7 +569,7 @@ fn sse_item_maps_to_content_free_delivery_lifecycle() {
 }
 
 #[test]
-fn dropped_http_request_cancels_the_registered_transport_token() {
+fn dropped_http_request_unregisters_without_cancelling_work() {
     let request_id = RequestId::new("request.http.disconnect").expect("request");
     let cancellation = CancellationSignal::active("cancel.http.disconnect").expect("cancellation");
     let registry: HttpCancellationRegistry = Arc::default();
@@ -176,12 +579,12 @@ fn dropped_http_request_cancels_the_registered_transport_token() {
         .insert(request_id.clone(), cancellation.clone());
 
     drop(HttpDisconnectCancellation::new(
-        registry,
-        request_id,
-        cancellation.clone(),
+        Arc::clone(&registry),
+        request_id.clone(),
     ));
 
-    assert!(cancellation.is_cancelled());
+    assert!(!cancellation.is_cancelled());
+    assert!(!registry.lock().expect("registry").contains_key(&request_id));
 }
 
 fn open_resume_token(body: &str) -> String {
@@ -239,11 +642,14 @@ async fn authenticated_context_reuses_exact_scope_and_transport_controls() {
     let request_id = RequestId::new("request.http.subscription").expect("HTTP request");
     let cancellation =
         CancellationContext::active("cancel.http.subscription").expect("HTTP cancellation");
+    let deadline =
+        Deadline::new(UtcMicros(observed_at.0.saturating_add(7_000_000))).expect("HTTP deadline");
 
     let resolved = resolve_authenticated_http_request_context(
         &state,
         &operation_id,
         request_id.clone(),
+        deadline.clone(),
         cancellation.clone(),
         observed_at,
         None,
@@ -263,10 +669,7 @@ async fn authenticated_context_reuses_exact_scope_and_transport_controls() {
     );
     assert_eq!(resolved.request_id(), &request_id);
     assert_eq!(resolved.cancellation(), &cancellation);
-    assert_eq!(
-        resolved.deadline().expires_at,
-        UtcMicros(observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS))
-    );
+    assert_eq!(resolved.deadline(), &deadline);
 }
 
 #[tokio::test]
@@ -372,6 +775,7 @@ async fn resolver_conceals_cross_project_scope_with_one_typed_denial() {
         &state,
         &operation_id,
         RequestId::new("request.http.denied").expect("request"),
+        context.deadline().clone(),
         CancellationContext::active("cancel.http.denied").expect("cancellation"),
         current_micros().expect("current time"),
         None,

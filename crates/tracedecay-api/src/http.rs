@@ -7,18 +7,32 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, CancellationSignal,
-    Deadline, PageRequest, ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective,
-    SafeDiagnostic,
+    Deadline, OpaqueCursor, PageRequest, ProblemOwningLayer, RequestId, ResultContractRef,
+    RetryDirective, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::SchemaId;
 
 use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
 
 const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
+const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpPageQuery {
+    #[serde(default = "default_http_page_size")]
+    page_size: u32,
+    #[serde(default)]
+    cursor: Option<OpaqueCursor>,
+}
+
+const fn default_http_page_size() -> u32 {
+    DEFAULT_HTTP_PAGE_SIZE
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOperation {
@@ -31,6 +45,14 @@ pub enum HttpApplicationOperation {
     FeedbackImpact,
     AffectedTests,
     TestResults,
+    CodeExactOccurrence,
+    CodePhraseSearch,
+    CodeSymbolSearch,
+    CodeSignatureSearch,
+    CodeImplementations,
+    CodeTypeHierarchy,
+    CodeCallers,
+    CodeCallees,
     SessionLookup,
     QualifiedName,
     CallChain,
@@ -63,6 +85,7 @@ pub enum HttpApplicationOperation {
 pub enum HttpApplicationOwnerKind {
     Git,
     Feedback,
+    CallableCode,
     Primitive,
     Configuration,
 }
@@ -79,6 +102,14 @@ impl HttpApplicationOperation {
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::TestResults => "test_results",
+            Self::CodeExactOccurrence => "code_exact_occurrence",
+            Self::CodePhraseSearch => "code_phrase_search",
+            Self::CodeSymbolSearch => "code_symbol_search",
+            Self::CodeSignatureSearch => "code_signature_search",
+            Self::CodeImplementations => "code_implementations",
+            Self::CodeTypeHierarchy => "code_type_hierarchy",
+            Self::CodeCallers => "code_callers",
+            Self::CodeCallees => "code_callees",
             Self::SessionLookup => "session_lookup",
             Self::QualifiedName => "qualified_name",
             Self::CallChain => "call_chain",
@@ -115,8 +146,16 @@ impl HttpApplicationOperation {
             | Self::FeedbackExpand
             | Self::FeedbackList
             | Self::FeedbackImpact => HttpApplicationOwnerKind::Feedback,
-            Self::AffectedTests
-            | Self::TestResults
+            Self::CodeExactOccurrence | Self::CodePhraseSearch | Self::CodeCallees => {
+                HttpApplicationOwnerKind::CallableCode
+            }
+            Self::AffectedTests => HttpApplicationOwnerKind::Feedback,
+            Self::TestResults
+            | Self::CodeSymbolSearch
+            | Self::CodeSignatureSearch
+            | Self::CodeImplementations
+            | Self::CodeTypeHierarchy
+            | Self::CodeCallers
             | Self::SessionLookup
             | Self::QualifiedName
             | Self::CallChain
@@ -174,6 +213,11 @@ pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
 
     fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 
+    fn invoke_callable_code(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture;
+
     fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 
     fn invoke_configuration(
@@ -192,6 +236,13 @@ where
     }
 
     fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
+        Box::pin((self)(request))
+    }
+
+    fn invoke_callable_code(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 
@@ -315,6 +366,7 @@ where
         .route("/feedback/impact", post(feedback_impact::<O>))
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
+        .route("/code/{operation}", post(callable_code_read::<O>))
         .route("/primitives/{operation}", post(primitive_read::<O>))
         .route(
             "/configuration/{operation}",
@@ -328,7 +380,7 @@ async fn git_preview<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -349,7 +401,7 @@ async fn git_apply<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -370,7 +422,7 @@ async fn feedback_diagnostics<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -391,7 +443,7 @@ async fn feedback_get<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -412,7 +464,7 @@ async fn feedback_expand<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -433,7 +485,7 @@ async fn feedback_list<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -454,7 +506,7 @@ async fn feedback_impact<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -475,7 +527,7 @@ async fn affected_tests<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -496,7 +548,7 @@ async fn test_results<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -518,7 +570,7 @@ async fn primitive_read<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -543,6 +595,40 @@ where
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
             ));
         }
+    };
+    invoke_route(operation, state, request_id, cancellation, page, body).await
+}
+
+fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    match operation {
+        "code_exact_occurrence" => Some(HttpApplicationOperation::CodeExactOccurrence),
+        "code_phrase_search" => Some(HttpApplicationOperation::CodePhraseSearch),
+        "code_symbol_search" => Some(HttpApplicationOperation::CodeSymbolSearch),
+        "code_signature_search" => Some(HttpApplicationOperation::CodeSignatureSearch),
+        "code_implementations" => Some(HttpApplicationOperation::CodeImplementations),
+        "code_type_hierarchy" => Some(HttpApplicationOperation::CodeTypeHierarchy),
+        "code_callers" => Some(HttpApplicationOperation::CodeCallers),
+        "code_callees" => Some(HttpApplicationOperation::CodeCallees),
+        _ => None,
+    }
+}
+
+async fn callable_code_read<O>(
+    Path(operation): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    let Some(operation) = parse_callable_code_operation(&operation) else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
     };
     invoke_route(operation, state, request_id, cancellation, page, body).await
 }
@@ -583,7 +669,7 @@ async fn configuration_operation<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
     cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -603,7 +689,7 @@ async fn invoke_route<O>(
     State(owners): State<O>,
     Extension(request_id): Extension<RequestId>,
     Extension(controls): Extension<HttpApplicationControls>,
-    page: Result<Query<PageRequest>, QueryRejection>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
@@ -652,6 +738,7 @@ where
     let invocation = match owner_kind {
         HttpApplicationOwnerKind::Git => owners.invoke_git(request),
         HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
+        HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
     };
@@ -660,7 +747,78 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpApplicationOperation, parse_configuration_operation};
+    use super::{
+        DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
+        parse_callable_code_operation, parse_configuration_operation,
+    };
+
+    #[test]
+    fn omitted_http_page_query_uses_the_canonical_default() {
+        let query: HttpPageQuery = serde_json::from_value(serde_json::json!({}))
+            .expect("empty HTTP query uses adapter defaults");
+        assert_eq!(query.page_size, DEFAULT_HTTP_PAGE_SIZE);
+        assert!(query.cursor.is_none());
+    }
+
+    #[test]
+    fn callable_code_operation_parser_is_exact_and_separately_owned() {
+        for (name, operation, owner) in [
+            (
+                "code_exact_occurrence",
+                HttpApplicationOperation::CodeExactOccurrence,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_phrase_search",
+                HttpApplicationOperation::CodePhraseSearch,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_symbol_search",
+                HttpApplicationOperation::CodeSymbolSearch,
+                HttpApplicationOwnerKind::Primitive,
+            ),
+            (
+                "code_signature_search",
+                HttpApplicationOperation::CodeSignatureSearch,
+                HttpApplicationOwnerKind::Primitive,
+            ),
+            (
+                "code_implementations",
+                HttpApplicationOperation::CodeImplementations,
+                HttpApplicationOwnerKind::Primitive,
+            ),
+            (
+                "code_type_hierarchy",
+                HttpApplicationOperation::CodeTypeHierarchy,
+                HttpApplicationOwnerKind::Primitive,
+            ),
+            (
+                "code_callers",
+                HttpApplicationOperation::CodeCallers,
+                HttpApplicationOwnerKind::Primitive,
+            ),
+            (
+                "code_callees",
+                HttpApplicationOperation::CodeCallees,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+        ] {
+            assert_eq!(parse_callable_code_operation(name), Some(operation));
+            assert_eq!(operation.as_str(), name);
+            assert_eq!(operation.owner_kind(), owner);
+        }
+        for rejected in [
+            "",
+            "exact_occurrence",
+            "phrase_search",
+            "callees",
+            "code_callers/",
+            "code_callees/",
+        ] {
+            assert_eq!(parse_callable_code_operation(rejected), None);
+        }
+    }
 
     #[test]
     fn configuration_operation_parser_is_exact_and_closed() {

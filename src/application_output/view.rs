@@ -19,9 +19,9 @@ pub(crate) struct HumanField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CanonicalHumanView {
-    pub heading: String,
-    pub fields: Vec<HumanField>,
+pub struct CanonicalHumanView {
+    pub(crate) heading: String,
+    pub(crate) fields: Vec<HumanField>,
 }
 
 impl CanonicalHumanView {
@@ -336,8 +336,8 @@ mod tests {
     };
     use tracedecay_domain::UtcMicros;
 
+    use super::super::markdown;
     use super::{CanonicalHumanView, payload_summary};
-    use crate::cli::output::markdown;
 
     #[test]
     fn partial_evidence_markdown_matches_the_golden_contract() {

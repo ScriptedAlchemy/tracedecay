@@ -30,7 +30,7 @@ impl MarkdownView {
     }
 }
 
-pub(crate) fn render(view: CanonicalHumanView) -> MarkdownView {
+pub fn render(view: CanonicalHumanView) -> MarkdownView {
     let mut text = format!("## {}\n", escape_text(&view.heading));
     for field in view.fields {
         text.push_str("\n- ");
@@ -59,8 +59,8 @@ fn escape_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::view::{CanonicalHumanView, HumanField, HumanFieldValue};
     use super::{HUMAN_VIEW_REVISION, MarkdownView, render};
-    use crate::cli::output::view::{CanonicalHumanView, HumanField, HumanFieldValue};
 
     #[test]
     fn carries_the_current_human_view_revision() {

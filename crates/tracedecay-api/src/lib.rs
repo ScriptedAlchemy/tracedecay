@@ -263,7 +263,7 @@ mod tests {
         );
         assert_eq!(
             HttpApplicationOperation::AffectedTests.owner_kind(),
-            HttpApplicationOwnerKind::Primitive
+            HttpApplicationOwnerKind::Feedback
         );
         assert_eq!(
             HttpApplicationOperation::DiagnosticsRead.owner_kind(),

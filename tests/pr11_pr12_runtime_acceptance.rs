@@ -4,10 +4,12 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
-use axum::body::to_bytes;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use serde_json::Value;
 use tempfile::TempDir;
+use tower::ServiceExt;
 use tracedecay::application::ProjectSourceAccessSnapshot;
 use tracedecay::application::feedback::concrete::open_pr12_feedback_runtime;
 use tracedecay::application::feedback::owner::{
@@ -20,10 +22,12 @@ use tracedecay::application::operation_stream::{
 use tracedecay::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    FeedbackSurfaceRequest, resolve_http_application_surface,
+    FeedbackSurfaceRequest, execute_application_surface, http_application_router,
+    parse_application_surface_request, resolve_application_surface_dispatch_with_controls,
+    resolve_http_application_surface,
 };
-use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
+use tracedecay::daemon::{DaemonHandshake, call_default_tool};
 use tracedecay::daemon_client::{
     DaemonInvocationClient, DaemonLspSessionClient, RequestedOutputFormat,
 };
@@ -37,9 +41,9 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblemKind, CancellationContext, CancellationObservation,
-    CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, RequestContext, RequestId,
-    ResolvedScope,
+    CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest,
+    RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
@@ -48,11 +52,12 @@ use tracedecay_domain::{
     ActorId, CommitId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
     WorktreeId,
 };
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 
 struct RuntimeFixture {
     _daemon: common::DaemonProcess,
     client: DaemonInvocationClient,
+    handshake: DaemonHandshake,
     project: PathBuf,
     _environment: common::IsolatedEnv,
 }
@@ -65,14 +70,15 @@ impl RuntimeFixture {
 
 async fn runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedEnv::acquire().await;
-    initialize_project(environment.home(), &project);
     let daemon = common::spawn_tracedecay_daemon(environment.home());
+    initialize_project(environment.home(), &project);
     let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
         .expect("daemon handshake");
-    let client = DaemonInvocationClient::for_current(handshake).expect("daemon client");
+    let client = DaemonInvocationClient::for_current(handshake.clone()).expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
+        handshake,
         project,
         _environment: environment,
     }
@@ -87,7 +93,7 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
         {
             FramePoll::Frame(frame) => {
                 let value: Value =
-                    serde_json::from_slice(frame.as_bytes()).expect("daemon LSP JSON");
+                    serde_json::from_slice(frame.as_slice()).expect("daemon LSP JSON");
                 session
                     .acknowledge_daemon_frame()
                     .await
@@ -113,13 +119,44 @@ async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
     );
 }
 
+async fn poll_lsp_context(
+    session: &mut DaemonLspSessionClient,
+    document_uri: &str,
+    kind: &str,
+    first_request_id: u64,
+) -> Value {
+    for request_id in first_request_id..first_request_id.saturating_add(100) {
+        send_lsp(
+            session,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tracedecay/context",
+                "params": {
+                    "kind": kind,
+                    "documentUri": document_uri,
+                },
+            }),
+        )
+        .await;
+        let response = poll_lsp_response(session, request_id).await;
+        if response.get("result").is_some() {
+            return response;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("production {kind} context projection did not become ready")
+}
+
 fn initialize_project(home: &Path, project: &Path) {
-    std::fs::create_dir_all(project.join("src")).expect("project source directory");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn runtime_acceptance() -> &'static str { \"ready\" }\n",
-    )
-    .expect("project source");
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/context_eval_project"),
+        project,
+    );
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pr12_managed_run_overlay"),
+        project,
+    );
     let output = common::tracedecay_command_with_home(home)
         .arg("init")
         .current_dir(project)
@@ -127,6 +164,19 @@ fn initialize_project(home: &Path, project: &Path) {
         .output()
         .expect("run tracedecay init");
     assert_command_success("tracedecay init", &output);
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("fixture destination");
+    for entry in std::fs::read_dir(source).expect("fixture directory") {
+        let entry = entry.expect("fixture entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("fixture entry type").is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
+        }
+    }
 }
 
 fn storage_status_request() -> ApplicationSurfaceRequest {
@@ -176,10 +226,193 @@ fn run_feedback_diagnostics(home: &Path, project: &Path, request_handle: &str) -
         .expect("run feedback_diagnostics")
 }
 
+fn run_application_tool(
+    home: &Path,
+    project: &Path,
+    operation: ApplicationSurfaceOperation,
+    arguments: &Value,
+) -> Output {
+    let project_arg = project.to_string_lossy().into_owned();
+    let arguments = arguments.to_string();
+    common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            operation.as_str(),
+            "--args",
+            arguments.as_str(),
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run application tool")
+}
+
+async fn assert_application_transport_parity(
+    fixture: &RuntimeFixture,
+    case: &str,
+    operation: ApplicationSurfaceOperation,
+    arguments: Value,
+) -> Value {
+    let cli = run_application_tool(fixture.home(), &fixture.project, operation, &arguments);
+    assert_command_success(operation.as_str(), &cli);
+    let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI application JSON");
+    let mcp = resolve_mcp_application_surface(
+        operation,
+        RequestId::new(format!("request.primitive-parity.mcp.{case}")).expect("MCP request id"),
+        parse_application_surface_request(operation, arguments.clone())
+            .expect("MCP surface request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP application dispatch");
+    let http = resolve_http_application_surface(
+        operation,
+        RequestId::new(format!("request.primitive-parity.http.{case}")).expect("HTTP request id"),
+        parse_application_surface_request(operation, arguments).expect("HTTP surface request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("HTTP application dispatch");
+    assert_eq!(mcp.operation, operation);
+    assert_eq!(http.operation, operation);
+    assert_eq!(mcp.requested_format, RequestedOutputFormat::Json);
+    assert_eq!(http.requested_format, RequestedOutputFormat::Json);
+    assert_eq!(
+        mcp.binding_id.as_str(),
+        format!("binding.mcp.{}.v1", operation.as_str())
+    );
+    assert_eq!(
+        http.binding_id.as_str(),
+        format!("binding.http.{}.v1", operation.as_str())
+    );
+    let expected_contract = format!(
+        "schema.application.primitive.{}.result",
+        operation.as_str().replace('_', "-")
+    );
+    for result in [&mcp, &http] {
+        let envelope = result
+            .result
+            .as_ref()
+            .expect("successful application result");
+        assert_eq!(envelope.contract.schema_id().as_str(), expected_contract);
+        assert_eq!(envelope.contract.schema_revision(), 1);
+        let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
+            panic!("primitive parity requires an evidence outcome");
+        };
+        assert_eq!(
+            evidence.execution.termination,
+            OperationTermination::Completed
+        );
+        assert_eq!(evidence.coverage.returned, evidence.page.returned);
+    }
+    assert_eq!(
+        cli["contract"]["schema_id"],
+        Value::String(expected_contract)
+    );
+    assert_eq!(cli["contract"]["schema_revision"], 1);
+    assert_eq!(cli["outcome"], "evidence");
+    assert_eq!(cli["value"]["execution"]["termination"], "completed");
+
+    let mut cli_envelope = cli.clone();
+    let mut mcp_envelope =
+        serde_json::to_value(mcp.result.as_ref().expect("MCP result")).expect("MCP envelope");
+    let mut http_envelope =
+        serde_json::to_value(http.result.as_ref().expect("HTTP result")).expect("HTTP envelope");
+    normalize_application_envelope(&mut cli_envelope);
+    normalize_application_envelope(&mut mcp_envelope);
+    normalize_application_envelope(&mut http_envelope);
+    assert_eq!(mcp_envelope, http_envelope);
+    assert_eq!(cli_envelope, mcp_envelope);
+
+    let mcp_payload = successful_application(&mcp);
+    let http_payload = successful_application(&http);
+    assert_eq!(mcp_payload, http_payload);
+    assert_eq!(cli["value"]["payload"], *mcp_payload);
+    assert_eq!(
+        cli["scope"]["project_id"],
+        serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope.project_id)
+            .expect("MCP project id")
+    );
+    assert_eq!(
+        mcp.result.as_ref().expect("MCP result").scope,
+        http.result.as_ref().expect("HTTP result").scope
+    );
+    mcp_payload.clone()
+}
+
+fn normalize_application_envelope(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for volatile in [
+                "request_id",
+                "trace_id",
+                "requested_at",
+                "resolved_at",
+                "revalidated_at",
+                "started_at",
+                "ended_at",
+                "effective_deadline",
+                "expires_at",
+                "observed_at",
+                "elapsed_micros",
+            ] {
+                fields.remove(volatile);
+            }
+            for value in fields.values_mut() {
+                normalize_application_envelope(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize_application_envelope(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
 fn feedback_diagnostics_request(request_handle: &str) -> ApplicationSurfaceRequest {
     ApplicationSurfaceRequest::Feedback(
         FeedbackSurfaceRequest::new(request_handle.to_owned()).expect("feedback request"),
     )
+}
+
+async fn run_application_http(fixture: &RuntimeFixture, path: &str, arguments: &Value) -> Value {
+    let app = http_application_router(
+        fixture.client.clone(),
+        OperationEventAuthority::default(),
+        ProjectId::new("project.runtime-http-mount").expect("HTTP mount project"),
+    )
+    .expect("production HTTP application router");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(arguments.to_string()))
+                .expect("HTTP application request"),
+        )
+        .await
+        .expect("HTTP application response");
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("HTTP application body"),
+    )
+    .expect("HTTP application JSON")
+}
+
+fn successful_http_payload(result: &Value) -> &Value {
+    assert_eq!(result["kind"], "success");
+    assert_eq!(result["value"]["outcome"], "evidence");
+    &result["value"]["value"]["payload"]
 }
 
 fn assert_command_success(label: &str, output: &Output) {
@@ -258,16 +491,121 @@ async fn project_open_application_boundary() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
+    let fixture = runtime_fixture().await;
+    let page = serde_json::json!({ "page_size": 10, "cursor": null });
+    let authenticate = assert_application_transport_parity(
+        &fixture,
+        "qualified-name-authenticate",
+        ApplicationSurfaceOperation::QualifiedName,
+        serde_json::json!({
+            "qualified_name": "src/auth/login.rs::authenticate",
+            "page": page,
+        }),
+    )
+    .await;
+    let authenticate_id = authenticate["symbols"][0]["node_id"]
+        .as_str()
+        .expect("authenticate fixture symbol");
+    assert_eq!(authenticate["symbols"][0]["file"], "src/auth/login.rs");
+
+    let create_session = assert_application_transport_parity(
+        &fixture,
+        "qualified-name-create-session",
+        ApplicationSurfaceOperation::QualifiedName,
+        serde_json::json!({
+            "qualified_name": "src/auth/session.rs::create_session",
+            "page": { "page_size": 10, "cursor": null },
+        }),
+    )
+    .await;
+    let create_session_id = create_session["symbols"][0]["node_id"]
+        .as_str()
+        .expect("create_session fixture symbol");
+
+    let call_chain = assert_application_transport_parity(
+        &fixture,
+        "call-chain",
+        ApplicationSurfaceOperation::CallChain,
+        serde_json::json!({
+            "from_node_id": authenticate_id,
+            "to_node_id": create_session_id,
+            "maximum_depth": 8,
+        }),
+    )
+    .await;
+    assert_eq!(call_chain["node_ids"][0], authenticate_id);
+    assert_eq!(
+        call_chain["node_ids"]
+            .as_array()
+            .expect("call-chain nodes")
+            .last()
+            .and_then(Value::as_str),
+        Some(create_session_id)
+    );
+
+    let dependents = assert_application_transport_parity(
+        &fixture,
+        "file-dependents",
+        ApplicationSurfaceOperation::FileDependents,
+        serde_json::json!({ "file": "src/auth/session.rs" }),
+    )
+    .await;
+    assert_eq!(dependents["file"], "src/auth/session.rs");
+    assert!(dependents["dependent_files"].as_array().is_some());
+
+    let source_path = fixture.project.join("src/auth/login.rs");
+    let source_len = std::fs::metadata(source_path)
+        .expect("fixture source metadata")
+        .len();
+    let source_lines = assert_application_transport_parity(
+        &fixture,
+        "source-lines",
+        ApplicationSurfaceOperation::SourceLines,
+        serde_json::json!({
+            "file": "src/auth/login.rs",
+            "span": { "start_byte": 0, "end_byte": source_len },
+            "meta": {
+                "temporal": "current",
+                "page": { "page_size": 10, "cursor": null },
+                "projection": "references_only",
+                "order": "source_position",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(
+        source_lines["references"][0]["span"],
+        serde_json::json!({ "start_byte": 0, "end_byte": source_len })
+    );
+
+    let source_body = assert_application_transport_parity(
+        &fixture,
+        "source-body",
+        ApplicationSurfaceOperation::SourceBody,
+        serde_json::json!({ "node_id": authenticate_id }),
+    )
+    .await;
+    assert_eq!(source_body["file"], "src/auth/login.rs");
+    assert!(
+        source_body["body"]
+            .as_str()
+            .expect("authenticate source body")
+            .contains("create_session(username)")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
     let fixture = runtime_fixture().await;
     let root_uri = url::Url::from_directory_path(&fixture.project)
         .expect("project root URI")
         .to_string();
-    let document_uri = url::Url::from_file_path(fixture.project.join("src/lib.rs"))
+    let document_uri = url::Url::from_file_path(fixture.project.join("src/auth/login.rs"))
         .expect("document URI")
         .to_string();
-    let source =
-        std::fs::read_to_string(fixture.project.join("src/lib.rs")).expect("project source");
+    let source = std::fs::read_to_string(fixture.project.join("src/auth/login.rs"))
+        .expect("checked-in fixture source");
     let mut session = DaemonLspSessionClient::open(
         fixture.client.clone(),
         "3.17",
@@ -279,9 +617,9 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
     let projections = [
         "diagnostics",
-        "post_edit_impact",
-        "affected_tests",
-        "test_run_results",
+        "postEditImpact",
+        "affectedTests",
+        "testRunResults",
     ]
     .into_iter()
     .map(|kind| {
@@ -364,29 +702,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     )
     .await;
 
-    let mut ready = None;
-    for request_id in 2..=100 {
-        send_lsp(
-            &mut session,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "tracedecay/context",
-                "params": {
-                    "kind": "diagnostics",
-                    "documentUri": document_uri,
-                },
-            }),
-        )
-        .await;
-        let response = poll_lsp_response(&mut session, request_id).await;
-        if response.get("result").is_some() {
-            ready = Some(response);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let projection = ready.expect("production context projection became ready");
+    let projection = poll_lsp_context(&mut session, &document_uri, "diagnostics", 2).await;
     assert_eq!(projection["result"]["rootUri"], root_uri);
     assert_eq!(projection["result"]["documentUri"], document_uri);
     assert_eq!(projection["result"]["kind"], "diagnostics");
@@ -404,6 +720,69 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         projection["result"]["identity"]["codeGenerationId"]
             .as_str()
             .is_some()
+    );
+    let mut related_lsp_handles = Vec::new();
+    for (kind, first_request_id) in [("postEditImpact", 102), ("affectedTests", 202)] {
+        let related = poll_lsp_context(&mut session, &document_uri, kind, first_request_id).await;
+        assert_eq!(related["result"]["rootUri"], root_uri);
+        assert_eq!(related["result"]["documentUri"], document_uri);
+        assert_eq!(related["result"]["kind"], kind);
+        assert_eq!(related["result"]["revision"], TRACEDECAY_CONTEXT_REVISION);
+        assert!(related["result"]["retrievalHandle"].as_str().is_some());
+        assert_eq!(
+            related["result"]["identity"],
+            projection["result"]["identity"]
+        );
+        related_lsp_handles.push(
+            related["result"]["retrievalHandle"]
+                .as_str()
+                .expect("related LSP retrieval handle")
+                .to_owned(),
+        );
+    }
+
+    let managed_run = call_default_tool(
+        &fixture.handshake,
+        "tracedecay_run_affected_tests",
+        serde_json::json!({
+            "changed_paths": ["src/auth/login.rs"],
+            "profile": "debug",
+            "timeout_secs": 60,
+            "max_tests": 1,
+            "format": "json",
+        }),
+    )
+    .await;
+    let managed_run = managed_run.expect("run affected tests through production daemon");
+    let managed_run: Value = serde_json::from_str(
+        managed_run["content"][0]["text"]
+            .as_str()
+            .expect("managed test-run JSON content"),
+    )
+    .expect("managed test-run payload");
+    assert_eq!(managed_run["passed"], 1);
+    assert_eq!(managed_run["failed"], 0);
+
+    let test_results = poll_lsp_context(&mut session, &document_uri, "testRunResults", 302).await;
+    assert_eq!(test_results["result"]["rootUri"], root_uri);
+    assert_eq!(test_results["result"]["documentUri"], document_uri);
+    assert_eq!(test_results["result"]["kind"], "testRunResults");
+    assert_eq!(
+        test_results["result"]["revision"],
+        TRACEDECAY_CONTEXT_REVISION
+    );
+    assert_eq!(test_results["result"]["coverage"], "complete");
+    assert_eq!(test_results["result"]["producerState"], "complete");
+    assert_eq!(
+        test_results["result"]["identity"],
+        projection["result"]["identity"]
+    );
+    assert_eq!(
+        test_results["result"]["items"]
+            .as_array()
+            .expect("managed test-run projection items")
+            .len(),
+        1
     );
 
     let lsp_handle = projection["result"]["retrievalHandle"]
@@ -437,31 +816,137 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     )
     .await
     .expect("MCP feedback dispatch");
-    let http = resolve_http_application_surface(
-        ApplicationSurfaceOperation::FeedbackDiagnostics,
-        RequestId::new("request.feedback-parity.http").expect("request id"),
-        feedback_diagnostics_request(canonical_handle),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
-    )
-    .await
-    .expect("HTTP feedback dispatch");
+    let feedback_arguments = serde_json::json!({ "request_handle": canonical_handle });
+    let http = run_application_http(&fixture, "/feedback/diagnostics", &feedback_arguments).await;
     let mcp_payload = successful_application(&mcp);
-    let http_payload = successful_application(&http);
+    let http_payload = successful_http_payload(&http);
     assert_eq!(mcp_payload, http_payload);
     assert_eq!(cli["value"]["payload"], *mcp_payload);
+    assert_eq!(
+        http["value"]["scope"],
+        serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope)
+            .expect("MCP feedback scope")
+    );
+
+    for lsp_handle in related_lsp_handles {
+        let record = match retrieve_response_handle(
+            &fixture.project,
+            &lsp_handle,
+            wall_clock_micros().0.div_euclid(1_000_000),
+        )
+        .expect("read related LSP response handle")
+        {
+            ResponseHandleLookup::Found(record) => record,
+            other => panic!("related LSP response handle unavailable: {other:?}"),
+        };
+        let record: Value =
+            serde_json::from_str(&record.content).expect("related LSP handle record");
+        assert_eq!(record["canonical_handle"], canonical_handle);
+    }
+
+    for (operation, path, expected_contract, projection_key) in [
+        (
+            ApplicationSurfaceOperation::FeedbackImpact,
+            "/feedback/impact",
+            "schema.application.feedback.impact.result",
+            "impact",
+        ),
+        (
+            ApplicationSurfaceOperation::AffectedTests,
+            "/tests/affected",
+            "schema.application.feedback.affected-tests.result",
+            "affected_tests",
+        ),
+    ] {
+        let cli = run_application_tool(
+            fixture.home(),
+            &fixture.project,
+            operation,
+            &feedback_arguments,
+        );
+        assert_command_success(operation.as_str(), &cli);
+        let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI feedback projection JSON");
+        let mcp = resolve_mcp_application_surface(
+            operation,
+            RequestId::new(format!(
+                "request.feedback-parity.mcp.{}",
+                operation.as_str()
+            ))
+            .expect("request id"),
+            parse_application_surface_request(operation, feedback_arguments.clone())
+                .expect("feedback projection request"),
+            RequestedOutputFormat::Json,
+            Some(&fixture.client),
+        )
+        .await
+        .expect("MCP feedback projection dispatch");
+        let http = run_application_http(&fixture, path, &feedback_arguments).await;
+        assert_eq!(mcp.operation, operation);
+        assert_eq!(
+            mcp.binding_id.as_str(),
+            format!("binding.mcp.{}.v1", operation.as_str())
+        );
+        let mcp_envelope = mcp.result.as_ref().expect("MCP feedback projection");
+        assert_eq!(
+            mcp_envelope.contract.schema_id().as_str(),
+            expected_contract
+        );
+        assert_eq!(mcp_envelope.contract.schema_revision(), 1);
+        let ApplicationOutcome::Evidence(evidence) = &mcp_envelope.outcome else {
+            panic!("feedback projection requires an evidence outcome");
+        };
+        assert_eq!(
+            evidence.execution.termination,
+            OperationTermination::Completed
+        );
+        assert_eq!(evidence.coverage.returned, evidence.page.returned);
+        assert_eq!(
+            cli["contract"]["schema_id"],
+            Value::String(expected_contract.to_owned())
+        );
+        assert_eq!(cli["outcome"], "evidence");
+        assert_eq!(cli["value"]["execution"]["termination"], "completed");
+        assert_eq!(http["value"]["contract"]["schema_id"], expected_contract);
+        assert_eq!(
+            http["value"]["binding_id"],
+            format!("binding.http.{}.v1", operation.as_str())
+        );
+        let projected_payload = successful_application(&mcp);
+        assert_ne!(projected_payload, mcp_payload);
+        assert!(
+            projected_payload.get(projection_key).is_some(),
+            "{} must expose its distinct {projection_key} projection",
+            operation.as_str()
+        );
+        assert_eq!(successful_http_payload(&http), projected_payload);
+        assert_eq!(cli["value"]["payload"], *projected_payload);
+
+        let mut cli_envelope = cli.clone();
+        let mut mcp_envelope =
+            serde_json::to_value(mcp_envelope).expect("MCP feedback projection envelope");
+        let mut http_envelope = http["value"].clone();
+        http_envelope
+            .as_object_mut()
+            .expect("HTTP success envelope")
+            .remove("binding_id");
+        normalize_application_envelope(&mut cli_envelope);
+        normalize_application_envelope(&mut mcp_envelope);
+        normalize_application_envelope(&mut http_envelope);
+        assert_eq!(cli_envelope, mcp_envelope);
+        assert_eq!(mcp_envelope, http_envelope);
+    }
 
     send_lsp(
         &mut session,
         serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 101,
+            "id": 402,
             "method": "tracedecay/context/expand",
             "params": { "retrievalHandle": lsp_handle },
         }),
     )
     .await;
-    let expanded = poll_lsp_response(&mut session, 101).await;
+    let expanded = poll_lsp_response(&mut session, 402).await;
     assert_eq!(expanded["result"]["coverage"], "complete");
     assert_eq!(
         expanded["result"]["evidence"]["Ok"]["outcome"]["value"]["payload"],
@@ -539,6 +1024,14 @@ async fn feedback_handle_bootstrap_reads() {
     ));
 }
 
+fn assert_exact_markdown_field(markdown: &str, label: &str, expected: &str) {
+    let expected = format!("- {label}: `{expected}`");
+    assert!(
+        markdown.lines().any(|line| line == expected),
+        "missing exact Markdown field {expected:?}\n{markdown}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn primitive_config_markdown_json_parity() {
     let fixture = runtime_fixture().await;
@@ -588,17 +1081,182 @@ async fn primitive_config_markdown_json_parity() {
     let markdown = String::from_utf8(markdown.stdout).expect("UTF-8 markdown");
     let json: Value = serde_json::from_slice(&json.stdout).expect("CLI JSON");
 
-    assert!(markdown.contains("## storage_status"));
-    assert!(markdown.contains("- Status: `success`"));
-    assert!(markdown.contains("- Outcome: `evidence`"));
-    assert!(markdown.contains("object(keys="));
-    assert!(markdown.contains("read_only"));
-    assert!(markdown.contains("status"));
+    assert_eq!(
+        markdown.lines().next(),
+        Some("## storage\\_status"),
+        "the operation heading uses the canonical Markdown escaping contract"
+    );
+    assert_exact_markdown_field(&markdown, "Operation", "storage_status");
+    assert_exact_markdown_field(&markdown, "Binding", "binding.cli.storage_status.v1");
+    assert_exact_markdown_field(
+        &markdown,
+        "Contract",
+        "schema.application.primitive.storage-status.result@1",
+    );
+    assert_exact_markdown_field(&markdown, "Status", "success");
+    assert_exact_markdown_field(&markdown, "Outcome", "evidence");
+    assert_exact_markdown_field(
+        &markdown,
+        "Scope project",
+        json["scope"]["project_id"]
+            .as_str()
+            .expect("JSON project scope"),
+    );
+    assert_exact_markdown_field(
+        &markdown,
+        "Scope repository",
+        json["scope"]["repository_id"]
+            .as_str()
+            .expect("JSON repository scope"),
+    );
+    assert_exact_markdown_field(
+        &markdown,
+        "Scope worktree",
+        json["scope"]["worktree_id"]
+            .as_str()
+            .expect("JSON worktree scope"),
+    );
+    assert_exact_markdown_field(
+        &markdown,
+        "Scope reference",
+        json["scope"]["reference"].as_str().unwrap_or("none"),
+    );
+    assert_exact_markdown_field(
+        &markdown,
+        "Scope digest",
+        json["scope"]["scope_digest"]
+            .as_str()
+            .expect("JSON scope digest"),
+    );
+    assert_exact_markdown_field(
+        &markdown,
+        "Freshness",
+        json["value"]["temporal"]["freshness"]
+            .as_str()
+            .expect("JSON freshness"),
+    );
+    assert_exact_markdown_field(
+        &markdown,
+        "Coverage",
+        json["value"]["coverage"]["completeness"]
+            .as_str()
+            .expect("JSON coverage"),
+    );
+    assert_exact_markdown_field(
+        &markdown,
+        "Page returned",
+        &json["value"]["page"]["returned"].to_string(),
+    );
+    let page_total = json["value"]["page"]["total"]
+        .as_u64()
+        .map_or_else(|| "unknown".to_owned(), |total| total.to_string());
+    assert_exact_markdown_field(&markdown, "Page total", &page_total);
+    let cursor = json["value"]["page"]["cursor"].as_str().unwrap_or("none");
+    assert_exact_markdown_field(&markdown, "Cursor", cursor);
+    assert_exact_markdown_field(&markdown, "Termination", "completed");
+    assert_exact_markdown_field(&markdown, "Cancellation stage", "none");
+
+    let payload = &json["value"]["payload"];
+    let payload_bytes = serde_json::to_vec(payload)
+        .expect("serialize JSON payload")
+        .len();
+    let payload_summary = format!(
+        "- Payload: object(keys=database\\_bytes,details,read\\_only,status; json\\_bytes={payload_bytes}); complete: --json"
+    );
+    assert!(
+        markdown.lines().any(|line| line == payload_summary),
+        "missing exact Markdown payload summary {payload_summary:?}\n{markdown}"
+    );
     assert_eq!(json["outcome"], "evidence");
     assert_eq!(
         &json["value"]["payload"],
         successful_application(&json_result)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_cancelled_application_has_cli_mcp_http_parity() {
+    let fixture = runtime_fixture().await;
+    let operation = ApplicationSurfaceOperation::StorageStatus;
+    let observed_at = wall_clock_micros();
+    let deadline =
+        Deadline::new(UtcMicros(observed_at.0.saturating_add(60_000_000))).expect("deadline");
+    let mut canonical_problem = None;
+
+    for (surface, surface_name) in [
+        (BindingSurface::Cli, "cli"),
+        (BindingSurface::Mcp, "mcp"),
+        (BindingSurface::Http, "http"),
+    ] {
+        let request_id = RequestId::new(format!("request.pre-cancelled-parity.{surface_name}"))
+            .expect("request id");
+        let cancellation =
+            CancellationSignal::active(format!("cancel.pre-cancelled-parity.{surface_name}"))
+                .expect("cancellation");
+        assert!(cancellation.cancel(observed_at));
+        let dispatched = resolve_application_surface_dispatch_with_controls(
+            surface,
+            operation,
+            request_id,
+            storage_status_request(),
+            PageRequest::first(10).expect("page"),
+            Some(deadline.clone()),
+            cancellation,
+            RequestedOutputFormat::Json,
+        )
+        .expect("pre-cancelled surface dispatch");
+        let result = execute_application_surface(operation, dispatched, Some(&fixture.client))
+            .await
+            .expect("pre-cancelled application invocation");
+
+        assert_eq!(result.operation, operation);
+        assert_eq!(
+            result.binding_id.as_str(),
+            format!("binding.{surface_name}.storage_status.v1")
+        );
+        let problem = result
+            .result
+            .expect_err("pre-cancelled request must not be admitted");
+        assert_eq!(
+            problem.contract.schema_id().as_str(),
+            "schema.application.primitive.storage-status.result"
+        );
+        assert_eq!(problem.contract.schema_revision(), 1);
+        assert_eq!(problem.problem.kind(), ApplicationProblemKind::Cancelled);
+        assert_eq!(
+            problem.problem.cancellation_stage,
+            Some(CancellationStage::BeforeAdmission)
+        );
+        assert!(problem.problem.is_pre_admission());
+
+        let mut normalized = serde_json::to_value(problem).expect("application problem envelope");
+        normalize_application_envelope(&mut normalized);
+        if let Some(expected) = &canonical_problem {
+            assert_eq!(&normalized, expected);
+        } else {
+            canonical_problem = Some(normalized);
+        }
+    }
+}
+
+fn parse_sse_frames(body: &str) -> Vec<(String, Option<u64>, Value)> {
+    body.split("\n\n")
+        .filter_map(|frame| {
+            let mut event = None;
+            let mut id = None;
+            let mut data = None;
+            for line in frame.lines() {
+                if let Some(value) = line.strip_prefix("event: ") {
+                    event = Some(value.to_owned());
+                } else if let Some(value) = line.strip_prefix("id: ") {
+                    id = Some(value.parse().expect("numeric SSE event id"));
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data = Some(serde_json::from_str(value).expect("SSE JSON data"));
+                }
+            }
+            event.map(|event| (event, id, data.expect("SSE event data")))
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -684,12 +1342,52 @@ async fn cancellation_capacity_resume() {
             .to_vec(),
     )
     .expect("UTF-8 SSE");
-    assert!(body.contains("event: open"));
-    assert!(body.contains("event: resume_gap"));
-    assert!(body.contains("\"first_missing_sequence\":1"));
-    assert!(body.contains("\"last_missing_sequence\":2"));
-    assert!(body.contains("event: cancelled"));
-    assert!(body.contains("\"termination\":\"cancelled\""));
+    let frames = parse_sse_frames(&body);
+    assert_eq!(
+        frames
+            .iter()
+            .map(|(event, _, _)| event.as_str())
+            .collect::<Vec<_>>(),
+        ["open", "resume_gap", "progress", "cancelled"]
+    );
+    assert_eq!(
+        frames.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(),
+        [None, Some(1), Some(3), Some(4)]
+    );
+    assert_eq!(frames[0].2["event"], "open");
+    assert_eq!(
+        frames[0].2["data"]["correlation_id"],
+        context.request_id().as_str()
+    );
+    assert_eq!(frames[0].2["data"]["frontier"]["next_sequence"], 5);
+    assert_eq!(frames[0].2["data"]["frontier"]["retained_from_sequence"], 3);
+    assert_eq!(
+        frames[0].2["data"]["frontier"]["resume_token"],
+        resume_token.as_str()
+    );
+    assert_eq!(frames[1].2["event"], "resume_gap");
+    assert_eq!(frames[1].2["data"]["sequence"], 1);
+    assert_eq!(frames[1].2["data"]["gap"]["first_missing_sequence"], 1);
+    assert_eq!(frames[1].2["data"]["gap"]["last_missing_sequence"], 2);
+    assert_eq!(
+        frames[1].2["data"]["gap"]["frontier"],
+        frames[0].2["data"]["frontier"]
+    );
+    assert_eq!(frames[2].2["event"], "progress");
+    assert_eq!(frames[2].2["data"]["sequence"], 3);
+    assert_eq!(frames[2].2["data"]["completed"], 3);
+    assert_eq!(frames[2].2["data"]["total"], 3);
+    assert_eq!(frames[3].2["event"], "cancelled");
+    assert_eq!(frames[3].2["data"]["sequence"], 4);
+    assert_eq!(frames[3].2["data"]["terminal"]["termination"], "cancelled");
+    assert_eq!(
+        frames[3].2["data"]["terminal"]["receipt"]["termination"],
+        "cancelled"
+    );
+    assert_eq!(
+        frames[3].2["data"]["terminal"]["receipt"]["cancellation"]["stage"],
+        "during_read"
+    );
 
     authority
         .begin(&other_context, OperationKind::GitPreview, UtcMicros(107))

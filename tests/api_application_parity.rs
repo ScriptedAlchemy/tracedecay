@@ -2,7 +2,11 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
 use tracedecay::application_surface::{
     APPLICATION_SURFACE_OPERATIONS, AffectedTestsSurfaceRequest, ApplicationSurfaceOperation,
     ApplicationSurfaceRequest, FeedbackImpactSurfaceRequest, FeedbackSurfaceRequest,
@@ -19,9 +23,13 @@ use tracedecay::mcp::tools::dispatch::{
     resolve_mcp_application_surface, resolve_mcp_application_surface_dispatch,
 };
 use tracedecay::mcp::tools::get_tool_definitions;
-use tracedecay_api::{CanonicalInvocationResult, HttpSseEvent};
+use tracedecay_api::{
+    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
+    application_router,
+};
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, ApplicationProblemKind, IdempotencyKey, RequestId,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationProblem, ApplicationProblemEnvelope,
+    ApplicationProblemKind, CancellationSignal, Deadline, IdempotencyKey, RequestId,
     ResultContractRef, RetryDirective, StreamEvent,
 };
 use tracedecay_domain::{
@@ -31,10 +39,62 @@ use tracedecay_domain::{
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
-use tracedecay_tool_catalog::{BindingSurface, ProfileId, SchemaId, SurfaceOperationName};
+use tracedecay_tool_catalog::{
+    BindingId, BindingSurface, ProfileId, SchemaId, SurfaceOperationName,
+};
 
 const PARITY_FIXTURE: &str =
     include_str!("../benchmarks/pr12-transport-boundary/goldens/application-surface-parity.json");
+
+#[tokio::test]
+async fn http_routes_apply_the_canonical_page_default_when_query_is_omitted() {
+    let observed = Arc::new(Mutex::new(None));
+    let capture = Arc::clone(&observed);
+    let owner = move |request: HttpApplicationRequest| {
+        let capture = Arc::clone(&capture);
+        async move {
+            *capture.lock().expect("capture HTTP page") = Some(request.page);
+            CanonicalInvocationResult::<serde_json::Value>::new(
+                BindingId::new("binding.http.feedback_diagnostics.v1").expect("binding"),
+                Err(ApplicationProblemEnvelope::new(
+                    ResultContractRef::new(
+                        SchemaId::new("schema.application.feedback.diagnostics.result")
+                            .expect("schema"),
+                        1,
+                    )
+                    .expect("result contract"),
+                    request.request_id,
+                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+                )),
+            )
+        }
+    };
+    let request = Request::builder()
+        .method("POST")
+        .uri("/feedback/diagnostics")
+        .header("content-type", "application/json")
+        .extension(RequestId::new("request.http-default-page").expect("request id"))
+        .extension(HttpApplicationControls {
+            deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            cancellation: CancellationSignal::active("cancel.http-default-page")
+                .expect("cancellation"),
+        })
+        .body(Body::from("{}"))
+        .expect("HTTP request");
+
+    let response = application_router(owner)
+        .oneshot(request)
+        .await
+        .expect("HTTP response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let page = observed
+        .lock()
+        .expect("read captured HTTP page")
+        .clone()
+        .expect("owner invoked");
+    assert_eq!(page.page_size, 10);
+    assert!(page.cursor.is_none());
+}
 
 #[test]
 fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
@@ -127,6 +187,11 @@ fn extended_primitive_reads_bind_cli_mcp_and_http() {
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
     for operation in [
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        ApplicationSurfaceOperation::CodeSignatureSearch,
+        ApplicationSurfaceOperation::CodeImplementations,
+        ApplicationSurfaceOperation::CodeTypeHierarchy,
+        ApplicationSurfaceOperation::CodeCallers,
         ApplicationSurfaceOperation::SessionLookup,
         ApplicationSurfaceOperation::QualifiedName,
         ApplicationSurfaceOperation::CallChain,
@@ -227,6 +292,39 @@ fn mcp_primitive_definitions_use_application_contracts() {
         );
         tracedecay::application_surface::parse_application_surface_request(operation, request)
             .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
+    }
+}
+
+#[test]
+fn mcp_feedback_cycle_projection_schemas_require_only_the_canonical_handle() {
+    let definitions = get_tool_definitions();
+    for operation in [
+        ApplicationSurfaceOperation::FeedbackImpact,
+        ApplicationSurfaceOperation::AffectedTests,
+    ] {
+        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} definition"));
+        assert_eq!(
+            definition.input_schema["properties"]
+                .as_object()
+                .expect("feedback-cycle properties")
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["request_handle"])
+        );
+        assert_eq!(
+            definition.input_schema["required"],
+            serde_json::json!(["request_handle"])
+        );
+        tracedecay::application_surface::parse_application_surface_request(
+            operation,
+            serde_json::json!({"request_handle": "rh_feedback-cycle.fixture"}),
+        )
+        .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
     }
 }
 
@@ -414,24 +512,12 @@ fn application_request(
         ApplicationSurfaceOperation::GitApply => git_requests().1,
         ApplicationSurfaceOperation::FeedbackImpact => {
             ApplicationSurfaceRequest::FeedbackImpact(FeedbackImpactSurfaceRequest {
-                node_id: expected["request"]["node_id"]
-                    .as_str()
-                    .expect("impact node")
-                    .to_owned(),
-                maximum_depth: 3,
-                path_prefix: None,
+                request_handle: "rh_missing-pr12-parity".to_owned(),
             })
         }
         ApplicationSurfaceOperation::AffectedTests => {
             ApplicationSurfaceRequest::AffectedTests(AffectedTestsSurfaceRequest {
-                files: vec![
-                    expected["request"]["files"][0]
-                        .as_str()
-                        .expect("affected file")
-                        .to_owned(),
-                ],
-                maximum_depth: 5,
-                filter: None,
+                request_handle: "rh_missing-pr12-parity".to_owned(),
             })
         }
         ApplicationSurfaceOperation::TestResults => {

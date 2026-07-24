@@ -1,9 +1,4 @@
-//! Shared CLI presentation contracts.
-//!
-//! These helpers preserve the application's canonical problem and cursor
-//! contracts while leaving transport-specific rendering to each surface.
+//! Binary aliases for the shared application presentation contracts.
 
-pub mod json;
-pub mod markdown;
 pub mod problem;
-pub(crate) mod view;
+pub(crate) use tracedecay::application_output::{json, markdown, view};

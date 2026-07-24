@@ -3,6 +3,97 @@ use serde_json::json;
 use super::{def, def_always_load, def_rw, required_object_schema, string_property};
 use crate::mcp::tools::ToolDefinition;
 
+fn closed_object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    let mut schema = required_object_schema(properties, required);
+    schema["additionalProperties"] = json!(false);
+    schema
+}
+
+fn page_request_schema() -> serde_json::Value {
+    closed_object_schema(
+        json!({
+            "page_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+            },
+            "cursor": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "maxLength": 4096
+            }
+        }),
+        &["page_size"],
+    )
+}
+
+fn temporal_mode_schema() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            closed_object_schema(json!({"kind": {"const": "current"}}), &["kind"]),
+            closed_object_schema(
+                json!({
+                    "kind": {"const": "as_of"},
+                    "cutoff": {"type": "integer"}
+                }),
+                &["kind", "cutoff"]
+            ),
+            closed_object_schema(json!({"kind": {"const": "evolution"}}), &["kind"]),
+            closed_object_schema(json!({"kind": {"const": "forensic"}}), &["kind"])
+        ]
+    })
+}
+
+fn retrieval_meta_schema() -> serde_json::Value {
+    closed_object_schema(
+        json!({
+            "temporal": temporal_mode_schema(),
+            "page": page_request_schema(),
+            "projection": {
+                "type": "string",
+                "enum": ["summary", "evidence", "references_only"]
+            },
+            "order": {
+                "type": "string",
+                "enum": [
+                    "relevance",
+                    "source_position",
+                    "temporal_descending",
+                    "stable_identity"
+                ]
+            }
+        }),
+        &["temporal", "page", "projection", "order"],
+    )
+}
+
+fn source_span_schema() -> serde_json::Value {
+    closed_object_schema(
+        json!({
+            "start_byte": {"type": "integer", "minimum": 0},
+            "end_byte": {"type": "integer", "minimum": 0}
+        }),
+        &["start_byte", "end_byte"],
+    )
+}
+
+fn diagnostics_scope_schema() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            {"const": "workspace"},
+            closed_object_schema(
+                json!({"package": string_property("Exact package diagnostic scope.")}),
+                &["package"]
+            ),
+            closed_object_schema(
+                json!({"file": string_property("Exact file diagnostic scope.")}),
+                &["file"]
+            )
+        ],
+        "description": "Workspace, package, or file diagnostic scope."
+    })
+}
+
 fn git_read_bounds() -> serde_json::Value {
     json!({
         "max_entries": {
@@ -136,11 +227,14 @@ fn feedback_surface_definition(
     description: &str,
     writes: bool,
 ) -> ToolDefinition {
-    let schema = required_object_schema(
+    let schema = closed_object_schema(
         json!({
-            "request_handle": string_property(
-                "Daemon-minted opaque request handle. Clients cannot reconstruct application requests from this value."
-            )
+            "request_handle": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Daemon-minted opaque request handle. Clients cannot reconstruct application requests from this value."
+            }
         }),
         &["request_handle"],
     );
@@ -236,56 +330,80 @@ pub(super) fn def_feedback_list() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_feedback_impact() -> ToolDefinition {
+fn context_scout_read_definition(name: &str, title: &str, description: &str) -> ToolDefinition {
     def(
-        "tracedecay_feedback_impact",
-        "Read feedback impact",
-        "Resolve impact for one symbol through the daemon-retained PR12 primitive owner, preserving canonical coverage, partial state, and continuation.",
+        name,
+        title,
+        description,
         required_object_schema(
             json!({
-                "node_id": string_property("Exact graph node identity."),
-                "maximum_depth": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 64,
-                    "default": 3
+                "envelope": {
+                    "type": "object",
+                    "description": "Exact authenticated Hook V2 envelope for the owning session."
                 },
-                "path_prefix": {
-                    "type": ["string", "null"],
-                    "description": "Optional admitted-root-relative scope prefix."
+                "native_session_id": string_property(
+                    "Native session identity whose protected digest must match the envelope."
+                ),
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 32,
+                    "default": 8,
+                    "description": "Maximum bounded recent Scout records."
                 }
             }),
-            &["node_id"],
+            &["envelope", "native_session_id"],
         ),
     )
 }
 
+pub(super) fn def_context_scout_recent() -> ToolDefinition {
+    context_scout_read_definition(
+        "tracedecay_context_scout_recent",
+        "Read recent Context Scout state",
+        "Read authenticated pending and delivered Scout state for the exact owning session.",
+    )
+}
+
+pub(super) fn def_context_scout_explain() -> ToolDefinition {
+    context_scout_read_definition(
+        "tracedecay_context_scout_explain",
+        "Explain Context Scout state",
+        "Explain authenticated Scout routing, suppression, delivery, and explicit feedback state.",
+    )
+}
+
+pub(super) fn def_context_scout_capability() -> ToolDefinition {
+    context_scout_read_definition(
+        "tracedecay_context_scout_capability",
+        "Read Context Scout capability",
+        "Read authenticated deterministic and configured-model Scout capability state.",
+    )
+}
+
+pub(super) fn def_context_scout_budget() -> ToolDefinition {
+    context_scout_read_definition(
+        "tracedecay_context_scout_budget",
+        "Read Context Scout budget",
+        "Read authenticated Scout limits and the latest model usage receipt.",
+    )
+}
+
+pub(super) fn def_feedback_impact() -> ToolDefinition {
+    feedback_surface_definition(
+        "tracedecay_feedback_impact",
+        "Read feedback impact",
+        "Project impact from the authorized completed feedback cycle identified by its daemon-minted opaque handle.",
+        false,
+    )
+}
+
 pub(super) fn def_affected_tests() -> ToolDefinition {
-    def(
+    feedback_surface_definition(
         "tracedecay_affected_tests",
         "Read affected tests",
-        "Resolve changed files through the daemon-retained PR12 test primitive with canonical ranking, coverage, partial state, and opaque continuation.",
-        required_object_schema(
-            json!({
-                "files": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 256,
-                    "items": {"type": "string"}
-                },
-                "maximum_depth": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 10,
-                    "default": 5
-                },
-                "filter": {
-                    "type": ["string", "null"],
-                    "description": "Optional bounded test-file filter."
-                }
-            }),
-            &["files"],
-        ),
+        "Project affected tests from the authorized completed feedback cycle identified by its daemon-minted opaque handle.",
+        false,
     )
 }
 
@@ -294,7 +412,7 @@ pub(super) fn def_test_results() -> ToolDefinition {
         "tracedecay_test_results",
         "Read recent test results",
         "Read the latest daemon-retained managed test result for the admitted project root.",
-        required_object_schema(json!({}), &[]),
+        closed_object_schema(json!({}), &[]),
     )
 }
 
@@ -308,7 +426,7 @@ fn primitive_read_definition(
         &format!("tracedecay_{operation}"),
         title,
         "Invoke the daemon-retained typed primitive owner and preserve its canonical evidence envelope.",
-        required_object_schema(properties, required),
+        closed_object_schema(properties, required),
     )
 }
 
@@ -318,7 +436,7 @@ pub(super) fn def_session_lookup() -> ToolDefinition {
         "Look up a session",
         json!({
             "session_id": string_property("Exact session identity."),
-            "meta": {"type": "object", "description": "Canonical retrieval metadata."}
+            "meta": retrieval_meta_schema()
         }),
         &["session_id", "meta"],
     )
@@ -330,7 +448,7 @@ pub(super) fn def_qualified_name_read() -> ToolDefinition {
         "Read qualified symbols",
         json!({
             "qualified_name": string_property("Exact qualified symbol name."),
-            "page": {"type": "object", "description": "Canonical page request."}
+            "page": page_request_schema()
         }),
         &["qualified_name", "page"],
     )
@@ -369,8 +487,8 @@ pub(super) fn def_source_lines_read() -> ToolDefinition {
         "Read source lines",
         json!({
             "file": string_property("Exact file occurrence identity."),
-            "span": {"type": "object", "description": "Canonical source span."},
-            "meta": {"type": "object", "description": "Canonical retrieval metadata."}
+            "span": source_span_schema(),
+            "meta": retrieval_meta_schema()
         }),
         &["file", "span", "meta"],
     )
@@ -423,7 +541,7 @@ pub(super) fn def_health_read() -> ToolDefinition {
     primitive_read_definition(
         "health_read",
         "Read project health",
-        json!({"meta": {"type": "object", "description": "Canonical retrieval metadata."}}),
+        json!({"meta": retrieval_meta_schema()}),
         &["meta"],
     )
 }
@@ -433,7 +551,7 @@ pub(super) fn def_storage_status_read() -> ToolDefinition {
         "tracedecay_storage_status",
         "Read storage status",
         "Invoke the daemon-retained typed primitive owner and preserve its canonical evidence envelope.",
-        required_object_schema(
+        closed_object_schema(
             json!({
                 "include_details": {
                     "type": "boolean",
@@ -451,11 +569,554 @@ pub(super) fn def_diagnostics_read() -> ToolDefinition {
         "diagnostics_read",
         "Read canonical diagnostics",
         json!({
-            "scope": {"description": "Workspace, package, or file diagnostic scope."},
+            "scope": diagnostics_scope_schema(),
             "maximum_diagnostics": {"type": "integer", "minimum": 1, "maximum": 10000}
         }),
         &["scope", "maximum_diagnostics"],
     )
+}
+
+fn callable_code_scope_schema() -> serde_json::Value {
+    closed_object_schema(
+        json!({
+            "generation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Exact immutable code-index generation identity."
+            },
+            "path_prefix": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Optional admitted-root-relative path prefix."
+            }
+        }),
+        &["generation"],
+    )
+}
+
+fn callable_code_meta_schema() -> serde_json::Value {
+    closed_object_schema(
+        json!({
+            "projection": {
+                "type": "string",
+                "enum": ["summary", "evidence", "references_only"]
+            },
+            "order": {
+                "type": "string",
+                "enum": [
+                    "relevance",
+                    "source_position",
+                    "temporal_descending",
+                    "stable_identity"
+                ]
+            }
+        }),
+        &["projection", "order"],
+    )
+}
+
+fn callable_symbol_graph_scope_schema() -> serde_json::Value {
+    closed_object_schema(
+        json!({
+            "path_prefix": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Optional admitted-root-relative path prefix."
+            }
+        }),
+        &[],
+    )
+}
+
+fn callable_symbol_graph_definition(
+    operation: &str,
+    title: &str,
+    mut properties: serde_json::Value,
+    required: &[&str],
+) -> ToolDefinition {
+    if let Some(properties) = properties.as_object_mut() {
+        properties.insert("scope".to_owned(), callable_symbol_graph_scope_schema());
+        properties.insert("meta".to_owned(), callable_code_meta_schema());
+    }
+    primitive_read_definition(operation, title, properties, required)
+}
+
+fn callable_code_definition(
+    operation: &str,
+    title: &str,
+    description: &str,
+    mut properties: serde_json::Value,
+    required: &[&str],
+) -> ToolDefinition {
+    if let Some(properties) = properties.as_object_mut() {
+        properties.insert("scope".to_owned(), callable_code_scope_schema());
+        properties.insert("meta".to_owned(), callable_code_meta_schema());
+    }
+    def(
+        &format!("tracedecay_{operation}"),
+        title,
+        description,
+        closed_object_schema(properties, required),
+    )
+}
+
+pub(super) fn def_code_exact_occurrence() -> ToolDefinition {
+    callable_code_definition(
+        "code_exact_occurrence",
+        "Find exact code occurrences",
+        "Invoke the callable code_exact_occurrence application surface and preserve its generation-bound canonical evidence envelope.",
+        json!({
+            "literal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Exact technical literal to match."
+            },
+            "kind": {
+                "type": ["string", "null"],
+                "enum": [
+                    null,
+                    "whole_symbol",
+                    "qualified_name",
+                    "path",
+                    "compiler_error_code",
+                    "compiler_error_text",
+                    "runtime_error_code",
+                    "runtime_error_text",
+                    "cli_flag",
+                    "tool_name",
+                    "configuration_key",
+                    "commit_identifier"
+                ],
+                "description": "Optional exact technical-term classification."
+            }
+        }),
+        &["literal", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_phrase_search() -> ToolDefinition {
+    callable_code_definition(
+        "code_phrase_search",
+        "Search code phrases",
+        "Invoke the callable code_phrase_search application surface and preserve its generation-bound canonical evidence envelope.",
+        json!({
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Sanitized lexical query text."
+            },
+            "phrases": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                },
+                "description": "Required bounded phrases that constrain lexical matching."
+            }
+        }),
+        &["query", "phrases", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_symbol_search() -> ToolDefinition {
+    callable_symbol_graph_definition(
+        "code_symbol_search",
+        "Search callable code symbols",
+        json!({
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+            },
+            "lazy_index_ignored_dependencies": {
+                "type": "boolean"
+            }
+        }),
+        &["query", "lazy_index_ignored_dependencies", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_signature_search() -> ToolDefinition {
+    callable_symbol_graph_definition(
+        "code_signature_search",
+        "Search callable code signatures",
+        json!({
+            "returns": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "maxLength": 4096
+            },
+            "params": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                }
+            },
+            "is_async": {
+                "type": ["boolean", "null"]
+            }
+        }),
+        &["params", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_implementations() -> ToolDefinition {
+    callable_symbol_graph_definition(
+        "code_implementations",
+        "Read callable code implementations",
+        json!({
+            "selector": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "selector": {"const": "trait"},
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 4096
+                            }
+                        },
+                        "required": ["selector", "name"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "selector": {"const": "method"},
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 4096
+                            }
+                        },
+                        "required": ["selector", "name"],
+                        "additionalProperties": false
+                    }
+                ]
+            }
+        }),
+        &["selector", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_type_hierarchy() -> ToolDefinition {
+    callable_symbol_graph_definition(
+        "code_type_hierarchy",
+        "Read callable code type hierarchy",
+        json!({
+            "node_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+            },
+            "maximum_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+            }
+        }),
+        &["node_id", "maximum_depth", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_callers() -> ToolDefinition {
+    callable_symbol_graph_definition(
+        "code_callers",
+        "Read callable code callers",
+        json!({
+            "node_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+            },
+            "maximum_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+            },
+            "resolve_trait_dispatch": {
+                "type": "boolean"
+            }
+        }),
+        &[
+            "node_id",
+            "maximum_depth",
+            "resolve_trait_dispatch",
+            "scope",
+            "meta",
+        ],
+    )
+}
+
+pub(super) fn def_code_callees() -> ToolDefinition {
+    callable_code_definition(
+        "code_callees",
+        "Read callable code callees",
+        "Invoke the callable code_callees application surface and preserve its generation-bound canonical evidence envelope.",
+        json!({
+            "node_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Exact graph node identity."
+            },
+            "maximum_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+            },
+            "resolve_trait_dispatch": {
+                "type": "boolean",
+                "description": "Whether to include concrete implementations reached through trait dispatch."
+            }
+        }),
+        &[
+            "node_id",
+            "maximum_depth",
+            "resolve_trait_dispatch",
+            "scope",
+            "meta",
+        ],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pr12_primitive_definitions_expose_closed_typed_request_schemas() {
+        let definitions = [
+            def_feedback_diagnostics(),
+            def_feedback_get(),
+            def_feedback_expand(),
+            def_feedback_list(),
+            def_feedback_impact(),
+            def_affected_tests(),
+            def_test_results(),
+            def_session_lookup(),
+            def_qualified_name_read(),
+            def_call_chain_read(),
+            def_file_dependents_read(),
+            def_source_lines_read(),
+            def_source_body_read(),
+            def_source_outline_read(),
+            def_module_api_read(),
+            def_file_metadata_read(),
+            def_health_read(),
+            def_storage_status_read(),
+            def_diagnostics_read(),
+            def_code_exact_occurrence(),
+            def_code_phrase_search(),
+            def_code_symbol_search(),
+            def_code_signature_search(),
+            def_code_implementations(),
+            def_code_type_hierarchy(),
+            def_code_callers(),
+            def_code_callees(),
+        ];
+
+        for definition in definitions {
+            assert_eq!(
+                definition.input_schema["additionalProperties"],
+                json!(false),
+                "{} must reject fields denied by its typed DTO",
+                definition.name
+            );
+        }
+
+        let session = def_session_lookup();
+        let meta = &session.input_schema["properties"]["meta"];
+        assert_eq!(
+            meta["required"],
+            json!(["temporal", "page", "projection", "order"])
+        );
+        assert_eq!(meta["additionalProperties"], json!(false));
+        assert_eq!(meta["properties"]["page"]["required"], json!(["page_size"]));
+        assert_eq!(
+            meta["properties"]["page"]["additionalProperties"],
+            json!(false)
+        );
+
+        let qualified_name = def_qualified_name_read();
+        assert_eq!(
+            qualified_name.input_schema["properties"]["page"]["required"],
+            json!(["page_size"])
+        );
+
+        let source_lines = def_source_lines_read();
+        assert_eq!(
+            source_lines.input_schema["properties"]["span"]["required"],
+            json!(["start_byte", "end_byte"])
+        );
+        assert_eq!(
+            source_lines.input_schema["properties"]["span"]["additionalProperties"],
+            json!(false)
+        );
+
+        let diagnostics = def_diagnostics_read();
+        let scope = &diagnostics.input_schema["properties"]["scope"];
+        assert_eq!(scope["oneOf"][0]["const"], "workspace");
+        assert_eq!(scope["oneOf"][1]["required"], json!(["package"]));
+        assert_eq!(scope["oneOf"][2]["required"], json!(["file"]));
+    }
+
+    #[test]
+    fn callable_code_definitions_use_distinct_surface_operation_names() {
+        let definitions = [
+            def_code_exact_occurrence(),
+            def_code_phrase_search(),
+            def_code_symbol_search(),
+            def_code_signature_search(),
+            def_code_implementations(),
+            def_code_type_hierarchy(),
+            def_code_callers(),
+            def_code_callees(),
+        ];
+
+        assert_eq!(
+            definitions.map(|definition| definition.name),
+            [
+                "tracedecay_code_exact_occurrence",
+                "tracedecay_code_phrase_search",
+                "tracedecay_code_symbol_search",
+                "tracedecay_code_signature_search",
+                "tracedecay_code_implementations",
+                "tracedecay_code_type_hierarchy",
+                "tracedecay_code_callers",
+                "tracedecay_code_callees",
+            ]
+        );
+    }
+
+    #[test]
+    fn callable_code_definitions_expose_typed_request_schemas() {
+        let exact = def_code_exact_occurrence();
+        assert_eq!(exact.input_schema["additionalProperties"], json!(false));
+        assert_eq!(
+            exact.input_schema["required"],
+            json!(["literal", "scope", "meta"])
+        );
+        assert_eq!(
+            exact.input_schema["properties"]["kind"]["enum"],
+            json!([
+                null,
+                "whole_symbol",
+                "qualified_name",
+                "path",
+                "compiler_error_code",
+                "compiler_error_text",
+                "runtime_error_code",
+                "runtime_error_text",
+                "cli_flag",
+                "tool_name",
+                "configuration_key",
+                "commit_identifier"
+            ])
+        );
+        assert_eq!(
+            exact.input_schema["properties"]["meta"]["required"],
+            json!(["projection", "order"])
+        );
+        assert_eq!(
+            exact.input_schema["properties"]["meta"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            exact.input_schema["properties"]["scope"]["additionalProperties"],
+            json!(false)
+        );
+        assert!(
+            exact.input_schema["properties"]["meta"]["properties"]
+                .get("page")
+                .is_none()
+        );
+
+        let phrase = def_code_phrase_search();
+        assert_eq!(
+            phrase.input_schema["required"],
+            json!(["query", "phrases", "scope", "meta"])
+        );
+        assert_eq!(phrase.input_schema["properties"]["phrases"]["maxItems"], 32);
+
+        let symbol_search = def_code_symbol_search();
+        assert_eq!(
+            symbol_search.input_schema["required"],
+            json!(["query", "lazy_index_ignored_dependencies", "scope", "meta"])
+        );
+        assert_eq!(
+            symbol_search.input_schema["properties"]["meta"]["required"],
+            json!(["projection", "order"])
+        );
+        assert!(
+            symbol_search.input_schema["properties"]["meta"]["properties"]
+                .get("page")
+                .is_none()
+        );
+
+        let signature_search = def_code_signature_search();
+        assert_eq!(
+            signature_search.input_schema["required"],
+            json!(["params", "scope", "meta"])
+        );
+        assert_eq!(
+            signature_search.input_schema["properties"]["params"]["maxItems"],
+            32
+        );
+
+        let implementations = def_code_implementations();
+        assert_eq!(
+            implementations.input_schema["properties"]["selector"]["oneOf"][0]["properties"]["selector"]
+                ["const"],
+            "trait"
+        );
+
+        let type_hierarchy = def_code_type_hierarchy();
+        assert_eq!(
+            type_hierarchy.input_schema["properties"]["maximum_depth"]["maximum"],
+            10
+        );
+
+        let callers = def_code_callers();
+        assert_eq!(
+            callers.input_schema["required"],
+            json!([
+                "node_id",
+                "maximum_depth",
+                "resolve_trait_dispatch",
+                "scope",
+                "meta"
+            ])
+        );
+
+        let callees = def_code_callees();
+        assert_eq!(
+            callees.input_schema["required"],
+            json!([
+                "node_id",
+                "maximum_depth",
+                "resolve_trait_dispatch",
+                "scope",
+                "meta"
+            ])
+        );
+        assert_eq!(
+            callees.input_schema["properties"]["maximum_depth"]["maximum"],
+            10
+        );
+    }
 }
 
 fn configuration_definition(

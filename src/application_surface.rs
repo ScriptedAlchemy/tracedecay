@@ -26,7 +26,9 @@ use tracedecay_api::{
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
-    AffectedFileTestsPrimitiveRequest, GraphImpactPrimitiveRequest, SymbolGraphScope,
+    CodeQueryScope, CodeRelationRequest, ExactOccurrenceRequest, GraphRelationRequest,
+    ImplementationSelector, ImplementationsRequest, PhraseSearchRequest, SignatureSearchRequest,
+    SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
@@ -43,12 +45,14 @@ use tracedecay_domain::configuration::{
     ProtectedChange, RollbackModeV1, SettingKey,
 };
 use tracedecay_domain::{
-    GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexTransactionOperationV1,
-    HunkRefV1, ManifestDigest, ProjectId, RepositoryStateSnapshotV1, UtcMicros, canonical_sha256,
+    ExactTechnicalTermKindV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
+    GitIndexTransactionOperationV1, HunkRefV1, ManifestDigest, ProjectId,
+    QueryNormalizationRevision, RepositoryStateSnapshotV1, SanitizerRevision, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{
-    BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, IdentifierError,
-    ProfileId, SchemaId, SurfaceOperationName, UseCaseId,
+    BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
+    IdentifierError, ProfileId, SchemaId, SurfaceOperationName, UseCaseId,
 };
 
 use crate::application::feedback::observations::{
@@ -77,6 +81,7 @@ use crate::daemon_client::{
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
+const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 const MAX_REQUEST_HANDLE_BYTES: usize = 256;
 static NEXT_HTTP_APPLICATION_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -93,6 +98,14 @@ pub enum ApplicationSurfaceOperation {
     FeedbackImpact,
     AffectedTests,
     TestResults,
+    CodeExactOccurrence,
+    CodePhraseSearch,
+    CodeSymbolSearch,
+    CodeSignatureSearch,
+    CodeImplementations,
+    CodeTypeHierarchy,
+    CodeCallers,
+    CodeCallees,
     SessionLookup,
     QualifiedName,
     CallChain,
@@ -120,7 +133,7 @@ pub enum ApplicationSurfaceOperation {
     ConfigurationAudit,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 34] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 42] = [
     ApplicationSurfaceOperation::GitPreview,
     ApplicationSurfaceOperation::GitApply,
     ApplicationSurfaceOperation::FeedbackDiagnostics,
@@ -130,6 +143,14 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 34] = [
     ApplicationSurfaceOperation::FeedbackImpact,
     ApplicationSurfaceOperation::AffectedTests,
     ApplicationSurfaceOperation::TestResults,
+    ApplicationSurfaceOperation::CodeExactOccurrence,
+    ApplicationSurfaceOperation::CodePhraseSearch,
+    ApplicationSurfaceOperation::CodeSymbolSearch,
+    ApplicationSurfaceOperation::CodeSignatureSearch,
+    ApplicationSurfaceOperation::CodeImplementations,
+    ApplicationSurfaceOperation::CodeTypeHierarchy,
+    ApplicationSurfaceOperation::CodeCallers,
+    ApplicationSurfaceOperation::CodeCallees,
     ApplicationSurfaceOperation::SessionLookup,
     ApplicationSurfaceOperation::QualifiedName,
     ApplicationSurfaceOperation::CallChain,
@@ -169,6 +190,14 @@ impl ApplicationSurfaceOperation {
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::TestResults => "test_results",
+            Self::CodeExactOccurrence => "code_exact_occurrence",
+            Self::CodePhraseSearch => "code_phrase_search",
+            Self::CodeSymbolSearch => "code_symbol_search",
+            Self::CodeSignatureSearch => "code_signature_search",
+            Self::CodeImplementations => "code_implementations",
+            Self::CodeTypeHierarchy => "code_type_hierarchy",
+            Self::CodeCallers => "code_callers",
+            Self::CodeCallees => "code_callees",
             Self::SessionLookup => "session_lookup",
             Self::QualifiedName => "qualified_name",
             Self::CallChain => "call_chain",
@@ -227,34 +256,242 @@ impl FeedbackSurfaceRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AffectedTestsSurfaceRequest {
-    pub files: Vec<String>,
-    #[serde(default = "default_affected_tests_depth")]
-    pub maximum_depth: usize,
-    #[serde(default)]
-    pub filter: Option<String>,
+    pub request_handle: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackImpactSurfaceRequest {
-    pub node_id: String,
-    #[serde(default = "default_impact_depth")]
-    pub maximum_depth: u32,
-    #[serde(default)]
-    pub path_prefix: Option<String>,
-}
-
-const fn default_impact_depth() -> u32 {
-    3
-}
-
-const fn default_affected_tests_depth() -> usize {
-    5
+    pub request_handle: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TestResultsSurfaceRequest {}
+
+/// Surface-owned query semantics. Pagination remains an invocation control so
+/// CLI, MCP, and HTTP cannot supply conflicting page authorities.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CallableCodeSurfaceMeta {
+    pub projection: ResultProjection,
+    pub order: RetrievalOrder,
+}
+
+impl CallableCodeSurfaceMeta {
+    fn into_application(self, page: PageRequest) -> RetrievalRequestMeta {
+        RetrievalRequestMeta::current(page, self.projection, self.order)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeExactOccurrenceSurfaceRequest {
+    pub literal: String,
+    pub kind: Option<ExactTechnicalTermKindV1>,
+    pub scope: CodeQueryScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+impl CodeExactOccurrenceSurfaceRequest {
+    pub fn into_application_request(
+        self,
+        page: PageRequest,
+    ) -> Result<ExactOccurrenceRequest, ApplicationContractError> {
+        ExactOccurrenceRequest::new(
+            self.literal,
+            self.kind,
+            self.scope,
+            self.meta.into_application(page),
+        )
+    }
+}
+
+/// Serializable adapter DTO for the request-local phrase query view.
+///
+/// The callable application request deliberately keeps its sanitized query
+/// non-serializable. The owning runtime supplies the exact sanitizer
+/// revisions when converting this transport DTO.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodePhraseSearchSurfaceRequest {
+    pub query: String,
+    pub phrases: Vec<String>,
+    pub scope: CodeQueryScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeSymbolSearchSurfaceRequest {
+    pub query: String,
+    pub scope: SymbolGraphScope,
+    pub lazy_index_ignored_dependencies: bool,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+impl CodeSymbolSearchSurfaceRequest {
+    pub(crate) fn into_primitive_request(
+        self,
+        sanitizer_revision: SanitizerRevision,
+        normalization_revision: QueryNormalizationRevision,
+        page: PageRequest,
+    ) -> Result<SymbolSearchPrimitiveRequest, ApplicationContractError> {
+        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
+            self.query,
+            sanitizer_revision,
+            normalization_revision,
+        )?;
+        Ok(SymbolSearchPrimitiveRequest {
+            query,
+            scope: self.scope,
+            lazy_index_ignored_dependencies: self.lazy_index_ignored_dependencies,
+            meta: self.meta.into_application(page),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeSignatureSearchSurfaceRequest {
+    pub returns: Option<String>,
+    pub params: Vec<String>,
+    pub is_async: Option<bool>,
+    pub scope: SymbolGraphScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeImplementationsSurfaceRequest {
+    pub selector: ImplementationSelector,
+    pub scope: SymbolGraphScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeTypeHierarchySurfaceRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub scope: SymbolGraphScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeCallersSurfaceRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub resolve_trait_dispatch: bool,
+    pub scope: SymbolGraphScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum PrimitiveCodeSurfaceRequest {
+    SymbolSearch(CodeSymbolSearchSurfaceRequest),
+    SignatureSearch(CodeSignatureSearchSurfaceRequest),
+    Implementations(CodeImplementationsSurfaceRequest),
+    TypeHierarchy(CodeTypeHierarchySurfaceRequest),
+    Callers(CodeCallersSurfaceRequest),
+}
+
+impl PrimitiveCodeSurfaceRequest {
+    pub(crate) fn into_primitive(
+        self,
+        sanitizer_revision: SanitizerRevision,
+        normalization_revision: QueryNormalizationRevision,
+        page: PageRequest,
+    ) -> Result<Pr12PrimitiveRequest, ApplicationContractError> {
+        Ok(match self {
+            Self::SymbolSearch(request) => Pr12PrimitiveRequest::SymbolSearch(
+                request.into_primitive_request(sanitizer_revision, normalization_revision, page)?,
+            ),
+            Self::SignatureSearch(request) => {
+                Pr12PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
+                    returns: request.returns,
+                    params: request.params,
+                    is_async: request.is_async,
+                    scope: request.scope,
+                    meta: request.meta.into_application(page),
+                })
+            }
+            Self::Implementations(request) => {
+                Pr12PrimitiveRequest::Implementations(ImplementationsRequest {
+                    selector: request.selector,
+                    scope: request.scope,
+                    meta: request.meta.into_application(page),
+                })
+            }
+            Self::TypeHierarchy(request) => {
+                Pr12PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
+                    node_id: request.node_id,
+                    maximum_depth: request.maximum_depth,
+                    scope: request.scope,
+                    meta: request.meta.into_application(page),
+                })
+            }
+            Self::Callers(request) => Pr12PrimitiveRequest::Callers(GraphRelationRequest {
+                node_id: request.node_id,
+                maximum_depth: request.maximum_depth,
+                resolve_trait_dispatch: request.resolve_trait_dispatch,
+                scope: request.scope,
+                meta: request.meta.into_application(page),
+            }),
+        })
+    }
+}
+
+impl CodePhraseSearchSurfaceRequest {
+    pub fn into_application_request(
+        self,
+        sanitizer_revision: SanitizerRevision,
+        normalization_revision: QueryNormalizationRevision,
+        page: PageRequest,
+    ) -> Result<PhraseSearchRequest, ApplicationContractError> {
+        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
+            self.query,
+            sanitizer_revision,
+            normalization_revision,
+        )?;
+        PhraseSearchRequest::new(
+            query,
+            self.phrases,
+            self.scope,
+            self.meta.into_application(page),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeCalleesSurfaceRequest {
+    pub node_id: String,
+    pub maximum_depth: u32,
+    pub resolve_trait_dispatch: bool,
+    pub scope: CodeQueryScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+impl CodeCalleesSurfaceRequest {
+    pub fn into_application_request(self, page: PageRequest) -> CodeRelationRequest {
+        CodeRelationRequest {
+            node_id: self.node_id,
+            maximum_depth: self.maximum_depth,
+            resolve_trait_dispatch: self.resolve_trait_dispatch,
+            scope: self.scope,
+            meta: self.meta.into_application(page),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum CallableCodeSurfaceRequest {
+    ExactOccurrence(CodeExactOccurrenceSurfaceRequest),
+    PhraseSearch(CodePhraseSearchSurfaceRequest),
+    Callees(CodeCalleesSurfaceRequest),
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -403,6 +640,8 @@ pub enum ApplicationSurfaceRequest {
     FeedbackImpact(FeedbackImpactSurfaceRequest),
     AffectedTests(AffectedTestsSurfaceRequest),
     TestResults(TestResultsSurfaceRequest),
+    CallableCode(CallableCodeSurfaceRequest),
+    PrimitiveCode(PrimitiveCodeSurfaceRequest),
     Primitive(Pr12PrimitiveRequest),
     Configuration(ConfigurationSurfaceRequest),
 }
@@ -515,13 +754,18 @@ async fn application_http_context(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let default_expires_at = observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS);
-    let caller_expires_at = request
-        .headers()
-        .get(HTTP_DEADLINE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(default_expires_at);
-    let Ok(deadline) = Deadline::new(UtcMicros(caller_expires_at.min(default_expires_at))) else {
+    let caller_expires_at = match request.headers().get(HTTP_DEADLINE_HEADER) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(expires_at) => expires_at,
+            None => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        None => default_expires_at,
+    };
+    let Ok(deadline) = Deadline::new(UtcMicros(caller_expires_at)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     request.extensions_mut().insert(request_id.clone());
@@ -533,7 +777,7 @@ async fn application_http_context(
     if let Ok(mut active) = cancellations.lock() {
         active.insert(request_id.clone(), cancellation.clone());
     }
-    let mut disconnect = HttpDisconnectCancellation::new(cancellations, request_id, cancellation);
+    let mut disconnect = HttpDisconnectCancellation::new(cancellations, request_id);
     let response = next.run(request).await;
     disconnect.disarm();
     response
@@ -542,20 +786,14 @@ async fn application_http_context(
 struct HttpDisconnectCancellation {
     registry: HttpCancellationRegistry,
     request_id: RequestId,
-    cancellation: CancellationSignal,
     armed: bool,
 }
 
 impl HttpDisconnectCancellation {
-    fn new(
-        registry: HttpCancellationRegistry,
-        request_id: RequestId,
-        cancellation: CancellationSignal,
-    ) -> Self {
+    fn new(registry: HttpCancellationRegistry, request_id: RequestId) -> Self {
         Self {
             registry,
             request_id,
-            cancellation,
             armed: true,
         }
     }
@@ -571,9 +809,6 @@ impl HttpDisconnectCancellation {
 impl Drop for HttpDisconnectCancellation {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self
-                .cancellation
-                .cancel(current_micros().unwrap_or(UtcMicros(1)));
             if let Ok(mut active) = self.registry.lock() {
                 active.remove(&self.request_id);
             }
@@ -666,14 +901,11 @@ async fn resolve_authenticated_http_request_context(
     state: &HttpOperationEventState,
     operation_id: &OperationId,
     request_id: RequestId,
+    deadline: Deadline,
     cancellation: CancellationContext,
     observed_at: UtcMicros,
     resume_token: Option<&ResumeToken>,
 ) -> Result<RequestContext, OperationEventError> {
-    let deadline = Deadline::new(UtcMicros(
-        observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS),
-    ))
-    .map_err(|error| OperationEventError::InvalidContext(error.to_string()))?;
     state
         .authority
         .resolve_request_context(
@@ -735,7 +967,7 @@ async fn http_operation_events(
     State(state): State<HttpOperationEventState>,
     AxumPath(operation_id): AxumPath<String>,
     Extension(request_id): Extension<RequestId>,
-    Extension(cancellation): Extension<CancellationSignal>,
+    Extension(controls): Extension<HttpApplicationControls>,
     Query(query): Query<HttpOperationEventQuery>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
@@ -771,7 +1003,8 @@ async fn http_operation_events(
         &state,
         &operation_id,
         request_id.clone(),
-        cancellation.context(),
+        controls.deadline,
+        controls.cancellation.context(),
         observed_at,
         query.resume_token.as_ref(),
     )
@@ -913,7 +1146,7 @@ async fn http_operation_cancel(
     State(state): State<HttpOperationEventState>,
     AxumPath(operation_id): AxumPath<String>,
     Extension(request_id): Extension<RequestId>,
-    Extension(cancellation): Extension<CancellationSignal>,
+    Extension(controls): Extension<HttpApplicationControls>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
     let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
@@ -948,7 +1181,8 @@ async fn http_operation_cancel(
         &state,
         &operation_id,
         request_id.clone(),
-        cancellation.context(),
+        controls.deadline,
+        controls.cancellation.context(),
         observed_at,
         None,
     )
@@ -1188,8 +1422,8 @@ pub fn application_surface_dispatch_input_with_controls(
         binding: BindingResolution {
             profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?,
             operation: SurfaceOperationName::new(operation.as_str())?,
-            protocol_revision: 1,
-            negotiated_features: BTreeSet::new(),
+            protocol_revision: APPLICATION_PROTOCOL_REVISION,
+            negotiated_features: application_negotiated_features(),
         },
         request,
         controls: InvocationControls {
@@ -1228,19 +1462,84 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::TestResults
                 )
                 | (
-                    Self::Primitive(_),
+                    Self::CallableCode(CallableCodeSurfaceRequest::ExactOccurrence(_)),
+                    ApplicationSurfaceOperation::CodeExactOccurrence
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::PhraseSearch(_)),
+                    ApplicationSurfaceOperation::CodePhraseSearch
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Callees(_)),
+                    ApplicationSurfaceOperation::CodeCallees
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(_)),
+                    ApplicationSurfaceOperation::CodeSymbolSearch
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::SignatureSearch(_)),
+                    ApplicationSurfaceOperation::CodeSignatureSearch
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::Implementations(_)),
+                    ApplicationSurfaceOperation::CodeImplementations
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::TypeHierarchy(_)),
+                    ApplicationSurfaceOperation::CodeTypeHierarchy
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::Callers(_)),
+                    ApplicationSurfaceOperation::CodeCallers
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::SessionLookup(_)),
                     ApplicationSurfaceOperation::SessionLookup
-                        | ApplicationSurfaceOperation::QualifiedName
-                        | ApplicationSurfaceOperation::CallChain
-                        | ApplicationSurfaceOperation::FileDependents
-                        | ApplicationSurfaceOperation::SourceLines
-                        | ApplicationSurfaceOperation::SourceBody
-                        | ApplicationSurfaceOperation::SourceOutline
-                        | ApplicationSurfaceOperation::ModuleApi
-                        | ApplicationSurfaceOperation::FileMetadata
-                        | ApplicationSurfaceOperation::HealthRead
-                        | ApplicationSurfaceOperation::StorageStatus
-                        | ApplicationSurfaceOperation::DiagnosticsRead
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::QualifiedName(_)),
+                    ApplicationSurfaceOperation::QualifiedName
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::CallChain(_)),
+                    ApplicationSurfaceOperation::CallChain
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::FileDependents(_)),
+                    ApplicationSurfaceOperation::FileDependents
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::SourceLines(_)),
+                    ApplicationSurfaceOperation::SourceLines
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::SourceBody(_)),
+                    ApplicationSurfaceOperation::SourceBody
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::SourceOutline(_)),
+                    ApplicationSurfaceOperation::SourceOutline
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::ModuleApi(_)),
+                    ApplicationSurfaceOperation::ModuleApi
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::FileMetadata(_)),
+                    ApplicationSurfaceOperation::FileMetadata
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::HealthRead(_)),
+                    ApplicationSurfaceOperation::HealthRead
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::StorageStatus(_)),
+                    ApplicationSurfaceOperation::StorageStatus
+                )
+                | (
+                    Self::Primitive(Pr12PrimitiveRequest::DiagnosticsRead(_)),
+                    ApplicationSurfaceOperation::DiagnosticsRead
                 )
                 | (
                     Self::Configuration(ConfigurationSurfaceRequest::List(_)),
@@ -1309,15 +1608,69 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::GitApply => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::GitApply)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::AffectedTests => serde_json::from_value(value)
-            .map(ApplicationSurfaceRequest::AffectedTests)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::FeedbackImpact => serde_json::from_value(value)
-            .map(ApplicationSurfaceRequest::FeedbackImpact)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::AffectedTests => {
+            let request: AffectedTestsSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            FeedbackSurfaceRequest::new(request.request_handle.clone())?;
+            Ok(ApplicationSurfaceRequest::AffectedTests(request))
+        }
+        ApplicationSurfaceOperation::FeedbackImpact => {
+            let request: FeedbackImpactSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            FeedbackSurfaceRequest::new(request.request_handle.clone())?;
+            Ok(ApplicationSurfaceRequest::FeedbackImpact(request))
+        }
         ApplicationSurfaceOperation::TestResults => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::TestResults)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::CodeExactOccurrence => {
+            serde_json::from_value::<CodeExactOccurrenceSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::ExactOccurrence)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodePhraseSearch => {
+            serde_json::from_value::<CodePhraseSearchSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::PhraseSearch)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeSymbolSearch => {
+            serde_json::from_value::<CodeSymbolSearchSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::SymbolSearch)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeSignatureSearch => {
+            serde_json::from_value::<CodeSignatureSearchSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::SignatureSearch)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeImplementations => {
+            serde_json::from_value::<CodeImplementationsSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::Implementations)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeTypeHierarchy => {
+            serde_json::from_value::<CodeTypeHierarchySurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::TypeHierarchy)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeCallers => {
+            serde_json::from_value::<CodeCallersSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::Callers)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeCallees => {
+            serde_json::from_value::<CodeCalleesSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Callees)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
         ApplicationSurfaceOperation::SessionLookup => {
             serde_json::from_value::<SessionLookupRequest>(value)
                 .map(Pr12PrimitiveRequest::SessionLookup)
@@ -1460,6 +1813,7 @@ pub async fn execute_application_surface(
     dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
     client: Option<&crate::daemon_client::DaemonInvocationClient>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    validate_current_application_binding(operation, &dispatched)?;
     let result_contract = ResultContractRef::from_schema(&dispatched.invocation.result_schema);
     let binding_id = dispatched.invocation.binding_id.clone();
     let request_id = dispatched.request_id;
@@ -1502,44 +1856,20 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::FeedbackImpact(request) => {
-            crate::daemon::DaemonInvocationRequest::primitive(
+            crate::daemon::DaemonInvocationRequest::feedback(
                 request_id.as_str(),
-                operation,
-                crate::application::primitives::Pr12PrimitiveRequest::Impact(
-                    GraphImpactPrimitiveRequest {
-                        node_id: request.node_id,
-                        maximum_depth: request.maximum_depth,
-                        scope: SymbolGraphScope {
-                            path_prefix: request.path_prefix,
-                        },
-                        meta: RetrievalRequestMeta::current(
-                            invocation.page,
-                            ResultProjection::Evidence,
-                            RetrievalOrder::StableIdentity,
-                        ),
-                    },
-                ),
+                ApplicationSurfaceOperation::FeedbackImpact,
+                request.request_handle,
                 observed_at,
                 deadline,
                 cancellation_context,
             )
         }
         ApplicationSurfaceRequest::AffectedTests(request) => {
-            crate::daemon::DaemonInvocationRequest::primitive(
+            crate::daemon::DaemonInvocationRequest::feedback(
                 request_id.as_str(),
-                operation,
-                crate::application::primitives::Pr12PrimitiveRequest::AffectedFileTests(
-                    AffectedFileTestsPrimitiveRequest {
-                        files: request.files,
-                        maximum_depth: request.maximum_depth,
-                        filter: request.filter,
-                        meta: RetrievalRequestMeta::current(
-                            invocation.page,
-                            ResultProjection::Evidence,
-                            RetrievalOrder::StableIdentity,
-                        ),
-                    },
-                ),
+                ApplicationSurfaceOperation::AffectedTests,
+                request.request_handle,
                 observed_at,
                 deadline,
                 cancellation_context,
@@ -1550,6 +1880,28 @@ pub async fn execute_application_surface(
                 request_id.as_str(),
                 operation,
                 crate::application::primitives::Pr12PrimitiveRequest::RecentTestResults,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
+        ApplicationSurfaceRequest::CallableCode(request) => {
+            crate::daemon::DaemonInvocationRequest::callable_code(
+                request_id.as_str(),
+                operation,
+                request,
+                invocation.page,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
+        ApplicationSurfaceRequest::PrimitiveCode(request) => {
+            crate::daemon::DaemonInvocationRequest::primitive_code(
+                request_id.as_str(),
+                operation,
+                request,
+                invocation.page,
                 observed_at,
                 deadline,
                 cancellation_context,
@@ -1693,6 +2045,14 @@ pub async fn execute_application_surface(
                 result.into_application(),
             ))
         }
+        crate::daemon::DaemonInvocationOutcome::CallableCode { scope, result } => {
+            Ok(ApplicationEnvelope::evidence(
+                result_contract.clone(),
+                request_id.clone(),
+                scope,
+                result.into_application(),
+            ))
+        }
         crate::daemon::DaemonInvocationOutcome::Configuration { scope, outcome } => {
             Ok(ApplicationEnvelope {
                 contract: result_contract.clone(),
@@ -1753,6 +2113,14 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         ApplicationSurfaceOperation::TestResults => Plan26FeedbackOperationV1::PrimitiveTestResults,
         ApplicationSurfaceOperation::GitPreview
         | ApplicationSurfaceOperation::GitApply
+        | ApplicationSurfaceOperation::CodeExactOccurrence
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::CodeCallees
         | ApplicationSurfaceOperation::SessionLookup
         | ApplicationSurfaceOperation::QualifiedName
         | ApplicationSurfaceOperation::CallChain
@@ -2099,6 +2467,22 @@ fn application_operation_for_http(
         HttpApplicationOperation::FeedbackImpact => ApplicationSurfaceOperation::FeedbackImpact,
         HttpApplicationOperation::AffectedTests => ApplicationSurfaceOperation::AffectedTests,
         HttpApplicationOperation::TestResults => ApplicationSurfaceOperation::TestResults,
+        HttpApplicationOperation::CodeExactOccurrence => {
+            ApplicationSurfaceOperation::CodeExactOccurrence
+        }
+        HttpApplicationOperation::CodePhraseSearch => ApplicationSurfaceOperation::CodePhraseSearch,
+        HttpApplicationOperation::CodeSymbolSearch => ApplicationSurfaceOperation::CodeSymbolSearch,
+        HttpApplicationOperation::CodeSignatureSearch => {
+            ApplicationSurfaceOperation::CodeSignatureSearch
+        }
+        HttpApplicationOperation::CodeImplementations => {
+            ApplicationSurfaceOperation::CodeImplementations
+        }
+        HttpApplicationOperation::CodeTypeHierarchy => {
+            ApplicationSurfaceOperation::CodeTypeHierarchy
+        }
+        HttpApplicationOperation::CodeCallers => ApplicationSurfaceOperation::CodeCallers,
+        HttpApplicationOperation::CodeCallees => ApplicationSurfaceOperation::CodeCallees,
         HttpApplicationOperation::SessionLookup => ApplicationSurfaceOperation::SessionLookup,
         HttpApplicationOperation::QualifiedName => ApplicationSurfaceOperation::QualifiedName,
         HttpApplicationOperation::CallChain => ApplicationSurfaceOperation::CallChain,
@@ -2161,10 +2545,32 @@ fn resolve_application_binding(
         &BindingResolution {
             profile_id,
             operation,
-            protocol_revision: 1,
-            negotiated_features: BTreeSet::new(),
+            protocol_revision: APPLICATION_PROTOCOL_REVISION,
+            negotiated_features: application_negotiated_features(),
         },
     )
+}
+
+fn application_negotiated_features() -> BTreeSet<FeatureId> {
+    BTreeSet::new()
+}
+
+fn validate_current_application_binding(
+    operation: ApplicationSurfaceOperation,
+    dispatched: &DispatchedInvocation<ApplicationSurfaceRequest>,
+) -> Result<(), ApplicationSurfaceAdapterError> {
+    let catalog = application_surface_catalog()?;
+    let resolver = CatalogBindingResolver::new(&catalog);
+    let current = resolve_application_binding(&resolver, dispatched.surface, operation)
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    if current.binding_id != dispatched.invocation.binding_id
+        || current.request_schema != dispatched.invocation.request_schema
+        || current.result_schema != dispatched.invocation.result_schema
+        || !dispatched.invocation.invocation.request.matches(operation)
+    {
+        return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+    }
+    Ok(())
 }
 
 fn http_adapter_problem(

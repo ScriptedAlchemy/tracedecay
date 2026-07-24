@@ -225,6 +225,53 @@ pub(crate) type GitReadFuture = std::pin::Pin<
 pub(crate) type GitReadExecutor =
     Arc<dyn Fn(GitReadInvocationV1) -> GitReadFuture + Send + Sync + 'static>;
 
+/// User-controlled fields admitted at the MCP source-edit boundary.
+///
+/// The daemon-owned executor closes over project authority and constructs the
+/// request context, authority receipt, policy proof, and authorization service.
+/// None of those authority-bearing values may be supplied by the transport.
+pub(crate) struct SourceEditInvocationV1 {
+    pub(crate) edit: tracedecay_application::SourceEditRequest,
+    pub(crate) idempotency_key: Option<tracedecay_application::IdempotencyKey>,
+    pub(crate) expected_state: Option<tracedecay_domain::ManifestDigest>,
+    pub(crate) request_id: tracedecay_application::RequestId,
+    pub(crate) deadline: tracedecay_application::Deadline,
+    pub(crate) cancellation: tracedecay_application::CancellationSignal,
+}
+
+pub(crate) type SourceEditFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = crate::errors::Result<
+                    crate::application::edit::SourceEditApplicationResult,
+                >,
+            > + Send
+            + 'static,
+    >,
+>;
+
+pub(crate) type SourceEditExecutor =
+    Arc<dyn Fn(SourceEditInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
+
+/// User-controlled identity and inspection conclusion for one uncertain edit.
+///
+/// Authority-bearing context and proof fields are deliberately absent: the
+/// daemon-owned executor constructs them from the current project admission.
+pub(crate) struct SourceEditReconciliationInvocationV1 {
+    pub(crate) kind: tracedecay_application::SourceEditKind,
+    pub(crate) effect_id: tracedecay_application::EffectId,
+    pub(crate) idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(crate) attempt_idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(crate) input_digest: tracedecay_domain::ManifestDigest,
+    pub(crate) disposition: tracedecay_application::SourceEditReconciliationDispositionV1,
+    pub(crate) request_id: tracedecay_application::RequestId,
+    pub(crate) deadline: tracedecay_application::Deadline,
+    pub(crate) cancellation: tracedecay_application::CancellationSignal,
+}
+
+pub(crate) type SourceEditReconciliationExecutor =
+    Arc<dyn Fn(SourceEditReconciliationInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
+
 pub(crate) type RetainedProjectGraphFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<Arc<TraceDecay>>> + Send + 'static>>;
 
@@ -312,6 +359,10 @@ pub struct McpServer {
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
     /// Daemon-owned, authority-gated PR9 typed Git-read bridge.
     git_read_executor: Option<GitReadExecutor>,
+    /// Installed only after project-open has resolved current source-edit
+    /// authority. Direct servers remain fail-closed.
+    source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
+    source_edit_reconciliation_executor: tokio::sync::OnceCell<SourceEditReconciliationExecutor>,
     /// Admission supplied by an authenticated daemon application route. It is
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
@@ -800,6 +851,8 @@ impl McpServer {
             code_index_hook_sink,
             code_index_search_executor,
             git_read_executor,
+            source_edit_executor: tokio::sync::OnceCell::new(),
+            source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
             #[cfg(any(test, feature = "test-transport"))]
@@ -959,6 +1012,42 @@ impl McpServer {
         &self,
     ) -> Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>> {
         Arc::clone(&self.diagnostics_lsp)
+    }
+
+    /// Installs the sole source-edit invocation owner resolved during
+    /// project-open admission. Reinstallation is rejected so a later caller
+    /// cannot replace the authority behind an already-serving MCP instance.
+    pub(crate) fn install_source_edit_executor(
+        &self,
+        executor: SourceEditExecutor,
+    ) -> std::result::Result<(), SourceEditExecutor> {
+        self.source_edit_executor
+            .set(executor)
+            .map_err(|error| match error {
+                tokio::sync::SetError::AlreadyInitializedError(executor)
+                | tokio::sync::SetError::InitializingError(executor) => executor,
+            })
+    }
+
+    pub(crate) fn install_source_edit_reconciliation_executor(
+        &self,
+        executor: SourceEditReconciliationExecutor,
+    ) -> std::result::Result<(), SourceEditReconciliationExecutor> {
+        self.source_edit_reconciliation_executor
+            .set(executor)
+            .map_err(|error| match error {
+                tokio::sync::SetError::AlreadyInitializedError(executor)
+                | tokio::sync::SetError::InitializingError(executor) => executor,
+            })
+    }
+
+    #[cfg(feature = "test-transport")]
+    #[doc(hidden)]
+    pub async fn install_project_open_source_edit_authority_for_test(
+        &self,
+    ) -> crate::errors::Result<()> {
+        crate::daemon::project_open_owners::install_project_open_source_edit_owners_for_test(self)
+            .await
     }
 
     pub fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {

@@ -70,17 +70,32 @@ fn is_mcp_git_read(tool_name: &str) -> bool {
     )
 }
 
+fn is_source_edit_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_str_replace"
+            | "tracedecay_multi_str_replace"
+            | "tracedecay_insert_at"
+            | "tracedecay_ast_grep_rewrite"
+            | "tracedecay_replace_symbol"
+            | "tracedecay_insert_at_symbol"
+            | "tracedecay_move_symbol"
+            | "tracedecay_source_edit_reconcile"
+    )
+}
+
 pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || is_mcp_git_read(tool_name)
+        || is_source_edit_tool(tool_name)
         || tool_name == "tracedecay_search"
 }
 
 fn dispatch_deadline_horizon_micros(
     application_surface: bool,
-    controlled_git_read: bool,
+    thirty_second_operation: bool,
 ) -> Option<i64> {
-    if controlled_git_read {
+    if thirty_second_operation {
         Some(30_000_000)
     } else if application_surface {
         Some(10_000_000)
@@ -815,6 +830,11 @@ impl McpServer {
                 application_cancellation,
                 code_index_search_executor: self.code_index_search_executor.clone(),
                 git_read_executor: self.git_read_executor.clone(),
+                source_edit_executor: self.source_edit_executor.get().cloned(),
+                source_edit_reconciliation_executor: self
+                    .source_edit_reconciliation_executor
+                    .get()
+                    .cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
@@ -980,6 +1000,7 @@ impl McpServer {
     ) -> ApplicationSurfaceDispatch<'a> {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
+        let source_edit = is_source_edit_tool(tool_name);
         let controlled_read = is_mcp_git_read(tool_name) || tool_name == "tracedecay_search";
         let request_id = tool_supports_live_cancellation(tool_name)
             .then(|| application_surface_request_id(id, memory_request_scope))
@@ -1004,15 +1025,17 @@ impl McpServer {
                 .as_ref()
                 .map(|request_id| request_id.as_str().to_owned()),
         };
-        let deadline =
-            dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read)
-                .and_then(|horizon| {
-                    let now = mcp_now_micros().0;
-                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                        now.saturating_add(horizon),
-                    ))
-                    .ok()
-                });
+        let deadline = dispatch_deadline_horizon_micros(
+            application_surface.is_some() || source_edit,
+            controlled_read || source_edit,
+        )
+        .and_then(|horizon| {
+            let now = mcp_now_micros().0;
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                now.saturating_add(horizon),
+            ))
+            .ok()
+        });
         let invocation_client = if application_surface.is_some() {
             self.application_surface_client
                 .get_or_try_init(|| async {
@@ -1516,7 +1539,7 @@ mod git_read_control_tests {
     use super::*;
 
     #[test]
-    fn controlled_reads_receive_live_control_registration_and_thirty_second_deadline() {
+    fn controlled_operations_receive_live_registration_and_bounded_deadlines() {
         assert!(tool_supports_live_cancellation("tracedecay_search"));
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
@@ -1535,6 +1558,23 @@ mod git_read_control_tests {
             );
             assert_eq!(
                 dispatch_deadline_horizon_micros(false, is_mcp_git_read(tool_name)),
+                Some(30_000_000)
+            );
+        }
+        for tool_name in [
+            "tracedecay_str_replace",
+            "tracedecay_multi_str_replace",
+            "tracedecay_insert_at",
+            "tracedecay_ast_grep_rewrite",
+            "tracedecay_replace_symbol",
+            "tracedecay_insert_at_symbol",
+            "tracedecay_move_symbol",
+            "tracedecay_source_edit_reconcile",
+        ] {
+            assert!(is_source_edit_tool(tool_name));
+            assert!(tool_supports_live_cancellation(tool_name));
+            assert_eq!(
+                dispatch_deadline_horizon_micros(true, true),
                 Some(30_000_000)
             );
         }
