@@ -107,26 +107,38 @@ impl From<&StoreShardScopeV1> for StoreShardKind {
     }
 }
 
-/// Classifies a whole physical store by its shard kind. Exhaustive over
-/// [`StoreShardKind`] -- no wildcard arm -- so a new shard scope added to
-/// `tracedecay_store` fails to compile here until someone deliberately
+/// Classifies a whole physical store by its shard kind, **for the single
+/// question of how a failure touching it should be escalated**. Exhaustive
+/// over [`StoreShardKind`] -- no wildcard arm -- so a new shard scope added
+/// to `tracedecay_store` fails to compile here until someone deliberately
 /// decides its class, rather than silently inheriting one.
 ///
-/// [`StoreShardKind::Project`] and [`StoreShardKind::ProjectSessions`] /
-/// [`StoreShardKind::ProfileSessions`] each name one physical file that
-/// mixes durability classes at the table level (a project's graph DB holds
-/// both derived code-graph tables and durable `memory_*` tables; a sessions
-/// store holds both small authority bookkeeping and bulk recoverable
-/// evidence). This function answers "is it ever safe to treat *the whole
-/// file* as blocking, or as droppable" -- for `Project` the conservative
-/// answer is `Durable` (it contains data that must never be dropped, so no
-/// whole-file operation may treat it as disposable); for the sessions
-/// stores the answer is `Recoverable`, matching the diagnosed failure and
-/// plan 38's storage-retention contract, because the tables that actually
-/// dominate their size are all re-ingestable or re-derivable (see
-/// [`session_authority_table_class`]). Callers that need to reason about one
-/// table inside a mixed store should classify that table directly instead
-/// of relying on the whole-store verdict.
+/// # This is an escalation verdict, not a deletion permit
+///
+/// Three of these kinds name one physical file that mixes durability classes
+/// at the table level:
+///
+/// - [`StoreShardKind::Project`] -- derived code-graph tables *and* durable
+///   `memory_*` tables in one graph DB.
+/// - [`StoreShardKind::ProjectSessions`] / [`StoreShardKind::ProfileSessions`]
+///   -- bulk recoverable transcript/observation evidence, but also the
+///   registry, configuration, savings-ledger and analytics tables that
+///   `ensure_registered_schema` (`src/global_db/schema_stages.rs`) applies to
+///   every sessions store, all of which [`session_authority_table_class`]
+///   itself calls `Durable`.
+///
+/// The sessions stores are `Recoverable` here because the operations this
+/// verdict gates -- mount, repair, migrate -- are *non-destructive retries*:
+/// failing one leaves every byte on disk for the next open, so escalating it
+/// to a fatal upgrade failure buys nothing and cost the owner a disabled
+/// daemon (see the module docs). `Project` is `Durable` because its
+/// dominant tables are the durable ones.
+///
+/// **A `Recoverable` verdict here therefore never means "safe to delete this
+/// file".** Any caller contemplating a whole-file destructive operation must
+/// ask [`whole_store_may_be_dropped`] instead, which is closed over
+/// [`StoreShardKind::mixes_durability_classes`] and answers `false` for every
+/// mixed store regardless of its escalation class.
 pub const fn shard_kind_durability_class(kind: StoreShardKind) -> StoreDurabilityClass {
     match kind {
         StoreShardKind::Profile | StoreShardKind::ProfileMemory | StoreShardKind::Project => {
@@ -143,6 +155,44 @@ pub const fn shard_kind_durability_class(kind: StoreShardKind) -> StoreDurabilit
 /// already hold a real [`StoreShardScopeV1`].
 pub fn shard_scope_durability_class(scope: &StoreShardScopeV1) -> StoreDurabilityClass {
     shard_kind_durability_class(StoreShardKind::from(scope))
+}
+
+impl StoreShardKind {
+    /// Whether one physical file of this kind holds tables of more than one
+    /// [`StoreDurabilityClass`], so that no single whole-file verdict can
+    /// describe everything inside it.
+    ///
+    /// Exhaustive, no wildcard arm: a new shard kind must state this
+    /// deliberately rather than inherit "single-class" by omission.
+    pub const fn mixes_durability_classes(self) -> bool {
+        match self {
+            // Derived code-graph tables plus durable `memory_*` tables.
+            Self::Project
+            // Bulk recoverable evidence plus the registry/configuration/
+            // savings-ledger/analytics tables `ensure_registered_schema`
+            // creates in every sessions store.
+            | Self::ProfileSessions
+            | Self::ProjectSessions => true,
+            Self::Profile | Self::ProfileMemory | Self::Code => false,
+        }
+    }
+}
+
+/// Whether a whole store file of this kind may be dropped and rebuilt outright
+/// rather than migrated -- the question a *destructive* whole-file operation
+/// must ask.
+///
+/// This is deliberately stricter than [`shard_kind_durability_class`]: a store
+/// that [`StoreShardKind::mixes_durability_classes`] can never be dropped
+/// wholesale, however its failures are escalated, because dropping it would
+/// take the durable tables sharing the file with it. Only a store that is
+/// single-class *and* fully rebuildable from the git checkout qualifies.
+pub const fn whole_store_may_be_dropped(kind: StoreShardKind) -> bool {
+    !kind.mixes_durability_classes()
+        && matches!(
+            shard_kind_durability_class(kind),
+            StoreDurabilityClass::Derived
+        )
 }
 
 /// Classifies one table inside the session/observation-authority schema
@@ -179,7 +229,7 @@ pub fn session_authority_table_class(table: &str) -> StoreDurabilityClass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::{BrainId, ProjectId, RepositoryId, UserProfileId, WorktreeId};
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
     use tracedecay_store::CodeShardScopeV1;
 
     fn id<T>(value: &str) -> T
@@ -245,8 +295,6 @@ mod tests {
 
     #[test]
     fn real_shard_scopes_convert_to_the_expected_kind() {
-        let brain = id::<BrainId>("brain.durability-test");
-        let profile = id::<UserProfileId>("profile.durability-test");
         let project = id::<ProjectId>("project.durability-test");
         let repository = id::<RepositoryId>("repository.durability-test");
         let worktree = id::<WorktreeId>("worktree.durability-test");
@@ -285,8 +333,51 @@ mod tests {
             }),
             StoreShardKind::Code
         );
-        let _ = brain;
-        let _ = profile;
+    }
+
+    /// The whole-file destructive question is strictly stronger than the
+    /// escalation question: `Recoverable` must never be readable as "safe to
+    /// delete this file".
+    #[test]
+    fn no_mixed_class_store_may_ever_be_dropped_wholesale() {
+        for kind in [
+            StoreShardKind::Project,
+            StoreShardKind::ProfileSessions,
+            StoreShardKind::ProjectSessions,
+        ] {
+            assert!(
+                kind.mixes_durability_classes(),
+                "{kind:?} shares one file across durability classes"
+            );
+            assert!(
+                !whole_store_may_be_dropped(kind),
+                "{kind:?} must never be droppable wholesale -- it would take \
+                 the durable tables sharing its file"
+            );
+        }
+        // Specifically the store the health-pass gate calls `Recoverable`.
+        assert_eq!(
+            shard_kind_durability_class(StoreShardKind::ProjectSessions),
+            StoreDurabilityClass::Recoverable
+        );
+        assert!(!whole_store_may_be_dropped(StoreShardKind::ProjectSessions));
+    }
+
+    #[test]
+    fn only_code_shards_may_be_dropped_and_rebuilt() {
+        assert!(whole_store_may_be_dropped(StoreShardKind::Code));
+        for kind in [
+            StoreShardKind::Profile,
+            StoreShardKind::ProfileMemory,
+            StoreShardKind::Project,
+            StoreShardKind::ProfileSessions,
+            StoreShardKind::ProjectSessions,
+        ] {
+            assert!(
+                !whole_store_may_be_dropped(kind),
+                "{kind:?} must not be droppable"
+            );
+        }
     }
 
     #[test]
