@@ -383,7 +383,7 @@ fn build_and_embed_dashboard_app() {
 }
 
 fn run_npm(dir: &Path, args: &[&str]) {
-    let status = Command::new("npm")
+    let status = Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
         .args(args)
         .current_dir(dir)
         .status()

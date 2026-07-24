@@ -549,6 +549,9 @@ impl SourceCapabilityCatalogBindingV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+// Boxing the large variant is wire-transparent but would change this public
+// store-protocol API and ripple through construction/match sites.
+#[allow(clippy::large_enum_variant)]
 pub enum EvidenceSpanCatalogBindingV1 {
     IntrinsicCanonicalOrdering,
     SourceCapability {
@@ -1457,6 +1460,9 @@ pub enum EvidenceAssemblyReadOperationV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// Boxing the large variant is wire-transparent but would change this public
+// store-protocol API and ripple through construction/match sites.
+#[allow(clippy::large_enum_variant)]
 pub enum EvidenceAssemblyReadResultV1 {
     Publication(Option<EvidenceAssemblyPublicationReceiptV1>),
     ContributionPage(Option<EvidenceAssemblyDrilldownPageV1>),

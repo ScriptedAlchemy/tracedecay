@@ -286,6 +286,9 @@ pub enum ProjectReadOperationV1 {
 /// Project-family read results across facts, observations, and diagnostics.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// Boxing the large variant is wire-transparent but would change this public
+// store-protocol API and ripple through construction/match sites.
+#[allow(clippy::large_enum_variant)]
 pub enum ProjectReadResultV1 {
     Fact(FactReadResultV1),
     Observation(ObservationReadResultV1),
@@ -319,6 +322,9 @@ pub enum RetrievalAnchorReadOperationV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// Boxing the large variant is wire-transparent but would change this public
+// store-protocol API and ripple through construction/match sites.
+#[allow(clippy::large_enum_variant)]
 pub enum RetrievalAnchorReadResultV1 {
     Anchor(Option<StoredRetrievalAnchorRecordV1>),
     CurrentDisposition(Option<RetrievalAnchorDispositionRecordV1>),
