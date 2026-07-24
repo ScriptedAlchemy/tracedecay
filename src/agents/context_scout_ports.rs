@@ -165,6 +165,15 @@ impl ContextScoutConfigurationPinV1 {
     pub const fn control(&self) -> ContextScoutControlV1 {
         self.control
     }
+
+    /// Revalidates this pin against the authoritative current configuration.
+    /// A revision or effective-behavior change invalidates in-flight Scout
+    /// work even when the host/session identity remains unchanged.
+    pub fn matches_current(&self, current: &ConfigurationCurrentStateV1) -> bool {
+        Self::from_current(current)
+            .as_ref()
+            .is_some_and(|current| current == self)
+    }
 }
 
 /// Exact authenticated scope and configuration used for one registry access.
@@ -407,19 +416,59 @@ impl ProjectContextScoutAddressRegistryV1 {
             let _ = transaction.rollback().await;
             return ContextScoutAddressBindOutcomeV1::Conflict;
         }
-        let mut exact = related
-            .into_iter()
-            .filter(|binding| binding.lifecycle == lifecycle);
-        if let Some(existing) = exact.next() {
-            let outcome = if exact.next().is_some() {
-                ContextScoutAddressBindOutcomeV1::Unavailable
-            } else if existing.matches_hook_and_pin(hook, pin) {
-                ContextScoutAddressBindOutcomeV1::Existing(existing.address)
-            } else {
-                ContextScoutAddressBindOutcomeV1::Conflict
-            };
+        let exact = ledger
+            .bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| binding.lifecycle == lifecycle)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if exact.len() > 1 {
             let _ = transaction.rollback().await;
-            return outcome;
+            return ContextScoutAddressBindOutcomeV1::Unavailable;
+        }
+        if let Some(index) = exact.first().copied() {
+            let existing = &ledger.bindings[index];
+            if existing.matches_hook_and_pin(hook, pin) {
+                let address = existing.address;
+                let _ = transaction.rollback().await;
+                return ContextScoutAddressBindOutcomeV1::Existing(address);
+            }
+            if !existing.matches_hook_locator(hook)
+                || existing.scope_digest != pin.scope_digest
+                || existing.lifecycle.project_id != pin.feedback_scope.project_id
+                || existing.lifecycle.worktree_id != pin.feedback_scope.worktree_id
+            {
+                let _ = transaction.rollback().await;
+                return ContextScoutAddressBindOutcomeV1::Conflict;
+            }
+            let Some(address) = random_address(&hook.envelope) else {
+                let _ = transaction.rollback().await;
+                return ContextScoutAddressBindOutcomeV1::Unavailable;
+            };
+            let replacement = &mut ledger.bindings[index];
+            replacement.configuration_revision = pin.configuration.revision_id.clone();
+            replacement.configuration_digest = pin.configuration.configuration_digest.clone();
+            replacement.address = address;
+            if !ledger.validate(&self.project_id) {
+                let _ = transaction.rollback().await;
+                return ContextScoutAddressBindOutcomeV1::Unavailable;
+            }
+            let Ok(encoded) = serde_json::to_string(&ledger) else {
+                let _ = transaction.rollback().await;
+                return ContextScoutAddressBindOutcomeV1::Unavailable;
+            };
+            if encoded.len() > MAX_ADDRESS_LEDGER_BYTES_V1
+                || self
+                    .database
+                    .set_metadata_unguarded(&transaction, ADDRESS_LEDGER_KEY_V1, &encoded)
+                    .await
+                    .is_err()
+                || transaction.commit().await.is_err()
+            {
+                return ContextScoutAddressBindOutcomeV1::Unavailable;
+            }
+            return ContextScoutAddressBindOutcomeV1::Bound(address);
         }
         if ledger.bindings.len() == MAX_ADDRESS_BINDINGS_V1 {
             let _ = transaction.rollback().await;
@@ -991,8 +1040,8 @@ mod tests {
                 observed_at: UtcMicros(10),
                 tool_id: Some([7; 16]),
                 effect_receipt_id: Some([8; 16]),
-                file_id: None,
-                changed_range_count: 0,
+                file_id: Some([9; 16]),
+                changed_range_count: 1,
             },
         )
         .unwrap();
@@ -1001,16 +1050,17 @@ mod tests {
 
     #[test]
     fn configuration_pin_preserves_disabled_and_explicit_model_states() {
-        let disabled = ContextScoutConfigurationPinV1::from_current(&configuration(
+        let disabled_current = configuration(
             "revision.scout.disabled",
             ContextScoutSettingsV1::disabled(),
-        ))
-        .unwrap();
+        );
+        let disabled = ContextScoutConfigurationPinV1::from_current(&disabled_current).unwrap();
         assert_eq!(
             disabled.control().state,
             ContextScoutServiceStateV1::Disabled
         );
         assert_eq!(disabled.control().model_path, None);
+        assert!(disabled.matches_current(&disabled_current));
 
         let configured = ContextScoutSettingsV1 {
             schema_version: ContextScoutSettingsV1::SCHEMA_VERSION,
@@ -1030,8 +1080,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn configuration_pin_rejects_inflight_authority_after_current_revision_changes() {
+        let admitted = configuration(
+            "revision.scout.admitted",
+            ContextScoutSettingsV1::disabled(),
+        );
+        let pin = ContextScoutConfigurationPinV1::from_current(&admitted).unwrap();
+        assert!(pin.matches_current(&admitted));
+        assert!(!pin.matches_current(&configuration(
+            "revision.scout.changed",
+            ContextScoutSettingsV1::disabled(),
+        )));
+    }
+
     #[tokio::test]
-    async fn native_fixture_binding_survives_restart_and_rejects_identity_or_revision_reuse() {
+    async fn native_fixture_binding_survives_restart_and_rotates_exact_revision_authority() {
         let (_temporary, database) = database().await;
         let registry = ProjectContextScoutAddressRegistryV1::new(
             database.clone(),
@@ -1061,33 +1125,39 @@ mod tests {
             ContextScoutAddressResolveOutcomeV1::Resolved(original)
         );
 
+        let next_revision = pin("revision.scout.two");
+        let rotated = match restarted.bind(&hook, &next_revision, lifecycle()).await {
+            ContextScoutAddressBindOutcomeV1::Bound(address) => address,
+            other => panic!("expected rotated address, got {other:?}"),
+        };
+        assert_ne!(rotated, original);
+        assert_eq!(
+            restarted.resolve(&hook, &next_revision).await,
+            ContextScoutAddressResolveOutcomeV1::Resolved(rotated)
+        );
+        assert_eq!(
+            restarted.resolve(&hook, &original_pin).await,
+            ContextScoutAddressResolveOutcomeV1::Missing
+        );
+
         let mut mismatched = lifecycle();
         mismatched.logical_message_id = id("message.scout.other");
-        let next_message = match restarted.bind(&hook, &original_pin, mismatched).await {
+        let next_message = match restarted.bind(&hook, &next_revision, mismatched).await {
             ContextScoutAddressBindOutcomeV1::Bound(address) => address,
             other => panic!("expected later message binding, got {other:?}"),
         };
-        assert_ne!(next_message, original);
+        assert_ne!(next_message, rotated);
         assert_eq!(
-            restarted.resolve(&hook, &original_pin).await,
+            restarted.resolve(&hook, &next_revision).await,
             ContextScoutAddressResolveOutcomeV1::Ambiguous
         );
         let mut mismatched_session = lifecycle();
         mismatched_session.session_id = id("session.scout.other");
         assert_eq!(
             restarted
-                .bind(&hook, &original_pin, mismatched_session)
+                .bind(&hook, &next_revision, mismatched_session)
                 .await,
             ContextScoutAddressBindOutcomeV1::Conflict
-        );
-        let next_revision = pin("revision.scout.two");
-        assert_eq!(
-            restarted.bind(&hook, &next_revision, lifecycle()).await,
-            ContextScoutAddressBindOutcomeV1::Conflict
-        );
-        assert_eq!(
-            restarted.resolve(&hook, &next_revision).await,
-            ContextScoutAddressResolveOutcomeV1::Missing
         );
 
         let encoded = database
@@ -1115,7 +1185,7 @@ mod tests {
             .unwrap();
         transaction.commit().await.unwrap();
         assert_eq!(
-            restarted.resolve(&hook, &original_pin).await,
+            restarted.resolve(&hook, &next_revision).await,
             ContextScoutAddressResolveOutcomeV1::Unavailable
         );
     }
