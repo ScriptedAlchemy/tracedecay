@@ -1,3 +1,4 @@
+mod authority;
 mod composition;
 mod cursor;
 mod request;

@@ -22,13 +22,17 @@ pub mod graph;
 pub mod hydrate;
 pub mod lexical;
 pub mod ports;
-pub mod rerank;
+pub mod pr9_authority;
 pub mod request;
+pub mod rerank;
 pub mod semantic;
 pub mod unavailable;
 
 pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
+};
+pub use self::pr9_authority::{
+    AuthorizedPr9FallbackV1, Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1,
 };
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};
