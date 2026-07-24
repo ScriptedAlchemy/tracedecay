@@ -8,11 +8,11 @@ use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db::global_db_operation_error;
 
-use super::OPERATION;
 use super::rows::{
     authority_violation, decode_authority_json, encode_authority_json,
     validate_source_cursor_authority_rows,
 };
+use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
 
 struct CommittedCursorCandidate {
     source_json: String,
@@ -70,9 +70,12 @@ pub(super) async fn repair_projection_frontier(
         trusted_checkpoint
     };
 
-    let mut coverage = conn
-        .query(
-            "SELECT observation.sequence,
+    let mut repaired_checkpoint = coverage_start;
+    let mut scan_cursor = coverage_start;
+    loop {
+        let mut coverage = conn
+            .query(
+                "SELECT observation.sequence,
                     ((EXISTS(
                         SELECT 1 FROM observation_projection_provenance AS provenance
                         WHERE provenance.projector_version = ?1
@@ -88,33 +91,42 @@ pub(super) async fn repair_projection_frontier(
                     )) AS disposition_count
              FROM observations AS observation
              WHERE observation.sequence > ?2 AND observation.sequence <= ?3
-             ORDER BY observation.sequence ASC",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                coverage_start,
-                checkpoint
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let mut repaired_checkpoint = coverage_start;
-    while let Some(row) = coverage
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        let sequence = row
-            .get::<i64>(0)
+             ORDER BY observation.sequence ASC LIMIT ?4",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    scan_cursor,
+                    checkpoint,
+                    AUDIT_PAGE_ROWS
+                ],
+            )
+            .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let disposition_count = row
-            .get::<i64>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        if disposition_count != 1 {
+        let mut page_rows = 0_i64;
+        let mut reached_gap = false;
+        while let Some(row) = coverage
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            page_rows += 1;
+            let sequence = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let disposition_count = row
+                .get::<i64>(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            scan_cursor = sequence;
+            if disposition_count != 1 {
+                reached_gap = true;
+                break;
+            }
+            repaired_checkpoint = sequence;
+        }
+        drop(coverage);
+        if reached_gap || page_rows < AUDIT_PAGE_ROWS {
             break;
         }
-        repaired_checkpoint = sequence;
     }
-    drop(coverage);
 
     if repaired_checkpoint != stored_checkpoint {
         conn.execute(
@@ -208,44 +220,58 @@ async fn latest_committed_source_cursors(
     conn: &impl QueryExecutor,
     after_sequence: i64,
 ) -> crate::errors::Result<Vec<CommittedCursorCandidate>> {
-    let mut rows = conn
-        .query(
-            "SELECT observation_json, committed_cursor_json
-             FROM observations WHERE sequence > ?1 ORDER BY sequence DESC",
-            params![after_sequence],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        let observation_json = row
-            .get::<String>(0)
+    // Newest-first keyset cursor. `sequence` is the observations rowid, so an
+    // exclusive upper bound walks the suffix backwards one page at a time.
+    let mut scan_cursor = i64::MAX;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT sequence, observation_json, committed_cursor_json
+             FROM observations WHERE sequence > ?1 AND sequence < ?2
+             ORDER BY sequence DESC LIMIT ?3",
+                params![after_sequence, scan_cursor, OBSERVATION_AUDIT_PAGE_ROWS],
+            )
+            .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let cursor_json = row
-            .get::<String>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let observation: DurableObservationV1 =
-            decode_authority_json(&observation_json, "committed observation authority JSON")?;
-        let cursor: ObservationSourceCursorV1 =
-            decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
-        let source_json = encode_authority_json(observation.source(), "observation source JSON")?;
-        let scope_json = encode_authority_json(observation.scope(), "observation scope JSON")?;
-        if seen.insert((source_json.clone(), scope_json.clone())) {
-            candidates.push(CommittedCursorCandidate {
-                source_json,
-                scope_json,
-                cursor_json: encode_authority_json(&cursor, "committed source cursor JSON")?,
-                cursor,
-            });
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            page_rows += 1;
+            scan_cursor = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let observation_json = row
+                .get::<String>(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let cursor_json = row
+                .get::<String>(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let observation: DurableObservationV1 =
+                decode_authority_json(&observation_json, "committed observation authority JSON")?;
+            let cursor: ObservationSourceCursorV1 =
+                decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
+            let source_json =
+                encode_authority_json(observation.source(), "observation source JSON")?;
+            let scope_json = encode_authority_json(observation.scope(), "observation scope JSON")?;
+            if seen.insert((source_json.clone(), scope_json.clone())) {
+                candidates.push(CommittedCursorCandidate {
+                    source_json,
+                    scope_json,
+                    cursor_json: encode_authority_json(&cursor, "committed source cursor JSON")?,
+                    cursor,
+                });
+            }
+        }
+        drop(rows);
+        if page_rows < OBSERVATION_AUDIT_PAGE_ROWS {
+            return Ok(candidates);
         }
     }
-    drop(rows);
-    Ok(candidates)
 }
 
 fn is_new_generation_frontier(
