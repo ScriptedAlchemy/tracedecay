@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   AXIS_HEIGHT,
   LANE_HEIGHT,
+  MAX_LANE_HEIGHT,
   TRACK_PAD,
   axisTicks,
+  bandScale,
+  laneHeightFor,
   clampWindow,
   densityProfile,
   fittedWindow,
@@ -78,6 +81,58 @@ describe('layoutTracks', () => {
     expect(layouts[0]?.height).toBeGreaterThan(layouts[1]!.height);
     expect(layouts[1]?.top).toBe(layouts[0]!.height);
     expect(layoutHeight(layouts)).toBe(layouts[1]!.top + layouts[1]!.height);
+  });
+
+  it('leaves lanes at their base height when the pane is unmeasured', () => {
+    const layouts = layoutTracks([track('a', [span('x', 0, 100)])], { start: 0, end: 200 }, 200);
+    expect(layouts[0]?.laneHeight).toBe(LANE_HEIGHT);
+  });
+
+  it('stretches a sparse weave into a tall pane and caps the stretch', () => {
+    const layouts = layoutTracks(
+      [track('a', [span('x', 0, 100)])],
+      { start: 0, end: 200 },
+      200,
+      900,
+    );
+    expect(layouts[0]?.laneHeight).toBe(MAX_LANE_HEIGHT);
+  });
+
+  it('never shrinks lanes below the base height when the weave is deep', () => {
+    const spans = Array.from({ length: 40 }, (_, index) => span(`s${index}`, 0, 100));
+    const layouts = layoutTracks([track('a', spans)], { start: 0, end: 200 }, 200, 120);
+    expect(layouts[0]?.lanes).toHaveLength(40);
+    expect(layouts[0]?.laneHeight).toBe(LANE_HEIGHT);
+  });
+});
+
+describe('laneHeightFor', () => {
+  it('falls back to the base height for a degenerate measurement', () => {
+    expect(laneHeightFor(0, 500)).toBe(LANE_HEIGHT);
+    expect(laneHeightFor(4, 0)).toBe(LANE_HEIGHT);
+  });
+});
+
+describe('bandScale', () => {
+  it('walks hour -> day -> month as the window widens', () => {
+    expect(bandScale(6 * HOUR)).toBe('hour');
+    expect(bandScale(5 * DAY)).toBe('day');
+    expect(bandScale(200 * DAY)).toBe('month');
+  });
+
+  it('drops the fine tick step below the calendar band where it can afford to', () => {
+    for (const seconds of [6 * HOUR, 5 * DAY, 200 * DAY]) {
+      const ceiling =
+        bandScale(seconds) === 'hour' ? HOUR : bandScale(seconds) === 'day' ? DAY : 30 * DAY;
+      expect(tickStepFor(seconds, 900)).toBeLessThan(ceiling);
+    }
+  });
+
+  it('keeps the coarse step when dropping under the band would crowd the axis', () => {
+    // Two years of history: every rung below the month band prints ticks
+    // tighter than the axis can label, so the fine row stays coarse.
+    expect(900 * DAY / tickStepFor(900 * DAY, 900)).toBeLessThanOrEqual(20);
+    expect(60 * DAY / tickStepFor(60 * DAY, 900)).toBeLessThanOrEqual(20);
   });
 });
 
