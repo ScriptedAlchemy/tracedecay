@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlTransaction as RuntimeTransaction;
 
@@ -36,9 +36,7 @@ impl Transaction {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
         tokio::task::spawn_blocking(move || {
-            runtime
-                .lock()
-                .expect("migration SQL transaction lock")
+            lock_runtime(&runtime)?
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
                 .execute(statement)
@@ -56,9 +54,7 @@ impl Transaction {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
         let rows = tokio::task::spawn_blocking(move || {
-            runtime
-                .lock()
-                .expect("migration SQL transaction lock")
+            lock_runtime(&runtime)?
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
                 .query(statement)
@@ -81,9 +77,7 @@ impl Transaction {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::task::spawn_blocking(move || {
-            runtime
-                .lock()
-                .expect("migration SQL transaction lock")
+            lock_runtime(&runtime)?
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
                 .execute_batch(sql)
@@ -103,9 +97,7 @@ impl Transaction {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
         tokio::task::spawn_blocking(move || {
-            runtime
-                .lock()
-                .expect("migration SQL transaction lock")
+            lock_runtime(&runtime)?
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
                 .execute_schema_step(statement)
@@ -122,9 +114,7 @@ impl Transaction {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::task::spawn_blocking(move || {
-            runtime
-                .lock()
-                .expect("migration SQL transaction lock")
+            lock_runtime(&runtime)?
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
                 .execute_schema_batch_step(sql)
@@ -139,9 +129,7 @@ impl Transaction {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
         tokio::task::spawn_blocking(move || {
-            runtime
-                .lock()
-                .expect("migration SQL transaction lock")
+            lock_runtime(&runtime)?
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
                 .validate(statement)
@@ -175,12 +163,16 @@ impl Transaction {
     }
 
     fn take_runtime(&self) -> Result<RuntimeTransaction> {
-        self.runtime
-            .lock()
-            .expect("migration SQL transaction lock")
+        lock_runtime(&self.runtime)?
             .take()
             .ok_or(super::Error::TransactionClosed)
     }
+}
+
+fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
+    runtime
+        .lock()
+        .map_err(|_| super::Error::Runtime("migration SQL transaction lock poisoned".to_owned()))
 }
 
 fn join_error(error: tokio::task::JoinError) -> super::Error {
@@ -189,13 +181,16 @@ fn join_error(error: tokio::task::JoinError) -> super::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use tracedecay_rusqlite_runtime::migration_sql::{
         MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
     };
 
-    use super::super::{Error, TestConnection};
+    use super::{
+        super::{Error, TestConnection},
+        lock_runtime,
+    };
 
     struct AllowWrites;
 
@@ -203,6 +198,21 @@ mod tests {
         fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn poisoned_transaction_lock_returns_a_typed_error() {
+        let runtime = Mutex::new(());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = runtime.lock().unwrap();
+            panic!("poison transaction lock");
+        });
+
+        let result = lock_runtime(&runtime);
+        let Err(Error::Runtime(message)) = result else {
+            panic!("poisoned transaction lock must return a runtime error");
+        };
+        assert_eq!(message, "migration SQL transaction lock poisoned");
     }
 
     #[tokio::test]
