@@ -1680,6 +1680,26 @@ fn migrate_registry_gc_parses() {
 }
 
 #[test]
+fn migrate_storage_report_parses() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "migrate",
+        "storage-report",
+        "--profile-root",
+        "/tmp/profile",
+        "--json",
+    ])
+    .expect("migrate storage-report should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Migrate {
+            action: MigrateAction::StorageReport { profile_root, json }
+        }) if profile_root.as_deref() == Some("/tmp/profile") && json
+    ));
+}
+
+#[test]
 fn branch_remove_requires_a_branch_name() {
     let err = match Cli::try_parse_from(["tracedecay", "branch", "remove"]) {
         Ok(_) => panic!("branch remove should require a name"),

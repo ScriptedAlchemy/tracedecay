@@ -563,6 +563,7 @@ Examples:
   tracedecay migrate apply --manifest plan.json --confirm-token <token>
   tracedecay migrate consolidate --source-project-id <old> --target-project-id <current>
   tracedecay migrate registry-gc                 Dry-run stale-registry cleanup
+  tracedecay migrate storage-report              Per-store size / free-page ratio (read-only)
 
 Related: tracedecay projects (registry view), tracedecay wipe.";
 

@@ -1081,6 +1081,18 @@ pub enum MigrateAction {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only per-store size, free-page ratio, and retention-backlog report
+    /// (plan 38 §7). Never mutates anything; use `branch gc` and the daemon's
+    /// automatic sweeps to reclaim what this reports.
+    #[command(name = "storage-report")]
+    StorageReport {
+        /// Profile root to inspect (defaults to the resolved user data dir).
+        #[arg(long = "profile-root")]
+        profile_root: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Roll back a manifest plan when the rollback preconditions are supported.
     Rollback {
         /// Manifest path to roll back.

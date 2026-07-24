@@ -541,18 +541,29 @@ fn newest_mtime_secs(dir: &Path) -> i64 {
 /// Total size in bytes of every file under `dir`. Best-effort: unreadable
 /// entries are skipped. Kept local to the lib because the binary-only
 /// `global::tracedecay_dir_size` is not reachable from this crate module.
-fn dir_size_bytes(dir: &Path) -> u64 {
+///
+/// Symlinks are never followed. `DirEntry::metadata` follows them, so a
+/// symlink pointing at an ancestor would recurse until the stack ran out, and
+/// one pointing outside the store would bill another directory's bytes to
+/// this one. `file_type` reports the link itself, so the walk stays inside
+/// the directory it was given.
+pub(crate) fn dir_size_bytes(dir: &Path) -> u64 {
     fn walk(path: &Path, acc: &mut u64) {
         let Ok(entries) = std::fs::read_dir(path) else {
             return;
         };
         for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else {
+            let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if meta.is_dir() {
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 walk(&entry.path(), acc);
-            } else if meta.is_file() {
+            } else if file_type.is_file()
+                && let Ok(meta) = entry.metadata()
+            {
                 *acc = acc.saturating_add(meta.len());
             }
         }
