@@ -1178,7 +1178,8 @@ fn feedback_observed(
 
     let observe =
         |relative_path: &str,
-         owned: Option<&tracedecay::agents::host_bundle_v2::HostBundleReceiptArtifactV1>|
+         owned: Option<&tracedecay::agents::host_bundle_v2::HostBundleReceiptArtifactV1>,
+         cataloged_ownership_marker: Option<String>|
          -> tracedecay::errors::Result<ObservedHostArtifactV1> {
             let path = tracedecay::agents::host_bundle_v2::inspect_install_target(
                 home,
@@ -1205,6 +1206,7 @@ fn feedback_observed(
                 artifact_digest,
                 ownership_marker: owned.map(|owned| owned.ownership_marker.clone()),
                 owned_artifact_digest: owned.map(|owned| owned.artifact_digest),
+                cataloged_ownership_marker,
             })
         };
 
@@ -1216,7 +1218,11 @@ fn feedback_observed(
                 .artifacts
                 .iter()
                 .find(|owned| owned.relative_path == artifact.relative_path);
-            observe(&artifact.relative_path, owned)
+            observe(
+                &artifact.relative_path,
+                owned,
+                Some(artifact.ownership_marker.clone()),
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     let orphan_observed = previous_receipt
@@ -1228,7 +1234,7 @@ fn feedback_observed(
                 .iter()
                 .any(|artifact| artifact.relative_path == owned.relative_path)
         })
-        .map(|owned| observe(&owned.relative_path, Some(owned)))
+        .map(|owned| observe(&owned.relative_path, Some(owned), None))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((manifest_observed, orphan_observed))
 }
@@ -2074,9 +2080,7 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
         // claude, cursor, hermes, kimi" undiagnosable from the output.
         let failed: Vec<String> = results
             .iter()
-            .filter_map(|(id, result)| {
-                result.as_ref().err().map(|error| format!("{id}: {error}"))
-            })
+            .filter_map(|(id, result)| result.as_ref().err().map(|error| format!("{id}: {error}")))
             .collect();
         if !failed.is_empty() {
             return Err(tracedecay::errors::TraceDecayError::Config {
