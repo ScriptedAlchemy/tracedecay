@@ -12,6 +12,7 @@ import {
   type WireLegalActionRef,
 } from '../../contracts/wire.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { CapacityBar } from '../../ui/ActivityColumns.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
@@ -26,14 +27,17 @@ import { DoctorInspector } from './DoctorInspector.tsx';
 /** Observatory storage health: independent typed telemetry and Doctor finding
  * read models. A failed source never hides the other source or becomes empty. */
 export function ObservatoryPage() {
+  const scope = useScope((s) => s.scope);
   const telemetry = useQuery({
-    queryKey: ['storage', 'telemetry'],
-    queryFn: () => fetchEnvelope('/api/storage/telemetry', StorageTelemetryPayloadSchema),
+    queryKey: ['storage', 'telemetry', scopeKey(scope)],
+    queryFn: () =>
+      fetchEnvelope(scopedUrl(scope, '/api/storage/telemetry'), StorageTelemetryPayloadSchema),
     refetchInterval: 30_000,
   });
   const findings = useQuery({
-    queryKey: ['storage', 'findings'],
-    queryFn: () => fetchEnvelope('/api/storage/findings', StorageFindingsPayloadSchema),
+    queryKey: ['storage', 'findings', scopeKey(scope)],
+    queryFn: () =>
+      fetchEnvelope(scopedUrl(scope, '/api/storage/findings'), StorageFindingsPayloadSchema),
     refetchInterval: 30_000,
   });
 

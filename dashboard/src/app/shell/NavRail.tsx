@@ -17,6 +17,7 @@ import { NavLink } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { StorageFindingsPayloadSchema } from '../../contracts/wire.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
+import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
 
 const ICONS: Record<string, LucideIcon> = {
@@ -86,9 +87,11 @@ function RailLink({
 /** The single Doctor attention dot (plan 11a): lit only when the findings
  * report carries a non-healthy finding; never a count, never another badge. */
 function useDoctorAttention(): boolean {
+  const scope = useScope((s) => s.scope);
   const findings = useQuery({
-    queryKey: ['storage', 'findings'],
-    queryFn: () => fetchEnvelope('/api/storage/findings', StorageFindingsPayloadSchema),
+    queryKey: ['storage', 'findings', scopeKey(scope)],
+    queryFn: () =>
+      fetchEnvelope(scopedUrl(scope, '/api/storage/findings'), StorageFindingsPayloadSchema),
     refetchInterval: 60_000,
   });
   const result = findings.data;

@@ -20,11 +20,21 @@ export const useScope = create<ScopeState>((set) => ({
   selectAllProjects: () => set({ scope: { kind: 'all' } }),
 }));
 
-/** Prefix for project-gateway API routes under the current scope. The active
- * project's own surfaces are served unprefixed; a selected project routes
- * through the registry gateway. */
-export function scopeApiBase(scope: DashboardScope): string {
-  return scope.kind === 'project'
-    ? `/api/projects/${encodeURIComponent(scope.projectId)}`
-    : '';
+/** Never-scoped surfaces: the registry itself and the dashboard chrome. */
+const UNSCOPED_PREFIXES = ['/api/projects', '/api/dashboard'];
+
+/** Rewrites an `/api/...` URL for the current scope. A selected project
+ * routes through the read-only project gateway, which rewrites
+ * `/api/projects/{id}/{tail}` back to `/api/{tail}` against that project's
+ * state; the all-projects default and the active project stay unprefixed. */
+export function scopedUrl(scope: DashboardScope, url: string): string {
+  if (scope.kind !== 'project') return url;
+  if (!url.startsWith('/api/')) return url;
+  if (UNSCOPED_PREFIXES.some((prefix) => url.startsWith(prefix))) return url;
+  return `/api/projects/${encodeURIComponent(scope.projectId)}/${url.slice('/api/'.length)}`;
+}
+
+/** Cache-key token for the current scope (splits query caches per scope). */
+export function scopeKey(scope: DashboardScope): string {
+  return scope.kind === 'project' ? `project:${scope.projectId}` : 'all';
 }
