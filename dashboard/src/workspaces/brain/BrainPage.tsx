@@ -211,15 +211,29 @@ function SignalPanel({
   const ageMs = lastEventAt == null ? null : Date.now() - lastEventAt;
   const topFamily = summary.families[0];
   return (
-    <div className="pointer-events-none absolute right-6 top-6 flex max-w-64 select-none items-stretch">
-      <span aria-hidden className="w-2 border-y border-l border-accent/40" />
-      <div className="flex min-w-0 flex-col gap-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
+    // Offset well below InstrumentReadout's own band (`top-6`, one row tall
+    // regardless of width) rather than sharing it: at narrow widths that
+    // five-cell row runs wider than the viewport, and a second HUD sharing
+    // its exact top offset painted underneath it, invisible. Anchoring to
+    // the canvas's bottom instead collided with the figure's own caption —
+    // GraphCanvas renders it as a normal-flow sibling directly below the
+    // canvas, inside this same positioning root, so `bottom-*` here lands on
+    // top of that text instead of below it. A fixed clearance under the
+    // instrument row is the one gap guaranteed clear at every width.
+    <div className="pointer-events-none absolute right-6 top-20 flex select-none items-stretch">
+      <span aria-hidden className="w-2 shrink-0 border-y border-l border-accent/40" />
+      {/* Fixed width, not a `max-w-*` on the row: a flex row only shrinks a
+       * child below its content's natural size when something forces it to,
+       * and the offline sentence is long enough that without an explicit
+       * width here it overflowed straight past this HUD and into the
+       * registry rail instead of wrapping. */}
+      <div className="flex w-56 flex-col gap-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
         <div className="flex items-center gap-2">
           <StateChip kind={connectionKind} />
         </div>
-        <span className="td-legend">
+        <span className="td-legend block whitespace-normal break-words">
           {sseState === 'offline'
-            ? 'event stream unreachable — not idle, disconnected'
+            ? 'stream unreachable — not idle'
             : ageMs == null
               ? 'no events observed yet'
               : `last event ${formatEventAge(ageMs)}`}
@@ -247,7 +261,7 @@ function SignalPanel({
           <Readout label="rate" size="sm" value={summary.ratePerMinute.toFixed(1)} unit="/min" />
         ) : null}
       </div>
-      <span aria-hidden className="w-2 border-y border-r border-accent/40" />
+      <span aria-hidden className="w-2 shrink-0 border-y border-r border-accent/40" />
     </div>
   );
 }
