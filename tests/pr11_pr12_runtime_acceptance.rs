@@ -20,10 +20,15 @@ use tracedecay::application::operation_stream::{
 use tracedecay::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    resolve_http_application_surface,
+    FeedbackSurfaceRequest, resolve_http_application_surface,
 };
 use tracedecay::daemon::DaemonHandshake;
-use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
+use tracedecay::daemon_client::{
+    DaemonInvocationClient, DaemonLspSessionClient, RequestedOutputFormat,
+};
+use tracedecay::lsp_bridge::{FramePoll, FrameSend};
+use tracedecay::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
 use tracedecay_application::feedback::{
@@ -73,6 +78,41 @@ async fn runtime_fixture() -> RuntimeFixture {
     }
 }
 
+async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u64) -> Value {
+    for _ in 0..200 {
+        match session
+            .poll_daemon_frame()
+            .await
+            .expect("poll daemon LSP frame")
+        {
+            FramePoll::Frame(frame) => {
+                let value: Value =
+                    serde_json::from_slice(frame.as_bytes()).expect("daemon LSP JSON");
+                session
+                    .acknowledge_daemon_frame()
+                    .await
+                    .expect("acknowledge daemon LSP frame");
+                if value.get("id").and_then(Value::as_u64) == Some(response_id) {
+                    return value;
+                }
+            }
+            FramePoll::Pending => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            FramePoll::Closed => panic!("daemon LSP session closed before response {response_id}"),
+        }
+    }
+    panic!("daemon LSP response {response_id} timed out")
+}
+
+async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
+    assert_eq!(
+        session
+            .try_send_client_frame(&value.to_string())
+            .await
+            .expect("send daemon LSP frame"),
+        FrameSend::Sent
+    );
+}
+
 fn initialize_project(home: &Path, project: &Path) {
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
     std::fs::write(
@@ -115,6 +155,31 @@ fn run_storage_status(home: &Path, project: &Path, json_output: bool) -> Output 
         command.arg("--json");
     }
     command.output().expect("run storage_status")
+}
+
+fn run_feedback_diagnostics(home: &Path, project: &Path, request_handle: &str) -> Output {
+    let project_arg = project.to_string_lossy().into_owned();
+    let arguments = serde_json::json!({ "request_handle": request_handle }).to_string();
+    common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "feedback_diagnostics",
+            "--args",
+            arguments.as_str(),
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run feedback_diagnostics")
+}
+
+fn feedback_diagnostics_request(request_handle: &str) -> ApplicationSurfaceRequest {
+    ApplicationSurfaceRequest::Feedback(
+        FeedbackSurfaceRequest::new(request_handle.to_owned()).expect("feedback request"),
+    )
 }
 
 fn assert_command_success(label: &str, output: &Output) {
@@ -189,6 +254,218 @@ async fn project_open_application_boundary() {
     assert_eq!(
         serde_json::to_value(&mcp_scope.project_id).expect("project id"),
         cli_value["scope"]["project_id"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn production_lsp_negotiates_and_projects_canonical_context() {
+    let fixture = runtime_fixture().await;
+    let root_uri = url::Url::from_directory_path(&fixture.project)
+        .expect("project root URI")
+        .to_string();
+    let document_uri = url::Url::from_file_path(fixture.project.join("src/lib.rs"))
+        .expect("document URI")
+        .to_string();
+    let source =
+        std::fs::read_to_string(fixture.project.join("src/lib.rs")).expect("project source");
+    let mut session = DaemonLspSessionClient::open(
+        fixture.client.clone(),
+        "3.17",
+        Some(root_uri.clone()),
+        Vec::new(),
+    )
+    .await
+    .expect("open production daemon LSP session");
+
+    let projections = [
+        "diagnostics",
+        "post_edit_impact",
+        "affected_tests",
+        "test_run_results",
+    ]
+    .into_iter()
+    .map(|kind| {
+        serde_json::json!({
+            "kind": kind,
+            "revision": TRACEDECAY_CONTEXT_REVISION,
+        })
+    })
+    .collect::<Vec<_>>();
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": root_uri,
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "experimental": {
+                        "tracedecay": {
+                            "revision": TRACEDECAY_CONTEXT_REVISION,
+                            "opaqueExpansion": true,
+                            "projections": projections,
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let initialized = poll_lsp_response(&mut session, 1).await;
+    assert_eq!(
+        initialized["result"]["capabilities"]["positionEncoding"],
+        "utf-16"
+    );
+    let negotiated = &initialized["result"]["capabilities"]["experimental"]["tracedecay"];
+    assert_eq!(negotiated["revision"], TRACEDECAY_CONTEXT_REVISION);
+    assert_eq!(negotiated["opaqueExpansion"], true);
+    assert_eq!(
+        negotiated["projections"]
+            .as_array()
+            .expect("negotiated projection registrations")
+            .len(),
+        4
+    );
+
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {},
+        }),
+    )
+    .await;
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": document_uri,
+                    "languageId": "rust",
+                    "version": 1,
+                    "text": source,
+                }
+            }
+        }),
+    )
+    .await;
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": { "textDocument": { "uri": document_uri } },
+        }),
+    )
+    .await;
+
+    let mut ready = None;
+    for request_id in 2..=100 {
+        send_lsp(
+            &mut session,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tracedecay/context",
+                "params": {
+                    "kind": "diagnostics",
+                    "documentUri": document_uri,
+                },
+            }),
+        )
+        .await;
+        let response = poll_lsp_response(&mut session, request_id).await;
+        if response.get("result").is_some() {
+            ready = Some(response);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let projection = ready.expect("production context projection became ready");
+    assert_eq!(projection["result"]["rootUri"], root_uri);
+    assert_eq!(projection["result"]["documentUri"], document_uri);
+    assert_eq!(projection["result"]["kind"], "diagnostics");
+    assert_eq!(
+        projection["result"]["revision"],
+        TRACEDECAY_CONTEXT_REVISION
+    );
+    assert!(projection["result"]["generation"].as_u64().is_some());
+    assert!(
+        projection["result"]["identity"]["headCommitId"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        projection["result"]["identity"]["codeGenerationId"]
+            .as_str()
+            .is_some()
+    );
+
+    let lsp_handle = projection["result"]["retrievalHandle"]
+        .as_str()
+        .expect("LSP canonical projection retrieval handle");
+    let handle_record = match retrieve_response_handle(
+        &fixture.project,
+        lsp_handle,
+        wall_clock_micros().0.div_euclid(1_000_000),
+    )
+    .expect("read LSP response handle through its authority")
+    {
+        ResponseHandleLookup::Found(record) => record,
+        other => panic!("LSP response handle unavailable: {other:?}"),
+    };
+    let handle_record: Value =
+        serde_json::from_str(&handle_record.content).expect("LSP response handle record");
+    let canonical_handle = handle_record["canonical_handle"]
+        .as_str()
+        .expect("canonical feedback handle");
+
+    let cli = run_feedback_diagnostics(fixture.home(), &fixture.project, canonical_handle);
+    assert_command_success("CLI feedback_diagnostics", &cli);
+    let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI feedback JSON");
+    let mcp = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::FeedbackDiagnostics,
+        RequestId::new("request.feedback-parity.mcp").expect("request id"),
+        feedback_diagnostics_request(canonical_handle),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP feedback dispatch");
+    let http = resolve_http_application_surface(
+        ApplicationSurfaceOperation::FeedbackDiagnostics,
+        RequestId::new("request.feedback-parity.http").expect("request id"),
+        feedback_diagnostics_request(canonical_handle),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("HTTP feedback dispatch");
+    let mcp_payload = successful_application(&mcp);
+    let http_payload = successful_application(&http);
+    assert_eq!(mcp_payload, http_payload);
+    assert_eq!(cli["value"]["payload"], *mcp_payload);
+
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tracedecay/context/expand",
+            "params": { "retrievalHandle": lsp_handle },
+        }),
+    )
+    .await;
+    let expanded = poll_lsp_response(&mut session, 101).await;
+    assert_eq!(expanded["result"]["coverage"], "complete");
+    assert_eq!(
+        expanded["result"]["evidence"]["Ok"]["outcome"]["value"]["payload"],
+        *mcp_payload
     );
 }
 
