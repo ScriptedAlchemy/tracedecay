@@ -51,6 +51,7 @@ impl OperationGate {
 struct FakeAttachment {
     snapshot: Mutex<PhysicalRuntimeSnapshot>,
     fail_drain: AtomicBool,
+    retain_work_after_drain: AtomicBool,
     drain_calls: AtomicUsize,
     close_calls: AtomicUsize,
     drain_gate: OperationGate,
@@ -71,6 +72,7 @@ impl FakeAttachment {
                 memory_estimate_bytes: 8_192,
             }),
             fail_drain: AtomicBool::new(false),
+            retain_work_after_drain: AtomicBool::new(false),
             drain_calls: AtomicUsize::new(0),
             close_calls: AtomicUsize::new(0),
             drain_gate: OperationGate::default(),
@@ -90,6 +92,9 @@ impl PhysicalRuntimeAttachment for FakeAttachment {
         self.drain_gate.wait();
         if self.fail_drain.load(Ordering::SeqCst) {
             return Err("injected drain failure".to_owned());
+        }
+        if self.retain_work_after_drain.load(Ordering::SeqCst) {
+            return Ok(());
         }
         let mut snapshot = self.snapshot.lock().unwrap();
         snapshot.writer_present = false;
@@ -241,6 +246,40 @@ async fn drain_failure_is_terminal_and_retains_evicting_attachment() {
         })
     ));
     assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        registry.lookup(&binding),
+        StoreRuntimeLookup::Evicting { .. }
+    ));
+}
+
+#[tokio::test]
+async fn incomplete_drain_is_verified_before_physical_close() {
+    let (registry, publisher) = attachment_registry();
+    let pin = profile_pin(&registry).await;
+    let first = open_published(
+        &registry,
+        project_request("project.attachment-incomplete-drain", &pin),
+    )
+    .await;
+    let binding = first.binding().clone();
+    let attachment = publisher.attachment(1);
+    attachment
+        .retain_work_after_drain
+        .store(true, Ordering::SeqCst);
+    drop(first);
+
+    assert!(matches!(
+        registry.begin_or_join_open(&project_request("project.after-incomplete-drain", &pin)),
+        StoreRuntimeOpenBegin::Rejected(
+            StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { .. }
+        )
+    ));
+    assert_eq!(attachment.drain_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        attachment.close_calls.load(Ordering::SeqCst),
+        0,
+        "close must not run until the registry verifies a complete drain"
+    );
     assert!(matches!(
         registry.lookup(&binding),
         StoreRuntimeLookup::Evicting { .. }

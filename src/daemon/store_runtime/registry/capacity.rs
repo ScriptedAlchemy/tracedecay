@@ -225,12 +225,12 @@ pub(super) fn drain_and_close_physical(
     if let Err(message) = handle.inner.attachment.drain() {
         return Err(attachment_failure("drain", message));
     }
-    if let Err(message) = handle.inner.attachment.close_and_join() {
-        return Err(attachment_failure("close_and_join", message));
-    }
     let physical = handle.physical_snapshot();
     if !physical.is_drained() {
         return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { snapshot: physical });
+    }
+    if let Err(message) = handle.inner.attachment.close_and_join() {
+        return Err(attachment_failure("close_and_join", message));
     }
     Ok(())
 }
