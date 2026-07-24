@@ -4,10 +4,12 @@ import { Activity, FileSearch, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DoctorFindingsPayload,
+  DoctorRemediationAuthorityScope,
   DoctorRemediationDescriptor,
   DoctorRemediationOperation,
   DoctorRemediationPayload,
   DoctorReportEntry,
+  DoctorReportCoverage,
   WireCoverage,
   WireFreshness,
   WireLegalActionRef,
@@ -32,6 +34,7 @@ import {
   readActiveDoctorOperation,
   remediationForEntry,
   saveActiveDoctorOperation,
+  sameDoctorAuthorityScope,
   sameDoctorScope,
 } from './doctorModel.ts';
 
@@ -57,18 +60,19 @@ export function DoctorInspector() {
   const reobservedOperation = useRef<string | null>(null);
   const currentScope =
     findings.data?.outcome === 'envelope' ? findings.data.envelope.scope : null;
-  const activeScopeMatches =
+  const activeTransportScopeMatches =
     activeOperation && currentScope
-      ? sameDoctorScope(activeOperation.scope, currentScope)
+      ? sameDoctorScope(activeOperation.transport_scope, currentScope)
       : false;
 
   const rememberOperation = (result: EnvelopeResult<DoctorRemediationPayload>) => {
     const operation = operationFromResult(result);
     if (!operation || result.outcome !== 'envelope') return;
     const active = {
-      schema_revision: 1 as const,
+      schema_revision: 2 as const,
       operation_id: operation.operation_id,
-      scope: result.envelope.scope,
+      transport_scope: result.envelope.scope,
+      authority_scope: operation.authority_scope,
     };
     setActiveOperation(active);
     saveActiveDoctorOperation(active);
@@ -88,15 +92,23 @@ export function DoctorInspector() {
   const status = useQuery({
     queryKey: doctorOperationQueryKey(activeOperation?.operation_id ?? 'inactive'),
     queryFn: () => fetchDoctorRemediationStatus(activeOperation!.operation_id),
-    enabled: activeOperation != null && activeScopeMatches,
+    enabled: activeOperation != null && activeTransportScopeMatches,
     refetchInterval: (query) => {
       const operation = operationFromResult(query.state.data);
       return operation?.phase === 'running' ? 2_000 : false;
     },
   });
 
+  const statusOperation = operationFromResult(status.data);
+  const statusAuthorityMatches =
+    activeOperation == null ||
+    statusOperation == null ||
+    sameDoctorAuthorityScope(
+      activeOperation.authority_scope,
+      statusOperation.authority_scope,
+    );
   const observedOperation =
-    operationFromResult(status.data) ??
+    (statusAuthorityMatches ? statusOperation : null) ??
     operationFromResult(apply.data) ??
     operationFromResult(preview.data);
 
@@ -114,7 +126,8 @@ export function DoctorInspector() {
 
   const selectedPreviewId = useMemo(() => {
     if (!selected) return null;
-    for (const result of [status.data, preview.data]) {
+    const statusResult = statusAuthorityMatches ? status.data : undefined;
+    for (const result of [statusResult, preview.data]) {
       const operation = operationFromResult(result);
       if (
         operation?.owning_operation === selected.descriptor.operation &&
@@ -124,7 +137,19 @@ export function DoctorInspector() {
       }
     }
     return null;
-  }, [preview.data, selected, status.data]);
+  }, [preview.data, selected, status.data, statusAuthorityMatches]);
+
+  const selectedAuthorityScope = useMemo(() => {
+    if (!selected) return null;
+    const statusResult = statusAuthorityMatches ? status.data : undefined;
+    for (const result of [statusResult, preview.data]) {
+      const operation = operationFromResult(result);
+      if (operation?.owning_operation === selected.descriptor.operation) {
+        return operation.authority_scope;
+      }
+    }
+    return null;
+  }, [preview.data, selected, status.data, statusAuthorityMatches]);
 
   const submitApply = () => {
     if (!selected) return;
@@ -169,13 +194,17 @@ export function DoctorInspector() {
         result={status.data ?? apply.data ?? preview.data}
         pending={status.isFetching || apply.isPending || preview.isPending}
         operationId={activeOperation?.operation_id ?? null}
-        scopeMismatch={activeOperation != null && currentScope != null && !activeScopeMatches}
+        transportScopeMismatch={
+          activeOperation != null && currentScope != null && !activeTransportScopeMatches
+        }
+        authorityScopeMismatch={!statusAuthorityMatches}
       />
 
       <RemediationDialog
         selection={selected}
         confirmed={confirmed}
         previewId={selectedPreviewId}
+        authorityScope={selectedAuthorityScope}
         applying={apply.isPending}
         result={apply.data}
         onConfirmedChange={setConfirmed}
@@ -234,6 +263,7 @@ function DoctorFindings({
           refreshing={refreshing}
           onRefresh={onRefresh}
         />
+        <DoctorReportCoverageGaps coverage={envelope.payload.report_coverage} />
         <DoctorState kind={envelope.domain_state} detail={envelope.payload.note} />
       </>
     );
@@ -249,6 +279,7 @@ function DoctorFindings({
         refreshing={refreshing}
         onRefresh={onRefresh}
       />
+      <DoctorReportCoverageGaps coverage={envelope.payload.report_coverage} />
       <OverviewGrid>
         {envelope.payload.entries.map((entry, index) => {
           const descriptor = remediationForEntry(entry, envelope.payload.remediations);
@@ -275,6 +306,50 @@ function DoctorFindings({
       </p>
     </>
   );
+}
+
+function DoctorReportCoverageGaps({
+  coverage,
+}: {
+  coverage: DoctorReportCoverage | null;
+}) {
+  const unavailable =
+    coverage?.families.filter(
+      (family) => family.consultation.status === 'unavailable',
+    ) ?? [];
+  if (unavailable.length === 0) return null;
+  return (
+    <div
+      className="mx-4 mt-2 flex flex-wrap gap-2 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2"
+      aria-label="Doctor source coverage gaps"
+    >
+      {unavailable.map(({ family, consultation }) => {
+        if (consultation.status !== 'unavailable') return null;
+        return (
+          <StateChip
+            key={family}
+            kind={consultationState(consultation.reason)}
+            detail={`${doctorFamilyLabel(family)} ${consultation.reason}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function consultationState(
+  reason: 'unwired' | 'unsupported' | 'absent' | 'denied' | 'unknown',
+): DomainStateKind {
+  switch (reason) {
+    case 'denied':
+      return 'denied';
+    case 'unsupported':
+    case 'unwired':
+      return 'unsupported';
+    case 'absent':
+    case 'unknown':
+      return 'unknown';
+  }
 }
 
 function FindingCard({
@@ -396,19 +471,29 @@ function OperationStatus({
   result,
   pending,
   operationId,
-  scopeMismatch,
+  transportScopeMismatch,
+  authorityScopeMismatch,
 }: {
   result: EnvelopeResult<DoctorRemediationPayload> | undefined;
   pending: boolean;
   operationId: string | null;
-  scopeMismatch: boolean;
+  transportScopeMismatch: boolean;
+  authorityScopeMismatch: boolean;
 }) {
   if (!operationId && !result) return null;
-  if (scopeMismatch) {
+  if (transportScopeMismatch) {
     return (
       <DoctorState
         kind="conflicting"
         detail="saved remediation belongs to a different dashboard scope"
+      />
+    );
+  }
+  if (authorityScopeMismatch) {
+    return (
+      <DoctorState
+        kind="conflicting"
+        detail="operation owner returned a different remediation authority scope"
       />
     );
   }
@@ -437,6 +522,7 @@ function OperationStatus({
       <span className="truncate font-mono text-2xs text-text-muted">
         {payload.operation.operation_id}
       </span>
+      <AuthorityScope scope={payload.operation.authority_scope} compact />
       {payload.operation.execution ? (
         <span className="ml-auto text-2xs text-text-muted">
           receipt {payload.operation.execution.termination.replaceAll('_', ' ')}
@@ -450,6 +536,7 @@ function RemediationDialog({
   selection,
   confirmed,
   previewId,
+  authorityScope,
   applying,
   result,
   onConfirmedChange,
@@ -459,6 +546,7 @@ function RemediationDialog({
   selection: SelectedRemediation | null;
   confirmed: boolean;
   previewId: string | null;
+  authorityScope: DoctorRemediationAuthorityScope | null;
   applying: boolean;
   result: EnvelopeResult<DoctorRemediationPayload> | undefined;
   onConfirmedChange: (confirmed: boolean) => void;
@@ -512,6 +600,15 @@ function RemediationDialog({
 
               <FindingEvidence entry={selection.entry} />
 
+              {authorityScope ? (
+                <AuthorityScope scope={authorityScope} />
+              ) : (
+                <StateChip
+                  kind="unknown"
+                  detail="authority scope will be resolved and rechecked by the owner at dispatch"
+                />
+              )}
+
               {confirmationRequired ? (
                 <label className="flex items-start gap-2 rounded-[var(--radius-standard)] border border-edge-subtle p-3 text-xs text-text-secondary">
                   <input
@@ -521,7 +618,9 @@ function RemediationDialog({
                     className="mt-0.5"
                   />
                   <span>
-                    I confirm this exact owner operation for the displayed scope and evidence.
+                    {authorityScope
+                      ? 'I confirm this exact owner operation for the authority scope shown above and the displayed evidence.'
+                      : 'I confirm this exact owner operation and the displayed evidence; the owner must resolve and recheck authority before any effect.'}
                   </span>
                 </label>
               ) : null}
@@ -549,6 +648,62 @@ function RemediationDialog({
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+function AuthorityScope({
+  scope,
+  compact = false,
+}: {
+  scope: DoctorRemediationAuthorityScope;
+  compact?: boolean;
+}) {
+  const label =
+    scope.scope_kind === 'profile'
+      ? `profile ${scope.profile_id}`
+      : `project ${scope.project_id}`;
+  if (compact) {
+    return (
+      <span
+        className="truncate font-mono text-2xs text-text-muted"
+        title={`${label} · ${scope.scope_digest}`}
+      >
+        authority {label}
+      </span>
+    );
+  }
+  const details =
+    scope.scope_kind === 'profile'
+      ? [
+          ['Brain', scope.brain_id],
+          ['Profile', scope.profile_id],
+          ['Profile sessions binding', scope.profile_sessions_binding_digest],
+          ['Scope digest', scope.scope_digest],
+        ]
+      : [
+          ['Project', scope.project_id],
+          ['Repository', scope.repository_id],
+          ['Worktree', scope.worktree_id],
+          ['Reference', scope.reference ?? 'none'],
+          ['Scope digest', scope.scope_digest],
+        ];
+  return (
+    <div
+      className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-3"
+      aria-label="Remediation authority scope"
+    >
+      <p className="text-2xs font-medium uppercase tracking-wide text-text-muted">
+        {scope.scope_kind} authority
+      </p>
+      <dl className="mt-2 grid gap-1">
+        {details.map(([term, value]) => (
+          <div key={term} className="grid gap-1 text-2xs sm:grid-cols-[9rem_1fr]">
+            <dt className="text-text-muted">{term}</dt>
+            <dd className="break-all font-mono text-text-secondary">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   );
 }
 

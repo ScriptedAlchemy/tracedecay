@@ -265,20 +265,6 @@ export const DoctorEvidenceStateSchema = z.enum([
 ]);
 export type DoctorEvidenceState = z.infer<typeof DoctorEvidenceStateSchema>;
 
-export const StorageFindingKindStatusSchema = z.object({
-  kind: DoctorStorageFindingKindSchema,
-  state: DoctorEvidenceStateSchema,
-  required_source: z.string(),
-  reason: z.string(),
-});
-export type StorageFindingKindStatus = z.infer<typeof StorageFindingKindStatusSchema>;
-
-export const StorageFindingsPayloadSchema = z.object({
-  kinds: z.array(StorageFindingKindStatusSchema),
-  note: z.string(),
-});
-export type StorageFindingsPayload = z.infer<typeof StorageFindingsPayloadSchema>;
-
 /* ---- /api/doctor findings + remediation payloads ---- */
 
 export const DoctorFindingFamilySchema = z.enum([
@@ -397,6 +383,11 @@ export const DoctorFindingsPayloadSchema = z.object({
 });
 export type DoctorFindingsPayload = z.infer<typeof DoctorFindingsPayloadSchema>;
 
+/** Deprecated `/api/storage/findings` compatibility name.
+ * The route returns the canonical Doctor storage-family projection. */
+export const StorageFindingsPayloadSchema = DoctorFindingsPayloadSchema;
+export type StorageFindingsPayload = DoctorFindingsPayload;
+
 export const DoctorRemediationPreviewRequestSchema = z.object({
   operation: z.string(),
 });
@@ -466,17 +457,35 @@ export const DoctorOperationReceiptSchema = z.object({
 });
 export type DoctorOperationReceipt = z.infer<typeof DoctorOperationReceiptSchema>;
 
-export const DoctorEffectReceiptSchema = z.object({
+export const DoctorProjectAuthorityScopeSchema = z.object({
+  scope_kind: z.literal('project'),
+  project_id: z.string(),
+  repository_id: z.string(),
+  worktree_id: z.string(),
+  reference: z.string().nullable(),
+  scope_digest: z.string(),
+});
+
+export const DoctorProfileAuthorityScopeSchema = z.object({
+  scope_kind: z.literal('profile'),
+  brain_id: z.string(),
+  profile_id: z.string(),
+  profile_sessions_binding_digest: z.string(),
+  scope_digest: z.string(),
+});
+
+export const DoctorRemediationAuthorityScopeSchema = z.discriminatedUnion('scope_kind', [
+  DoctorProjectAuthorityScopeSchema,
+  DoctorProfileAuthorityScopeSchema,
+]);
+export type DoctorRemediationAuthorityScope = z.infer<
+  typeof DoctorRemediationAuthorityScopeSchema
+>;
+
+const DoctorEffectReceiptFields = {
   operation: z.string(),
   request_id: z.string(),
   actor: z.string(),
-  scope: z.object({
-    project_id: z.string(),
-    repository_id: z.string(),
-    worktree_id: z.string(),
-    reference: z.string().nullable(),
-    scope_digest: z.string(),
-  }),
   effect_class: z.enum([
     'read',
     'preview',
@@ -497,14 +506,29 @@ export const DoctorEffectReceiptSchema = z.object({
   outcome: DoctorOperationTerminationSchema,
   committed_state: z.string().nullable(),
   external_proof: z.string().nullable(),
-});
+};
+
+export const DoctorEffectReceiptSchema = z.discriminatedUnion('scope_kind', [
+  z.object({
+    scope_kind: z.literal('project'),
+    ...DoctorEffectReceiptFields,
+    scope: DoctorProjectAuthorityScopeSchema.omit({ scope_kind: true }),
+  }),
+  z.object({
+    scope_kind: z.literal('profile'),
+    ...DoctorEffectReceiptFields,
+    scope: DoctorProfileAuthorityScopeSchema.omit({ scope_kind: true }),
+  }),
+]);
 export type DoctorEffectReceipt = z.infer<typeof DoctorEffectReceiptSchema>;
 
 export const DoctorRemediationOperationSchema = z.object({
   operation_id: z.string(),
   owning_operation: z.string(),
+  authority_scope: DoctorRemediationAuthorityScopeSchema,
   phase: DoctorRemediationOperationPhaseSchema,
   preview_id: z.string().nullable(),
+  idempotency_key: z.string().nullable(),
   execution: DoctorOperationReceiptSchema.nullable(),
   effect_receipt: DoctorEffectReceiptSchema.nullable(),
 });
