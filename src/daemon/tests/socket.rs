@@ -216,11 +216,16 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         )
         .unwrap_or(i64::MAX),
     );
+    let git_scope = super::super::project_open_owners::resolved_scope_for_project(
+        repository.path(),
+        &project_id,
+    )
+    .expect("daemon-authenticated Git scope");
     let snapshot = super::super::git_transactions::capture_exact_snapshot_for_test(
         repository.path(),
         project_id.clone(),
-        RepositoryId::new("repository.socket-git").expect("repository id"),
-        WorktreeId::new("worktree.socket-git").expect("worktree id"),
+        git_scope.repository_id.clone(),
+        git_scope.worktree_id.clone(),
         observed_at,
     );
     let identity = GitCommitIdentityV1 {
@@ -294,6 +299,42 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     assert_eq!(response["status"], "application_problem");
     assert_eq!(response["problem"]["kind"], "not_found_or_not_authorized");
 
+    let forged_scope_snapshot = super::super::git_transactions::capture_exact_snapshot_for_test(
+        repository.path(),
+        project_id.clone(),
+        RepositoryId::new("repository.caller-selected").unwrap(),
+        WorktreeId::new("worktree.caller-selected").unwrap(),
+        observed_at,
+    );
+    let forged_scope = super::super::DaemonInvocationRequest::git_preview(
+        "request.socket.forged-scope",
+        crate::application_surface::GitPreviewSurfaceRequest {
+            operation: GitIndexTransactionOperationV1::CommitIndex,
+            preview_id: GitIndexPreviewId::new("preview.socket-forged-scope").unwrap(),
+            repository_snapshot: forged_scope_snapshot,
+            selected_hunks: Vec::new(),
+            commit_intent: request.commit_intent.clone(),
+        },
+        observed_at,
+        deadline.clone(),
+        cancellation.clone(),
+    );
+    writer
+        .write_all(serde_json::to_string(&forged_scope).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    let response: Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("forged scope response"),
+    )
+    .unwrap();
+    assert_eq!(response["status"], "application_problem");
+    assert_eq!(response["problem"]["kind"], "not_found_or_not_authorized");
+
     let preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.preview",
         request,
@@ -320,7 +361,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     let apply_request = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.apply",
         apply.clone(),
-        observed_at,
+        UtcMicros(1),
         deadline.clone(),
         cancellation,
     );
@@ -337,6 +378,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         assert_eq!(response["request_id"], expected_request_id);
         assert_eq!(response["status"], "git_apply", "{response:#}");
         assert_eq!(response["effect"]["receipt"]["outcome"], "completed");
+        assert_ne!(response["effect"]["execution"]["started_at"], 1);
     }
 
     let stale = super::super::DaemonInvocationRequest::git_apply(
@@ -650,15 +692,12 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .project_id
         .clone()
         .expect("profile project id");
-    drop(primary_cg);
+    let registry = primary_cg.profile_database();
     let mut config = crate::config::load_config(&linked).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&linked, &config)
         .expect("disable unrelated startup transcript ingestion");
 
-    let registry = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path)
-        .await
-        .expect("registry");
     registry
         .upsert_code_project(
             &project_id,
@@ -687,13 +726,19 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
     let context = registry
         .project_registry_context_by_id(&project_id)
         .await
-        .expect("registry context");
+        .expect("registry context")
+        .expect("linked project registry context present");
     assert_eq!(
         context.project.canonical_root,
-        crate::global_db::GlobalDb::canonical_project_key(&primary)
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
+            &primary
+        )
     );
     assert!(context.aliases.iter().any(|alias| {
-        alias.alias_path == crate::global_db::GlobalDb::canonical_project_key(&linked)
+        alias.alias_path
+            == crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
+                &linked,
+            )
     }));
 }
 

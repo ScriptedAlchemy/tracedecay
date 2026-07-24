@@ -137,11 +137,26 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
     },
 ];
 
-const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
+pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
+    "configuration_list",
+    "configuration_explain",
+    "configuration_get",
+    "configuration_set",
+    "configuration_unset",
+    "configuration_batch",
+    "configuration_write_credential",
+    "configuration_observed_state",
+    "configuration_protected_preview",
+    "configuration_protected_apply",
+    "configuration_rollback_preview",
+    "configuration_rollback_apply",
+    "configuration_audit",
+];
+
+const CONFIGURATION_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
-    BindingSurface::Dashboard,
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -376,6 +391,42 @@ mod tests {
                 .capabilities()
                 .iter()
                 .all(|capability| capability.availability().is_callable())
+        );
+    }
+
+    #[test]
+    fn configuration_surface_exposes_only_pre_dashboard_transports() {
+        let contribution = configuration_surface_catalog_contribution().expect("contribution");
+        let surfaces = contribution
+            .bindings()
+            .iter()
+            .map(|binding| binding.surface())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            surfaces,
+            std::collections::BTreeSet::from([
+                BindingSurface::Cli,
+                BindingSurface::Mcp,
+                BindingSurface::Http,
+            ])
+        );
+        assert!(
+            contribution
+                .bindings()
+                .iter()
+                .all(|binding| binding.surface() != BindingSurface::Dashboard)
+        );
+    }
+
+    #[test]
+    fn exported_configuration_operation_names_match_the_catalog_specs() {
+        assert_eq!(
+            CONFIGURATION_SPECS
+                .iter()
+                .map(|spec| spec.name)
+                .collect::<Vec<_>>(),
+            CONFIGURATION_SURFACE_OPERATION_NAMES
         );
     }
 }

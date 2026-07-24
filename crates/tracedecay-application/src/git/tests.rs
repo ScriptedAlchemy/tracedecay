@@ -320,3 +320,45 @@ fn apply_request_must_bind_the_exact_preview_before_native_mutation() {
         })
     ));
 }
+
+#[test]
+fn apply_idempotency_digest_excludes_volatile_revalidation_evidence() {
+    let preview_request = request(commit_intent("requested message\n"));
+    let snapshot_digest =
+        GitIndexPreviewV1::repository_snapshot_digest(&preview_request.repository_snapshot)
+            .expect("snapshot digest");
+    let preview = GitIndexPreviewV1::new_with_commit_intent(
+        preview_request.preview_id.clone(),
+        GitIndexTransactionOperationV1::CommitIndex,
+        preview_request.repository_snapshot.clone(),
+        snapshot_digest,
+        Vec::new(),
+        preview_request.repository_snapshot.index.tree_id.clone(),
+        preview_request.commit_intent.as_ref(),
+        GitIndexPreviewDispositionV1::Applicable,
+        UtcMicros(10),
+        UtcMicros(20),
+    )
+    .expect("preview");
+    let request = apply_request(&preview_request, &preview);
+    let expected = request.input_digest().expect("semantic apply digest");
+
+    let mut revalidated = request.clone();
+    revalidated.observed_at = UtcMicros(16);
+    revalidated.authority.revalidated_at = UtcMicros(3);
+    revalidated.proof.configuration_digest = digest('b');
+    revalidated.proof.catalog_digest = digest('c');
+    revalidated.proof.privacy_digest = digest('d');
+    assert_eq!(
+        revalidated.input_digest().expect("revalidated digest"),
+        expected
+    );
+
+    revalidated.preview_digest = digest('e');
+    assert_ne!(
+        revalidated
+            .input_digest()
+            .expect("different preview digest"),
+        expected
+    );
+}

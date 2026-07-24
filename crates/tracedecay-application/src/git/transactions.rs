@@ -35,6 +35,17 @@ pub struct GitIndexOperationBindingV1 {
 }
 
 impl GitIndexOperationBindingV1 {
+    pub fn for_operation(
+        operation: GitIndexTransactionOperationV1,
+    ) -> Result<Self, ApplicationContractError> {
+        let (capability, use_case) = git_index_operation_ids(operation);
+        Ok(Self {
+            capability_id: CapabilityId::new(capability)?,
+            use_case_id: UseCaseId::new(use_case)?,
+            operation,
+        })
+    }
+
     fn validate(&self) -> Result<(), ApplicationContractError> {
         let (capability, use_case) = git_index_operation_ids(self.operation);
         if self.capability_id != CapabilityId::new(capability)?
@@ -219,7 +230,13 @@ impl GitIndexApplyRequestV1 {
         self.validate()?;
         Ok(canonical_sha256(&(
             GIT_INDEX_APPLY_REQUEST_DIGEST_DOMAIN_V1,
-            self,
+            self.context.actor(),
+            self.context.scope(),
+            &self.binding,
+            &self.preview_id,
+            &self.preview_digest,
+            &self.idempotency_key,
+            &self.proof.external_proof,
         ))?)
     }
 

@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use tracedecay_domain::{CapabilityId as DomainCapabilityId, UtcMicros};
 use tracedecay_policy::routing::{
-    CapabilityRoutingRequestV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
+    CapabilityAvailabilityV1, CapabilityRoutingRequestV1, ScopeMatchV1,
+    TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
 use tracedecay_tool_catalog::{
     ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, CapabilityId,
@@ -16,8 +17,8 @@ use crate::policy::{
 };
 use crate::result::ResultContractRef;
 
-/// Closed application operation identity. It is validation metadata only and
-/// contains no invocation callback, registry, or transport dispatch.
+/// Closed application operation identity passed intact to the retained
+/// canonical dispatcher after catalog resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationOperation {
     capability_id: CapabilityId,
@@ -65,6 +66,7 @@ impl ApplicationOperation {
         composition: &PolicyEvaluatorCompositionV1,
         consumer: PolicyConsumerV1,
         context: &PolicyEvaluationContextV1,
+        runtime_availability: CapabilityAvailabilityV1,
         truth_source_state: TruthSourceStateV1,
         required_freshness: TruthFreshnessRequirementV1,
         evidence_horizon: Option<PolicyEvidenceHorizonV1>,
@@ -73,25 +75,24 @@ impl ApplicationOperation {
         PolicyEvaluationV1<tracedecay_policy::routing::CapabilityRoutingDecisionV1>,
         ApplicationContractError,
     > {
-        if !context
-            .request()
-            .allows(&self.capability_id, &self.use_case_id)
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "application policy route authority",
-            });
-        }
         let candidate = composition.candidate(
             self.capability_id.as_str(),
+            runtime_availability,
             ScopeMatchV1::Match,
             truth_source_state,
             0,
         )?;
         let capability_id = DomainCapabilityId::new(self.capability_id.as_str().to_owned())?;
+        let authorized_capabilities = context
+            .request()
+            .allows(&self.capability_id, &self.use_case_id)
+            .then_some(capability_id.clone())
+            .into_iter()
+            .collect();
         let request = CapabilityRoutingRequestV1 {
             declared_capability_order: vec![capability_id.clone()],
             candidates: vec![candidate.clone()],
-            authorized_capabilities: [capability_id].into_iter().collect(),
+            authorized_capabilities,
             required_effect_class: candidate.effect_class,
             required_freshness,
             policy_revision: context.policy_revision(),
@@ -103,8 +104,54 @@ impl ApplicationOperation {
     }
 }
 
-/// Validation-only proof that one concrete application use case owns a
-/// request/result schema pair.
+/// One canonical dispatcher can implement this trait for each typed request it
+/// accepts. The catalog never erases requests through JSON or `Any`.
+pub trait CanonicalApplicationDispatcher<Request> {
+    type Output;
+
+    fn invoke(&self, operation: &ApplicationOperation, request: Request) -> Self::Output;
+}
+
+/// A resolved application handler bound to the one dispatcher retained by
+/// root composition.
+pub struct BoundApplicationHandler<'a, Dispatcher> {
+    descriptor: &'a ApplicationHandlerDescriptor,
+    dispatcher: &'a Dispatcher,
+}
+
+impl<'a, Dispatcher> BoundApplicationHandler<'a, Dispatcher> {
+    fn new(descriptor: &'a ApplicationHandlerDescriptor, dispatcher: &'a Dispatcher) -> Self {
+        Self {
+            descriptor,
+            dispatcher,
+        }
+    }
+
+    pub fn operation(&self) -> &ApplicationOperation {
+        self.descriptor.operation()
+    }
+
+    pub fn request_schema(&self) -> &SchemaRef {
+        self.descriptor.request_schema()
+    }
+
+    pub fn result_schema(&self) -> &SchemaRef {
+        self.descriptor.result_schema()
+    }
+
+    pub fn invoke<Request>(
+        &self,
+        request: Request,
+    ) -> <Dispatcher as CanonicalApplicationDispatcher<Request>>::Output
+    where
+        Dispatcher: CanonicalApplicationDispatcher<Request>,
+    {
+        self.dispatcher.invoke(self.descriptor.operation(), request)
+    }
+}
+
+/// Proof that one concrete application use case owns a request/result schema
+/// pair and can be bound to root composition's canonical dispatcher.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptor {
     operation: ApplicationOperation,
@@ -142,6 +189,13 @@ impl ApplicationHandlerDescriptor {
         &self.result_schema
     }
 
+    pub fn bind<'a, Dispatcher>(
+        &'a self,
+        dispatcher: &'a Dispatcher,
+    ) -> BoundApplicationHandler<'a, Dispatcher> {
+        BoundApplicationHandler::new(self, dispatcher)
+    }
+
     pub fn catalog_descriptor(&self) -> Result<CatalogHandlerDescriptor, ApplicationContractError> {
         Ok(CatalogHandlerDescriptor::new(
             self.operation.use_case_id().clone(),
@@ -151,8 +205,7 @@ impl ApplicationHandlerDescriptor {
     }
 }
 
-/// Closed set of validation-only handler descriptors supplied to future root
-/// catalog composition.
+/// Closed set of handler descriptors supplied to root catalog composition.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptors {
     descriptors: BTreeMap<UseCaseId, ApplicationHandlerDescriptor>,

@@ -43,6 +43,19 @@ pub enum HttpApplicationOperation {
     HealthRead,
     StorageStatus,
     DiagnosticsRead,
+    ConfigurationList,
+    ConfigurationExplain,
+    ConfigurationGet,
+    ConfigurationSet,
+    ConfigurationUnset,
+    ConfigurationBatch,
+    ConfigurationWriteCredential,
+    ConfigurationObservedState,
+    ConfigurationProtectedPreview,
+    ConfigurationProtectedApply,
+    ConfigurationRollbackPreview,
+    ConfigurationRollbackApply,
+    ConfigurationAudit,
 }
 
 /// The canonical application owner family responsible for one HTTP binding.
@@ -51,6 +64,7 @@ pub enum HttpApplicationOwnerKind {
     Git,
     Feedback,
     Primitive,
+    Configuration,
 }
 
 impl HttpApplicationOperation {
@@ -77,6 +91,19 @@ impl HttpApplicationOperation {
             Self::HealthRead => "health_read",
             Self::StorageStatus => "storage_status",
             Self::DiagnosticsRead => "diagnostics_read",
+            Self::ConfigurationList => "configuration_list",
+            Self::ConfigurationExplain => "configuration_explain",
+            Self::ConfigurationGet => "configuration_get",
+            Self::ConfigurationSet => "configuration_set",
+            Self::ConfigurationUnset => "configuration_unset",
+            Self::ConfigurationBatch => "configuration_batch",
+            Self::ConfigurationWriteCredential => "configuration_write_credential",
+            Self::ConfigurationObservedState => "configuration_observed_state",
+            Self::ConfigurationProtectedPreview => "configuration_protected_preview",
+            Self::ConfigurationProtectedApply => "configuration_protected_apply",
+            Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
+            Self::ConfigurationRollbackApply => "configuration_rollback_apply",
+            Self::ConfigurationAudit => "configuration_audit",
         }
     }
 
@@ -102,6 +129,19 @@ impl HttpApplicationOperation {
             | Self::HealthRead
             | Self::StorageStatus
             | Self::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
+            Self::ConfigurationList
+            | Self::ConfigurationExplain
+            | Self::ConfigurationGet
+            | Self::ConfigurationSet
+            | Self::ConfigurationUnset
+            | Self::ConfigurationBatch
+            | Self::ConfigurationWriteCredential
+            | Self::ConfigurationObservedState
+            | Self::ConfigurationProtectedPreview
+            | Self::ConfigurationProtectedApply
+            | Self::ConfigurationRollbackPreview
+            | Self::ConfigurationRollbackApply
+            | Self::ConfigurationAudit => HttpApplicationOwnerKind::Configuration,
         }
     }
 }
@@ -135,6 +175,11 @@ pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
     fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 
     fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
+
+    fn invoke_configuration(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture;
 }
 
 impl<F, Fut> HttpApplicationOwners for F
@@ -151,6 +196,13 @@ where
     }
 
     fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
+        Box::pin((self)(request))
+    }
+
+    fn invoke_configuration(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 }
@@ -264,6 +316,10 @@ where
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
         .route("/primitives/{operation}", post(primitive_read::<O>))
+        .route(
+            "/configuration/{operation}",
+            post(configuration_operation::<O>),
+        )
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
 }
@@ -491,6 +547,57 @@ where
     invoke_route(operation, state, request_id, cancellation, page, body).await
 }
 
+fn parse_configuration_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    match operation {
+        "configuration_list" => Some(HttpApplicationOperation::ConfigurationList),
+        "configuration_explain" => Some(HttpApplicationOperation::ConfigurationExplain),
+        "configuration_get" => Some(HttpApplicationOperation::ConfigurationGet),
+        "configuration_set" => Some(HttpApplicationOperation::ConfigurationSet),
+        "configuration_unset" => Some(HttpApplicationOperation::ConfigurationUnset),
+        "configuration_batch" => Some(HttpApplicationOperation::ConfigurationBatch),
+        "configuration_write_credential" => {
+            Some(HttpApplicationOperation::ConfigurationWriteCredential)
+        }
+        "configuration_observed_state" => {
+            Some(HttpApplicationOperation::ConfigurationObservedState)
+        }
+        "configuration_protected_preview" => {
+            Some(HttpApplicationOperation::ConfigurationProtectedPreview)
+        }
+        "configuration_protected_apply" => {
+            Some(HttpApplicationOperation::ConfigurationProtectedApply)
+        }
+        "configuration_rollback_preview" => {
+            Some(HttpApplicationOperation::ConfigurationRollbackPreview)
+        }
+        "configuration_rollback_apply" => {
+            Some(HttpApplicationOperation::ConfigurationRollbackApply)
+        }
+        "configuration_audit" => Some(HttpApplicationOperation::ConfigurationAudit),
+        _ => None,
+    }
+}
+
+async fn configuration_operation<O>(
+    Path(operation): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<PageRequest>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    let Some(operation) = parse_configuration_operation(&operation) else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+    };
+    invoke_route(operation, state, request_id, cancellation, page, body).await
+}
+
 async fn invoke_route<O>(
     operation: HttpApplicationOperation,
     State(owners): State<O>,
@@ -546,6 +653,89 @@ where
         HttpApplicationOwnerKind::Git => owners.invoke_git(request),
         HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
+        HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
     };
     invocation.await.into_http_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpApplicationOperation, parse_configuration_operation};
+
+    #[test]
+    fn configuration_operation_parser_is_exact_and_closed() {
+        let expected = [
+            (
+                "configuration_list",
+                HttpApplicationOperation::ConfigurationList,
+            ),
+            (
+                "configuration_explain",
+                HttpApplicationOperation::ConfigurationExplain,
+            ),
+            (
+                "configuration_get",
+                HttpApplicationOperation::ConfigurationGet,
+            ),
+            (
+                "configuration_set",
+                HttpApplicationOperation::ConfigurationSet,
+            ),
+            (
+                "configuration_unset",
+                HttpApplicationOperation::ConfigurationUnset,
+            ),
+            (
+                "configuration_batch",
+                HttpApplicationOperation::ConfigurationBatch,
+            ),
+            (
+                "configuration_write_credential",
+                HttpApplicationOperation::ConfigurationWriteCredential,
+            ),
+            (
+                "configuration_observed_state",
+                HttpApplicationOperation::ConfigurationObservedState,
+            ),
+            (
+                "configuration_protected_preview",
+                HttpApplicationOperation::ConfigurationProtectedPreview,
+            ),
+            (
+                "configuration_protected_apply",
+                HttpApplicationOperation::ConfigurationProtectedApply,
+            ),
+            (
+                "configuration_rollback_preview",
+                HttpApplicationOperation::ConfigurationRollbackPreview,
+            ),
+            (
+                "configuration_rollback_apply",
+                HttpApplicationOperation::ConfigurationRollbackApply,
+            ),
+            (
+                "configuration_audit",
+                HttpApplicationOperation::ConfigurationAudit,
+            ),
+        ];
+
+        for (name, operation) in expected {
+            assert_eq!(parse_configuration_operation(name), Some(operation));
+            assert_eq!(operation.as_str(), name);
+            assert_eq!(
+                operation.owner_kind(),
+                super::HttpApplicationOwnerKind::Configuration
+            );
+        }
+        for rejected in [
+            "",
+            "list",
+            "configuration",
+            "configuration_LIST",
+            "configuration_list/",
+            "configuration_unknown",
+        ] {
+            assert_eq!(parse_configuration_operation(rejected), None);
+        }
+    }
 }

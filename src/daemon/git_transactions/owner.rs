@@ -1,16 +1,29 @@
 //! One retained Git index transaction service per daemon-owned project store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::{GitIndexApplyRequestV1, GitIndexTransactionPortError};
+use tracedecay_application::{
+    GitIndexApplyRequestV1, GitIndexOperationBindingV1, GitIndexTransactionPortError, ResolvedScope,
+};
+use tracedecay_domain::configuration::{
+    ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
+    SOURCE_BINDINGS_SETTING_KEY, SettingKey, resolve_restrictive_capabilities,
+};
 use tracedecay_domain::{
-    GitHeadStateV1, GitIndexPreviewV1, ManifestDigest, ProjectId, UtcMicros, canonical_sha256,
+    ActorId, CapabilityId as DomainCapabilityId, GitHeadStateV1, GitIndexPreviewV1,
+    GitIndexTransactionOperationV1, ManifestDigest, ProjectId, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
+use tracedecay_tool_catalog::CapabilityId;
 
-use crate::global_db::GlobalDb;
+use crate::application::ProjectSourceAccessSnapshot;
+use crate::application::configuration::ConfigurationControlStore;
+use crate::catalog_composition::build_application_catalog_snapshot;
+use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
 use super::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService,
@@ -18,15 +31,205 @@ use super::{
     GitIndexTransactionStoreRegistry, SharedDaemonGitIndexTransactionStore,
 };
 
-const GIT_POLICY_REVISION: u64 = 1;
-const GIT_POLICY_DIGEST_DOMAIN: &str = "tracedecay.daemon.git-index-policy.v1";
-const GIT_CONFIGURATION_DIGEST_DOMAIN: &str = "tracedecay.daemon.git-index-configuration.v1";
-const GIT_CATALOG_DIGEST_DOMAIN: &str = "tracedecay.application.catalog.v1";
-const GIT_PRIVACY_DIGEST_DOMAIN: &str = "tracedecay.application.privacy.v1";
+const GIT_POLICY_REVISION: u64 = 2;
 
-/// Rechecks the daemon-minted capability and exact preview scope immediately
-/// before the native mutation boundary.
-pub(crate) struct DaemonGitIndexPolicyRecheck;
+#[derive(Clone, Debug)]
+pub(crate) struct DaemonGitAuthorityStateV1 {
+    pub(crate) scope: ResolvedScope,
+    pub(crate) requester: ActorId,
+    pub(crate) effective_capabilities: BTreeSet<CapabilityId>,
+    pub(crate) grant_expires_at: UtcMicros,
+    pub(crate) policy_revision: u64,
+    pub(crate) policy_digest: ManifestDigest,
+    pub(crate) configuration_digest: ManifestDigest,
+    pub(crate) catalog_digest: ManifestDigest,
+    pub(crate) privacy_digest: ManifestDigest,
+    pub(crate) evaluated_at: UtcMicros,
+}
+
+pub(crate) trait DaemonGitAuthoritySource: Send + Sync {
+    fn current(
+        &self,
+        operation: GitIndexTransactionOperationV1,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError>;
+}
+
+struct ProductionDaemonGitAuthoritySource {
+    access: ProjectSourceAccessSnapshot,
+    configuration: OwnedGlobalDbConfigurationControlStore,
+    runtime: tokio::runtime::Handle,
+}
+
+impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
+    fn current(
+        &self,
+        operation: GitIndexTransactionOperationV1,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        let evaluated_at = current_micros();
+        if evaluated_at >= self.access.grant_expires_at {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        }
+        let current = self
+            .runtime
+            .block_on(self.configuration.current())
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        if current.snapshot.validate().is_err() {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        }
+
+        let binding = GitIndexOperationBindingV1::for_operation(operation)
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let capability_id = binding.capability_id;
+        let bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let Some(ConfigurationValueV1::SourceBindings(bindings)) =
+            current.snapshot.effective_values.get(&bindings_key)
+        else {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        };
+        let authority = AuthorityRef::Project(self.access.scope.project_id.clone());
+        let configured_bindings = bindings
+            .iter()
+            .filter(|binding| {
+                binding.source_kind == self.access.binding.source_kind
+                    && binding.authority == authority
+            })
+            .collect::<Vec<_>>();
+        if configured_bindings.len() > 1
+            || configured_bindings.first().copied().is_some_and(|binding| {
+                binding.source_locator_digest != self.access.binding.source_locator_digest
+            })
+        {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        }
+        let source_binding = configured_bindings.first().map_or_else(
+            || self.access.binding.clone(),
+            |binding| (**binding).clone(),
+        );
+        let access_rules_key = SettingKey::new(ACCESS_RULES_SETTING_KEY)
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let Some(ConfigurationValueV1::AccessRules(access_rules)) =
+            current.snapshot.effective_values.get(&access_rules_key)
+        else {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        };
+        let granted_capabilities = self
+            .access
+            .effective_capabilities
+            .iter()
+            .map(|capability| DomainCapabilityId::new(capability.as_str().to_owned()))
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|_| GitIndexTransactionPortError::PolicyDenied)?;
+        let resolution = resolve_restrictive_capabilities(
+            granted_capabilities,
+            access_rules,
+            &CapabilityResolutionContextV1 {
+                actor: self.access.requester.clone(),
+                operation: None,
+                source_kind: self.access.binding.source_kind,
+                authority,
+                evaluated_at,
+            },
+        )
+        .map_err(|_| GitIndexTransactionPortError::PolicyDenied)?;
+        let effective_capabilities = resolution
+            .effective
+            .into_iter()
+            .map(|capability| CapabilityId::new(capability.as_str().to_owned()))
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|_| GitIndexTransactionPortError::PolicyDenied)?;
+        if !effective_capabilities.contains(&capability_id) {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        }
+        let catalog = build_application_catalog_snapshot()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let manifest = catalog
+            .capability(&capability_id)
+            .ok_or(GitIndexTransactionPortError::PolicyDenied)?;
+        let catalog_digest = ManifestDigest::new(catalog.digest().to_string())
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let privacy_digest = canonical_sha256(&(
+            manifest.privacy(),
+            manifest.denied_disclosure(),
+            manifest.scope(),
+            &source_binding,
+            &current.snapshot.resolution_provenance_digest,
+        ))
+        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let policy_digest = canonical_sha256(&(
+            GIT_POLICY_REVISION,
+            &self.access.scope,
+            &self.access.requester,
+            &source_binding,
+            &current.revision_id,
+            &current.snapshot.effective_behavior_digest,
+            &current.snapshot.resolution_provenance_digest,
+            manifest,
+            &catalog_digest,
+            &privacy_digest,
+        ))
+        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+
+        Ok(DaemonGitAuthorityStateV1 {
+            scope: self.access.scope.clone(),
+            requester: self.access.requester.clone(),
+            effective_capabilities,
+            grant_expires_at: self.access.grant_expires_at,
+            policy_revision: GIT_POLICY_REVISION,
+            policy_digest,
+            configuration_digest: current.snapshot.effective_behavior_digest,
+            catalog_digest,
+            privacy_digest,
+            evaluated_at,
+        })
+    }
+}
+
+#[derive(Default)]
+struct DaemonGitAuthoritySlot {
+    source: RwLock<Option<Arc<dyn DaemonGitAuthoritySource>>>,
+}
+
+impl DaemonGitAuthoritySlot {
+    fn install(
+        &self,
+        source: Arc<dyn DaemonGitAuthoritySource>,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        *self
+            .source
+            .write()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)? = Some(source);
+        Ok(())
+    }
+}
+
+impl DaemonGitAuthoritySource for DaemonGitAuthoritySlot {
+    fn current(
+        &self,
+        operation: GitIndexTransactionOperationV1,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        let source = self
+            .source
+            .read()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?
+            .as_ref()
+            .ok_or(GitIndexTransactionPortError::PolicyDenied)?
+            .clone();
+        source.current(operation)
+    }
+}
+
+/// Rechecks current daemon-authenticated capability, configuration, catalog,
+/// privacy, and exact preview scope immediately before native mutation.
+pub(crate) struct DaemonGitIndexPolicyRecheck {
+    authority: Arc<dyn DaemonGitAuthoritySource>,
+}
+
+impl DaemonGitIndexPolicyRecheck {
+    pub(crate) fn new(authority: Arc<dyn DaemonGitAuthoritySource>) -> Self {
+        Self { authority }
+    }
+}
 
 impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
     fn recheck(
@@ -34,52 +237,68 @@ impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
         request: &GitIndexApplyRequestV1,
         preview: &GitIndexPreviewV1,
     ) -> Result<CurrentGitIndexPolicyStateV1, GitIndexTransactionPortError> {
-        let (policy_digest, configuration_digest) = daemon_git_policy_evidence()?;
-        let catalog_digest = canonical_sha256(&GIT_CATALOG_DIGEST_DOMAIN)
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        let privacy_digest = canonical_sha256(&GIT_PRIVACY_DIGEST_DOMAIN)
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        if request.proof.catalog_digest != catalog_digest
-            || request.proof.privacy_digest != privacy_digest
+        let current = self.authority.current(request.binding.operation)?;
+        if request.context.scope() != &current.scope
+            || request.context.actor() != &current.requester
+            || current.evaluated_at >= current.grant_expires_at
+            || current.policy_revision != request.authority.policy.revision
+            || current.policy_digest != request.authority.policy.digest
+            || current.policy_digest != request.proof.policy_digest
+            || current.configuration_digest != request.proof.configuration_digest
+            || current.catalog_digest != request.proof.catalog_digest
+            || current.privacy_digest != request.proof.privacy_digest
             || request.proof.external_proof.is_some()
         {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        let scope = request.context.scope();
         Ok(CurrentGitIndexPolicyStateV1 {
             authorization: GitEffectAuthorizationV1 {
                 capability_granted: request
                     .context
-                    .allows(&request.binding.capability_id, &request.binding.use_case_id),
-                owner_scope_matches: scope.project_id == preview.repository_snapshot.project_id
-                    && scope.repository_id == preview.repository_snapshot.repository_id
-                    && preview.repository_snapshot.worktree_id.as_ref() == Some(&scope.worktree_id)
-                    && match (&scope.reference, &preview.repository_snapshot.head) {
-                        (
-                            Some(reference),
-                            GitHeadStateV1::Attached { branch, .. }
-                            | GitHeadStateV1::Unborn { branch },
-                        ) => reference.as_str() == branch,
-                        (None, GitHeadStateV1::Detached { .. }) => true,
-                        (None, _) | (Some(_), GitHeadStateV1::Detached { .. }) => false,
-                    },
+                    .allows(&request.binding.capability_id, &request.binding.use_case_id)
+                    && current
+                        .effective_capabilities
+                        .contains(&request.binding.capability_id),
+                owner_scope_matches: scope_matches_snapshot(
+                    &current.scope,
+                    &preview.repository_snapshot,
+                ),
             },
             conflict_risk: GitConflictRiskV1::NoneKnown,
-            policy_revision: GIT_POLICY_REVISION,
-            policy_digest,
-            configuration_digest,
-            evaluated_at: request.observed_at,
+            policy_revision: current.policy_revision,
+            policy_digest: current.policy_digest,
+            configuration_digest: current.configuration_digest,
+            evaluated_at: current.evaluated_at,
         })
     }
 }
 
-pub(crate) fn daemon_git_policy_evidence()
--> Result<(ManifestDigest, ManifestDigest), GitIndexTransactionPortError> {
-    let policy = canonical_sha256(&(GIT_POLICY_DIGEST_DOMAIN, GIT_POLICY_REVISION))
-        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-    let configuration = canonical_sha256(&(GIT_CONFIGURATION_DIGEST_DOMAIN, GIT_POLICY_REVISION))
-        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-    Ok((policy, configuration))
+fn scope_matches_snapshot(
+    scope: &ResolvedScope,
+    snapshot: &tracedecay_domain::RepositoryStateSnapshotV1,
+) -> bool {
+    scope.project_id == snapshot.project_id
+        && scope.repository_id == snapshot.repository_id
+        && snapshot.worktree_id.as_ref() == Some(&scope.worktree_id)
+        && match (&scope.reference, &snapshot.head) {
+            (
+                Some(reference),
+                GitHeadStateV1::Attached { branch, .. } | GitHeadStateV1::Unborn { branch },
+            ) => reference.as_str() == branch,
+            (None, GitHeadStateV1::Detached { .. }) => true,
+            (None, _) | (Some(_), GitHeadStateV1::Detached { .. }) => false,
+        }
+}
+
+fn current_micros() -> UtcMicros {
+    UtcMicros(
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_micros()),
+        )
+        .unwrap_or(i64::MAX),
+    )
 }
 
 pub(crate) type DaemonProjectGitIndexTransactionService = DaemonGitIndexTransactionService<
@@ -93,16 +312,27 @@ pub(crate) type DaemonProjectGitIndexTransactionService = DaemonGitIndexTransact
 pub(crate) struct DaemonGitInvocationOwner {
     pub(crate) project_id: ProjectId,
     pub(crate) service: Arc<DaemonProjectGitIndexTransactionService>,
+    authority: Arc<DaemonGitAuthoritySlot>,
+}
+
+impl DaemonGitInvocationOwner {
+    pub(crate) fn current_authority(
+        &self,
+        operation: GitIndexTransactionOperationV1,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        self.authority.current(operation)
+    }
 }
 
 struct ServiceEntry {
     project_id: ProjectId,
     repository_root: PathBuf,
     service: Arc<DaemonProjectGitIndexTransactionService>,
+    authority: Arc<DaemonGitAuthoritySlot>,
 }
 
 /// Owns the store actor, native executor, classifier, policy recheck, and
-/// repository queue for each canonical project `GlobalDb`.
+/// repository queue for each registered project session database.
 #[derive(Default)]
 pub(crate) struct DaemonGitIndexTransactionServiceRegistry {
     stores: GitIndexTransactionStoreRegistry,
@@ -113,13 +343,58 @@ pub(crate) struct DaemonGitIndexTransactionServiceRegistry {
 impl DaemonGitIndexTransactionServiceRegistry {
     pub(crate) async fn ensure(
         &self,
-        database: Arc<GlobalDb>,
+        database: Arc<RegisteredGlobalDb>,
         repository_root: PathBuf,
         project_id: ProjectId,
         observed_at: UtcMicros,
     ) -> Result<Arc<DaemonProjectGitIndexTransactionService>, GitIndexTransactionPortError> {
         let database_path = database
             .db_path()
+            .canonicalize()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        self.ensure_with(
+            database_path,
+            repository_root,
+            project_id,
+            observed_at,
+            || self.stores.ensure(database),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn ensure_engine_test(
+        &self,
+        database_path: PathBuf,
+        repository_root: PathBuf,
+        project_id: ProjectId,
+        observed_at: UtcMicros,
+    ) -> Result<Arc<DaemonProjectGitIndexTransactionService>, GitIndexTransactionPortError> {
+        let store_path = database_path.clone();
+        self.ensure_with(
+            database_path,
+            repository_root,
+            project_id,
+            observed_at,
+            || self.stores.ensure_engine_test(store_path),
+        )
+        .await
+    }
+
+    async fn ensure_with<F>(
+        &self,
+        database_path: PathBuf,
+        repository_root: PathBuf,
+        project_id: ProjectId,
+        observed_at: UtcMicros,
+        open_store: F,
+    ) -> Result<Arc<DaemonProjectGitIndexTransactionService>, GitIndexTransactionPortError>
+    where
+        F: FnOnce() -> tracedecay_store::GitIndexTransactionStoreResult<
+            super::SharedDaemonGitIndexTransactionStore,
+        >,
+    {
+        let database_path = database_path
             .canonicalize()
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let repository_root = repository_root
@@ -142,11 +417,10 @@ impl DaemonGitIndexTransactionServiceRegistry {
 
         // Open/retain the store actor under the creation gate before native
         // recovery runs on a blocking thread. Later ensures reuse this actor.
-        let store = self
-            .stores
-            .ensure(database)
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let store = open_store().map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let native_root = repository_root.clone();
+        let authority = Arc::new(DaemonGitAuthoritySlot::default());
+        let service_authority = Arc::clone(&authority);
         let (project_id, service) = tokio::task::spawn_blocking(move || {
             let native = FixedDaemonGitIndexExecutor::new(
                 DaemonProjectGitIndexPreviewAssembler::new(native_root, project_id.clone()),
@@ -155,7 +429,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
                 store,
                 native,
                 GitEffectClassifierV1::default(),
-                DaemonGitIndexPolicyRecheck,
+                DaemonGitIndexPolicyRecheck::new(service_authority),
                 observed_at,
             )
             .map(|service| (project_id, service))
@@ -169,6 +443,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
                 project_id,
                 repository_root,
                 service: Arc::clone(&service),
+                authority,
             },
         );
         Ok(service)
@@ -189,6 +464,42 @@ impl DaemonGitIndexTransactionServiceRegistry {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
         Ok(Some(Arc::clone(&entry.service)))
+    }
+
+    pub(crate) async fn install_authority(
+        &self,
+        repository_root: &std::path::Path,
+        access: ProjectSourceAccessSnapshot,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        let repository_root = repository_root
+            .canonicalize()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let services = self.services.lock().await;
+        let mut matches = services
+            .values()
+            .filter(|entry| entry.repository_root == repository_root);
+        let Some(entry) = matches.next() else {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        };
+        if matches.next().is_some()
+            || access.scope.project_id != entry.project_id
+            || access.binding.authority != AuthorityRef::Project(entry.project_id.clone())
+        {
+            return Err(GitIndexTransactionPortError::PolicyDenied);
+        }
+        entry
+            .authority
+            .install(Arc::new(ProductionDaemonGitAuthoritySource {
+                access,
+                configuration:
+                    OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
+                        configuration_database,
+                    ),
+                runtime,
+            }))?;
+        Ok(())
     }
 
     /// Resolve only an owner already mounted by project-open admission.
@@ -213,6 +524,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         Ok(Some(DaemonGitInvocationOwner {
             project_id: entry.project_id.clone(),
             service: Arc::clone(&entry.service),
+            authority: Arc::clone(&entry.authority),
         }))
     }
 

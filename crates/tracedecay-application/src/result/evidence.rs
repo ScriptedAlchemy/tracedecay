@@ -498,7 +498,7 @@ pub struct RetrievalEvidence<T> {
 }
 
 /// Immutable evidence packet consumed by adapters and later planner work.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidencePacket<T> {
     pub temporal: TemporalState,

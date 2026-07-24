@@ -2,8 +2,8 @@
 //!
 //! This module owns no policy rules. It binds exact request scope and the
 //! current Plan-20 configuration snapshot to the existing `tracedecay-policy`
-//! evaluators, and projects only callable catalog/application handler pairs
-//! into capability routing.
+//! evaluators, and projects catalog/application handler pairs plus their
+//! static availability into capability routing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,7 +30,7 @@ use tracedecay_policy::routing::{
     CapabilityRoutingDecisionV1, CapabilityRoutingEvaluator, CapabilityRoutingEvaluatorV1,
     CapabilityRoutingRequestV1, ScopeMatchV1, TruthSourceStateV1,
 };
-use tracedecay_tool_catalog::EffectClass;
+use tracedecay_tool_catalog::{AvailabilityContract, EffectClass};
 
 use crate::context::{RequestAdmission, RequestContext, ResolvedScope};
 use crate::error::ApplicationContractError;
@@ -210,10 +210,11 @@ pub struct PolicyEvaluationV1<T> {
     pub decision: T,
 }
 
-/// Callable catalog capability projected for pure routing.
+/// Handler-backed catalog capability projected for pure routing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredPolicyCapabilityV1 {
     capability_id: String,
+    catalog_availability: CapabilityAvailabilityV1,
     effect_class: EffectClass,
     catalog_digest: ManifestDigest,
 }
@@ -225,6 +226,10 @@ impl RegisteredPolicyCapabilityV1 {
 
     pub const fn effect_class(&self) -> EffectClass {
         self.effect_class
+    }
+
+    pub const fn catalog_availability(&self) -> CapabilityAvailabilityV1 {
+        self.catalog_availability
     }
 
     pub fn catalog_digest(&self) -> &ManifestDigest {
@@ -248,8 +253,8 @@ pub struct PolicyEvaluatorCompositionV1 {
 
 impl PolicyEvaluatorCompositionV1 {
     /// Builds the routing projection from the canonical catalog and matching
-    /// application handlers. Unavailable metadata never becomes a callable
-    /// policy route.
+    /// application handlers. Static unavailability remains a policy fact even
+    /// though transport/profile composition keeps the operation inert.
     pub fn from_application_catalog() -> Result<Self, ApplicationContractError> {
         let contributions = application_catalog_contributions()?;
         let handlers = application_handler_descriptors()?;
@@ -265,27 +270,27 @@ impl PolicyEvaluatorCompositionV1 {
         for capability in contributions
             .iter()
             .flat_map(|contribution| contribution.capabilities())
-            .filter(|capability| capability.availability().is_callable())
         {
             let Some(handler) = handlers.get(capability.use_case_id()) else {
                 return Err(ApplicationContractError::Inconsistent {
-                    field: "callable policy capability handler",
+                    field: "policy capability handler",
                 });
             };
             if handler.operation().capability_id() != capability.capability_id() {
                 return Err(ApplicationContractError::Inconsistent {
-                    field: "callable policy capability identity",
+                    field: "policy capability identity",
                 });
             }
             let capability_id = capability.capability_id().as_str().to_owned();
             let registered = RegisteredPolicyCapabilityV1 {
                 capability_id: capability_id.clone(),
+                catalog_availability: catalog_availability(capability.availability()),
                 effect_class: capability.effect(),
                 catalog_digest: canonical_sha256(&(POLICY_CAPABILITY_DIGEST_DOMAIN, capability))?,
             };
             if capabilities.insert(capability_id, registered).is_some() {
                 return Err(ApplicationContractError::Duplicate {
-                    field: "callable policy capability",
+                    field: "policy capability",
                 });
             }
         }
@@ -310,6 +315,7 @@ impl PolicyEvaluatorCompositionV1 {
     pub fn candidate(
         &self,
         capability_id: &str,
+        runtime_availability: CapabilityAvailabilityV1,
         scope_match: ScopeMatchV1,
         truth_source_state: TruthSourceStateV1,
         priority: u32,
@@ -318,11 +324,17 @@ impl PolicyEvaluatorCompositionV1 {
             self.capabilities
                 .get(capability_id)
                 .ok_or(ApplicationContractError::Inconsistent {
-                    field: "callable policy route",
+                    field: "policy route",
                 })?;
         Ok(CapabilityRouteCandidateV1 {
             capability_id: tracedecay_domain::CapabilityId::new(registered.capability_id.clone())?,
-            availability: CapabilityAvailabilityV1::Available,
+            availability: if registered.catalog_availability
+                == CapabilityAvailabilityV1::Unavailable
+            {
+                CapabilityAvailabilityV1::Unavailable
+            } else {
+                runtime_availability
+            },
             scope_match,
             effect_class: route_effect(registered.effect_class)?,
             truth_source_state,
@@ -526,17 +538,18 @@ impl PolicyEvaluatorCompositionV1 {
         for capability in &request.declared_capability_order {
             if !self.capabilities.contains_key(capability.as_str()) {
                 return Err(ApplicationContractError::Inconsistent {
-                    field: "declared callable policy route",
+                    field: "declared policy route",
                 });
             }
         }
         for candidate in &request.candidates {
             let Some(registered) = self.capabilities.get(candidate.capability_id.as_str()) else {
                 return Err(ApplicationContractError::Inconsistent {
-                    field: "candidate callable policy route",
+                    field: "candidate policy route",
                 });
             };
-            if candidate.availability != CapabilityAvailabilityV1::Available
+            if (registered.catalog_availability == CapabilityAvailabilityV1::Unavailable
+                && candidate.availability != CapabilityAvailabilityV1::Unavailable)
                 || candidate.effect_class != route_effect(registered.effect_class)?
                 || candidate.catalog_digest != registered.catalog_digest
             {
@@ -546,6 +559,15 @@ impl PolicyEvaluatorCompositionV1 {
             }
         }
         Ok(())
+    }
+}
+
+fn catalog_availability(availability: &AvailabilityContract) -> CapabilityAvailabilityV1 {
+    match availability {
+        AvailabilityContract::Available | AvailabilityContract::Deprecated { .. } => {
+            CapabilityAvailabilityV1::Available
+        }
+        AvailabilityContract::Unavailable { .. } => CapabilityAvailabilityV1::Unavailable,
     }
 }
 

@@ -52,14 +52,14 @@ impl ConfigurationMutationAuthority {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct SettingSummary {
     pub key: SettingKey,
     pub sensitivity: SettingSensitivityV1,
     pub restart_requirement: RestartRequirementV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ResolvedSetting {
     pub key: SettingKey,
     pub effective_value: ConfigurationValueV1,
@@ -186,7 +186,7 @@ pub struct WriteOnlyCredentialMutation {
     pub write_handle: CredentialWriteHandleV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ComponentConfigurationState {
     pub component: String,
     pub desired_revision_id: ConfigurationRevisionId,
@@ -195,7 +195,7 @@ pub struct ComponentConfigurationState {
     pub activation_error_code: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ConfigurationMutationReceipt {
     pub receipt_id: ConfigurationReceiptId,
     pub base_revision_id: ConfigurationRevisionId,
@@ -211,7 +211,7 @@ pub struct ConfigurationAuditQuery {
     pub limit: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ConfigurationAuditPage {
     pub events: Vec<ConfigurationAuditEvent>,
     pub next_after_event_id: Option<ConfigurationAuditEventId>,

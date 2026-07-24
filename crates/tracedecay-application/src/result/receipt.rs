@@ -189,7 +189,7 @@ pub enum ReconciliationState {
 }
 
 /// Read-only preview of a future typed effect.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewResult<T> {
     pub preview_id: PreviewId,
@@ -234,7 +234,7 @@ impl<T> PreviewResult<T> {
 
 /// Durable effect proof. It records identities and receipts, never credentials
 /// or arbitrary command text.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EffectReceipt {
     pub operation: UseCaseId,
@@ -292,7 +292,7 @@ impl EffectReceipt {
 
 /// Result of an admitted effect. `EffectUnknown` remains a receipt state and
 /// cannot be remapped into a pre-admission problem.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EffectResult<T> {
     pub effect_id: EffectId,

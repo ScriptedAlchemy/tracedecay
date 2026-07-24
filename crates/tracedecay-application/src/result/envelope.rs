@@ -54,7 +54,7 @@ impl ResultContractRef {
 }
 
 /// Canonical outcome family for an admitted application operation.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "outcome", content = "value")]
 pub enum ApplicationOutcome<T> {
     Evidence(EvidencePacket<T>),
@@ -63,7 +63,7 @@ pub enum ApplicationOutcome<T> {
 }
 
 /// Successful application result with a stable contract, request, and scope.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationEnvelope<T> {
     pub contract: ResultContractRef,

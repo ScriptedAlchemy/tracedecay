@@ -1,8 +1,9 @@
-//! Public Git preview/apply surface bindings.
+//! Public read-only Git intelligence and preview/apply surface bindings.
 //!
 //! Internal `stage_hunks` / `unstage_hunks` / `commit_index` capabilities remain
 //! application-only (no surface bindings). Adapters expose only `git_preview`
-//! and `git_apply`.
+//! and `git_apply`; PR9 status/diff/history/blame/hunk reads are callable
+//! independently and expose no mutation capability.
 
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
@@ -30,9 +31,77 @@ struct SurfaceSpec {
     summary: &'static str,
     description: &'static str,
     example: &'static str,
+    surfaces: &'static [BindingSurface],
 }
 
-const SURFACE_SPECS: [SurfaceSpec; 2] = [
+const MCP_SURFACE: [BindingSurface; 1] = [BindingSurface::Mcp];
+const TRANSPORT_SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+];
+
+const SURFACE_SPECS: [SurfaceSpec; 7] = [
+    SurfaceSpec {
+        capability: "capability.application.git.status",
+        use_case: "use-case.application.git.status",
+        request_schema: "schema.application.git.status.request",
+        result_schema: "schema.application.git.status.result",
+        operation: "git_status",
+        effect: EffectClass::Read,
+        summary: "Read typed Git status",
+        description: "Read bounded typed status for one exact admitted project worktree.",
+        example: "Show typed Git status for this project",
+        surfaces: &MCP_SURFACE,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.diff",
+        use_case: "use-case.application.git.diff",
+        request_schema: "schema.application.git.diff.request",
+        result_schema: "schema.application.git.diff.result",
+        operation: "git_diff",
+        effect: EffectClass::Read,
+        summary: "Read a typed Git diff",
+        description: "Read one bounded working-tree, staged, or exact commit-range diff.",
+        example: "Show the typed staged Git diff",
+        surfaces: &MCP_SURFACE,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.history",
+        use_case: "use-case.application.git.history",
+        request_schema: "schema.application.git.history.request",
+        result_schema: "schema.application.git.history.result",
+        operation: "git_history",
+        effect: EffectClass::Read,
+        summary: "Read bounded Git history",
+        description: "Read bounded typed commit history for one exact admitted project worktree.",
+        example: "Show recent typed Git history",
+        surfaces: &MCP_SURFACE,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.blame",
+        use_case: "use-case.application.git.blame",
+        request_schema: "schema.application.git.blame.request",
+        result_schema: "schema.application.git.blame.result",
+        operation: "git_blame",
+        effect: EffectClass::Read,
+        summary: "Read typed Git blame",
+        description: "Read bounded typed line provenance for one admitted path.",
+        example: "Show typed Git blame for this file",
+        surfaces: &MCP_SURFACE,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.hunks",
+        use_case: "use-case.application.git.hunks",
+        request_schema: "schema.application.git.hunks.request",
+        result_schema: "schema.application.git.hunks.result",
+        operation: "git_hunks",
+        effect: EffectClass::Read,
+        summary: "Read typed Git hunk references",
+        description: "Mint bounded HunkRef evidence from one working-tree or staged diff.",
+        example: "List typed hunk references for the staged diff",
+        surfaces: &MCP_SURFACE,
+    },
     SurfaceSpec {
         capability: "capability.application.git.preview",
         use_case: "use-case.application.git.preview",
@@ -43,6 +112,7 @@ const SURFACE_SPECS: [SurfaceSpec; 2] = [
         summary: "Preview Git index mutations",
         description: "Build an immutable preview for selected index mutations with CAS evidence.",
         example: "Preview staging these hunks",
+        surfaces: &TRANSPORT_SURFACES,
     },
     SurfaceSpec {
         capability: "capability.application.git.apply",
@@ -56,25 +126,20 @@ const SURFACE_SPECS: [SurfaceSpec; 2] = [
         summary: "Apply a Git index preview",
         description: "Apply one exact preview identity through daemon-serialized index transactions.",
         example: "Apply the previewed Git index mutation",
+        surfaces: &TRANSPORT_SURFACES,
     },
 ];
 
-const SURFACES: [BindingSurface; 3] = [
-    BindingSurface::Cli,
-    BindingSurface::Mcp,
-    BindingSurface::Http,
-];
-
-/// Catalog contribution for public Git preview/apply bindings only.
+/// Catalog contribution for public Git read and preview/apply bindings.
 pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
     let mut capabilities = Vec::with_capacity(SURFACE_SPECS.len());
-    let mut bindings = Vec::with_capacity(SURFACE_SPECS.len() * SURFACES.len());
+    let mut bindings = Vec::new();
 
     for spec in &SURFACE_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
-        let mut binding_ids = Vec::with_capacity(SURFACES.len());
-        for surface in SURFACES {
+        let mut binding_ids = Vec::with_capacity(spec.surfaces.len());
+        for surface in spec.surfaces.iter().copied() {
             let binding_id = BindingId::new(format!(
                 "binding.{}.{}.{}",
                 match surface {
@@ -130,8 +195,15 @@ fn capability(
             spec.description,
             vec![spec.example.to_owned()],
         )?,
-        request_schema: schema(spec.request_schema)?,
-        result_schema: schema(spec.result_schema)?,
+        request_schema: schema(spec.request_schema, 65_536)?,
+        result_schema: schema(
+            spec.result_schema,
+            if spec.effect == EffectClass::Read {
+                4_194_304
+            } else {
+                8_192
+            },
+        )?,
         effect: spec.effect,
         scope: ScopeRequirement::new(vec![
             ScopeDimension::Project,
@@ -225,7 +297,14 @@ fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
 fn handler_descriptor(
     spec: &SurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
-    let result_schema = schema(spec.result_schema)?;
+    let result_schema = schema(
+        spec.result_schema,
+        if spec.effect == EffectClass::Read {
+            4_194_304
+        } else {
+            8_192
+        },
+    )?;
     ApplicationHandlerDescriptor::new(
         ApplicationOperation::new(
             CapabilityId::new(spec.capability)?,
@@ -233,13 +312,13 @@ fn handler_descriptor(
             ResultContractRef::from_schema(&result_schema),
             true,
         ),
-        schema(spec.request_schema)?,
+        schema(spec.request_schema, 65_536)?,
         result_schema,
     )
 }
 
-fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
-    Ok(SchemaRef::new(SchemaId::new(id)?, 1, 8_192)?)
+fn schema(id: &str, maximum_bytes: u32) -> Result<SchemaRef, ApplicationContractError> {
+    Ok(SchemaRef::new(SchemaId::new(id)?, 1, maximum_bytes)?)
 }
 
 #[cfg(test)]
@@ -247,18 +326,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_git_bindings_exclude_internal_index_steps() {
+    fn public_git_bindings_include_reads_and_exclude_internal_index_steps() {
         let contribution = git_surface_catalog_contribution().expect("contribution");
         let operations: Vec<_> = contribution
             .bindings()
             .iter()
             .map(|binding| binding.operation().as_str().to_owned())
             .collect();
-        assert!(
-            operations
-                .iter()
-                .all(|name| name == "git_preview" || name == "git_apply")
-        );
+        for expected in [
+            "git_status",
+            "git_diff",
+            "git_history",
+            "git_blame",
+            "git_hunks",
+            "git_preview",
+            "git_apply",
+        ] {
+            assert!(operations.iter().any(|name| name == expected), "{expected}");
+        }
         assert!(!operations.iter().any(|name| {
             name.contains("stage_hunks")
                 || name.contains("unstage_hunks")

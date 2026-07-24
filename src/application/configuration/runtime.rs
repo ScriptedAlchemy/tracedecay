@@ -4,7 +4,7 @@
 //! authorization, mutation, audit, and credential semantics remain in the
 //! existing application operations and Plan20 store.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::UtcMicros;
@@ -22,6 +22,7 @@ use crate::config::{
     SemanticConfig,
 };
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
@@ -43,6 +44,8 @@ type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send 
 /// local transport.
 pub struct ProjectConfigurationRuntime {
     configuration: PinnedRuntimeConfiguration,
+    configuration_database: Arc<RegisteredGlobalDb>,
+    authorities: Arc<ConfigurationAuthoritySlots>,
     #[allow(dead_code)] // Plan 20 config control-plane — staged
     control_plane: SharedConfigurationControlPlane,
     client: Arc<ProductionConfigurationDaemonClient>,
@@ -50,6 +53,10 @@ pub struct ProjectConfigurationRuntime {
 
 impl ProjectConfigurationRuntime {
     pub(crate) fn open(opened: OpenedRuntimeConfiguration) -> Result<Self> {
+        let OpenedRuntimeConfiguration {
+            configuration,
+            registered_database,
+        } = opened;
         let mut registry =
             crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
                 TraceDecayError::Config {
@@ -58,23 +65,27 @@ impl ProjectConfigurationRuntime {
             })?;
         register_semantic_runtime_configuration(&mut registry)?;
         let registry = Arc::new(registry);
-        let store =
-            OwnedGlobalDbConfigurationControlStore::from_project_runtime_db(opened.database);
+        let store = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
+            Arc::clone(&registered_database),
+        );
+        let authorities = Arc::new(ConfigurationAuthoritySlots::default());
         let control_plane: SharedConfigurationControlPlane =
             Arc::new(RetainedConfigurationControlPlane {
                 registry,
                 store: store.clone(),
-                scopes: SharedScopeResolution::unavailable(),
-                authorization: SharedMutationAuthorization::unavailable(),
+                scopes: SharedScopeResolution(Arc::clone(&authorities)),
+                authorization: SharedMutationAuthorization(Arc::clone(&authorities)),
                 clock: SystemConfigurationClock,
             });
         let client = Arc::new(ProductionConfigurationDaemonClient {
-            target: opened.configuration.target.clone(),
+            target: configuration.target.clone(),
             store,
             control_plane: Arc::clone(&control_plane),
         });
         Ok(Self {
-            configuration: opened.configuration,
+            configuration,
+            configuration_database: registered_database,
+            authorities,
             control_plane,
             client,
         })
@@ -82,6 +93,18 @@ impl ProjectConfigurationRuntime {
 
     pub(crate) fn configuration(&self) -> &PinnedRuntimeConfiguration {
         &self.configuration
+    }
+
+    pub(crate) fn registered_database(&self) -> Arc<RegisteredGlobalDb> {
+        Arc::clone(&self.configuration_database)
+    }
+
+    pub(crate) fn install_authorities(
+        &self,
+        scopes: Arc<dyn ScopeResolutionPort + Send + Sync>,
+        authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
+    ) -> Result<()> {
+        self.authorities.install(scopes, authorization)
     }
 
     #[allow(dead_code)] // Plan 20 config control-plane — staged
@@ -99,10 +122,7 @@ impl ProjectConfigurationRuntime {
 }
 
 // Release this runtime's process-global daemon-client registration when the
-// last handle drops. The runtime retains the opened store `Arc`, and leaving
-// it registered kept the exclusive sessions.db writer lease alive for the
-// whole process lifetime, blocking the managed daemon (the single legitimate
-// writer). The uninstall is `Arc::ptr_eq`-guarded, so a newer client
+// last handle drops. The uninstall is `Arc::ptr_eq`-guarded, so a newer client
 // installed by a live handle for the same project is never removed.
 impl Drop for ProjectConfigurationRuntime {
     fn drop(&mut self) {
@@ -555,13 +575,55 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
     }
 }
 
-struct SharedScopeResolution(Arc<dyn ScopeResolutionPort + Send + Sync>);
+struct InstalledConfigurationAuthorities {
+    scopes: Arc<dyn ScopeResolutionPort + Send + Sync>,
+    authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
+}
 
-impl SharedScopeResolution {
-    fn unavailable() -> Self {
-        Self(Arc::new(UnavailableScopeResolution))
+#[derive(Default)]
+struct ConfigurationAuthoritySlots {
+    installed: OnceLock<InstalledConfigurationAuthorities>,
+}
+
+impl ConfigurationAuthoritySlots {
+    fn install(
+        &self,
+        scopes: Arc<dyn ScopeResolutionPort + Send + Sync>,
+        authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
+    ) -> Result<()> {
+        self.installed
+            .set(InstalledConfigurationAuthorities {
+                scopes,
+                authorization,
+            })
+            .map_err(|_| TraceDecayError::Config {
+                message: "configuration runtime authorities are already installed".to_owned(),
+            })
+    }
+
+    fn scope_resolution(
+        &self,
+    ) -> std::result::Result<&Arc<dyn ScopeResolutionPort + Send + Sync>, ConfigurationError> {
+        self.installed
+            .get()
+            .map(|authorities| &authorities.scopes)
+            .ok_or(ConfigurationError::Unavailable)
+    }
+
+    fn mutation_authorization(
+        &self,
+    ) -> std::result::Result<
+        &Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
+        ConfigurationError,
+    > {
+        self.installed
+            .get()
+            .map(|authorities| &authorities.authorization)
+            .ok_or(ConfigurationError::Unavailable)
     }
 }
+
+struct SharedScopeResolution(Arc<ConfigurationAuthoritySlots>);
 
 impl ScopeResolutionPort for SharedScopeResolution {
     fn resolve_protected_change<'a>(
@@ -569,7 +631,10 @@ impl ScopeResolutionPort for SharedScopeResolution {
         actor: &'a AuthorizedActor,
         change: &'a ProtectedChange,
     ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
-        self.0.resolve_protected_change(actor, change)
+        let Ok(scopes) = self.0.scope_resolution() else {
+            return Box::pin(async { Err(ConfigurationError::Unavailable) });
+        };
+        scopes.resolve_protected_change(actor, change)
     }
 
     fn revalidate_plan<'a>(
@@ -577,17 +642,14 @@ impl ScopeResolutionPort for SharedScopeResolution {
         actor: &'a AuthorizedActor,
         plan: &'a ProtectedChangePlan,
     ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
-        self.0.revalidate_plan(actor, plan)
+        let Ok(scopes) = self.0.scope_resolution() else {
+            return Box::pin(async { Err(ConfigurationError::Unavailable) });
+        };
+        scopes.revalidate_plan(actor, plan)
     }
 }
 
-struct SharedMutationAuthorization(Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>);
-
-impl SharedMutationAuthorization {
-    fn unavailable() -> Self {
-        Self(Arc::new(UnavailableMutationAuthorization))
-    }
-}
+struct SharedMutationAuthorization(Arc<ConfigurationAuthoritySlots>);
 
 impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
     fn recheck<'a>(
@@ -600,45 +662,10 @@ impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
         now: UtcMicros,
     ) -> ConfigurationOperationFuture<'a, super::ports::CurrentConfigurationMutationAuthorizationV1>
     {
-        self.0
-            .recheck(receipt, operation, expected_revision, sink, effect, now)
-    }
-}
-
-struct UnavailableScopeResolution;
-
-impl ScopeResolutionPort for UnavailableScopeResolution {
-    fn resolve_protected_change<'a>(
-        &'a self,
-        _actor: &'a AuthorizedActor,
-        _change: &'a ProtectedChange,
-    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn revalidate_plan<'a>(
-        &'a self,
-        _actor: &'a AuthorizedActor,
-        _plan: &'a ProtectedChangePlan,
-    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-}
-
-struct UnavailableMutationAuthorization;
-
-impl ConfigurationMutationAuthorizationPort for UnavailableMutationAuthorization {
-    fn recheck<'a>(
-        &'a self,
-        _receipt: &'a tracedecay_domain::configuration::ConfigurationMutationGrantReceiptV1,
-        _operation: tracedecay_domain::configuration::ConfigurationMutationOperationV1,
-        _expected_revision: &'a ConfigurationRevisionId,
-        _sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
-        _effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
-        _now: UtcMicros,
-    ) -> ConfigurationOperationFuture<'a, super::ports::CurrentConfigurationMutationAuthorizationV1>
-    {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
+        let Ok(authorization) = self.0.mutation_authorization() else {
+            return Box::pin(async { Err(ConfigurationError::Unavailable) });
+        };
+        authorization.recheck(receipt, operation, expected_revision, sink, effect, now)
     }
 }
 
@@ -660,6 +687,86 @@ impl ConfigurationClock for SystemConfigurationClock {
 mod tests {
     use super::*;
     use crate::application::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
+
+    struct TestScopeResolution;
+
+    impl ScopeResolutionPort for TestScopeResolution {
+        fn resolve_protected_change<'a>(
+            &'a self,
+            _actor: &'a AuthorizedActor,
+            _change: &'a ProtectedChange,
+        ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
+            unreachable!("authority installation test does not invoke the scope port")
+        }
+
+        fn revalidate_plan<'a>(
+            &'a self,
+            _actor: &'a AuthorizedActor,
+            _plan: &'a ProtectedChangePlan,
+        ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1> {
+            unreachable!("authority installation test does not invoke the scope port")
+        }
+    }
+
+    struct TestMutationAuthorization;
+
+    impl ConfigurationMutationAuthorizationPort for TestMutationAuthorization {
+        fn recheck<'a>(
+            &'a self,
+            _receipt: &'a tracedecay_domain::configuration::ConfigurationMutationGrantReceiptV1,
+            _operation: tracedecay_domain::configuration::ConfigurationMutationOperationV1,
+            _expected_revision: &'a ConfigurationRevisionId,
+            _sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
+            _effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
+            _now: UtcMicros,
+        ) -> ConfigurationOperationFuture<
+            'a,
+            super::super::ports::CurrentConfigurationMutationAuthorizationV1,
+        > {
+            unreachable!("authority installation test does not invoke the authorization port")
+        }
+    }
+
+    #[test]
+    fn configuration_authorities_fail_closed_until_installed() {
+        let authorities = ConfigurationAuthoritySlots::default();
+
+        assert!(matches!(
+            authorities.scope_resolution(),
+            Err(ConfigurationError::Unavailable)
+        ));
+        assert!(matches!(
+            authorities.mutation_authorization(),
+            Err(ConfigurationError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn configuration_authorities_bind_atomically_once() {
+        let authorities = ConfigurationAuthoritySlots::default();
+        let scopes: Arc<dyn ScopeResolutionPort + Send + Sync> = Arc::new(TestScopeResolution);
+        let authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync> =
+            Arc::new(TestMutationAuthorization);
+
+        authorities
+            .install(Arc::clone(&scopes), Arc::clone(&authorization))
+            .expect("first authority installation");
+        assert!(Arc::ptr_eq(
+            authorities.scope_resolution().expect("installed scopes"),
+            &scopes
+        ));
+        assert!(Arc::ptr_eq(
+            authorities
+                .mutation_authorization()
+                .expect("installed authorization"),
+            &authorization
+        ));
+
+        let error = authorities
+            .install(scopes, authorization)
+            .expect_err("second authority installation must fail");
+        assert!(matches!(error, TraceDecayError::Config { .. }));
+    }
 
     #[test]
     fn client_exposes_typed_direct_mutation_operations() {

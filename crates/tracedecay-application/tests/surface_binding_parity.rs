@@ -15,6 +15,7 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         BindingSurface::Mcp,
         BindingSurface::Http,
     ];
+    const MCP_SURFACE: [BindingSurface; 1] = [BindingSurface::Mcp];
     const ADVISORY_SURFACES: [BindingSurface; 4] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -31,7 +32,19 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
     let git_handlers = git_surface_handler_descriptors().expect("git handlers");
     let feedback_handlers = feedback_surface_handler_descriptors().expect("feedback handlers");
 
-    assert_surface_contract_parity(&git, &git_handlers, &TRANSPORT_SURFACES, &[]);
+    let git_read_overrides = [
+        ("capability.application.git.status", MCP_SURFACE.as_slice()),
+        ("capability.application.git.diff", MCP_SURFACE.as_slice()),
+        ("capability.application.git.history", MCP_SURFACE.as_slice()),
+        ("capability.application.git.blame", MCP_SURFACE.as_slice()),
+        ("capability.application.git.hunks", MCP_SURFACE.as_slice()),
+    ];
+    assert_surface_contract_parity(
+        &git,
+        &git_handlers,
+        &TRANSPORT_SURFACES,
+        &git_read_overrides,
+    );
     let advisory_overrides =
         ADVISORY_CAPABILITIES.map(|capability_id| (capability_id, ADVISORY_SURFACES.as_slice()));
     assert_surface_contract_parity(

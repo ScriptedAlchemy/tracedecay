@@ -1,9 +1,10 @@
 //! Root-owned assembly of the application capability catalog.
 //!
 //! Composition validates metadata against the closed application handler
-//! descriptors. It retains no executable handler, store, or query authority.
+//! descriptors and binds them to one caller-supplied canonical dispatcher.
 
 use thiserror::Error;
+use tracedecay_application::handlers::BoundApplicationHandler;
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationHandlerDescriptors,
     application_catalog_contributions, application_handler_descriptors,
@@ -12,6 +13,7 @@ use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogContributionV1, CatalogSnapshotBuilderV1,
     CatalogSnapshotV1, CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
     ProfileDefinitionInputV1, ProfileId, ProfileKind, RoutingFixtureExpectation, RoutingFixtureV1,
+    UseCaseId,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -24,9 +26,60 @@ pub enum CatalogCompositionError {
     Identifier(#[from] IdentifierError),
 }
 
+/// Immutable catalog metadata and the application descriptors bound to one
+/// retained canonical dispatcher.
+pub struct ApplicationCatalogComposition<Dispatcher> {
+    snapshot: CatalogSnapshotV1,
+    handlers: ApplicationHandlerDescriptors,
+    dispatcher: Dispatcher,
+}
+
+impl<Dispatcher> ApplicationCatalogComposition<Dispatcher> {
+    pub fn snapshot(&self) -> &CatalogSnapshotV1 {
+        &self.snapshot
+    }
+
+    pub fn handler(
+        &self,
+        use_case_id: &UseCaseId,
+    ) -> Option<BoundApplicationHandler<'_, Dispatcher>> {
+        self.handlers
+            .get(use_case_id)
+            .map(|descriptor| descriptor.bind(&self.dispatcher))
+    }
+}
+
+/// Compose the immutable catalog and retain its one canonical application
+/// dispatcher. Request and result types remain compile-time checked by the
+/// dispatcher's per-request trait implementations.
+pub fn compose_application_catalog<Dispatcher>(
+    dispatcher: Dispatcher,
+) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
+    compose_application_catalog_with(|_snapshot| dispatcher)
+}
+
+/// Compose the catalog when the retained dispatcher also needs the validated
+/// immutable snapshot for its own binding checks.
+pub fn compose_application_catalog_with<Dispatcher>(
+    dispatcher: impl FnOnce(&CatalogSnapshotV1) -> Dispatcher,
+) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
+    let (snapshot, handlers) = assemble_application_catalog()?;
+    let dispatcher = dispatcher(&snapshot);
+    Ok(ApplicationCatalogComposition {
+        snapshot,
+        handlers,
+        dispatcher,
+    })
+}
+
 /// Build the immutable catalog snapshot used by transport binding resolution.
-/// The snapshot carries metadata only; executable ownership stays elsewhere.
+/// Callers that execute operations must use [`compose_application_catalog`].
 pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
+    assemble_application_catalog().map(|(snapshot, _handlers)| snapshot)
+}
+
+fn assemble_application_catalog()
+-> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
     let mut contributions = application_catalog_contributions()?;
     let handlers = application_handler_descriptors()?;
     contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
@@ -42,7 +95,7 @@ pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, Catalog
     }
     builder.add_profile(profile);
 
-    Ok(builder.build()?)
+    Ok((builder.build()?, handlers))
 }
 
 /// Validates the application-owned catalog before application-only handler

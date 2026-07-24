@@ -32,6 +32,7 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+use super::owner::{DaemonGitAuthoritySource, DaemonGitIndexPolicyRecheck};
 use super::queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
 use super::recovery::{GitIndexRecoveryError, GitIndexRecoveryExecutor};
 use super::service::{
@@ -40,10 +41,10 @@ use super::service::{
 };
 use super::store::DaemonGitIndexTransactionStore;
 use super::{
-    DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
+    DaemonGitAuthorityStateV1, DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
     DaemonGitIndexTransactionServiceRegistry,
 };
-use crate::global_db::GlobalDb;
+use crate::db::engine::TestConnection;
 
 #[test]
 fn same_repository_mutations_never_enter_the_native_section_together() {
@@ -464,6 +465,55 @@ impl GitIndexPolicyRecheckPort for TestPolicy {
     }
 }
 
+struct MutableDaemonGitAuthority {
+    current: Mutex<DaemonGitAuthorityStateV1>,
+}
+
+impl DaemonGitAuthoritySource for MutableDaemonGitAuthority {
+    fn current(
+        &self,
+        _operation: GitIndexTransactionOperationV1,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        Ok(self.current.lock().expect("authority state").clone())
+    }
+}
+
+#[test]
+fn daemon_policy_recheck_rejects_a_capability_revoked_after_preview() {
+    let preview = preview();
+    let request = apply_request(&preview, "idempotency.revoked-authority");
+    let source = Arc::new(MutableDaemonGitAuthority {
+        current: Mutex::new(DaemonGitAuthorityStateV1 {
+            scope: request.context.scope().clone(),
+            requester: request.context.actor().clone(),
+            effective_capabilities: BTreeSet::from([request.binding.capability_id.clone()]),
+            grant_expires_at: request.context.grant().expires_at,
+            policy_revision: request.authority.policy.revision,
+            policy_digest: request.proof.policy_digest.clone(),
+            configuration_digest: request.proof.configuration_digest.clone(),
+            catalog_digest: request.proof.catalog_digest.clone(),
+            privacy_digest: request.proof.privacy_digest.clone(),
+            evaluated_at: request.observed_at,
+        }),
+    });
+    let recheck = DaemonGitIndexPolicyRecheck::new(source.clone());
+
+    recheck
+        .recheck(&request, &preview)
+        .expect("current authenticated authority admits apply");
+    source
+        .current
+        .lock()
+        .expect("authority state")
+        .effective_capabilities
+        .clear();
+
+    assert_eq!(
+        recheck.recheck(&request, &preview),
+        Err(GitIndexTransactionPortError::PolicyDenied)
+    );
+}
+
 type TestPort = DaemonGitIndexTransactionPort<
     DaemonGitIndexTransactionStore,
     FakeNative,
@@ -485,14 +535,8 @@ struct TestHarness {
 
 fn test_store(directory: &tempfile::TempDir) -> DaemonGitIndexTransactionStore {
     let path = directory.path().join("canonical-project.db");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    let database = runtime
-        .block_on(GlobalDb::open_at_without_structured_backfill(&path))
-        .expect("canonical project database");
-    DaemonGitIndexTransactionStore::open(Arc::new(database)).expect("canonical store actor")
+    DaemonGitIndexTransactionStore::open_engine_test(TestConnection::open(&path))
+        .expect("canonical store actor")
 }
 
 struct StartupUnavailableStore(DaemonGitIndexTransactionStore);
@@ -678,7 +722,7 @@ fn safe_native_failure_receives_terminal_abort_and_replays_without_native_work()
 }
 
 #[test]
-fn terminal_replay_bypasses_current_policy_and_conflicting_input_rejects() {
+fn terminal_replay_bypasses_revalidated_policy_but_conflicting_effect_input_rejects() {
     let harness = test_port(
         [NativeMode::Completed(GitIndexReceiptOutcomeV1::Committed)],
         [],
@@ -698,8 +742,16 @@ fn terminal_replay_bypasses_current_policy_and_conflicting_input_rejects() {
     assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
 
+    let mut revalidated = harness.request.clone();
+    revalidated.proof.configuration_digest = digest('e');
+    let replay = harness
+        .port
+        .apply(&revalidated)
+        .expect("authorization evidence does not change semantic effect identity");
+    assert_eq!(replay.receipt, first.receipt);
+
     let mut conflicting = harness.request.clone();
-    conflicting.proof.configuration_digest = digest('e');
+    conflicting.preview_digest = digest('f');
     assert_eq!(
         harness.port.apply(&conflicting),
         Err(GitIndexTransactionPortError::IdempotencyConflict)
@@ -951,19 +1003,14 @@ fn quarantine_clears_only_after_a_proven_recovery_receipt() {
 #[tokio::test]
 async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
     let directory = tempfile::tempdir().expect("project directory");
-    let database = Arc::new(
-        GlobalDb::open_at_without_structured_backfill(
-            &directory.path().join("canonical-project.db"),
-        )
-        .await
-        .expect("canonical project database"),
-    );
+    let database_path = directory.path().join("canonical-project.db");
+    rusqlite::Connection::open(&database_path).expect("canonical project database");
     let registry = DaemonGitIndexTransactionServiceRegistry::default();
     let project_id = id::<ProjectId>("project.singleton.fixture");
 
     let first = registry
-        .ensure(
-            Arc::clone(&database),
+        .ensure_engine_test(
+            database_path.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
             UtcMicros(20),
@@ -971,8 +1018,8 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
         .await
         .expect("first project service");
     let second = registry
-        .ensure(
-            database,
+        .ensure_engine_test(
+            database_path,
             directory.path().to_path_buf(),
             project_id,
             UtcMicros(21),
@@ -987,18 +1034,13 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
 async fn daemon_owner_rejects_rebinding_a_project_database_to_another_worktree_root() {
     let directory = tempfile::tempdir().expect("project directory");
     let alternate = tempfile::tempdir().expect("alternate worktree directory");
-    let database = Arc::new(
-        GlobalDb::open_at_without_structured_backfill(
-            &directory.path().join("canonical-project.db"),
-        )
-        .await
-        .expect("canonical project database"),
-    );
+    let database_path = directory.path().join("canonical-project.db");
+    rusqlite::Connection::open(&database_path).expect("canonical project database");
     let registry = DaemonGitIndexTransactionServiceRegistry::default();
     let project_id = id::<ProjectId>("project.singleton.fixture");
     registry
-        .ensure(
-            Arc::clone(&database),
+        .ensure_engine_test(
+            database_path.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
             UtcMicros(20),
@@ -1008,8 +1050,8 @@ async fn daemon_owner_rejects_rebinding_a_project_database_to_another_worktree_r
 
     assert_eq!(
         registry
-            .ensure(
-                database,
+            .ensure_engine_test(
+                database_path,
                 alternate.path().to_path_buf(),
                 project_id,
                 UtcMicros(21),

@@ -26,8 +26,8 @@ pub(crate) use journal::{DurableGitIndexJournal, GitIndexJournalError};
 pub(crate) use native::capture_exact_snapshot_for_test;
 pub(crate) use native::{DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor};
 pub(crate) use owner::{
-    DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
-    DaemonProjectGitIndexTransactionService, daemon_git_policy_evidence,
+    DaemonGitAuthorityStateV1, DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
+    DaemonProjectGitIndexTransactionService,
 };
 pub(crate) use queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
 pub(crate) use recovery::{
