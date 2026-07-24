@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::{canonical_json_bytes, host_integration_catalog_v1};
 
 use super::host_bundle_v2::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
@@ -205,26 +206,41 @@ pub fn verified_embedded_host_bundle(
     let host_name = host_name(host);
     let component_name = component_name(component);
     let assets = component_assets(host, component)?;
-    let identity: [u8; 32] = Sha256::digest(b"tracedecay.first-party-host-components.v1").into();
+    let artifacts = assets
+        .iter()
+        .map(|(path, bytes)| HostBundleArtifactV1 {
+            relative_path: path.clone(),
+            artifact_digest: Sha256::digest(bytes).into(),
+            ownership_marker: format!("tracedecay.{host_name}.{component_name}.v1"),
+        })
+        .collect::<Vec<_>>();
+    let catalog = host_integration_catalog_v1();
     let manifest = HostBundleManifestV1 {
         schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
         host,
         component,
-        integration_manifest_digest: identity,
-        catalog_digest: identity,
+        integration_manifest_digest: catalog
+            .host_capability_digest(host)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?,
+        catalog_digest: catalog
+            .canonical_authority_digest()
+            .map_err(|_| HostBundleRegistryError::Incompatible)?,
         configuration_snapshot_id: format!("first-party.{}", env!("CARGO_PKG_VERSION")),
-        effective_behavior_digest: identity,
-        resolution_provenance_digest: identity,
+        effective_behavior_digest: embedded_bundle_identity(
+            "effective_behavior",
+            host,
+            component,
+            &artifacts,
+        )?,
+        resolution_provenance_digest: embedded_bundle_identity(
+            "resolution_provenance",
+            host,
+            component,
+            &artifacts,
+        )?,
         protocol_min: 1,
         protocol_max: 1,
-        artifacts: assets
-            .iter()
-            .map(|(path, bytes)| HostBundleArtifactV1 {
-                relative_path: path.clone(),
-                artifact_digest: Sha256::digest(bytes).into(),
-                ownership_marker: format!("tracedecay.{host_name}.{component_name}.v1"),
-            })
-            .collect(),
+        artifacts,
     };
     let manifest_digest = manifest
         .canonical_digest()
@@ -241,6 +257,36 @@ pub fn verified_embedded_host_bundle(
             .collect(),
         manifest_digest,
     })
+}
+
+#[derive(serde::Serialize)]
+struct EmbeddedBundleIdentityV1<'a> {
+    schema_version: u16,
+    registry_version: u64,
+    purpose: &'a str,
+    host: HostKindV1,
+    component: HostBundleComponentV1,
+    artifacts: Vec<HostBundleArtifactV1>,
+}
+
+fn embedded_bundle_identity(
+    purpose: &str,
+    host: HostKindV1,
+    component: HostBundleComponentV1,
+    artifacts: &[HostBundleArtifactV1],
+) -> Result<[u8; 32], HostBundleRegistryError> {
+    let mut artifacts = artifacts.to_vec();
+    artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    canonical_json_bytes(&EmbeddedBundleIdentityV1 {
+        schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
+        registry_version: FIRST_PARTY_COMPONENT_CATALOG_VERSION,
+        purpose,
+        host,
+        component,
+        artifacts,
+    })
+    .map(|bytes| Sha256::digest(bytes).into())
+    .map_err(|_| HostBundleRegistryError::Incompatible)
 }
 
 fn component_assets(
@@ -545,6 +591,46 @@ mod tests {
                     !body.contains(placeholder),
                     "{} retained {placeholder}",
                     content.relative_path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_manifests_pin_catalog_capabilities_and_real_artifact_content() {
+        let catalog = host_integration_catalog_v1();
+        let marker: [u8; 32] = Sha256::digest(b"tracedecay.first-party-host-components.v1").into();
+        let expected_catalog_digest = catalog.canonical_authority_digest().unwrap();
+        for host in HostKindV1::ALL {
+            for component in default_components(host) {
+                let bundle = verified_embedded_host_bundle(host, component, 0).unwrap();
+                assert_eq!(bundle.manifest.catalog_digest, expected_catalog_digest);
+                assert_eq!(
+                    bundle.manifest.integration_manifest_digest,
+                    catalog.host_capability_digest(host).unwrap()
+                );
+                for artifact in &bundle.manifest.artifacts {
+                    let content = bundle
+                        .contents
+                        .iter()
+                        .find(|content| content.relative_path == artifact.relative_path)
+                        .expect("every manifest artifact has compiled content");
+                    assert_eq!(
+                        artifact.artifact_digest,
+                        <[u8; 32]>::from(Sha256::digest(&content.bytes))
+                    );
+                }
+                let identities = [
+                    bundle.manifest.integration_manifest_digest,
+                    bundle.manifest.catalog_digest,
+                    bundle.manifest.effective_behavior_digest,
+                    bundle.manifest.resolution_provenance_digest,
+                ];
+                assert!(identities.iter().all(|identity| *identity != marker));
+                assert_eq!(
+                    identities.into_iter().collect::<BTreeSet<_>>().len(),
+                    identities.len(),
+                    "catalog, capability, behavior, and provenance digests stay distinct"
                 );
             }
         }

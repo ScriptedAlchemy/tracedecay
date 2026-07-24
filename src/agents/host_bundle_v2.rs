@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::canonical_json_bytes;
+pub use tracedecay_domain::{
+    HostCapabilityRecordV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1,
+    HostCapabilityV1, HostKindV1, stock_host_capabilities,
+};
 
 const HOST_BUNDLE_SCHEMA_VERSION: u16 = 1;
 const MAX_MANIFEST_ARTIFACTS: usize = 128;
@@ -42,43 +46,10 @@ pub fn resolved_host_bundle_lifecycle_root() -> crate::errors::Result<PathBuf> {
     Ok(crate::storage::default_profile_root()?.join("host-components"))
 }
 
-/// Hosts and host surfaces covered by the stock conformance set.
-/// Cursor desktop/cloud remain projections of one Cursor integration, while
-/// Cline-family means only versions with an evidenced Cline registration path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostKindV1 {
-    ClaudeCode,
-    CursorDesktop,
-    CursorCloud,
-    Codex,
-    Hermes,
-    Kiro,
-    ClineFamily,
-    Cline,
-    RooCode,
-    Kilo,
-    KimiCode,
-    OpenCode,
-}
-
 /// Canonical stock-host enumeration shared by packaging, delivery, and
 /// conformance consumers.
 pub const fn stock_host_kinds() -> [HostKindV1; 12] {
-    [
-        HostKindV1::ClaudeCode,
-        HostKindV1::CursorDesktop,
-        HostKindV1::CursorCloud,
-        HostKindV1::Codex,
-        HostKindV1::Hermes,
-        HostKindV1::Kiro,
-        HostKindV1::ClineFamily,
-        HostKindV1::Cline,
-        HostKindV1::RooCode,
-        HostKindV1::Kilo,
-        HostKindV1::KimiCode,
-        HostKindV1::OpenCode,
-    ]
+    HostKindV1::ALL
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -101,40 +72,6 @@ pub enum HostBundleLifecycleOpV1 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HostCapabilityV1 {
-    Lsp,
-    NativeDiagnostics,
-    Hooks,
-    Mcp,
-    Cli,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostCapabilityUnavailableReasonV1 {
-    HostApiAbsent,
-    HostRegistrationUnsupported,
-    NativeFixtureLimited,
-    CheckedInEvidenceMissing,
-    CompetingExtensionClaim,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
-pub enum HostCapabilityStateV1 {
-    Supported,
-    Degraded(HostCapabilityUnavailableReasonV1),
-    Unavailable(HostCapabilityUnavailableReasonV1),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostCapabilityRecordV1 {
-    pub capability: HostCapabilityV1,
-    pub state: HostCapabilityStateV1,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum HostRegistrationRouteV1 {
     ClaudeConfiguredLanguageLsp,
     CursorNativeDiagnostics,
@@ -153,73 +90,6 @@ pub struct HostRegistrationEvidenceV1 {
     pub state: HostCapabilityStateV1,
     pub evidence_ref: &'static str,
     pub starts_analyzer: bool,
-}
-
-/// Static host-surface facts only. Runtime installation and availability are
-/// observed elsewhere and must not be inferred from this matrix.
-pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
-    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::{
-        CheckedInEvidenceMissing, HostApiAbsent, HostRegistrationUnsupported, NativeFixtureLimited,
-    };
-    use HostCapabilityV1::{Cli, Hooks, Lsp, Mcp, NativeDiagnostics};
-
-    let (lsp, native_diagnostics, hooks) = match host {
-        HostKindV1::ClaudeCode => (Supported, Unavailable(HostApiAbsent), Supported),
-        HostKindV1::CursorDesktop => (
-            Unavailable(HostRegistrationUnsupported),
-            Supported,
-            Supported,
-        ),
-        HostKindV1::CursorCloud => (
-            Unavailable(HostRegistrationUnsupported),
-            Unavailable(HostApiAbsent),
-            Unavailable(CheckedInEvidenceMissing),
-        ),
-        HostKindV1::Codex | HostKindV1::Hermes => (
-            Unavailable(HostRegistrationUnsupported),
-            Unavailable(HostApiAbsent),
-            Supported,
-        ),
-        HostKindV1::Kiro => (
-            Unavailable(HostRegistrationUnsupported),
-            Unavailable(HostApiAbsent),
-            Degraded(NativeFixtureLimited),
-        ),
-        HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => (
-            Unavailable(HostRegistrationUnsupported),
-            Unavailable(HostApiAbsent),
-            Unavailable(HostApiAbsent),
-        ),
-        HostKindV1::KimiCode => (
-            Unavailable(HostRegistrationUnsupported),
-            Unavailable(HostApiAbsent),
-            Supported,
-        ),
-        HostKindV1::OpenCode => (Supported, Supported, Supported),
-    };
-    [
-        HostCapabilityRecordV1 {
-            capability: Lsp,
-            state: lsp,
-        },
-        HostCapabilityRecordV1 {
-            capability: NativeDiagnostics,
-            state: native_diagnostics,
-        },
-        HostCapabilityRecordV1 {
-            capability: Hooks,
-            state: hooks,
-        },
-        HostCapabilityRecordV1 {
-            capability: Mcp,
-            state: Supported,
-        },
-        HostCapabilityRecordV1 {
-            capability: Cli,
-            state: Supported,
-        },
-    ]
 }
 
 /// Truthful host registration matrix used by packaging and conformance

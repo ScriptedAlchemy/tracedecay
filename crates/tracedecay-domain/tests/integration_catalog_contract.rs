@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    HostCapabilityAvailabilityV1, HostCapabilityReasonV1, HostIntegrationCatalogV1,
-    HostIntegrationIdV1, IntegrationCatalogError, IntegrationDaemonActionV1,
-    IntegrationDaemonApiV1, IntegrationEffectClassV1, IntegrationPrivacyClassV1,
-    TraceDecayProfileBindingV1, canonical_json_bytes, host_integration_catalog_v1,
+    HostCapabilityAvailabilityV1, HostCapabilityReasonV1, HostCapabilityV1,
+    HostIntegrationCatalogV1, HostIntegrationIdV1, HostKindV1, IntegrationCatalogError,
+    IntegrationDaemonActionV1, IntegrationDaemonApiV1, IntegrationEffectClassV1,
+    IntegrationPrivacyClassV1, TraceDecayProfileBindingV1, canonical_json_bytes,
+    host_integration_catalog_v1,
 };
 
 const GOLDEN_CATALOG: &str = include_str!("fixtures/integration_catalog_v1.json");
@@ -214,4 +217,99 @@ fn stable_direct_host_integration_ids_match_provider_ids() {
     for host in HostIntegrationIdV1::ALL {
         assert_eq!(HostIntegrationIdV1::from_wire(host.as_wire()), Some(host));
     }
+}
+
+#[test]
+fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
+    assert_eq!(
+        HostKindV1::ALL.map(|host| serde_json::to_value(host).unwrap()),
+        [
+            "claude_code",
+            "cursor_desktop",
+            "cursor_cloud",
+            "codex",
+            "hermes",
+            "kiro",
+            "cline_family",
+            "cline",
+            "roo_code",
+            "kilo",
+            "kimi_code",
+            "open_code",
+        ]
+        .map(Value::from)
+    );
+    assert_eq!(
+        HostKindV1::ClaudeCode.fixture_backed_observation_integration_id(),
+        Some(HostIntegrationIdV1::Claude)
+    );
+    assert_eq!(
+        HostKindV1::CursorDesktop.fixture_backed_observation_integration_id(),
+        Some(HostIntegrationIdV1::Cursor)
+    );
+    assert_eq!(
+        HostKindV1::Codex.fixture_backed_observation_integration_id(),
+        Some(HostIntegrationIdV1::Codex)
+    );
+    assert_eq!(
+        HostKindV1::Hermes.fixture_backed_observation_integration_id(),
+        Some(HostIntegrationIdV1::Hermes)
+    );
+    assert_eq!(
+        HostKindV1::Kiro.fixture_backed_observation_integration_id(),
+        Some(HostIntegrationIdV1::Kiro)
+    );
+    for host in [
+        HostKindV1::CursorCloud,
+        HostKindV1::ClineFamily,
+        HostKindV1::Cline,
+        HostKindV1::RooCode,
+        HostKindV1::Kilo,
+        HostKindV1::KimiCode,
+        HostKindV1::OpenCode,
+    ] {
+        assert_eq!(
+            host.fixture_backed_observation_integration_id(),
+            None,
+            "{host:?} must not claim a PR6 native observation fixture"
+        );
+    }
+}
+
+#[test]
+fn canonical_catalog_authority_covers_every_stock_host_capability_once() {
+    let catalog = host_integration_catalog_v1();
+    let views = catalog.stock_host_capability_views();
+    assert_eq!(
+        views.iter().map(|view| view.host()).collect::<Vec<_>>(),
+        HostKindV1::ALL
+    );
+    for view in &views {
+        assert_eq!(
+            view.capabilities()
+                .iter()
+                .map(|record| record.capability)
+                .collect::<Vec<_>>(),
+            [
+                HostCapabilityV1::Lsp,
+                HostCapabilityV1::NativeDiagnostics,
+                HostCapabilityV1::Hooks,
+                HostCapabilityV1::Mcp,
+                HostCapabilityV1::Cli,
+            ]
+        );
+        assert_eq!(
+            view.capabilities(),
+            catalog.stock_host_capabilities(view.host())
+        );
+    }
+
+    let catalog_digest = catalog.canonical_authority_digest().unwrap();
+    assert_ne!(catalog_digest, [0; 32]);
+    let capability_digests = HostKindV1::ALL
+        .into_iter()
+        .map(|host| catalog.host_capability_digest(host).unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(capability_digests.len(), HostKindV1::ALL.len());
+    assert!(!capability_digests.contains(&catalog_digest));
 }
