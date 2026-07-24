@@ -6,9 +6,11 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { Meter, Readout } from '../../ui/instrument.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
+import { splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
@@ -69,44 +71,83 @@ export function KnowledgePage() {
                     className="h-8 w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
                   />
                 </form>
-                <div className="grid grid-cols-2 gap-2">
-                  <StatTile label="facts" value={stats?.facts ?? '—'} />
-                  <StatTile label="entities" value={stats?.entities ?? '—'} />
+                {/* The rail used to be a 2×1 grid of equal tiles whose 26px
+                 * numerals overflowed their own cells — 41,204 facts rendered
+                 * as the string "41…". Facts is the quantity this workspace
+                 * exists to report, so it takes the display tier and the whole
+                 * rail width in the compact magnitude language; the supporting
+                 * counts sit under it on one shared bezel. */}
+                <div className="flex flex-col">
+                  <div className="td-raised border border-edge-subtle px-3 py-3">
+                    <Readout
+                      label="facts"
+                      size="xl"
+                      value={splitCount(stats?.facts).value}
+                      unit={splitCount(stats?.facts).unit}
+                      note={
+                        stats?.facts != null
+                          ? `${stats.facts.toLocaleString()} recorded`
+                          : undefined
+                      }
+                    />
+                  </div>
+                  <div className="flex border-x border-b border-edge-subtle bg-surface-1">
+                    <div className="min-w-0 flex-1 px-3 py-2">
+                      <Readout
+                        label="entities"
+                        size="sm"
+                        value={splitCount(stats?.entities).value}
+                        unit={splitCount(stats?.entities).unit}
+                      />
+                    </div>
+                    {stats?.banks != null ? (
+                      <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
+                        <Readout label="banks" size="sm" value={stats.banks} />
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
                 {histogram.length > 0 ? (
-                  <figure className="flex flex-col gap-1">
-                    <figcaption className="text-2xs text-text-muted">
-                      trust distribution (0 → 1)
-                    </figcaption>
+                  <figure className="flex flex-col gap-1.5">
+                    <figcaption className="td-legend">trust distribution</figcaption>
+                    {/* Bucket labels read ".0-0.1", ".1-0.2" and so on; at 9px
+                     * every fifth one printed as unreadable debris under the
+                     * bars. The axis is a known 0→1 scale, so it is ruled with
+                     * its two ends instead of relabelled. */}
                     <Chart
                       ariaLabel={`Trust distribution across ${histogram.length} buckets; the facts list carries per-fact trust values`}
-                      height={96}
+                      height={80}
                       option={{
                         xAxis: {
                           type: 'category',
                           data: histogram.map((bucket) => bucket.label),
-                          axisLabel: { interval: 4, fontSize: 9 },
+                          axisLabel: { show: false },
+                          axisTick: { show: false },
                         },
                         yAxis: { type: 'value', axisLabel: { show: false } },
                         grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
                         series: [
                           {
                             type: 'bar',
-                            barCategoryGap: '25%',
-                            itemStyle: { borderRadius: [2, 2, 0, 0] },
+                            barCategoryGap: '20%',
                             data: histogram.map((bucket) => bucket.value),
                           },
                         ],
                       }}
                     />
+                    <div
+                      aria-hidden
+                      className="flex items-center justify-between border-t border-edge-subtle pt-1"
+                    >
+                      <span className="td-legend">0 · decayed</span>
+                      <span className="td-legend">1 · held</span>
+                    </div>
                   </figure>
                 ) : null}
                 {(stats?.hrr_coverage ?? []).length > 0 ? (
-                  <figure className="flex flex-col gap-1">
-                    <figcaption className="text-2xs text-text-muted">
-                      HRR vector coverage by category
-                    </figcaption>
-                    <div className="flex flex-col gap-1">
+                  <figure className="flex flex-col gap-2">
+                    <figcaption className="td-legend">HRR vector coverage</figcaption>
+                    <div className="flex flex-col gap-2">
                       {(stats?.hrr_coverage ?? []).map((row) => (
                         <HrrCoverageBar key={row.category} row={row} />
                       ))}
@@ -140,6 +181,14 @@ export function KnowledgePage() {
                 </p>
               );
             }
+            // Recall counts have no absolute ceiling, so the rail is scaled to
+            // the busiest fact actually on screen. That makes the column a
+            // ranking of what is loaded — which is what it is — rather than an
+            // implied fraction of some total the daemon never reported.
+            const recallCeiling = facts.reduce(
+              (max, fact) => Math.max(max, fact.retrieval_count ?? 0),
+              0,
+            );
             return (
               <VirtualList
                 items={facts}
@@ -147,6 +196,7 @@ export function KnowledgePage() {
                 renderItem={(fact) => (
                   <FactListRow
                     fact={fact}
+                    recallCeiling={recallCeiling}
                     selected={selected?.fact_id === fact.fact_id}
                     onSelect={() => setSelected(fact)}
                   />
@@ -183,12 +233,22 @@ export function KnowledgePage() {
   );
 }
 
+/** One fact, read as three ranked quantities and a sentence.
+ *
+ * The row previously spent forty pixels on a hairline trust bar with no
+ * number, then printed the recall count as plain grey text — so a column of
+ * facts carried no visible ordering at all and the two measurements that
+ * define this product (how much a memory is trusted, how often it is
+ * reinforced) were the least legible things on the row. Both now get a printed
+ * figure AND a length: the digits for precision, the rail for ranking. */
 function FactListRow({
   fact,
+  recallCeiling,
   selected,
   onSelect,
 }: {
   fact: FactRow;
+  recallCeiling: number;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -196,72 +256,103 @@ function FactListRow({
     () => (fact.content ?? String(fact.fact_id)).split('\n')[0] ?? '',
     [fact],
   );
+  const trust = Math.max(0, Math.min(fact.trust_score, 1));
+  const recalls = fact.retrieval_count ?? 0;
   return (
     <DataRow selected={selected} onSelect={onSelect}>
-      <TrustBar score={fact.trust_score} />
-      <span className="min-w-0 flex-1 truncate">{summary}</span>
+      <span className="flex w-14 shrink-0 flex-col gap-1">
+        <span
+          className={cn(
+            'td-value text-2xs leading-none',
+            trust >= 0.7
+              ? 'text-text-primary'
+              : trust >= 0.4
+                ? 'text-text-secondary'
+                : 'text-text-muted',
+          )}
+          data-cell="numeric"
+        >
+          {trust.toFixed(2)}
+        </span>
+        <Meter
+          fraction={trust}
+          className="h-[3px]"
+          tone={
+            trust >= 0.7 ? 'bg-accent' : trust >= 0.4 ? 'bg-accent/60' : 'bg-accent/30'
+          }
+        />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-text-primary">{summary}</span>
+      {/* Column priority under 768px: the fact itself and how far it can be
+       * trusted are the row. Category and recall count are what a narrow
+       * viewport gives up -- keeping all four columns crushed the summary to
+       * three glyphs, which is not density, just damage. */}
       {fact.category ? (
-        <span className="shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs text-text-muted">
+        <span className="td-legend shrink-0 border border-edge-subtle px-1.5 py-1 max-md:hidden">
           {fact.category}
         </span>
       ) : null}
-      <span className="tabular w-16 shrink-0 text-right text-2xs text-text-muted">
-        {fact.retrieval_count ?? 0} recalls
+      <span className="flex w-20 shrink-0 flex-col items-end gap-1 max-md:hidden">
+        <span className="td-value text-2xs leading-none text-text-secondary" data-cell="numeric">
+          {recalls}
+          <span className="td-unit ml-1">rc</span>
+        </span>
+        <Meter
+          fraction={recallCeiling > 0 ? recalls / recallCeiling : null}
+          className="h-[3px] w-full"
+          align="right"
+          tone="bg-text-muted"
+        />
       </span>
     </DataRow>
   );
 }
 
 /** Per-category HRR coverage: fraction bar plus a truthful status label when
- * the bank is missing, stale, or under-vectorized. */
+ * the bank is missing, stale, or under-vectorized.
+ *
+ * The status cell used to be 36px wide, which is narrower than the words it
+ * has to hold: "no bank" and "stale" both wrapped onto a second line and
+ * collided with the bar above. Category and status now share one line above a
+ * full-width rail, so the longest status string in the taxonomy still sits on
+ * one line inside a 224px filter rail. */
 function HrrCoverageBar({ row }: { row: HrrCoverageRow }) {
   const clamped = Math.max(0, Math.min(row.coverage, 1));
   const degraded = row.status !== 'ready';
+  // missing_bank has no vector bank to measure against, so a percentage would
+  // be a fabricated denominator: the status is reported instead of a number.
+  const readout =
+    degraded && row.status !== 'missing_vectors'
+      ? row.status === 'missing_bank'
+        ? 'no bank'
+        : 'stale'
+      : `${(clamped * 100).toFixed(0)}%`;
   return (
-    <div className="flex items-center gap-2">
-      <span className="w-20 shrink-0 truncate text-2xs text-text-muted">{row.category}</span>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline gap-2">
+        <span className="min-w-0 flex-1 truncate text-2xs text-text-secondary">
+          {row.category}
+        </span>
+        <span
+          className={cn(
+            'shrink-0 text-2xs',
+            degraded ? 'td-legend' : 'tabular text-text-primary',
+          )}
+        >
+          {readout}
+        </span>
+      </div>
       <span
-        className="relative h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-3"
+        className="td-meter block h-1 w-full"
         role="img"
         aria-label={`${row.category} HRR coverage ${(clamped * 100).toFixed(0)}% (${row.hrr_vectors}/${row.facts} facts), status ${row.status.replace('_', ' ')}`}
       >
         <span
-          className={cn(
-            'absolute inset-y-0 left-0 rounded-full',
-            degraded ? 'bg-accent/40' : 'bg-accent',
-          )}
+          className={cn('td-meter-fill', degraded && 'bg-accent/40')}
           style={{ width: `${clamped * 100}%` }}
         />
       </span>
-      <span className="tabular w-9 shrink-0 text-right text-2xs text-text-muted">
-        {degraded && row.status !== 'missing_vectors'
-          ? row.status === 'missing_bank'
-            ? 'no bank'
-            : 'stale'
-          : `${(clamped * 100).toFixed(0)}%`}
-      </span>
     </div>
-  );
-}
-
-/** Trust rendered as a fixed-width luminance bar: length = score, so a column
- * of rows reads as a sorted-trust texture at a glance. */
-function TrustBar({ score }: { score: number }) {
-  const clamped = Math.max(0, Math.min(score, 1));
-  return (
-    <span
-      className="relative h-1 w-10 shrink-0 overflow-hidden rounded-full bg-surface-3"
-      role="img"
-      aria-label={`trust ${clamped.toFixed(2)}`}
-    >
-      <span
-        className={cn(
-          'absolute inset-y-0 left-0 rounded-full',
-          clamped >= 0.7 ? 'bg-accent' : clamped >= 0.4 ? 'bg-accent/60' : 'bg-accent/30',
-        )}
-        style={{ width: `${clamped * 100}%` }}
-      />
-    </span>
   );
 }
 

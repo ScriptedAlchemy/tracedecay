@@ -107,6 +107,7 @@ export function Panel({
   className,
   bodyClassName,
   tone = 'edge',
+  elevation = 'face',
 }: {
   legend: string;
   actions?: ReactNode;
@@ -115,6 +116,10 @@ export function Panel({
   className?: string;
   bodyClassName?: string;
   tone?: 'edge' | 'signal';
+  /** Which plane of the chassis the panel body occupies. `well` recesses the
+   * body so the region reads as something you look into — use it for lists,
+   * logs and canvases, not for prose. */
+  elevation?: 'face' | 'well';
 }) {
   return (
     <section
@@ -125,12 +130,20 @@ export function Panel({
       )}
     >
       <Corners tone={tone} />
-      <header className="flex h-7 shrink-0 items-center gap-2 border-b border-edge-subtle px-2.5">
-        <h2 className="td-legend truncate text-text-secondary">{legend}</h2>
+      <header className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+        <h2 className="td-title truncate">{legend}</h2>
         <span aria-hidden className="td-rule" />
         {actions}
       </header>
-      <div className={cn('min-w-0 flex-1 p-3', bodyClassName)}>{children}</div>
+      <div
+        className={cn(
+          'min-w-0 flex-1 p-3',
+          elevation === 'well' && 'td-well',
+          bodyClassName,
+        )}
+      >
+        {children}
+      </div>
       {footer ? (
         <footer className="shrink-0 border-t border-edge-subtle px-2.5 py-1.5">{footer}</footer>
       ) : null}
@@ -138,21 +151,33 @@ export function Panel({
   );
 }
 
-export type ReadoutSize = 'sm' | 'md' | 'lg';
+export type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
 
+/** `sm`–`lg` stay on the text scale for cells that sit inside prose rhythm.
+ * `xl` and `display` switch to `.td-display`, which retunes tracking and
+ * weight for large monospaced figures — the two tiers are visually different
+ * kinds of object, not just different sizes of the same one. */
 const VALUE_SIZE: Record<ReadoutSize, string> = {
-  sm: 'text-xs',
-  md: 'text-base font-medium',
-  lg: 'text-xl font-medium',
+  sm: 'td-value text-xs',
+  md: 'td-value text-base font-medium',
+  lg: 'td-value text-xl font-medium',
+  xl: 'td-display text-2xl',
+  display: 'td-display text-3xl',
 };
 
 /** One measured quantity. Legend above in letterspaced caps, the number in
- * tabular mono, the unit set small and quiet on the same baseline. */
+ * tabular mono, the unit set small and quiet on the same baseline.
+ *
+ * `fraction` adds the magnitude rail: the same number expressed a second time
+ * as a length, so a column of readouts can be ranked without reading any
+ * digits. It is decorative reinforcement of a value that is already printed
+ * beside it, so it stays out of the accessibility tree. */
 export function Readout({
   label,
   value,
   unit,
   note,
+  fraction,
   size = 'md',
   align = 'left',
   className,
@@ -161,30 +186,85 @@ export function Readout({
   value: ReactNode;
   unit?: string | undefined;
   note?: ReactNode;
+  fraction?: number | null | undefined;
   size?: ReadoutSize;
   align?: 'left' | 'right';
   className?: string;
 }) {
+  const large = size === 'xl' || size === 'display';
+  const rail =
+    fraction == null || !Number.isFinite(fraction)
+      ? null
+      : Math.max(0, Math.min(1, fraction));
   return (
     <div
       className={cn(
-        'flex min-w-0 flex-col gap-1.5',
+        'flex min-w-0 flex-col',
+        large ? 'gap-2' : 'gap-1.5',
         align === 'right' && 'items-end text-right',
         className,
       )}
     >
       <span className="td-legend truncate">{label}</span>
       <span className="flex min-w-0 items-baseline gap-1">
-        <span
-          className={cn('td-value truncate leading-none', VALUE_SIZE[size])}
-          data-cell="numeric"
-        >
+        <span className={cn('truncate', VALUE_SIZE[size])} data-cell="numeric">
           {value}
         </span>
-        {unit ? <span className="td-unit shrink-0 leading-none">{unit}</span> : null}
+        {unit ? (
+          <span
+            className={cn('td-unit shrink-0 leading-none', large && 'text-2xs')}
+          >
+            {unit}
+          </span>
+        ) : null}
       </span>
+      {rail != null ? (
+        <span aria-hidden className="td-meter h-px w-full">
+          <span className="td-meter-fill" style={{ width: `${rail * 100}%` }} />
+        </span>
+      ) : null}
       {note ? <span className="truncate text-3xs text-text-muted">{note}</span> : null}
     </div>
+  );
+}
+
+/** The row-scale magnitude rail: a quantity given a length so a column of them
+ * reads as a distribution. Pass `ariaLabel` only when the number is NOT also
+ * printed beside the meter; when it is, the meter is redundant to a screen
+ * reader and stays hidden. */
+export function Meter({
+  fraction,
+  className,
+  tone,
+  align = 'left',
+  ariaLabel,
+}: {
+  fraction: number | null | undefined;
+  className?: string;
+  /** Utility class for the fill, when the bar carries a state hue. */
+  tone?: string;
+  /** Which edge the fill grows from. A meter under a right-aligned figure has
+   * to grow leftward, or the number and its own bar share no edge and the
+   * column reads as two unrelated ragged things instead of one measurement. */
+  align?: 'left' | 'right';
+  ariaLabel?: string;
+}) {
+  const clamped =
+    fraction == null || !Number.isFinite(fraction)
+      ? null
+      : Math.max(0, Math.min(1, fraction));
+  const a11y = ariaLabel
+    ? ({ role: 'img', 'aria-label': ariaLabel } as const)
+    : ({ 'aria-hidden': true } as const);
+  return (
+    <span {...a11y} className={cn('td-meter h-1', className)}>
+      {clamped != null ? (
+        <span
+          className={cn('td-meter-fill', align === 'right' && 'left-auto right-0', tone)}
+          style={{ width: `${clamped * 100}%` }}
+        />
+      ) : null}
+    </span>
   );
 }
 
@@ -193,34 +273,48 @@ export interface ReadoutItem {
   value: ReactNode;
   unit?: string | undefined;
   note?: ReactNode;
+  /** 0–1 magnitude for the readout's rail; omit when the quantity has no
+   * meaningful ceiling to be measured against. */
+  fraction?: number | null | undefined;
 }
 
 /** A ruled row of readouts divided by hairlines — the instrument's answer to a
- * row of stat cards. Cells share one bezel instead of each owning a box. */
+ * row of stat cards. Cells share one bezel instead of each owning a box.
+ *
+ * At `elevation="raised"` the bar becomes the surface's headline: it lifts off
+ * the face on the standard one-highlight-one-shadow recipe, so the eye lands
+ * there first instead of scanning a uniform grid for somewhere to start. */
 export function ReadoutBar({
   items,
   size = 'md',
   className,
   label,
+  elevation = 'face',
 }: {
   items: readonly ReadoutItem[];
   size?: ReadoutSize;
   className?: string;
   label?: string;
+  elevation?: 'face' | 'raised';
 }) {
   if (items.length === 0) return null;
+  const large = size === 'xl' || size === 'display';
   return (
     <div
       aria-label={label}
       className={cn(
-        'relative flex flex-wrap border-y border-edge-subtle bg-surface-1',
+        'relative flex flex-wrap border-y border-edge-subtle',
+        elevation === 'raised' ? 'td-raised' : 'bg-surface-1',
         className,
       )}
     >
       {items.map((item) => (
         <div
           key={item.label}
-          className="min-w-0 flex-1 basis-32 border-l border-edge-subtle px-3 py-2.5 first:border-l-0"
+          className={cn(
+            'min-w-0 flex-1 border-l border-edge-subtle px-3 first:border-l-0',
+            large ? 'basis-44 py-3.5' : 'basis-32 py-2.5',
+          )}
         >
           <Readout {...item} size={size} />
         </div>

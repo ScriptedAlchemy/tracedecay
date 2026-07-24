@@ -43,13 +43,25 @@ export interface GraphCanvasEdge {
  * yellows that read as "warning" against the dark field; chroma varies a
  * little across the arc so neighbouring hues stay tellable apart.
  */
-function kindColor(kind: string): string {
+function kindColor(kind: string, light: boolean): string {
   let hash = 0;
   for (let index = 0; index < kind.length; index += 1) {
     hash = (hash * 31 + kind.charCodeAt(index)) >>> 0;
   }
-  const chroma = 0.112 + ((hash >>> 9) % 6) * 0.011;
-  return `oklch(0.78 ${chroma.toFixed(3)} ${186 + (hash % 148)})`;
+  // A body is lit against its medium, so which side of the substrate it sits
+  // on has to flip with the theme. Pinned at L 0.78 the kind hues were tuned
+  // for a dark field; on the light field they landed ABOVE the background and
+  // forty overlapping translucent discs accumulated into a white cloud with no
+  // structure in it at all. On paper a node is saturated ink: darker than its
+  // medium, with a little more chroma to hold its hue at the lower lightness.
+  // Chroma is what survives overlap. At the old 0.112 the dark hues were
+  // pastels sitting near the top of the lightness range, so a dense cluster of
+  // them accumulated into an undifferentiated pale mass -- the graph lost its
+  // colour exactly where it had the most structure to show. Saturated bodies a
+  // little further down the range stay tellable apart when they pile up.
+  const chroma = (light ? 0.135 : 0.152) + ((hash >>> 9) % 6) * 0.012;
+  const lightness = light ? 0.55 : 0.72;
+  return `oklch(${lightness} ${chroma.toFixed(3)} ${186 + (hash % 148)})`;
 }
 
 /** Samples the resolved theme tokens Sigma needs; canvas renderers cannot
@@ -64,13 +76,23 @@ function palette(element: HTMLElement) {
     // so the renderer always receives a form it can read.
     return cssColorToRgb(style.getPropertyValue(name).trim() || fallback);
   };
+  const substrate = token('--raw-surface-1', '#1c2029');
+  // Which medium the field is suspended in, measured rather than assumed, so
+  // a future theme that is neither of the two shipped ones still resolves.
+  const light = (substrate[0] * 299 + substrate[1] * 587 + substrate[2] * 114) / 1000 > 128;
   return {
     hot: token('--raw-accent', '#7aa2f7'),
     edge: token('--raw-edge-subtle', '#333a46'),
     label: token('--raw-text-secondary', '#aab0bd'),
     /** What a node fades INTO as its signal decays: the substrate itself. */
-    substrate: token('--raw-surface-1', '#1c2029'),
+    substrate,
     dim: token('--raw-surface-3', '#3a4150'),
+    light,
+    /** A dark medium has almost unlimited headroom above it before a glow
+     * clips to white; paper has very little, and additive-looking overlap goes
+     * muddy long before it goes bright. Resting glow is damped on the light
+     * field so a dense cluster stays a cluster instead of a smudge. */
+    glowScale: light ? 0.55 : 1,
   };
 }
 
@@ -164,16 +186,35 @@ export function GraphCanvas({
     // Deterministic circular seed (sorted order) so layouts are stable
     // across reloads of the same subgraph.
     const sorted = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
+    const seedLight = palette(container).light;
+    // Sigma fits the camera to the graph's extent, so an identical base radius
+    // renders far larger on a sparse graph than on a dense one: forty symbols
+    // read correctly on Code while seven filled the Brain canvas with discs.
+    // Normalising the radius against node count keeps a node the same apparent
+    // object however much of the graph is on screen -- degree still sets the
+    // relative sizes within a graph, which is the only comparison that means
+    // anything. The dense case is left exactly where it was.
+    const density = Math.min(1, Math.max(0.45, Math.sqrt(nodes.length / 40)));
+    // The second half of the same problem: node radius is in screen pixels but
+    // the SPACING between nodes is not, so the identical graph that reads
+    // correctly in a 1060px canvas becomes a solid mass of overlapping discs in
+    // a 270px one. Measuring the canvas area each node actually gets lets a
+    // narrow viewport shrink the bodies instead of fusing them. It only ever
+    // reduces -- a roomy canvas is already correct.
+    const perNode =
+      (container.clientWidth * container.clientHeight) / Math.max(nodes.length, 1);
+    const roominess = Math.min(1, Math.sqrt(perNode / 8000));
+    const bodyScale = Math.max(0.4, density * roominess);
     sorted.forEach((node, index) => {
       const angle = (index / sorted.length) * Math.PI * 2;
-      const [kr, kg, kb] = cssColorToRgb(kindColor(node.kind));
+      const [kr, kg, kb] = cssColorToRgb(kindColor(node.kind, seedLight));
       graph.addNode(node.id, {
         label: node.label,
         kind: node.kind,
         degree: node.degree,
         x: Math.cos(angle),
         y: Math.sin(angle),
-        size: 5 + 9 * Math.sqrt(node.degree / maxDegree),
+        size: (5 + 9 * Math.sqrt(node.degree / maxDegree)) * bodyScale,
         isHub: node.degree >= maxDegree * 0.75,
         // A graph with no vitality measurement rests mid-scale, so an absent
         // signal never masquerades as a dead network.
@@ -466,16 +507,24 @@ export function GraphCanvas({
             ? lerpRgbTuple([kr, kg, kb], colors.hot, Math.min(1, heat))
             : ([kr, kg, kb] as [number, number, number]);
           const shared = { x: attrs['x'], y: attrs['y'], label: '' };
+          // Sigma draws each companion as a hard-edged disc, so a corona is
+          // really three concentric steps and every step is a visible edge.
+          // The old radii (1.55x and 2.9x the body) made those edges read as
+          // banding rather than falloff, and turned a modest graph into a field
+          // of lollipops. Pulled in tight, the resting glow is a rim on the
+          // body instead of a second object beside it -- and a strike still
+          // has all the room it needs to swell.
+          const glow = colors.glowScale;
           upsert(graph, haloId, {
             ...shared,
-            size: size * (1.55 + 1.1 * heat),
-            color: rgba(lit, 0.06 + 0.13 * vitality + 0.26 * heat),
+            size: size * (1.38 + 1.0 * heat),
+            color: rgba(lit, (0.05 + 0.1 * vitality) * glow + 0.26 * heat),
             zIndex: 1,
           });
           upsert(graph, bloomId, {
             ...shared,
-            size: size * (2.9 + 2.2 * heat),
-            color: rgba(lit, 0.022 + 0.045 * vitality + 0.1 * heat),
+            size: size * (2.2 + 2.0 * heat),
+            color: rgba(lit, (0.018 + 0.034 * vitality) * glow + 0.1 * heat),
             zIndex: 0,
           });
           // Impact flare: a wide, faint ring pops on strike and expands as the
@@ -583,9 +632,26 @@ export function GraphCanvas({
     if (field.warm) wake();
 
     const themeObserver = new MutationObserver(() => {
+      const wasLight = colors.light;
       colors = palette(container);
       renderer.setSetting('defaultEdgeColor', rgba(colors.edge, 0.9));
       renderer.setSetting('labelColor', { color: rgb(colors.label) });
+      // kindRgb is baked once at construction, so a theme flip used to leave
+      // every node wearing the other theme's lightness — the hues only looked
+      // right on whichever theme happened to be active at mount. Re-derive
+      // them when, and only when, the medium actually changed sides.
+      if (colors.light !== wasLight) {
+        for (const node of graph.nodes()) {
+          if (isManaged(node)) continue;
+          const kind = graph.getNodeAttribute(node, 'kind') as string | undefined;
+          if (kind == null) continue;
+          graph.setNodeAttribute(
+            node,
+            'kindRgb',
+            cssColorToRgb(kindColor(kind, colors.light)),
+          );
+        }
+      }
       syncGlow();
       renderer.refresh();
     });

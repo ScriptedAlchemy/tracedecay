@@ -7,8 +7,10 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { Meter, Readout } from '../../ui/instrument.tsx';
+import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -86,10 +88,22 @@ export function SessionsPage() {
               hint: `~${Number(b['token_estimate'] ?? 0).toLocaleString()} tokens`,
             }));
             const total = buckets.reduce((sum, b) => sum + b.value, 0);
+            const split = splitCount(total);
             return (
               <div className="flex flex-col gap-3">
-                <ActivityColumns buckets={buckets.slice(-46)} />
-                <StatTile label="messages tracked" value={total.toLocaleString()} />
+                <div className="td-raised border border-edge-subtle px-3 py-3">
+                  <Readout
+                    label="messages tracked"
+                    size="xl"
+                    value={split.value}
+                    unit={split.unit}
+                    note={`${total.toLocaleString()} across ${buckets.length} days`}
+                  />
+                </div>
+                <figure className="flex flex-col gap-1.5">
+                  <figcaption className="td-legend">daily volume</figcaption>
+                  <ActivityColumns buckets={buckets.slice(-46)} height={56} />
+                </figure>
               </div>
             );
           }}
@@ -120,23 +134,28 @@ export function SessionsPage() {
                     const provider = String(hit['source'] ?? hit['provider'] ?? '');
                     const role = String(hit['role'] ?? '');
                     const snippet = String(hit['snippet'] ?? hit['content'] ?? '');
-                    const when = hit['timestamp']
-                      ? new Date(Number(hit['timestamp']) * 1000).toLocaleString()
-                      : '';
+                    const when = hit['timestamp'] ? formatStamp(Number(hit['timestamp'])) : '';
                     return (
                       <DataRow
                         key={id}
                         selected={selected === hit}
                         onSelect={() => setSelected(hit)}
                       >
-                        <span className="w-14 shrink-0 truncate text-2xs text-text-muted">
+                        <span className="td-legend w-14 shrink-0 truncate max-md:hidden">
                           {provider}
                         </span>
-                        <span className="w-14 shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1 text-center text-2xs text-text-muted">
+                        <span className="td-legend w-14 shrink-0 border border-edge-subtle px-1 py-1 text-center">
                           {role}
                         </span>
-                        <span className="min-w-0 flex-1 truncate">{snippet}</span>
-                        <span className="tabular shrink-0 text-2xs text-text-muted">{when}</span>
+                        <span className="min-w-0 flex-1 truncate text-text-primary">
+                          {snippet}
+                        </span>
+                        <span
+                          className="td-value w-28 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted max-md:hidden"
+                          data-cell="numeric"
+                        >
+                          {when}
+                        </span>
                       </DataRow>
                     );
                   })}
@@ -154,6 +173,13 @@ export function SessionsPage() {
                   no sessions in the current window
                 </p>
               );
+            // The session list is a list of sizes. Scaling every bar to the
+            // heaviest session actually loaded turns thirty near-identical
+            // three-digit numbers into a shape the eye can rank.
+            const heaviest = rows.reduce(
+              (max, row) => Math.max(max, Number(row['message_count'] ?? 0)),
+              0,
+            );
             return (
               <VirtualList
                 items={rows}
@@ -163,23 +189,49 @@ export function SessionsPage() {
                   const provider = String(row['provider'] ?? row['source'] ?? '');
                   const count = row['message_count'];
                   const when = row['last_timestamp']
-                    ? new Date(Number(row['last_timestamp']) * 1000).toLocaleString()
+                    ? formatStamp(Number(row['last_timestamp']))
                     : '';
                   return (
                     <DataRow
                       selected={selected === row}
                       onSelect={() => setSelected(row)}
                     >
+                      {/* The session id carries the provider as its own prefix,
+                       * so under 768px the separate provider column and the
+                       * wall-clock stamp both go: keeping them collapsed the
+                       * id -- the only unique thing on the row -- to nothing. */}
                       {provider ? (
-                        <span className="w-24 shrink-0 truncate text-text-muted">{provider}</span>
-                      ) : null}
-                      <span className="min-w-0 flex-1 truncate font-mono">{id}</span>
-                      {count !== undefined ? (
-                        <span className="tabular shrink-0 text-2xs text-text-muted">
-                          {String(count)} msgs
+                        <span className="td-legend w-14 shrink-0 truncate max-md:hidden">
+                          {provider}
                         </span>
                       ) : null}
-                      <span className="tabular shrink-0 text-2xs text-text-muted">{when}</span>
+                      <span className="td-value min-w-0 flex-1 truncate text-text-primary">
+                        {id}
+                      </span>
+                      {count !== undefined ? (
+                        <span className="flex w-24 shrink-0 flex-col items-end gap-1">
+                          <span
+                            className="td-value text-2xs leading-none text-text-secondary"
+                            data-cell="numeric"
+                          >
+                            {String(count)}
+                            <span className="td-unit ml-1">msg</span>
+                          </span>
+                          <Meter
+                            fraction={
+                              heaviest > 0 ? Number(count) / heaviest : null
+                            }
+                            className="h-[3px] w-full"
+                            align="right"
+                          />
+                        </span>
+                      ) : null}
+                      <span
+                        className="td-value w-28 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted max-md:hidden"
+                        data-cell="numeric"
+                      >
+                        {when}
+                      </span>
                     </DataRow>
                   );
                 }}
