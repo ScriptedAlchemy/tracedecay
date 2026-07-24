@@ -100,26 +100,6 @@
       "disposition": "test-only S11 evidence fixture"
     },
     {
-      "path": "src/db/connection.rs",
-      "callee": "Database::open",
-      "disposition": "test-only registered attachment reuse fixture"
-    },
-    {
-      "path": "src/db/connection.rs",
-      "callee": "Database::open_read_only",
-      "disposition": "test-only registered attachment alias fixture"
-    },
-    {
-      "path": "src/migrate/consolidate/sqlite.rs",
-      "callee": "Database::open",
-      "disposition": "temporary migration inspection pending final migration"
-    },
-    {
-      "path": "src/migrate/consolidate/sqlite.rs",
-      "callee": "Database::open_read_only",
-      "disposition": "temporary migration inspection pending final migration"
-    },
-    {
       "path": "src/migrate/hermes/memory.rs",
       "callee": "Database::initialize",
       "disposition": "temporary Hermes memory migration path"
