@@ -607,7 +607,7 @@ impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
 }
 
 impl Database {
-    pub(super) fn retained_runtime(&self) -> &StoreRuntimeHandle {
+    pub(crate) fn retained_runtime(&self) -> &StoreRuntimeHandle {
         &self.inner._runtime
     }
 

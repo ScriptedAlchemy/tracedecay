@@ -5,6 +5,7 @@ use crate::db::Database;
 use tracedecay_domain::{
     ActorId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
+use tracedecay_store::FactContradictionStateV1;
 use tracedecay_store::{
     CompatibilityDashboardFactDetailQueryV1, CompatibilityDashboardFactDetailV1,
     CompatibilityDashboardMemoryOverviewQueryV1, CompatibilityDashboardMemoryOverviewV1,
@@ -31,8 +32,9 @@ use tracedecay_store::{
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    FactProposalStoreError, FactQueryCoverageV1, FactStore, FactStoreResult, FactWriteBatch,
+    LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
+    StoredFactV1,
 };
 
 use crud::{
@@ -76,15 +78,16 @@ mod primitives;
 mod projection;
 mod proposals;
 mod repair;
+mod runtime;
 mod scoring;
 mod search;
 
 #[cfg(test)]
 use crate::db::MemoryV2FeedbackHistoryRepairBatchOutcome;
 #[cfg(test)]
-use envelope::compatibility_lookup_operation_receipt_tx;
+use crate::db::engine::params;
 #[cfg(test)]
-use libsql::params;
+use envelope::compatibility_lookup_operation_receipt_tx;
 #[cfg(test)]
 use primitives::{
     COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_source_store_id, storage_message,
@@ -114,7 +117,10 @@ impl<'a> DatabaseFactStore<'a> {
 
 impl FactStore for DatabaseFactStore<'_> {
     async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
-        self.commit_batch(&batch).await
+        match runtime::retained_fact_runtime(self.db)? {
+            Some(runtime) => runtime::commit_fact(self.db, runtime, batch).await,
+            None => self.commit_batch(&batch).await,
+        }
     }
 
     async fn query_current_facts(
@@ -123,7 +129,7 @@ impl FactStore for DatabaseFactStore<'_> {
     ) -> FactStoreResult<Vec<StoredFactV1>> {
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_current_facts_tx(&snapshot, &query).await;
@@ -134,9 +140,12 @@ impl FactStore for DatabaseFactStore<'_> {
         &self,
         query: FactCurrentQuery,
     ) -> FactStoreResult<Option<StoredFactV1>> {
+        if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
+            return runtime::query_fact_current(runtime, query);
+        }
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_current_tx(&snapshot, query.owner(), query.fact_id()).await;
@@ -147,9 +156,18 @@ impl FactStore for DatabaseFactStore<'_> {
         &self,
         query: FactCurrentQuery,
     ) -> FactStoreResult<FactCurrentResponseV1> {
+        if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
+            let fact = runtime::query_fact_current(runtime, query)?;
+            let observed = u64::from(fact.is_some());
+            return Ok(FactCurrentResponseV1::new(
+                fact,
+                FactQueryCoverageV1::new(0, 0, observed, 0),
+                FactContradictionStateV1::Unknown,
+            ));
+        }
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_current_response_tx(&snapshot, &query).await;
@@ -162,7 +180,7 @@ impl FactStore for DatabaseFactStore<'_> {
     ) -> FactStoreResult<Option<StoredFactV1>> {
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_as_of_tx(&snapshot, &query).await;
@@ -175,7 +193,7 @@ impl FactStore for DatabaseFactStore<'_> {
     ) -> FactStoreResult<FactAsOfResponseV1> {
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_as_of_response_tx(&snapshot, &query).await;
@@ -186,9 +204,12 @@ impl FactStore for DatabaseFactStore<'_> {
         &self,
         query: FactLineageQuery,
     ) -> FactStoreResult<Vec<FactLineageEventV1>> {
+        if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
+            return runtime::query_fact_lineage(runtime, query);
+        }
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_lineage_tx(&snapshot, &query).await;
@@ -199,9 +220,18 @@ impl FactStore for DatabaseFactStore<'_> {
         &self,
         query: FactLineageQuery,
     ) -> FactStoreResult<FactLineageResponseV1> {
+        if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
+            let events = runtime::query_fact_lineage(runtime, query)?;
+            let observed = u64::from(!events.is_empty());
+            return Ok(FactLineageResponseV1::new(
+                events,
+                FactQueryCoverageV1::new(0, 0, observed, 0),
+                FactContradictionStateV1::Unknown,
+            ));
+        }
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_lineage_response_tx(&snapshot, &query).await;
@@ -211,7 +241,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = resolve_legacy_fact_tx(&snapshot, &query).await;
@@ -224,7 +254,7 @@ impl FactStore for DatabaseFactStore<'_> {
     ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
         let snapshot = self
             .db
-            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .begin_memory_read_transaction(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = get_retrieval_anchor_tx(&snapshot, &query).await;
@@ -239,7 +269,7 @@ impl FactProposalStore for DatabaseFactStore<'_> {
     ) -> Result<PromoteFactProposalOutcome, FactProposalStoreError> {
         let transaction = self
             .db
-            .begin_write_transaction(PROMOTE_OPERATION)
+            .begin_memory_write_transaction(PROMOTE_OPERATION)
             .await
             .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?;
         let outcome = match promote_fact_proposal_tx(&transaction, &promotion).await {

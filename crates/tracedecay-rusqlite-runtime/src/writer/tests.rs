@@ -213,10 +213,12 @@ impl WriterPersistence for CancellingFirstRequestPersistence {
                 )
                 .map_err(|_| settlement::infrastructure("run unrelated batch query"))?;
         }
+        let sequence = i64::try_from(self.sequence)
+            .map_err(|_| settlement::infrastructure("convert cancellation batch marker"))?;
         savepoint
             .execute(
                 "INSERT INTO cancellation_batch(value) VALUES (?1)",
-                [self.sequence],
+                [sequence],
             )
             .map_err(|_| settlement::infrastructure("insert cancellation batch marker"))?;
         let metadata = &request.envelope().metadata;
