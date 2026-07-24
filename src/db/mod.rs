@@ -17,7 +17,6 @@ mod redundancy_pairs;
 mod retrieval_anchor_authority;
 pub(crate) mod retrieval_anchor_schema;
 mod rows;
-pub(crate) mod runtime_compat;
 mod search;
 mod sql;
 mod stats;
