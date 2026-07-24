@@ -48,6 +48,35 @@ pub enum DatabaseAuthorityRole {
     Test,
 }
 
+#[cfg_attr(
+    not(feature = "test-transport"),
+    doc = r#"
+Production builds do not expose the integration-fixture authority escape hatch.
+
+```compile_fail
+use std::path::Path;
+use tracedecay::db::DatabaseAuthority;
+
+let _ = DatabaseAuthority::acquire_test(Path::new("/tmp/fixture.db"), "fixture");
+```
+
+Debug assertions alone do not enable daemonless writable authority:
+
+```
+use tracedecay::db::DatabaseAuthority;
+
+let path = std::env::temp_dir().join(format!(
+    "tracedecay-production-authority-boundary-{}.db",
+    std::process::id()
+));
+let error = DatabaseAuthority::for_runtime(&path, "production boundary")
+    .expect_err("temp paths must not grant production write authority");
+assert!(error.to_string().contains(
+    "database access requires managed-daemon or exclusive-maintenance authority"
+));
+```
+"#
+)]
 #[derive(Clone, Debug)]
 pub struct DatabaseAuthority {
     inner: Arc<AuthorityInner>,
@@ -229,7 +258,8 @@ impl DatabaseAuthority {
     #[doc(hidden)]
     pub fn for_runtime(db_path: &Path, intent: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
-        if cfg!(debug_assertions) && is_isolated_test_path(&identity.database_path) {
+        #[cfg(any(test, feature = "test-transport"))]
+        if is_isolated_test_path(&identity.database_path) {
             let existing_role = PROCESS_LEASES
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -272,8 +302,8 @@ impl DatabaseAuthority {
         // but never while another process already holds exclusive daemon
         // authority for the profile. Rejected contenders and brokered clients
         // must fail closed with zero durable SQLite opens/writes.
-        if cfg!(debug_assertions)
-            && is_isolated_test_path(&identity.database_path)
+        #[cfg(any(test, feature = "test-transport"))]
+        if is_isolated_test_path(&identity.database_path)
             && !foreign_daemon_authority_held(&identity.profile_root)
         {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Test, intent);
@@ -290,6 +320,7 @@ impl DatabaseAuthority {
 
     /// Test escape hatch for integration fixtures. Production paths are
     /// rejected even when a caller can reach this hidden API.
+    #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
     pub fn acquire_test(db_path: &Path, intent: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
@@ -493,25 +524,25 @@ fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> Trac
     access_error(operation, path, &error.to_string())
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 pub(super) fn is_isolated_test_path(path: &Path) -> bool {
     let root = std::env::temp_dir();
     if path.starts_with(root.canonicalize().unwrap_or(root)) {
         return true;
     }
-    cfg!(debug_assertions)
-        && std::env::var_os("TRACEDECAY_DATA_DIR")
-            .filter(|root| !root.is_empty())
-            .map(PathBuf::from)
-            .is_some_and(|root| {
-                let root = if root.is_absolute() {
-                    root
-                } else {
-                    std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .join(root)
-                };
-                path.starts_with(root.canonicalize().unwrap_or(root))
-            })
+    std::env::var_os("TRACEDECAY_DATA_DIR")
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .is_some_and(|root| {
+            let root = if root.is_absolute() {
+                root
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(root)
+            };
+            path.starts_with(root.canonicalize().unwrap_or(root))
+        })
 }
 
 /// Matches `src/daemon/authority.rs` `LOCK_FILE`. Kept local so the access

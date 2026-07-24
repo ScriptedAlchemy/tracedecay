@@ -1,24 +1,34 @@
 // Rust guideline compliant 2025-10-17
+#[cfg(any(test, feature = "test-transport"))]
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(test, feature = "test-transport"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-transport"))]
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{
-    BrainId, FactOwnerV1, RepositoryId, SourceStoreId, UserProfileId, WorktreeId,
-};
+#[cfg(any(test, feature = "test-transport"))]
+use tracedecay_domain::{BrainId, RepositoryId, UserProfileId, WorktreeId};
+use tracedecay_domain::{FactOwnerV1, SourceStoreId};
 use tracedecay_rusqlite_runtime::{CheckpointBlockers, CheckpointOutcome, CheckpointRequest};
+#[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::{
-    CodeShardScopeV1, LocatorDigest, ProjectId, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestProbeV1, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
+    CodeShardScopeV1, LocatorDigest, ProjectId, StoreIncarnationV1, StoreShardIdV1,
+    VerifiedStoreLocatorV1,
+};
+use tracedecay_store::{
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeInterruptionV1, RuntimeRequestProbeV1,
 };
 
+use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
+#[cfg(any(test, feature = "test-transport"))]
 use crate::daemon::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
-    StoreRuntimeHandle, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
-    StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
-    StoreRuntimeRegistryFuture, StoreRuntimeResolver,
+    StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+    StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
+    StoreRuntimeResolver,
 };
 use crate::db::engine::{Connection, ReadSnapshot, Transaction, TransactionBehavior};
 use crate::errors::{Result, TraceDecayError};
@@ -41,12 +51,25 @@ pub(crate) use pragmas::{
 use registry::{DatabaseInner, database_slot};
 
 /// `SQLite` database backed by one daemon-owned native runtime attachment.
+#[cfg_attr(
+    not(feature = "test-transport"),
+    doc = r#"
+Production builds do not expose writable daemonless fixture runtimes.
+
+```compile_fail
+use tracedecay::db::{Database, TestDatabaseRuntimeMode};
+
+let _ = (Database::publish_test_runtime, TestDatabaseRuntimeMode::Initialize);
+```
+"#
+)]
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<DatabaseInner>,
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-transport"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TestDatabaseRuntimeMode {
     Initialize,
@@ -54,15 +77,18 @@ pub enum TestDatabaseRuntimeMode {
     ReadOnly,
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 struct ExactTestRuntimeResolver {
     locators: BTreeMap<StoreRuntimeKey, ExactTestRuntimeLocator>,
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 struct ExactTestRuntimeLocator {
     verified: VerifiedStoreLocatorV1,
     path: PathBuf,
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 impl StoreRuntimeResolver for ExactTestRuntimeResolver {
     fn resolve<'a>(
         &'a self,
@@ -703,6 +729,7 @@ impl Database {
     }
 
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn publish_test_runtime(
         db_path: &Path,
         authority: &DatabaseAuthority,
@@ -725,6 +752,7 @@ impl Database {
     /// preserves actor-time scope revocation without weakening the Test-only
     /// fixture escape hatch.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn publish_maintenance_test_runtime(
         db_path: &Path,
         authority: &DatabaseAuthority,
@@ -750,6 +778,7 @@ impl Database {
         Self::publish_fixture_runtime(db_path, authority, mode).await
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
     async fn publish_fixture_runtime(
         db_path: &Path,
         authority: &DatabaseAuthority,
@@ -1554,6 +1583,7 @@ impl Database {
     }
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 fn exact_test_runtime_locator(
     shard_id: StoreShardIdV1,
     incarnation: StoreIncarnationV1,
@@ -1575,6 +1605,7 @@ fn exact_test_runtime_locator(
     ))
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 fn test_runtime_error(operation: &'static str, message: String) -> TraceDecayError {
     TraceDecayError::Database {
         message,

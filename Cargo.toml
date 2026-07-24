@@ -103,9 +103,8 @@ include = [
 ]
 
 [features]
-# Keep the shipped default and `--all-features` behavior equivalent. Every
-# declared root feature is listed explicitly so adding a feature requires a
-# deliberate default-set decision rather than silently creating a lean build.
+# Keep every production feature in the shipped default set. Test-only seams
+# such as `test-transport` remain explicit opt-ins.
 default = [
     "token-counting",
     "lite",
@@ -148,7 +147,6 @@ default = [
     "lang-quint",
     "lang-toml",
     "lang-lean",
-    "test-transport",
     "semantic-fastembed",
 ]
 
