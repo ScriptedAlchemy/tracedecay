@@ -17,13 +17,14 @@ use tracedecay_application::{
     CancellationObservation, CancellationStage, Deadline, OperationBudgetUsage, OperationReceipt,
     OperationTermination, RequestId,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
 
 use crate::application::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
 use crate::diagnose::{Severity, parse_cargo_output};
+use crate::diagnostics_store::DiagnosticsStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::redundancy::{Fingerprint, body_token_window, redundancy_match_score, round4};
 use crate::tracedecay::{TraceDecay, is_test_file};
@@ -515,18 +516,32 @@ where
         ),
     ))
     .map_err(test_run_contract_error)?;
-    let emitter = begin_test_run(cg).await?;
+    let emitter = begin_test_run(cg, effective_deadline.clone()).await?;
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
-    let output = match runner(
+    let run = runner(
         project_root.clone(),
         run_args.profile,
         test_names.clone(),
         Duration::from_secs(run_args.timeout_secs),
-    )
-    .await
-    {
+    );
+    tokio::pin!(run);
+    let mut cancellation = emitter.clone();
+    let run_result = tokio::select! {
+        result = &mut run => result,
+        _ = cancellation.cancelled() => {
+            finish_test_run(
+                &emitter,
+                started_at,
+                &effective_deadline,
+                OperationTermination::Cancelled,
+            )
+            .await?;
+            return Ok(error_result(&args, "cargo", "test", "cargo test cancelled"));
+        }
+    };
+    let output = match run_result {
         Ok(output) => output,
         Err(TestRunFailure::Spawn(error)) => {
             finish_test_run(
@@ -601,14 +616,15 @@ where
     ))
 }
 
-async fn begin_test_run(cg: &TraceDecay) -> Result<OperationEmitter> {
+async fn begin_test_run(cg: &TraceDecay, deadline: Deadline) -> Result<OperationEmitter> {
     let root = cg
         .project_root()
         .canonicalize()
         .map_err(|error| TraceDecayError::Config {
             message: format!("managed test-run root is unavailable: {error}"),
         })?;
-    let root_uri = Url::from_directory_path(root)
+    let head_commit_id = current_head_commit_id(&root);
+    let root_uri = Url::from_directory_path(&root)
         .map_err(|()| TraceDecayError::Config {
             message: "managed test-run root URI is invalid".to_owned(),
         })?
@@ -616,10 +632,26 @@ async fn begin_test_run(cg: &TraceDecay) -> Result<OperationEmitter> {
     let sequence = NEXT_TEST_RUN_OPERATION.fetch_add(1, Ordering::Relaxed);
     let request_id = RequestId::new(format!("request.managed-test-run.{sequence}"))
         .map_err(test_run_contract_error)?;
+    let database = cg.dashboard_database_guard();
+    let code_generation_id = DiagnosticsStore::new(database.conn())
+        .current_generation()
+        .await?;
     operation_event_authority()
-        .begin_managed_test_run(root_uri, request_id)
+        .begin_managed_test_run(
+            root_uri,
+            request_id,
+            head_commit_id,
+            code_generation_id,
+            deadline,
+        )
         .await
         .map_err(test_run_event_error)
+}
+
+fn current_head_commit_id(root: &Path) -> Option<CommitId> {
+    let repository = gix::open(root).ok()?;
+    let commit = repository.head_commit().ok()?;
+    CommitId::new(commit.id().to_hex().to_string()).ok()
 }
 
 async fn finish_test_run(
@@ -977,6 +1009,12 @@ fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[allow(dead_code)]
+    fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(begin_test_run(cg, deadline));
+    }
 
     #[tokio::test]
     async fn directly_changed_test_file_is_dispatched_without_toolchain_execution() {
