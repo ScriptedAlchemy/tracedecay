@@ -188,15 +188,21 @@ function InstrumentReadout({
   return (
     <div className="pointer-events-none absolute left-6 top-6 flex select-none items-stretch">
       <span aria-hidden className="w-2 border-y border-l border-accent/40" />
-      <dl className="flex items-center gap-4 bg-surface-0/70 px-3 py-1.5 backdrop-blur-sm">
+      {/* The counts and their names were a step apart on the type scale, which
+       * on a HUD floating over a dark field made the whole strip read as one
+       * grey ribbon. Setting the figures on the display tier and the names on
+       * the legend tier puts the two ends of the scale side by side, so the
+       * numbers carry from across the room and the labels stay quiet. */}
+      <dl className="flex items-end gap-5 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
         {items.map((item) => (
-          <div key={item.label} className="flex items-baseline gap-1.5">
-            <dd className="tabular text-sm font-semibold leading-none text-text-primary">
+          <div key={item.label} className="flex flex-col gap-1">
+            <dd
+              className="td-display text-lg text-text-primary"
+              data-cell="numeric"
+            >
               {item.value.toLocaleString()}
             </dd>
-            <dt className="text-2xs uppercase tracking-wider text-text-muted">
-              {item.label}
-            </dt>
+            <dt className="td-legend">{item.label}</dt>
           </div>
         ))}
       </dl>
@@ -252,39 +258,53 @@ function ProjectRow({ project }: { project: ProjectRegistryEntry }) {
       onClick={() => selectProject(project.project_id, project.label)}
       aria-pressed={selected}
       className={cn(
-        'flex w-full items-center gap-3 border-b border-edge-subtle px-3 py-2 text-left last:border-b-0',
+        'flex w-full flex-col gap-1 border-b border-edge-subtle px-3 py-2 text-left last:border-b-0',
         'hover:bg-surface-2',
         selected && 'bg-accent/10',
       )}
     >
-      <RecencyDot lastSeenAt={project.last_seen_at} />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-medium">
+      {/* Five columns on one line asked for roughly 385px inside a 296px rail,
+       * so the age column was simply clipped off the right edge of every row in
+       * the registry. The same five facts stack into three lines that fit:
+       * identity and age, then where it lives, then what it holds. Dense, but
+       * composed -- nothing here is allowed to run off its own card. */}
+      <span className="flex w-full items-baseline gap-2">
+        <RecencyDot lastSeenAt={project.last_seen_at} className="self-center" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-primary">
           {project.label}
-          {project.is_active ? (
-            <span className="ml-2 rounded-[var(--radius-chip)] bg-accent/15 px-1.5 text-2xs font-medium text-text-primary">
-              active
-            </span>
-          ) : null}
         </span>
+        {project.is_active ? (
+          <span className="td-legend shrink-0 bg-accent/15 px-1.5 py-1 text-text-primary">
+            active
+          </span>
+        ) : null}
         <span
-          className="block truncate font-mono text-2xs text-text-muted"
-          title={project.canonical_root}
+          className="td-value shrink-0 text-2xs text-text-muted"
+          data-cell="numeric"
         >
-          {project.project_root}
+          {relativeTime(project.last_seen_at)}
         </span>
       </span>
-      {branch ? (
-        <span className="inline-flex shrink-0 items-center gap-1 text-2xs text-text-muted">
-          <GitBranch aria-hidden size={11} />
-          <span className="max-w-32 truncate">{branch}</span>
-        </span>
-      ) : null}
-      <span className="tabular w-28 shrink-0 text-right text-2xs text-text-muted">
-        {project.store_count} stores · {project.artifact_count} artifacts
+      <span
+        className="td-value block truncate pl-3.5 text-2xs text-text-muted"
+        title={project.canonical_root}
+      >
+        {project.project_root}
       </span>
-      <span className="tabular w-20 shrink-0 text-right text-2xs text-text-muted">
-        {relativeTime(project.last_seen_at)}
+      <span className="flex w-full items-baseline gap-2 pl-3.5">
+        {branch ? (
+          <span className="inline-flex min-w-0 shrink items-center gap-1 text-2xs text-text-secondary">
+            <GitBranch aria-hidden size={11} className="shrink-0" />
+            <span className="truncate">{branch}</span>
+          </span>
+        ) : null}
+        <span aria-hidden className="td-rule" />
+        <span
+          className="td-legend shrink-0 text-text-muted"
+          data-cell="numeric"
+        >
+          {project.store_count} st · {project.artifact_count} art
+        </span>
       </span>
     </button>
   );

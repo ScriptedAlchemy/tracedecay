@@ -238,7 +238,14 @@
 }
 
 /** Bezel screen ruling: the faint horizontal discipline of a CRT face, used
- * only on the graph field so the canvas reads as an instrument screen. */
+ * only on the graph field so the canvas reads as an instrument screen.
+ *
+ * At a 3px period and 0.3 opacity the ruling was reading as texture rather
+ * than discipline: over the empty field it was about right, but across a lit
+ * node body -- which is saturated and small -- it corrugated the disc into
+ * visible corduroy and made the graph look cheap. A 4px period at less than
+ * half the opacity keeps the CRT hint on the field and stops fighting the one
+ * thing on the canvas that is actually supposed to be looked at. */
 .td-scanlines::after {
   content: '';
   position: absolute;
@@ -246,10 +253,10 @@
   pointer-events: none;
   background-image: repeating-linear-gradient(
     to bottom,
-    color-mix(in oklab, var(--raw-surface-0) 60%, transparent) 0 1px,
-    transparent 1px 3px
+    color-mix(in oklab, var(--raw-surface-0) 55%, transparent) 0 1px,
+    transparent 1px 4px
   );
-  opacity: 0.3;
+  opacity: 0.13;
 }
 
 /** Live signal: a slow, low-amplitude flash on the single element that proves

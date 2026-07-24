@@ -182,6 +182,14 @@ export function GraphCanvas({
     // across reloads of the same subgraph.
     const sorted = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
     const seedLight = palette(container).light;
+    // Sigma fits the camera to the graph's extent, so an identical base radius
+    // renders far larger on a sparse graph than on a dense one: forty symbols
+    // read correctly on Code while seven filled the Brain canvas with discs.
+    // Normalising the radius against node count keeps a node the same apparent
+    // object however much of the graph is on screen -- degree still sets the
+    // relative sizes within a graph, which is the only comparison that means
+    // anything. The dense case is left exactly where it was.
+    const density = Math.min(1, Math.max(0.45, Math.sqrt(nodes.length / 40)));
     sorted.forEach((node, index) => {
       const angle = (index / sorted.length) * Math.PI * 2;
       const [kr, kg, kb] = cssColorToRgb(kindColor(node.kind, seedLight));
@@ -191,7 +199,7 @@ export function GraphCanvas({
         degree: node.degree,
         x: Math.cos(angle),
         y: Math.sin(angle),
-        size: 5 + 9 * Math.sqrt(node.degree / maxDegree),
+        size: (5 + 9 * Math.sqrt(node.degree / maxDegree)) * density,
         isHub: node.degree >= maxDegree * 0.75,
         // A graph with no vitality measurement rests mid-scale, so an absent
         // signal never masquerades as a dead network.
