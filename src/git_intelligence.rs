@@ -519,6 +519,8 @@ impl NativeGitIntelligence {
             GitOperationStateV1::Revert
         } else if git_dir.join("BISECT_LOG").is_file() {
             GitOperationStateV1::Bisect
+        } else if git_dir.join("sequencer").is_dir() {
+            GitOperationStateV1::Sequencer
         } else {
             GitOperationStateV1::None
         }

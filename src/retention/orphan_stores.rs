@@ -14,13 +14,14 @@
 //! The contract is "re-link or explicitly retire, never orphan silently": a
 //! store whose registry roots are gone but whose manifest points at a
 //! *different, currently-live* root is classified [`StoreDisposition::Relinkable`]
-//! and is never collected here — it is surfaced for the reconciliation path
-//! (`doctor::registry_drift`) to re-link. Only stores with no live root at all
-//! are eligible for collection, and only once older than the retention window.
+//! and is never collected here — an applied sweep atomically transfers its
+//! registry identity to that exact live project. Only stores with no live root
+//! at all are eligible for collection, and only once older than the retention
+//! window.
 
 use std::path::{Path, PathBuf};
 
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 
 /// One profile-sharded store observed on disk, paired with the registry
 /// identity that points at it. This is the pure input to classification so the
@@ -41,6 +42,13 @@ pub struct StoreCensusEntry {
     pub last_write_secs: i64,
     /// Total bytes on disk under `data_root`.
     pub size_bytes: u64,
+    /// Exact registry identity observed with this filesystem census.
+    pub expected_store_relpath: String,
+    pub expected_created_at: i64,
+    pub expected_last_write_at: Option<i64>,
+    /// Payload mtime and manifest bytes fence collection against revival.
+    pub expected_payload_mtime_secs: i64,
+    pub expected_manifest_bytes: Option<Vec<u8>>,
 }
 
 /// What should happen to a store, decided purely from its census entry.
@@ -67,6 +75,11 @@ pub struct OrphanStoreFinding {
     /// `now - last_write_secs`, clamped at zero.
     pub age_secs: i64,
     pub size_bytes: u64,
+    pub expected_store_relpath: String,
+    pub expected_created_at: i64,
+    pub expected_last_write_at: Option<i64>,
+    pub expected_payload_mtime_secs: i64,
+    pub expected_manifest_bytes: Option<Vec<u8>>,
 }
 
 impl OrphanStoreFinding {
@@ -117,6 +130,11 @@ pub fn classify_stores(census: &[StoreCensusEntry], now: i64) -> Vec<OrphanStore
             disposition: classify_one(entry),
             age_secs: now.saturating_sub(entry.last_write_secs).max(0),
             size_bytes: entry.size_bytes,
+            expected_store_relpath: entry.expected_store_relpath.clone(),
+            expected_created_at: entry.expected_created_at,
+            expected_last_write_at: entry.expected_last_write_at,
+            expected_payload_mtime_secs: entry.expected_payload_mtime_secs,
+            expected_manifest_bytes: entry.expected_manifest_bytes.clone(),
         })
         .collect()
 }
@@ -128,8 +146,8 @@ pub struct CollectionPlan {
     pub collect: Vec<OrphanStoreFinding>,
     /// Orphaned but still inside the retention window — kept for now, surfaced.
     pub retained_immature: Vec<OrphanStoreFinding>,
-    /// Re-linkable (moved repository) — never collected here, surfaced for
-    /// reconciliation so the identity is re-linked rather than orphaned.
+    /// Re-linkable (moved repository) — never collected; an applied sweep
+    /// transfers these to the exact registered live project identity.
     pub relink: Vec<OrphanStoreFinding>,
 }
 
@@ -172,29 +190,101 @@ pub struct CollectedStore {
 }
 
 /// Outcome of executing a [`CollectionPlan`] against the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionFailureKind {
+    OutsideProfile,
+    InspectFailed,
+    RemoveFailed,
+    RegistryChanged,
+    ManifestChanged,
+    PayloadChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionFailure {
+    pub store_id: String,
+    pub kind: CollectionFailureKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CollectionOutcome {
     pub collected: Vec<CollectedStore>,
     pub reclaimed_bytes: u64,
-    pub errors: Vec<String>,
+    pub errors: Vec<CollectionFailure>,
 }
 
 /// Delete the on-disk data directories for every store in `plan.collect`.
 /// Re-linkable and immature stores are left untouched. A directory that is
 /// already gone counts as collected (idempotent). Best-effort: a failed
 /// removal is recorded in `errors` and does not abort the rest.
-pub fn execute_collection(plan: &CollectionPlan) -> CollectionOutcome {
+#[cfg(test)]
+pub fn execute_collection(plan: &CollectionPlan, profile_root: &Path) -> CollectionOutcome {
     let mut outcome = CollectionOutcome::default();
+    let canonical_profile = match profile_root.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            outcome
+                .errors
+                .extend(plan.collect.iter().map(|finding| CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::InspectFailed,
+                }));
+            return outcome;
+        }
+    };
     for finding in &plan.collect {
+        let canonical_target = match finding.data_root.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let is_profile_child = finding
+                    .data_root
+                    .parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .is_some_and(|parent| {
+                        parent.starts_with(&canonical_profile) && parent != canonical_profile
+                    });
+                if !is_profile_child {
+                    outcome.errors.push(CollectionFailure {
+                        store_id: finding.store_id.clone(),
+                        kind: CollectionFailureKind::OutsideProfile,
+                    });
+                    continue;
+                }
+                outcome.reclaimed_bytes =
+                    outcome.reclaimed_bytes.saturating_add(finding.size_bytes);
+                outcome.collected.push(CollectedStore {
+                    project_id: finding.project_id.clone(),
+                    store_id: finding.store_id.clone(),
+                    data_root: finding.data_root.clone(),
+                    size_bytes: finding.size_bytes,
+                });
+                continue;
+            }
+            Err(_) => {
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::InspectFailed,
+                });
+                continue;
+            }
+        };
+        if canonical_target == canonical_profile
+            || !canonical_target.starts_with(&canonical_profile)
+        {
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::OutsideProfile,
+            });
+            continue;
+        }
         match std::fs::remove_dir_all(&finding.data_root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                outcome.errors.push(format!(
-                    "failed to collect orphan store '{}' at '{}': {error}",
-                    finding.store_id,
-                    finding.data_root.display()
-                ));
+            Err(_) => {
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::RemoveFailed,
+                });
                 continue;
             }
         }
@@ -207,6 +297,220 @@ pub fn execute_collection(plan: &CollectionPlan) -> CollectionOutcome {
         });
     }
     outcome
+}
+
+pub(crate) fn store_finding_is_profile_contained(
+    finding: &OrphanStoreFinding,
+    profile_root: &Path,
+) -> bool {
+    let relpath = Path::new(&finding.expected_store_relpath);
+    if relpath.as_os_str().is_empty()
+        || relpath
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || profile_root.join(relpath) != finding.data_root
+    {
+        return false;
+    }
+    let Ok(canonical_profile) = profile_root.canonicalize() else {
+        return false;
+    };
+    let target_exists = finding.data_root.exists();
+    let mut existing = finding.data_root.as_path();
+    while !existing.exists() {
+        let Some(parent) = existing.parent() else {
+            return false;
+        };
+        existing = parent;
+    }
+    existing.canonicalize().is_ok_and(|path| {
+        path.starts_with(&canonical_profile) && (!target_exists || path != canonical_profile)
+    })
+}
+
+/// Executes collection while holding the registered writer transaction from
+/// the final registry/manifest/payload recheck through retirement. This closes
+/// the revival window between the census and filesystem deletion.
+pub(crate) async fn execute_registered_collection(
+    db: &RegisteredGlobalDb,
+    plan: &CollectionPlan,
+    profile_root: &Path,
+) -> crate::errors::Result<(CollectionOutcome, usize)> {
+    let mut outcome = CollectionOutcome::default();
+    let mut retired = 0usize;
+    for finding in &plan.collect {
+        if !store_finding_is_profile_contained(finding, profile_root) {
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::OutsideProfile,
+            });
+            continue;
+        }
+
+        let transaction = db.begin_write_transaction().await?;
+        let mut rows = transaction
+            .query(
+                "SELECT store_relpath, created_at, last_write_at
+                 FROM store_instances
+                 WHERE project_id = ?1 AND store_id = ?2",
+                crate::db::engine::params![finding.project_id.as_str(), finding.store_id.as_str()],
+            )
+            .await
+            .map_err(|error| orphan_db_error("recheck orphan store identity", error))?;
+        let current = match rows
+            .next()
+            .await
+            .map_err(|error| orphan_db_error("read orphan store identity", error))?
+        {
+            Some(row) => Some((
+                row.get::<String>(0)
+                    .map_err(|error| orphan_db_error("decode orphan store relpath", error))?,
+                row.get::<i64>(1)
+                    .map_err(|error| orphan_db_error("decode orphan store generation", error))?,
+                row.get::<Option<i64>>(2)
+                    .map_err(|error| orphan_db_error("decode orphan last write", error))?,
+            )),
+            None => None,
+        };
+        drop(rows);
+        if current
+            != Some((
+                finding.expected_store_relpath.clone(),
+                finding.expected_created_at,
+                finding.expected_last_write_at,
+            ))
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| orphan_db_error("rollback changed orphan store", error))?;
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::RegistryChanged,
+            });
+            continue;
+        }
+
+        let manifest_path = finding
+            .data_root
+            .join(crate::storage::STORE_MANIFEST_FILENAME);
+        let current_manifest = match std::fs::read(&manifest_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                transaction.rollback().await.map_err(|error| {
+                    orphan_db_error("rollback unreadable orphan manifest", error)
+                })?;
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::InspectFailed,
+                });
+                continue;
+            }
+        };
+        if current_manifest != finding.expected_manifest_bytes {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| orphan_db_error("rollback changed orphan manifest", error))?;
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::ManifestChanged,
+            });
+            continue;
+        }
+        if finding.data_root.exists()
+            && newest_mtime_secs(&finding.data_root) != finding.expected_payload_mtime_secs
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| orphan_db_error("rollback revived orphan payload", error))?;
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::PayloadChanged,
+            });
+            continue;
+        }
+
+        match std::fs::remove_dir_all(&finding.data_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|error| orphan_db_error("rollback failed orphan removal", error))?;
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::RemoveFailed,
+                });
+                continue;
+            }
+        }
+        let deleted = transaction
+            .execute(
+                "DELETE FROM store_instances
+                 WHERE project_id = ?1 AND store_id = ?2
+                   AND store_relpath = ?3 AND created_at = ?4
+                   AND last_write_at IS ?5",
+                crate::db::engine::params![
+                    finding.project_id.as_str(),
+                    finding.store_id.as_str(),
+                    finding.expected_store_relpath.as_str(),
+                    finding.expected_created_at,
+                    finding.expected_last_write_at
+                ],
+            )
+            .await
+            .map_err(|error| orphan_db_error("retire collected orphan store", error))?;
+        if deleted != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| orphan_db_error("rollback raced orphan retirement", error))?;
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::RegistryChanged,
+            });
+            continue;
+        }
+        transaction
+            .execute(
+                "DELETE FROM code_projects
+                 WHERE project_id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM store_instances WHERE project_id = ?1
+                   )",
+                crate::db::engine::params![finding.project_id.as_str()],
+            )
+            .await
+            .map_err(|error| orphan_db_error("retire empty collected project", error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| orphan_db_error("commit collected orphan retirement", error))?;
+
+        retired = retired.saturating_add(1);
+        outcome.reclaimed_bytes = outcome.reclaimed_bytes.saturating_add(finding.size_bytes);
+        outcome.collected.push(CollectedStore {
+            project_id: finding.project_id.clone(),
+            store_id: finding.store_id.clone(),
+            data_root: finding.data_root.clone(),
+            size_bytes: finding.size_bytes,
+        });
+    }
+    Ok((outcome, retired))
+}
+
+fn orphan_db_error(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::Database {
+        operation: operation.to_string(),
+        message: error.to_string(),
+    }
 }
 
 /// Newest mtime under `dir`, unix seconds, or `0` when nothing is readable.
@@ -261,30 +565,44 @@ fn dir_size_bytes(dir: &Path) -> u64 {
 /// Build the on-disk store census from the registry. Reads manifests and sizes
 /// directories but never mutates. Only profile-sharded stores are considered;
 /// other storage modes are not laid out under the profile root here.
-pub async fn build_store_census(db: &GlobalDb, profile_root: &Path) -> Vec<StoreCensusEntry> {
+pub async fn build_store_census(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+) -> crate::errors::Result<Vec<StoreCensusEntry>> {
     let mut census = Vec::new();
-    for project in db.list_code_projects(usize::MAX).await {
-        let Some(context) = db.project_registry_context_by_id(&project.project_id).await else {
-            continue;
-        };
-        for store_context in context.stores {
-            let store = store_context.store;
+    for project in db.list_code_projects(usize::MAX).await? {
+        for store in db
+            .try_list_store_instances_for_project(&project.project_id)
+            .await?
+        {
             if store.storage_mode != "profile_sharded" {
                 continue;
             }
             let data_root = profile_root.join(&store.store_relpath);
-            if !data_root.exists() {
-                continue;
-            }
-            let manifest_root = crate::storage::read_store_manifest(
-                &data_root.join(crate::storage::STORE_MANIFEST_FILENAME),
-            )
-            .ok()
-            .map(|manifest| manifest.project_root);
+            let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+            let expected_manifest_bytes = match std::fs::read(&manifest_path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(crate::errors::TraceDecayError::Config {
+                        message: format!(
+                            "failed to snapshot store manifest '{}': {error}",
+                            manifest_path.display()
+                        ),
+                    });
+                }
+            };
+            let manifest_root = expected_manifest_bytes
+                .as_deref()
+                .and_then(|bytes| {
+                    serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok()
+                })
+                .map(|manifest| manifest.project_root);
+            let expected_payload_mtime_secs = newest_mtime_secs(&data_root);
             let last_write_secs = store
                 .last_write_at
                 .filter(|value| *value > 0)
-                .unwrap_or_else(|| newest_mtime_secs(&data_root));
+                .unwrap_or(expected_payload_mtime_secs);
             let size_bytes = dir_size_bytes(&data_root);
             census.push(StoreCensusEntry {
                 project_id: project.project_id.clone(),
@@ -296,10 +614,15 @@ pub async fn build_store_census(db: &GlobalDb, profile_root: &Path) -> Vec<Store
                 manifest_root,
                 last_write_secs,
                 size_bytes,
+                expected_store_relpath: store.store_relpath,
+                expected_created_at: store.created_at,
+                expected_last_write_at: store.last_write_at,
+                expected_payload_mtime_secs,
+                expected_manifest_bytes,
             });
         }
     }
-    census
+    Ok(census)
 }
 
 /// The report returned by a sweep: the full classified plan plus, when
@@ -309,6 +632,8 @@ pub struct OrphanSweepReport {
     pub plan: CollectionPlan,
     pub applied: bool,
     pub outcome: CollectionOutcome,
+    /// Registry identities transferred to their exact currently-live project.
+    pub relinked_registry_rows: usize,
     /// Registry rows removed for collected stores.
     pub retired_registry_rows: usize,
 }
@@ -318,61 +643,71 @@ pub struct OrphanSweepReport {
 /// `retention_secs` are deleted and their now-dangling registry rows retired in
 /// the same operation, so an identity migration never leaves a silent orphan.
 ///
-/// This is deliberately not wired to a scheduler here; the caller (daemon
-/// backstop tick or Doctor pass) owns cadence and mutation authority.
+/// The caller (daemon backstop tick or Doctor pass) owns cadence and mutation
+/// authority.
 pub async fn sweep_orphan_stores(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     profile_root: &Path,
     retention_secs: i64,
     now: i64,
     apply: bool,
-) -> OrphanSweepReport {
-    let census = build_store_census(db, profile_root).await;
+) -> crate::errors::Result<OrphanSweepReport> {
+    let census = build_store_census(db, profile_root).await?;
     let findings = classify_stores(&census, now);
     let plan = plan_collection(findings, retention_secs);
 
     if !apply {
-        return OrphanSweepReport {
+        return Ok(OrphanSweepReport {
             plan,
             applied: false,
             outcome: CollectionOutcome::default(),
+            relinked_registry_rows: 0,
             retired_registry_rows: 0,
-        };
+        });
     }
 
-    let outcome = execute_collection(&plan);
-    let collected_roots = plan
-        .collect
-        .iter()
-        .filter(|finding| {
-            outcome
-                .collected
-                .iter()
-                .any(|c| c.store_id == finding.store_id)
-        })
-        .map(|finding| {
-            // Retire the identity by its canonical registry key. Only stores we
-            // actually removed from disk are retired, so a failed deletion
-            // keeps its row and stays a finding.
-            census
-                .iter()
-                .find(|entry| entry.store_id == finding.store_id)
-                .map(|entry| entry.canonical_root.clone())
-        })
-        .collect::<Vec<_>>();
-    let collected_roots = collected_roots.into_iter().flatten().collect::<Vec<_>>();
-    let retired_registry_rows = if collected_roots.is_empty() {
-        0
-    } else {
-        db.delete_project_paths(&collected_roots).await
-    };
+    let mut relinked_registry_rows = 0usize;
+    let mut preflight_errors = Vec::new();
+    for finding in &plan.relink {
+        let StoreDisposition::Relinkable { live_root } = &finding.disposition else {
+            continue;
+        };
+        if !store_finding_is_profile_contained(finding, profile_root) {
+            preflight_errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::OutsideProfile,
+            });
+            continue;
+        }
+        if db
+            .relink_orphan_store_instance(
+                &finding.project_id,
+                &finding.store_id,
+                live_root,
+                profile_root,
+                &finding.data_root,
+                &finding.expected_store_relpath,
+                finding.expected_created_at,
+                finding.expected_last_write_at,
+                finding.expected_manifest_bytes.as_deref(),
+            )
+            .await?
+        {
+            relinked_registry_rows = relinked_registry_rows.saturating_add(1);
+        }
+    }
 
-    OrphanSweepReport {
+    let (mut outcome, retired_registry_rows) =
+        execute_registered_collection(db, &plan, profile_root).await?;
+    outcome.errors.splice(0..0, preflight_errors);
+
+    Ok(OrphanSweepReport {
         plan,
         applied: true,
         outcome,
+        relinked_registry_rows,
         retired_registry_rows,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -813,7 +813,6 @@ pub(crate) mod store_runtime;
 pub fn mark_process_long_lived_for_session_maintenance() {
     store_runtime::session_registry::mark_process_long_lived_for_session_maintenance();
 }
-pub(crate) mod store_size_telemetry;
 pub(crate) mod transport;
 pub(crate) use service::invocation::{
     BoundedPr13HookOrchestratorV1, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,

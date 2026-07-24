@@ -1,10 +1,34 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::global_db::{GlobalDb, StoreInstanceUpsert};
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::db::DaemonDatabaseScope;
+use crate::global_db::RegisteredGlobalDb;
 use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 
 const DAY: i64 = 24 * 60 * 60;
+static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+
+async fn open_registered_db(
+    profile_root: &Path,
+) -> (
+    DaemonSessionRuntimeRegistryV1,
+    DaemonDatabaseScope,
+    Arc<RegisteredGlobalDb>,
+) {
+    let identity = crate::daemon::profile_identity::load_or_create(profile_root).unwrap();
+    let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
+    let scope =
+        crate::db::enter_daemon_database_scope(profile_root, nonce, "orphan store sweep test")
+            .unwrap();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .unwrap();
+    let database = registry.profile_database().await.unwrap();
+    (registry, scope, database)
+}
 
 fn entry(
     store_id: &str,
@@ -15,6 +39,7 @@ fn entry(
     last_write_secs: i64,
     size_bytes: u64,
 ) -> StoreCensusEntry {
+    let expected_store_relpath = data_root.to_string_lossy().into_owned();
     StoreCensusEntry {
         project_id: format!("proj_{store_id}"),
         store_id: store_id.to_string(),
@@ -24,6 +49,11 @@ fn entry(
         manifest_root,
         last_write_secs,
         size_bytes,
+        expected_store_relpath,
+        expected_created_at: 0,
+        expected_last_write_at: Some(last_write_secs),
+        expected_payload_mtime_secs: last_write_secs,
+        expected_manifest_bytes: None,
     }
 }
 
@@ -126,6 +156,11 @@ fn execute_collection_deletes_only_collect_set() {
             disposition: StoreDisposition::Orphaned,
             age_secs: 90 * DAY,
             size_bytes: 7,
+            expected_store_relpath: "collect-me".into(),
+            expected_created_at: 0,
+            expected_last_write_at: None,
+            expected_payload_mtime_secs: 0,
+            expected_manifest_bytes: None,
         }],
         retained_immature: vec![OrphanStoreFinding {
             project_id: "proj_keep".into(),
@@ -134,11 +169,16 @@ fn execute_collection_deletes_only_collect_set() {
             disposition: StoreDisposition::Orphaned,
             age_secs: DAY,
             size_bytes: 0,
+            expected_store_relpath: "keep-me".into(),
+            expected_created_at: 0,
+            expected_last_write_at: None,
+            expected_payload_mtime_secs: 0,
+            expected_manifest_bytes: None,
         }],
         relink: Vec::new(),
     };
 
-    let outcome = execute_collection(&plan);
+    let outcome = execute_collection(&plan, tmp.path());
     assert_eq!(outcome.collected.len(), 1);
     assert_eq!(outcome.reclaimed_bytes, 7);
     assert!(outcome.errors.is_empty());
@@ -148,20 +188,64 @@ fn execute_collection_deletes_only_collect_set() {
 
 #[test]
 fn already_missing_directory_collects_idempotently() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let stores = tmp.path().join("stores");
+    std::fs::create_dir_all(&stores).unwrap();
     let plan = CollectionPlan {
         collect: vec![OrphanStoreFinding {
             project_id: "proj_gone".into(),
             store_id: "gone".into(),
-            data_root: PathBuf::from("/definitely/not/here/store"),
+            data_root: stores.join("gone"),
             disposition: StoreDisposition::Orphaned,
             age_secs: 90 * DAY,
             size_bytes: 42,
+            expected_store_relpath: "stores/gone".into(),
+            expected_created_at: 0,
+            expected_last_write_at: None,
+            expected_payload_mtime_secs: 0,
+            expected_manifest_bytes: None,
         }],
         ..CollectionPlan::default()
     };
-    let outcome = execute_collection(&plan);
+    let outcome = execute_collection(&plan, tmp.path());
     assert_eq!(outcome.collected.len(), 1);
     assert!(outcome.errors.is_empty());
+}
+
+#[test]
+fn execute_collection_rejects_store_outside_profile() {
+    let profile = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    let target = outside.path().join("store");
+    std::fs::create_dir_all(&target).unwrap();
+    let plan = CollectionPlan {
+        collect: vec![OrphanStoreFinding {
+            project_id: "proj_escape".into(),
+            store_id: "escape".into(),
+            data_root: target.clone(),
+            disposition: StoreDisposition::Orphaned,
+            age_secs: 90 * DAY,
+            size_bytes: 1,
+            expected_store_relpath: "store".into(),
+            expected_created_at: 0,
+            expected_last_write_at: None,
+            expected_payload_mtime_secs: 0,
+            expected_manifest_bytes: None,
+        }],
+        ..CollectionPlan::default()
+    };
+
+    let outcome = execute_collection(&plan, profile.path());
+
+    assert!(target.exists(), "outside-profile store must not be removed");
+    assert!(outcome.collected.is_empty());
+    assert_eq!(
+        outcome.errors,
+        vec![CollectionFailure {
+            store_id: "escape".into(),
+            kind: CollectionFailureKind::OutsideProfile,
+        }]
+    );
 }
 
 /// Seed a profile with one live store and one identity-drift orphan store, then
@@ -178,9 +262,7 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     // Orphan identity: canonical + display roots that no longer exist.
     let dead_root = tmp.path().join("moved-away-repo");
 
-    let db = GlobalDb::open_at(&profile_root.join("global.db"))
-        .await
-        .unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
 
     // Anchor timestamps at a real epoch base so the recorded last-write drives
     // the age (not the freshly-written file mtime, which would be "now").
@@ -207,14 +289,18 @@ async fn sweep_collects_orphan_store_and_retires_row() {
 
     let now = base;
     // Dry run: plan classifies orphan, mutates nothing.
-    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, now, false).await;
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, now, false)
+        .await
+        .unwrap();
     assert_eq!(report.plan.collect.len(), 1, "one orphan should be planned");
     assert_eq!(report.plan.collect[0].store_id, "store_orphan");
     assert!(!report.applied);
     assert!(orphan_data_root.exists(), "dry run must not delete");
 
     // Apply: orphan store removed, row retired, live store untouched.
-    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, now, true).await;
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, now, true)
+        .await
+        .unwrap();
     assert!(report.applied);
     assert_eq!(report.outcome.collected.len(), 1);
     assert_eq!(report.retired_registry_rows, 1);
@@ -227,6 +313,7 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     let remaining: Vec<_> = db
         .list_code_projects(usize::MAX)
         .await
+        .unwrap()
         .into_iter()
         .map(|p| p.project_id)
         .collect();
@@ -237,11 +324,303 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     );
 }
 
+#[tokio::test]
+async fn sweep_preserves_immature_sibling_store_identity() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("moved-away-repo");
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let now = 1_700_000_000i64;
+    let old_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_orphan",
+        "store_old",
+        &dead_root,
+        now - 100 * DAY,
+    )
+    .await;
+    let young_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_orphan",
+        "store_young",
+        &dead_root,
+        now - DAY,
+    )
+    .await;
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, now, true)
+        .await
+        .unwrap();
+
+    assert_eq!(report.retired_registry_rows, 1);
+    assert!(!old_root.exists());
+    assert!(young_root.exists());
+    let stores = db
+        .try_list_store_instances_for_project("proj_orphan")
+        .await
+        .unwrap();
+    assert_eq!(
+        stores
+            .into_iter()
+            .map(|store| store.store_id)
+            .collect::<Vec<_>>(),
+        vec!["store_young"]
+    );
+    assert!(
+        db.list_code_projects(usize::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|project| project.project_id == "proj_orphan")
+    );
+}
+
+#[tokio::test]
+async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("old-repository-root");
+    let live_root = tmp.path().join("renamed-repository-root");
+    std::fs::create_dir_all(&live_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let store_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_old",
+        "store_moved",
+        &dead_root,
+        1_700_000_000,
+    )
+    .await;
+    seed_project(&db, "proj_live", &live_root, 1_700_000_000).await;
+
+    let manifest = StoreManifest {
+        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+        project_id: Some("proj_old".to_string()),
+        store_kind: StoreKind::CodeProject,
+        storage_mode: StorageMode::ProfileSharded,
+        project_root: live_root,
+        data_root: store_root.clone(),
+        graph_db_relpath: PathBuf::from("graph.db"),
+        sessions_db_relpath: PathBuf::from("sessions.db"),
+        branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+    };
+    std::fs::write(
+        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, 1_700_000_000, true)
+        .await
+        .unwrap();
+
+    assert_eq!(report.relinked_registry_rows, 1);
+    assert!(report.outcome.collected.is_empty());
+    assert!(store_root.exists(), "re-link must not delete store payload");
+    assert!(
+        db.try_list_store_instances_for_project("proj_old")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let target_stores = db
+        .try_list_store_instances_for_project("proj_live")
+        .await
+        .unwrap();
+    assert_eq!(target_stores.len(), 1);
+    assert_eq!(target_stores[0].store_id, "store_moved");
+    assert_eq!(target_stores[0].project_id, "proj_live");
+    let relinked_manifest = crate::storage::read_store_manifest(
+        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    )
+    .unwrap();
+    assert_eq!(relinked_manifest.project_id.as_deref(), Some("proj_live"));
+    assert!(
+        !db.list_code_projects(usize::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|project| project.project_id == "proj_old")
+    );
+}
+
+#[tokio::test]
+async fn sweep_resumes_manifest_forward_after_interrupted_relink() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("old-repository-root");
+    let live_root = tmp.path().join("renamed-repository-root");
+    std::fs::create_dir_all(&live_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let store_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_old",
+        "store_moved",
+        &dead_root,
+        1_700_000_000,
+    )
+    .await;
+    seed_project(&db, "proj_live", &live_root, 1_700_000_000).await;
+    let mut manifest = crate::storage::read_store_manifest(
+        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    )
+    .unwrap();
+    manifest.project_id = Some("proj_live".to_string());
+    manifest.project_root = live_root;
+    crate::storage::write_store_manifest_to_path(
+        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        &manifest,
+    )
+    .unwrap();
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, 1_700_000_000, true)
+        .await
+        .unwrap();
+
+    assert_eq!(report.relinked_registry_rows, 1);
+    assert!(
+        db.try_list_store_instances_for_project("proj_old")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db.try_list_store_instances_for_project("proj_live")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|store| store.store_id)
+            .collect::<Vec<_>>(),
+        vec!["store_moved"]
+    );
+}
+
+#[tokio::test]
+async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registration() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("old-repository-root");
+    let unregistered_live_root = tmp.path().join("unregistered-live-root");
+    std::fs::create_dir_all(&unregistered_live_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let store_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_old",
+        "store_moved",
+        &dead_root,
+        1_700_000_000,
+    )
+    .await;
+    let mut manifest = crate::storage::read_store_manifest(
+        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    )
+    .unwrap();
+    manifest.project_root = unregistered_live_root;
+    std::fs::write(
+        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, 1_700_000_000, true)
+        .await
+        .unwrap();
+
+    assert_eq!(report.relinked_registry_rows, 0);
+    assert!(report.outcome.collected.is_empty());
+    assert!(store_root.exists());
+    let prior = db
+        .try_list_store_instances_for_project("proj_old")
+        .await
+        .unwrap();
+    assert_eq!(prior.len(), 1);
+    assert_eq!(prior[0].store_id, "store_moved");
+    let unchanged_manifest = crate::storage::read_store_manifest(
+        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    )
+    .unwrap();
+    assert_eq!(unchanged_manifest.project_id.as_deref(), Some("proj_old"));
+}
+
+#[tokio::test]
+async fn relink_database_failure_rolls_back_manifest_and_registry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("old-repository-root");
+    let live_root = tmp.path().join("registered-live-root");
+    std::fs::create_dir_all(&live_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let store_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_old",
+        "store_moved",
+        &dead_root,
+        1_700_000_000,
+    )
+    .await;
+    seed_project(&db, "proj_live", &live_root, 1_700_000_000).await;
+    let mut manifest = crate::storage::read_store_manifest(
+        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    )
+    .unwrap();
+    manifest.project_root = live_root;
+    std::fs::write(
+        store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    db.writer_connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_test_relink
+             BEFORE INSERT ON store_instances
+             WHEN NEW.project_id = 'proj_live'
+             BEGIN SELECT RAISE(ABORT, 'test relink rejection'); END;",
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        sweep_orphan_stores(&db, &profile_root, 7 * DAY, 1_700_000_000, true)
+            .await
+            .is_err()
+    );
+
+    let prior = db
+        .try_list_store_instances_for_project("proj_old")
+        .await
+        .unwrap();
+    assert_eq!(prior.len(), 1);
+    assert_eq!(prior[0].store_id, "store_moved");
+    assert!(
+        db.try_list_store_instances_for_project("proj_live")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let restored_manifest = crate::storage::read_store_manifest(
+        &store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+    )
+    .unwrap();
+    assert_eq!(restored_manifest.project_id.as_deref(), Some("proj_old"));
+}
+
 /// Register a profile-sharded store and write its manifest + a payload file.
 /// Returns the on-disk data root. The manifest `project_root` matches the
 /// registry root so a dead root is a true orphan (not a re-link candidate).
 async fn seed_store(
-    db: &GlobalDb,
+    db: &RegisteredGlobalDb,
     profile_root: &Path,
     project_id: &str,
     store_id: &str,
@@ -269,20 +648,55 @@ async fn seed_store(
     )
     .unwrap();
 
-    db.upsert_code_project(project_id, project_root, None, None, None)
+    seed_project(db, project_id, project_root, created_at).await;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO store_instances (
+                store_id, project_id, store_kind, storage_mode, store_relpath,
+                manifest_relpath, created_at, last_verified_at, last_write_at
+             ) VALUES (?1, ?2, 'project', 'profile_sharded', ?3, NULL, ?4, NULL, ?4)",
+            crate::db::engine::params![
+                store_id,
+                project_id,
+                format!("stores/{store_id}"),
+                created_at
+            ],
+        )
         .await
         .unwrap();
-    db.upsert_store_instance(StoreInstanceUpsert {
-        store_id: store_id.to_string(),
-        project_id: project_id.to_string(),
-        store_kind: "project".to_string(),
-        storage_mode: "profile_sharded".to_string(),
-        store_relpath: format!("stores/{store_id}"),
-        manifest_relpath: None,
-        last_verified_at: None,
-        last_write_at: Some(created_at),
-    })
-    .await
-    .unwrap();
+    transaction.commit().await.unwrap();
     data_root
+}
+
+async fn seed_project(
+    db: &RegisteredGlobalDb,
+    project_id: &str,
+    project_root: &Path,
+    timestamp: i64,
+) {
+    let root = RegisteredGlobalDb::canonical_project_key(project_root);
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO code_projects (
+                project_id, canonical_root, display_root, created_at, last_seen_at
+             ) VALUES (?1, ?2, ?2, ?3, ?3)
+             ON CONFLICT(project_id) DO NOTHING",
+            crate::db::engine::params![project_id, root.as_str(), timestamp],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(alias_path) DO UPDATE SET
+                project_id = excluded.project_id,
+                last_seen_at = excluded.last_seen_at",
+            crate::db::engine::params![root, project_id, timestamp],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
 }

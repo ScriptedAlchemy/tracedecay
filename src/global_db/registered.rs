@@ -193,24 +193,6 @@ impl RegisteredGlobalDb {
         )
     }
 
-    pub(crate) fn storage_telemetry(
-        &self,
-        store: tracedecay_application::storage::StoreKeyV1,
-        reader_wait: std::time::Duration,
-    ) -> crate::errors::Result<crate::daemon::store_size_telemetry::DaemonStoreSizeTelemetry> {
-        crate::daemon::store_size_telemetry::DaemonStoreSizeTelemetry::mount(
-            store,
-            &self.runtime,
-            reader_wait,
-        )
-        .map_err(|error| {
-            registered_error(
-                "mount registered store telemetry reader",
-                format!("{error:?}"),
-            )
-        })
-    }
-
     pub(crate) fn storage_page_counts(&self) -> crate::errors::Result<(u64, u64, u64)> {
         self.runtime
             .storage_page_counts(std::time::Duration::from_secs(5))

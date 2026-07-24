@@ -92,8 +92,6 @@ use crate::daemon_client::DaemonInvocationClient;
 use crate::db::{Database, DatabaseEngineConnection};
 use crate::diagnostics::lsp;
 use crate::errors::{Result, TraceDecayError};
-#[cfg(test)]
-use crate::global_db::GlobalDb;
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
@@ -179,6 +177,13 @@ impl AdmittedDoctorReportV1 {
 pub(crate) struct DashboardState {
     /// Registered project id for profile-backed stores, when known.
     pub(crate) project_id: Option<String>,
+    /// Exact project graph retained by the daemon for this dashboard state.
+    /// Absent for lightweight/profile-only states that cannot run project
+    /// automation.
+    pub(crate) project_graph: Option<Arc<TraceDecay>>,
+    /// Resolves other registered projects only when their graph is already
+    /// mounted by the daemon.
+    pub(crate) project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     /// Immutable authoritative owner for every memory operation served here.
     pub(crate) memory_owner: FactOwnerV1,
     /// Active code-graph database. This can be branch-specific.
@@ -234,6 +239,58 @@ pub(crate) struct DashboardState {
     /// references descriptive and non-actionable.
     pub(crate) doctor_remediation_dispatcher:
         Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+}
+
+/// Test-only lifetime owner for the same registered authorities retained by a
+/// daemon dashboard. Integration tests pass the typed host-admission runtime;
+/// raw database handles never cross the public test seam.
+pub(crate) struct DashboardHostAdmissionTestAuthorityV1 {
+    _runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    project_sessions: Arc<RegisteredGlobalDb>,
+    profile_database: Arc<RegisteredGlobalDb>,
+}
+
+impl DashboardHostAdmissionTestAuthorityV1 {
+    pub(crate) fn new(
+        runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        project_sessions: Arc<RegisteredGlobalDb>,
+    ) -> Self {
+        Self {
+            _runtime: runtime,
+            project_sessions,
+            profile_database,
+        }
+    }
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-transport")]
+#[derive(Clone, Default)]
+pub struct DashboardTestProjectGraphsV1 {
+    graphs: Arc<std::sync::RwLock<std::collections::HashMap<PathBuf, Arc<TraceDecay>>>>,
+}
+
+#[cfg(feature = "test-transport")]
+impl DashboardTestProjectGraphsV1 {
+    pub fn register(&self, graph: Arc<TraceDecay>) {
+        self.graphs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(graph.project_root().to_path_buf(), graph);
+    }
+
+    fn resolver(&self) -> crate::mcp::server::RetainedProjectGraphResolver {
+        let graphs = Arc::clone(&self.graphs);
+        Arc::new(move |project_root| {
+            let graph = graphs
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&project_root)
+                .cloned();
+            Box::pin(async move { graph })
+        })
+    }
 }
 
 impl DashboardState {
@@ -322,12 +379,13 @@ pub(crate) fn project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
 
 async fn build_state_inner(
     cg: &TraceDecay,
+    project_graph: Option<Arc<TraceDecay>>,
+    project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     warm_token_counts: bool,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
-    doctor_owner: Option<crate::daemon::dashboard_doctor::DashboardDoctorOwnerV1>,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -348,6 +406,8 @@ async fn build_state_inner(
         .unwrap_or_default();
     let state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
+        project_graph,
+        project_graph_resolver,
         memory_owner,
         graph_conn: mem_db.engine_conn(),
         _database_guards: vec![mem_db.clone()],
@@ -370,10 +430,8 @@ async fn build_state_inner(
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler,
         automation_writer,
-        doctor_report_reader: doctor_owner.as_ref().map(|owner| owner.report_reader()),
-        doctor_remediation_dispatcher: doctor_owner
-            .as_ref()
-            .map(|owner| owner.remediation_dispatcher()),
+        doctor_report_reader: None,
+        doctor_remediation_dispatcher: None,
     };
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
@@ -391,30 +449,32 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         cg,
         None,
         None,
+        None,
+        None,
         true,
         None,
         direct_dashboard_automation_writer(),
-        None,
     )
     .await
 }
 
 pub(crate) async fn build_state_with_automation_reconciler(
-    cg: &TraceDecay,
+    cg: Arc<TraceDecay>,
+    project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
-    doctor_owner: Option<crate::daemon::dashboard_doctor::DashboardDoctorOwnerV1>,
 ) -> Result<DashboardState> {
     build_state_inner(
-        cg,
+        cg.as_ref(),
+        Some(Arc::clone(&cg)),
+        project_graph_resolver,
         registered_project_session_db,
         registered_savings_db,
         true,
         automation_scheduler_reconciler,
         automation_writer,
-        doctor_owner,
     )
     .await
 }
@@ -423,17 +483,18 @@ pub(crate) async fn build_state_with_automation_reconciler(
 /// dashboard project picker. Automation authority is inherited from the active
 /// dashboard state so daemon-selected projects cannot fall back to direct open.
 pub(crate) async fn build_selected_project_state(
-    cg: &TraceDecay,
+    cg: Arc<TraceDecay>,
     active: &DashboardState,
 ) -> Result<DashboardState> {
     build_state_inner(
-        cg,
+        cg.as_ref(),
+        Some(Arc::clone(&cg)),
+        active.project_graph_resolver.clone(),
         None,
         active.savings_db.clone(),
         false,
         None,
         Arc::clone(&active.automation_writer),
-        None,
     )
     .await
 }
@@ -464,6 +525,9 @@ where
         port,
         shutdown,
         DashboardRunOptions::production(open),
+        None,
+        None,
+        None,
     )
     .await
 }
@@ -478,7 +542,45 @@ pub async fn run_until_shutdown_for_tests<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    run_until_shutdown_inner(cg, host, port, shutdown, DashboardRunOptions::test()).await
+    run_until_shutdown_inner(
+        cg,
+        host,
+        port,
+        shutdown,
+        DashboardRunOptions::test(),
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-transport")]
+pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
+    cg: Arc<TraceDecay>,
+    runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    project_graphs: DashboardTestProjectGraphsV1,
+    host: &str,
+    port: u16,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let authority = runtime.dashboard_test_authority()?;
+    let project_graph_resolver = project_graphs.resolver();
+    run_until_shutdown_inner(
+        cg.as_ref(),
+        host,
+        port,
+        shutdown,
+        DashboardRunOptions::test(),
+        Some(&authority),
+        Some(project_graph_resolver),
+        Some(Arc::clone(&cg)),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -509,18 +611,22 @@ async fn run_until_shutdown_inner<F>(
     port: u16,
     shutdown: F,
     options: DashboardRunOptions,
+    test_authority: Option<&DashboardHostAdmissionTestAuthorityV1>,
+    test_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    test_project_graph: Option<Arc<TraceDecay>>,
 ) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let state = build_state_inner(
         cg,
-        None,
-        None,
+        test_project_graph,
+        test_project_graph_resolver,
+        test_authority.map(|authority| Arc::clone(&authority.project_sessions)),
+        test_authority.map(|authority| Arc::clone(&authority.profile_database)),
         options.warm_token_counts,
         None,
         direct_dashboard_automation_writer(),
-        None,
     )
     .await?;
     let app = router(cg, state).await?;
@@ -1184,6 +1290,35 @@ mod authority_tests {
     }
 
     #[tokio::test]
+    async fn daemon_dashboard_retains_the_exact_mounted_project_graph() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = Arc::new(
+            TraceDecay::init(project.path())
+                .await
+                .expect("project init"),
+        );
+
+        let state = build_state_with_automation_reconciler(
+            Arc::clone(&cg),
+            None,
+            None,
+            None,
+            None,
+            direct_dashboard_automation_writer(),
+        )
+        .await
+        .expect("dashboard state");
+
+        assert!(Arc::ptr_eq(
+            state.project_graph.as_ref().expect("retained graph"),
+            &cg,
+        ));
+    }
+
+    #[tokio::test]
     async fn retained_project_session_authority_is_reused_exactly() {
         let _pin = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
@@ -1192,13 +1327,29 @@ mod authority_tests {
         let cg = TraceDecay::init(project.path())
             .await
             .expect("project init");
-        let retained = Arc::new(
-            GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-                .await
-                .expect("project session DB"),
+        let project_id = ProjectId::new(
+            cg.store_layout()
+                .identity
+                .project_id
+                .clone()
+                .expect("project identity"),
+        )
+        .expect("valid project identity");
+        let runtime = Arc::new(
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+                project.path().join(".profile"),
+                project.path(),
+                project_id,
+            )
+            .await
+            .expect("registered project sessions"),
         );
+        let authority = runtime
+            .dashboard_test_authority()
+            .expect("dashboard test authority");
+        let retained = Arc::clone(&authority.project_sessions);
 
-        let selected = resolve_lcm_store(&cg, Some(Arc::clone(&retained)), false).await;
+        let selected = resolve_lcm_store(&cg, Some(Arc::clone(&retained))).await;
 
         assert!(Arc::ptr_eq(
             selected.lcm_db.as_ref().expect("retained LCM authority"),
@@ -1217,20 +1368,15 @@ mod authority_tests {
         let cg = TraceDecay::init(project.path())
             .await
             .expect("project init");
-        let db_path = cg.store_layout().sessions_db_path.clone();
-        // Configuration authority opens sessions.db during init.
-        assert!(
-            db_path.exists(),
-            "init must open configuration authority sessions.db"
-        );
+        let selected = resolve_lcm_store(&cg, None).await;
 
-        let selected = resolve_lcm_store(&cg, None, false).await;
-
-        // Without retained authority the dashboard may open read-only, but must
-        // not promote a writable LCM handle.
-        assert!(selected.conn.is_some());
+        // A display path is not read authority.
         assert!(selected.lcm_db.is_none());
-        assert_ne!(selected.scope, "unavailable");
+        assert_eq!(selected.scope, "unavailable");
+        assert_eq!(
+            selected.path,
+            cg.store_layout().sessions_db_path.display().to_string()
+        );
     }
 
     #[tokio::test]
@@ -1242,15 +1388,10 @@ mod authority_tests {
         let cg = TraceDecay::init(project.path())
             .await
             .expect("project init");
-        let db_path = cg.store_layout().sessions_db_path.clone();
-        let writable = GlobalDb::open_at(&db_path).await.expect("session DB");
-        drop(writable);
+        let selected = resolve_lcm_store(&cg, None).await;
 
-        let selected = resolve_lcm_store(&cg, None, false).await;
-
-        assert!(selected.conn.is_some());
         assert!(selected.lcm_db.is_none());
-        assert_ne!(selected.scope, "unavailable");
+        assert_eq!(selected.scope, "unavailable");
     }
 
     #[test]

@@ -134,6 +134,6 @@ pub use storage::{
     RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
     StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
     StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1,
-    TableGrowthTelemetryReadV1, TableNameV1, incident_debris_finding, orphan_store_finding,
-    over_budget_finding, retention_backlog_finding, stale_branch_dbs_finding,
+    TableNameV1, incident_debris_finding, orphan_store_finding, over_budget_finding,
+    retention_backlog_finding, stale_branch_dbs_finding,
 };

@@ -15,11 +15,14 @@
 //! an unknown timestamp are always kept. A [dry-run][`RetentionPlan`] counts
 //! what would be removed without mutating anything.
 
-use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use crate::db::engine::{Executor, QueryExecutor};
 use crate::errors::{Result, TraceDecayError};
 
+/// Store-owned quarantine and collection for corruption/recovery artifacts
+/// found beside live databases (plan 38, §5).
+pub mod incident_debris;
 /// Store-level (whole-directory) orphan detection and collection. Row-level
 /// pruning below stays inside a live store; `orphan_stores` collects entire
 /// profile-sharded store directories whose project identity no longer resolves
@@ -159,42 +162,118 @@ fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
     now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
 }
 
+mod backend {
+    pub trait Sealed {}
+}
+
+/// Driver-neutral execution surface for retention.
+///
+/// The trait is sealed because retention admits only daemon-owned database
+/// capabilities whose writer and snapshot lifetimes are already enforced.
+pub trait RetentionBackend: backend::Sealed {
+    #[doc(hidden)]
+    async fn delete_before(&self, table: RetentionTable, cutoff: i64) -> Result<u64>;
+
+    #[doc(hidden)]
+    async fn count_before(&self, table: RetentionTable, cutoff: i64) -> Result<u64>;
+}
+
+async fn delete_before(
+    executor: &(impl Executor + ?Sized),
+    table: RetentionTable,
+    cutoff: i64,
+) -> Result<u64> {
+    let name = table.table_name();
+    let sql = format!(
+        "DELETE FROM {name} WHERE {TIMESTAMP_COLUMN} IS NOT NULL AND {TIMESTAMP_COLUMN} < ?1"
+    );
+    executor
+        .execute(&sql, crate::db::engine::params![cutoff])
+        .await
+        .map_err(|error| retention_error(name, "delete", &error))
+}
+
+async fn count_before(
+    executor: &(impl QueryExecutor + ?Sized),
+    table: RetentionTable,
+    cutoff: i64,
+) -> Result<u64> {
+    let name = table.table_name();
+    let sql = format!(
+        "SELECT COUNT(*) FROM {name} \
+         WHERE {TIMESTAMP_COLUMN} IS NOT NULL AND {TIMESTAMP_COLUMN} < ?1"
+    );
+    let mut result = executor
+        .query(&sql, crate::db::engine::params![cutoff])
+        .await
+        .map_err(|error| retention_error(name, "count", &error))?;
+    let row = result
+        .next()
+        .await
+        .map_err(|error| retention_error(name, "count", &error))?;
+    Ok(row
+        .and_then(|row| row.get::<i64>(0).ok())
+        .unwrap_or(0)
+        .max(0) as u64)
+}
+
+macro_rules! retention_backend {
+    ($($executor:ty),+ $(,)?) => {
+        $(
+            impl backend::Sealed for $executor {}
+
+            impl RetentionBackend for $executor {
+                async fn delete_before(
+                    &self,
+                    table: RetentionTable,
+                    cutoff: i64,
+                ) -> Result<u64> {
+                    delete_before(self, table, cutoff).await
+                }
+
+                async fn count_before(
+                    &self,
+                    table: RetentionTable,
+                    cutoff: i64,
+                ) -> Result<u64> {
+                    count_before(self, table, cutoff).await
+                }
+            }
+        )+
+    };
+}
+
+retention_backend!(crate::global_db::RegisteredGlobalDbWriteTransaction<'_>,);
+
+#[cfg(test)]
+retention_backend!(
+    crate::db::engine::Connection,
+    crate::db::engine::Transaction,
+);
+
 /// Prunes (or, in [`RetentionMode::DryRun`], counts) rows in `table` older
 /// than its configured window. A disabled window is a no-op that reports
 /// `rows = 0`.
-pub async fn prune_table(
-    conn: &Connection,
+pub async fn prune_table<E>(
+    conn: &E,
     table: RetentionTable,
     window_days: Option<u32>,
     mode: RetentionMode,
     now_secs: i64,
-) -> Result<RetentionTableReport> {
+) -> Result<RetentionTableReport>
+where
+    E: RetentionBackend + ?Sized,
+{
     let Some(window_days) = window_days else {
         return Ok(RetentionTableReport::skipped(table));
     };
     let cutoff = cutoff_secs(window_days, now_secs);
-    let column = TIMESTAMP_COLUMN;
     let name = table.table_name();
 
     let rows = if mode.is_apply() {
-        let sql = format!("DELETE FROM {name} WHERE {column} IS NOT NULL AND {column} < ?1");
-        conn.execute(&sql, params![cutoff])
-            .await
-            .map_err(|e| retention_error(name, "delete", &e))?
+        conn.delete_before(table, cutoff).await?
     } else {
-        let sql =
-            format!("SELECT COUNT(*) FROM {name} WHERE {column} IS NOT NULL AND {column} < ?1");
-        let mut result = conn
-            .query(&sql, params![cutoff])
-            .await
-            .map_err(|e| retention_error(name, "count", &e))?;
-        let row = result
-            .next()
-            .await
-            .map_err(|e| retention_error(name, "count", &e))?;
-        row.and_then(|row| row.get::<i64>(0).ok())
-            .unwrap_or(0)
-            .max(0) as u64
+        conn.count_before(table, cutoff).await?
     };
 
     Ok(RetentionTableReport {
@@ -209,12 +288,15 @@ pub async fn prune_table(
 /// ([`RetentionTable::GLOBAL_TABLES`]) using `config`, returning a per-table
 /// report. Session data is only touched when the operator has explicitly
 /// configured a window for it.
-pub async fn prune_global_tables(
-    conn: &Connection,
+pub async fn prune_global_tables<E>(
+    conn: &E,
     config: &RetentionConfig,
     mode: RetentionMode,
     now_secs: i64,
-) -> Result<Vec<RetentionTableReport>> {
+) -> Result<Vec<RetentionTableReport>>
+where
+    E: RetentionBackend + ?Sized,
+{
     let mut reports = Vec::with_capacity(RetentionTable::GLOBAL_TABLES.len());
     for table in RetentionTable::GLOBAL_TABLES {
         reports.push(prune_table(conn, table, config.window_days(table), mode, now_secs).await?);
@@ -236,7 +318,7 @@ impl RetentionPlan {
     }
 }
 
-fn retention_error(table: &str, op: &str, err: &libsql::Error) -> TraceDecayError {
+fn retention_error(table: &str, op: &str, err: &crate::db::engine::Error) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("retention {op} on '{table}' failed: {err}"),
         operation: format!("retention::{op}"),
@@ -247,13 +329,10 @@ fn retention_error(table: &str, op: &str, err: &libsql::Error) -> TraceDecayErro
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::db::engine::{Connection, TestConnection, params};
 
-    async fn memory_conn() -> Connection {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .unwrap();
-        db.connect().unwrap()
+    fn test_conn(directory: &tempfile::TempDir) -> TestConnection {
+        TestConnection::open(&directory.path().join("retention.db"))
     }
 
     async fn seed_analytics(conn: &Connection, ts: &[Option<i64>]) {
@@ -321,12 +400,13 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_window_is_a_no_op() {
-        let conn = memory_conn().await;
+        let directory = tempfile::tempdir().unwrap();
+        let conn = test_conn(&directory);
         let now = 1_000_000_000;
         seed_analytics(&conn, &[Some(now - 10 * SECONDS_PER_DAY), Some(now)]).await;
 
         let report = prune_table(
-            &conn,
+            &*conn,
             RetentionTable::AnalyticsEvents,
             None,
             RetentionMode::Apply,
@@ -341,7 +421,8 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_counts_but_does_not_delete() {
-        let conn = memory_conn().await;
+        let directory = tempfile::tempdir().unwrap();
+        let conn = test_conn(&directory);
         let now = 1_000_000_000;
         seed_analytics(
             &conn,
@@ -355,7 +436,7 @@ mod tests {
         .await;
 
         let report = prune_table(
-            &conn,
+            &*conn,
             RetentionTable::AnalyticsEvents,
             Some(180),
             RetentionMode::DryRun,
@@ -370,7 +451,8 @@ mod tests {
 
     #[tokio::test]
     async fn apply_deletes_only_rows_older_than_window_and_keeps_null_timestamps() {
-        let conn = memory_conn().await;
+        let directory = tempfile::tempdir().unwrap();
+        let conn = test_conn(&directory);
         let now = 1_000_000_000;
         seed_analytics(
             &conn,
@@ -385,7 +467,7 @@ mod tests {
         .await;
 
         let report = prune_table(
-            &conn,
+            &*conn,
             RetentionTable::AnalyticsEvents,
             Some(180),
             RetentionMode::Apply,
@@ -404,13 +486,14 @@ mod tests {
 
     #[tokio::test]
     async fn prune_global_tables_reports_each_table() {
-        let conn = memory_conn().await;
+        let directory = tempfile::tempdir().unwrap();
+        let conn = test_conn(&directory);
         let now = 1_000_000_000;
         seed_analytics(&conn, &[Some(now - 400 * SECONDS_PER_DAY)]).await;
         // session_messages must exist for the (disabled) count/skip path; with
         // a None window it is never queried, so no table is required.
         let reports =
-            prune_global_tables(&conn, &config_days(Some(180)), RetentionMode::Apply, now)
+            prune_global_tables(&*conn, &config_days(Some(180)), RetentionMode::Apply, now)
                 .await
                 .unwrap();
         assert_eq!(reports.len(), 3);
