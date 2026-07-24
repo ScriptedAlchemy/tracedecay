@@ -89,7 +89,9 @@ function SettingsSurface({ payload }: { payload: unknown }) {
   return (
     <>
       <WorkspaceHeader
-        path="/settings"
+        // `channels.ts` keys its channel list on unprefixed paths, so a
+        // leading slash here silently falls through to the `--` fallback.
+        path="settings"
         title="Settings"
         note="effective configuration · read-only"
         actions={
