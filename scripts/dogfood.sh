@@ -54,14 +54,37 @@ marker_checksum() {
   local output
 
   if command -v sha256sum >/dev/null 2>&1; then
-    output=$(printf '%s' "$payload" | sha256sum)
+    output=$(printf '%s' "$payload" | sha256sum) || return
   elif command -v shasum >/dev/null 2>&1; then
-    output=$(printf '%s' "$payload" | shasum -a 256)
+    output=$(printf '%s' "$payload" | shasum -a 256) || return
   else
     printf 'dogfood requires sha256sum or shasum for recovery markers\n' >&2
     return 1
   fi
   printf '%s' "${output%% *}"
+}
+
+file_checksum() {
+  local path=$1
+  local output
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    output=$(sha256sum -- "$path") || return
+  elif command -v shasum >/dev/null 2>&1; then
+    output=$(shasum -a 256 "$path") || return
+  else
+    printf 'dogfood requires sha256sum or shasum for recovery markers\n' >&2
+    return 1
+  fi
+  printf '%s' "${output%% *}"
+}
+
+retained_binary_checksum() {
+  if [[ ! -f "$installed_binary" ]]; then
+    printf 'none'
+    return 0
+  fi
+  file_checksum "$installed_binary"
 }
 
 file_mode() {
@@ -85,6 +108,7 @@ marker_transition_is_valid() {
     preparing:not-reached:allowed:unchanged | \
       preparing:not-reached:forbidden:unchanged | \
       safe-rollback-complete:not-reached:allowed:unchanged | \
+      safe-rollback-complete:not-reached:forbidden:unchanged | \
       post-update-starting:reached:forbidden:inactivity-pending | \
       forward-recovery-required:reached:forbidden:inactive | \
       forward-recovery-required:reached:forbidden:inactivity-unproven | \
@@ -102,11 +126,15 @@ marker_attempt_id=
 marker_boundary=not-reached
 marker_policy=allowed
 marker_daemon=unchanged
+marker_format=0
+marker_retained_binary_sha256=none
+marker_retained_binary_trusted=0
 
 load_boundary_state() {
   local lines=()
   local payload
   local expected_checksum
+  local checksum_index
 
   if [[ ! -e "$boundary_state" && ! -L "$boundary_state" ]]; then
     return 0
@@ -125,14 +153,44 @@ load_boundary_state() {
   fi
 
   mapfile -t lines <"$boundary_state"
-  if ((${#lines[@]} != 7)) ||
-    [[ "${lines[0]}" != format=2 ]] ||
-    [[ "${lines[1]}" != attempt_id=* ]] ||
+  case "${lines[0]:-}" in
+    format=2)
+      if ((${#lines[@]} != 7)); then
+        printf 'invalid dogfood migration marker structure: %s\n' "$boundary_state" >&2
+        return 1
+      fi
+      marker_format=2
+      marker_retained_binary_sha256=none
+      marker_retained_binary_trusted=0
+      checksum_index=6
+      ;;
+    format=3)
+      if ((${#lines[@]} != 8)) ||
+        [[ "${lines[6]}" != retained_binary_sha256=* ]]; then
+        printf 'invalid dogfood migration marker structure: %s\n' "$boundary_state" >&2
+        return 1
+      fi
+      marker_format=3
+      marker_retained_binary_sha256=${lines[6]#retained_binary_sha256=}
+      if [[ "$marker_retained_binary_sha256" != none &&
+        ! "$marker_retained_binary_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'invalid dogfood migration marker retained binary binding: %s\n' \
+          "$boundary_state" >&2
+        return 1
+      fi
+      checksum_index=7
+      ;;
+    *)
+      printf 'invalid dogfood migration marker structure: %s\n' "$boundary_state" >&2
+      return 1
+      ;;
+  esac
+  if [[ "${lines[1]}" != attempt_id=* ]] ||
     [[ "${lines[2]}" != outcome=* ]] ||
     [[ "${lines[3]}" != attempt_boundary=* ]] ||
     [[ "${lines[4]}" != old_binary_policy=* ]] ||
     [[ "${lines[5]}" != managed_daemon=* ]] ||
-    [[ "${lines[6]}" != checksum=* ]]; then
+    [[ "${lines[$checksum_index]}" != checksum=* ]]; then
     printf 'invalid dogfood migration marker structure: %s\n' "$boundary_state" >&2
     return 1
   fi
@@ -152,12 +210,18 @@ load_boundary_state() {
     return 1
   fi
 
-  printf -v payload '%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "${lines[0]}" "${lines[1]}" "${lines[2]}" "${lines[3]}" "${lines[4]}" "${lines[5]}"
+  printf -v payload '%s\n' "${lines[@]:0:checksum_index}"
   expected_checksum=$(marker_checksum "$payload")
-  if [[ "${lines[6]#checksum=}" != "$expected_checksum" ]]; then
+  if [[ "${lines[$checksum_index]#checksum=}" != "$expected_checksum" ]]; then
     printf 'invalid dogfood migration marker checksum: %s\n' "$boundary_state" >&2
     return 1
+  fi
+  if ((marker_format == 3)); then
+    local current_retained_binary_sha256
+    current_retained_binary_sha256=$(retained_binary_checksum) || return
+    if [[ "$current_retained_binary_sha256" == "$marker_retained_binary_sha256" ]]; then
+      marker_retained_binary_trusted=1
+    fi
   fi
 }
 
@@ -216,15 +280,18 @@ record_boundary_outcome() {
   local managed_daemon=$4
   local checksum
   local payload
+  local retained_binary_sha256
   local temporary
 
   marker_transition_is_valid \
     "$outcome" "$attempt_boundary" "$binary_policy" "$managed_daemon" ||
     return 1
   validate_marker_transition "$outcome" || return 1
+  retained_binary_sha256=$(retained_binary_checksum) || return
   printf -v payload \
-    'format=2\nattempt_id=%s\noutcome=%s\nattempt_boundary=%s\nold_binary_policy=%s\nmanaged_daemon=%s\n' \
-    "$attempt_id" "$outcome" "$attempt_boundary" "$binary_policy" "$managed_daemon"
+    'format=3\nattempt_id=%s\noutcome=%s\nattempt_boundary=%s\nold_binary_policy=%s\nmanaged_daemon=%s\nretained_binary_sha256=%s\n' \
+    "$attempt_id" "$outcome" "$attempt_boundary" "$binary_policy" "$managed_daemon" \
+    "$retained_binary_sha256"
   checksum=$(marker_checksum "$payload") || return
   temporary=$(mktemp "${boundary_state}.new.XXXXXX") || return
   if ! {
@@ -243,14 +310,18 @@ record_boundary_outcome() {
   marker_boundary=$attempt_boundary
   marker_policy=$binary_policy
   marker_daemon=$managed_daemon
+  marker_format=3
+  marker_retained_binary_sha256=$retained_binary_sha256
+  marker_retained_binary_trusted=1
 }
 
 load_boundary_state
 rm -f -- "${boundary_state}".new.*
 
 # A valid reached/forbidden pending marker means a prior attempt already crossed
-# the migration boundary. Never overwrite preparing until the installed new
-# binary's typed inactive-recovery command proves the managed unit is inactive.
+# the migration boundary. Never trust the installed path without an identity
+# binding from that attempt. Stage the current source build atomically, then use
+# that stable candidate to prove the managed unit is inactive.
 require_inactive_recovery_before_preparing() {
   case "$marker_outcome" in
     post-update-starting | forward-recovery-required) ;;
@@ -259,15 +330,20 @@ require_inactive_recovery_before_preparing() {
       ;;
   esac
 
-  if [[ ! -x "$installed_binary" ]]; then
+  if ((marker_format == 3 && ! marker_retained_binary_trusted)); then
     printf '%s\n' \
-      "dogfood retry from $marker_outcome requires the installed new binary." \
-      "Missing executable at $installed_binary" \
+      'The retained installed binary does not match its migration-marker binding.' \
+      'It will not be executed; recovery will use the current source build.' >&2
+  fi
+
+  if ! install_atomically "$source_binary" "$staged_binary"; then
+    printf '%s\n' \
+      "dogfood retry from $marker_outcome could not stage the current source build." \
       'The migration marker was left unchanged.' >&2
     return 1
   fi
 
-  if ! "$installed_binary" post-update --mode dogfood-recover-inactive; then
+  if ! "$staged_binary" post-update --mode dogfood-recover-inactive; then
     printf '%s\n' \
       "dogfood inactive recovery failed while a $marker_outcome marker is pending." \
       'The migration marker was left unchanged.' \

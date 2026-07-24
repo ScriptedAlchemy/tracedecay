@@ -249,6 +249,12 @@ marker_checksum() {
   printf '%s' "${output%% *}"
 }
 
+binary_checksum() {
+  local output
+  output=$(sha256sum -- "$1")
+  printf '%s' "${output%% *}"
+}
+
 write_test_marker() {
   local path=$1
   local attempt_id=$2
@@ -262,6 +268,32 @@ write_test_marker() {
     "$attempt_id" "$outcome" "$boundary" "$policy" "$daemon"
   printf '%schecksum=%s\n' "$payload" "$(marker_checksum "$payload")" >"$path"
   chmod 0600 "$path"
+}
+
+write_test_marker_v3() {
+  local path=$1
+  local attempt_id=$2
+  local outcome=$3
+  local boundary=$4
+  local policy=$5
+  local daemon=$6
+  local retained_binary_sha256=$7
+  local payload
+  printf -v payload \
+    'format=3\nattempt_id=%s\noutcome=%s\nattempt_boundary=%s\nold_binary_policy=%s\nmanaged_daemon=%s\nretained_binary_sha256=%s\n' \
+    "$attempt_id" "$outcome" "$boundary" "$policy" "$daemon" "$retained_binary_sha256"
+  printf '%schecksum=%s\n' "$payload" "$(marker_checksum "$payload")" >"$path"
+  chmod 0600 "$path"
+}
+
+assert_v3_retained_binding() {
+  local expected=none
+  if [[ -e "$installed" || -L "$installed" ]]; then
+    expected=$(binary_checksum "$installed")
+  fi
+  grep -Fxq format=3 "$case_state" ||
+    fail 'new boundary marker did not migrate to format 3'
+  assert_boundary retained_binary_sha256 "$expected"
 }
 
 assert_no_temporary_install_files() {
@@ -404,8 +436,10 @@ PY
 }
 
 assert_valid_boundary_marker() {
+  local checksum_index
   local marker_mode
   local payload
+  local retained_binary_sha256
   local -a marker_lines
 
   test -f "$case_state" || fail "boundary marker missing after crash"
@@ -418,9 +452,27 @@ assert_valid_boundary_marker() {
   test "$marker_mode" = 600 ||
     fail "boundary marker mode is $marker_mode instead of 600"
   mapfile -t marker_lines <"$case_state"
-  ((${#marker_lines[@]} == 7)) ||
-    fail "boundary marker has ${#marker_lines[@]} lines instead of seven"
-  test "${marker_lines[0]}" = format=2 || fail "boundary marker format changed"
+  case "${marker_lines[0]:-}" in
+    format=2)
+      ((${#marker_lines[@]} == 7)) ||
+        fail "format-2 boundary marker has ${#marker_lines[@]} lines instead of seven"
+      checksum_index=6
+      ;;
+    format=3)
+      ((${#marker_lines[@]} == 8)) ||
+        fail "format-3 boundary marker has ${#marker_lines[@]} lines instead of eight"
+      [[ "${marker_lines[6]}" == retained_binary_sha256=* ]] ||
+        fail "format-3 boundary marker has no retained binary binding"
+      retained_binary_sha256=${marker_lines[6]#retained_binary_sha256=}
+      [[ "$retained_binary_sha256" == none ||
+        "$retained_binary_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+        fail "format-3 boundary marker has invalid retained binary binding"
+      checksum_index=7
+      ;;
+    *)
+      fail "boundary marker has unsupported format: ${marker_lines[0]:-missing}"
+      ;;
+  esac
   [[ "${marker_lines[1]}" == attempt_id=* && -n "${marker_lines[1]#attempt_id=}" ]] ||
     fail "boundary marker has no attempt id"
   [[ "${marker_lines[2]}" == outcome=* ]] || fail "boundary marker has no outcome"
@@ -430,14 +482,15 @@ assert_valid_boundary_marker() {
     fail "boundary marker has no binary policy"
   [[ "${marker_lines[5]}" == managed_daemon=* ]] ||
     fail "boundary marker has no daemon state"
-  printf -v payload '%s\n%s\n%s\n%s\n%s\n%s\n' "${marker_lines[@]:0:6}"
-  test "${marker_lines[6]}" = "checksum=$(marker_checksum "$payload")" ||
+  printf -v payload '%s\n' "${marker_lines[@]:0:checksum_index}"
+  test "${marker_lines[$checksum_index]}" = "checksum=$(marker_checksum "$payload")" ||
     fail "boundary marker checksum is invalid"
 
   case "${marker_lines[2]#outcome=}:${marker_lines[3]#attempt_boundary=}:${marker_lines[4]#old_binary_policy=}:${marker_lines[5]#managed_daemon=}" in
     preparing:not-reached:allowed:unchanged | \
       preparing:not-reached:forbidden:unchanged | \
       safe-rollback-complete:not-reached:allowed:unchanged | \
+      safe-rollback-complete:not-reached:forbidden:unchanged | \
       post-update-starting:reached:forbidden:inactivity-pending | \
       forward-recovery-required:reached:forbidden:inactive | \
       forward-recovery-required:reached:forbidden:inactivity-unproven | \
@@ -662,29 +715,28 @@ grep -Fq 'rerun cargo dogfood' "$case_output" ||
 assert_no_temporary_install_files
 
 # A new invocation after a boundary failure must prove inactive recovery with
-# the retained installed binary before overwriting preparing and moving forward.
+# the current source build before overwriting preparing and moving forward.
 : >"$case_log"
 write_fake_binary "$case_source" newer
 run_case >"$case_output" 2>&1
 cmp "$case_source" "$installed"
 cmp "$case_source" "$staged"
 test "$(cat "$case_log")" = \
-  $'new:post-update --mode dogfood-recover-inactive\nnewer:post-update --strict --mode dogfood-forward-only' ||
-  fail 'repeated invocation skipped installed inactive recovery'
+  $'newer:post-update --mode dogfood-recover-inactive\nnewer:post-update --strict --mode dogfood-forward-only' ||
+  fail 'repeated invocation skipped source-candidate inactive recovery'
 assert_boundary outcome validated
 assert_boundary old_binary_policy forbidden
 assert_no_temporary_install_files
 
-# Retry with a still-active daemon must use the installed new binary's typed
+# Retry with a still-active daemon must use the current source candidate's typed
 # inactive-recovery command. Failure leaves the pending marker untouched and
-# must not install the candidate or invoke any old binary.
+# must not invoke the unbound installed binary.
 setup_case retry-active-old-daemon
 write_fake_binary "$case_source" newer
 write_fake_binary "$installed" new-installed
 write_fake_binary "$staged" new-staged
 write_fake_binary "$case_root/old leftover" old-installed
 cp "$installed" "$case_root/expected installed"
-cp "$staged" "$case_root/expected staged"
 daemon_marker="$case_root/daemon-running"
 : >"$daemon_marker"
 write_test_marker \
@@ -693,19 +745,19 @@ write_test_marker \
 cp "$case_state" "$case_root/marker.before"
 if run_case \
   TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER="$daemon_marker" \
-  TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY=new-installed \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY=newer \
   TRACEDECAY_DOGFOOD_TEST_FAIL_COMMAND='post-update --mode dogfood-recover-inactive' \
   >"$case_output" 2>&1; then
   fail 'retry with active daemon and failed recovery unexpectedly succeeded'
 fi
 cmp "$case_root/expected installed" "$installed"
-cmp "$case_root/expected staged" "$staged"
+cmp "$case_source" "$staged"
 cmp "$case_root/marker.before" "$case_state" ||
   fail 'failed inactive recovery overwrote the pending marker'
 test -e "$daemon_marker" || fail 'failed recovery cleared the active daemon marker'
 test "$(cat "$case_log")" = \
-  $'new-installed:post-update --mode dogfood-recover-inactive' ||
-  fail 'active-daemon retry escaped the installed recover-inactive path'
+  $'newer:post-update --mode dogfood-recover-inactive' ||
+  fail 'active-daemon retry escaped the source-candidate recover-inactive path'
 if grep -q '^old-' "$case_log"; then
   fail 'active-daemon retry invoked an old binary'
 fi
@@ -718,8 +770,8 @@ assert_boundary outcome forward-recovery-required
 assert_boundary managed_daemon inactivity-unproven
 assert_no_temporary_install_files
 
-# Successful inactive recovery must run against the installed new binary and
-# clear any still-active daemon before preparing/forward-only may proceed.
+# Successful inactive recovery must run against the current source candidate
+# and clear any still-active daemon before preparing/forward-only may proceed.
 setup_case retry-recovery-success
 write_fake_binary "$case_source" newer
 write_fake_binary "$installed" new-installed
@@ -735,16 +787,118 @@ run_case \
 cmp "$case_source" "$installed"
 cmp "$case_source" "$staged"
 test "$(cat "$case_log")" = \
-  $'new-installed:post-update --mode dogfood-recover-inactive\nnewer:post-update --strict --mode dogfood-forward-only' ||
+  $'newer:post-update --mode dogfood-recover-inactive\nnewer:post-update --strict --mode dogfood-forward-only' ||
   fail 'recovery success did not prove inactivity before forward-only'
 # Forward-only may start the new unit afterward; recovery is proven by the
-# installed recover-inactive preceding any forward-only work.
+# source-candidate recover-inactive preceding any forward-only work.
 if grep -q '^old-' "$case_log"; then
   fail 'recovery success invoked an old binary'
 fi
 assert_boundary outcome validated
 assert_boundary old_binary_policy forbidden
 assert_no_temporary_install_files
+
+# A v2 pending marker does not bind the installed path. Recovery must therefore
+# use the newly built source candidate, even when the installed path was
+# replaced by a broken old binary after the marker was written.
+setup_case retry-recovery-replaced-installed
+write_fake_binary "$case_source" newer
+write_fake_binary "$installed" old-replaced
+write_fake_binary "$staged" new-staged
+write_test_marker \
+  "$case_state" previous-attempt-retry02b forward-recovery-required reached forbidden \
+  inactive
+if ! run_case \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY=old-replaced \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_COMMAND='post-update --mode dogfood-recover-inactive' \
+  >"$case_output" 2>&1; then
+  fail 'v2 retry could not recover with the newer source candidate'
+fi
+cmp "$case_source" "$installed"
+cmp "$case_source" "$staged"
+test "$(cat "$case_log")" = \
+  $'newer:post-update --mode dogfood-recover-inactive\nnewer:post-update --strict --mode dogfood-forward-only' ||
+  fail 'v2 retry executed an unbound installed binary'
+assert_boundary outcome validated
+assert_boundary old_binary_policy forbidden
+assert_valid_boundary_marker
+assert_v3_retained_binding
+assert_no_temporary_install_files
+
+# A valid v3 marker binds the retained installed bytes. If that path is later
+# replaced, the mismatch must be detected and the unbound path must never run;
+# the current source candidate remains the forward-recovery authority.
+setup_case retry-recovery-v3-binding-mismatch
+write_fake_binary "$case_source" newer
+write_fake_binary "$installed" retained-new
+write_fake_binary "$staged" retained-staged
+retained_digest=$(binary_checksum "$installed")
+write_test_marker_v3 \
+  "$case_state" previous-attempt-retry02c forward-recovery-required reached forbidden \
+  inactive "$retained_digest"
+write_fake_binary "$installed" old-replaced
+if ! run_case \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY=old-replaced \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_COMMAND='post-update --mode dogfood-recover-inactive' \
+  >"$case_output" 2>&1; then
+  fail 'v3 mismatch could not recover with the newer source candidate'
+fi
+test "$(cat "$case_log")" = \
+  $'newer:post-update --mode dogfood-recover-inactive\nnewer:post-update --strict --mode dogfood-forward-only' ||
+  fail 'v3 mismatch executed the unbound installed binary'
+assert_boundary outcome validated
+assert_boundary old_binary_policy forbidden
+assert_valid_boundary_marker
+assert_v3_retained_binding
+assert_no_temporary_install_files
+
+# A replaced retained path may no longer be hashable at all. That is an
+# untrusted mismatch, not permission to block the trusted source recovery path.
+setup_case retry-recovery-v3-unhashable-installed
+write_fake_binary "$case_source" newer
+write_fake_binary "$installed" retained-new
+write_fake_binary "$staged" retained-staged
+retained_digest=$(binary_checksum "$installed")
+write_test_marker_v3 \
+  "$case_state" previous-attempt-retry02d forward-recovery-required reached forbidden \
+  inactive "$retained_digest"
+rm -f -- "$installed"
+ln -s "$case_root/missing-retained-binary" "$installed"
+if ! run_case >"$case_output" 2>&1; then
+  fail 'v3 unhashable retained path blocked trusted source recovery'
+fi
+test "$(cat "$case_log")" = \
+  $'newer:post-update --mode dogfood-recover-inactive\nnewer:post-update --strict --mode dogfood-forward-only' ||
+  fail 'v3 unhashable mismatch executed an unexpected binary'
+cmp "$case_source" "$installed"
+assert_boundary outcome validated
+assert_valid_boundary_marker
+assert_v3_retained_binding
+assert_no_temporary_install_files
+
+# If no usable retained binary exists, an interrupted retry must durably encode
+# `none`; it must never publish an empty or malformed digest binding.
+setup_case retry-recovery-v3-missing-retained-binding
+write_fake_binary "$case_source" newer
+write_fake_binary "$installed" retained-new
+write_fake_binary "$staged" retained-staged
+retained_digest=$(binary_checksum "$installed")
+write_test_marker_v3 \
+  "$case_state" previous-attempt-retry02e forward-recovery-required reached forbidden \
+  inactive "$retained_digest"
+rm -f -- "$installed"
+ln -s "$case_root/missing-retained-binary" "$installed"
+fail_once="$case_root/candidate-install-failed"
+if run_case \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_INSTALL_PREFIX="$case_stage/tracedecay.candidate." \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_INSTALL_ONCE="$fail_once" \
+  >"$case_output" 2>&1; then
+  fail 'missing-retained candidate failure unexpectedly succeeded'
+fi
+assert_boundary outcome preparing
+assert_boundary old_binary_policy forbidden
+assert_boundary retained_binary_sha256 none
+assert_valid_boundary_marker
 
 # Recovery failure is fail-closed across repeated retries: the authoritative
 # pending marker bytes must remain identical.
@@ -753,7 +907,6 @@ write_fake_binary "$case_source" newer
 write_fake_binary "$installed" new-installed
 write_fake_binary "$staged" new-staged
 cp "$installed" "$case_root/expected installed"
-cp "$staged" "$case_root/expected staged"
 daemon_marker="$case_root/daemon-running"
 : >"$daemon_marker"
 write_test_marker \
@@ -764,7 +917,7 @@ for attempt in 1 2; do
   : >"$case_log"
   if run_case \
     TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER="$daemon_marker" \
-    TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY=new-installed \
+    TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY=newer \
     TRACEDECAY_DOGFOOD_TEST_FAIL_COMMAND='post-update --mode dogfood-recover-inactive' \
     >"$case_output" 2>&1; then
     fail "repeated recovery failure attempt $attempt unexpectedly succeeded"
@@ -772,11 +925,11 @@ for attempt in 1 2; do
   cmp "$case_root/marker.before" "$case_state" ||
     fail "repeated recovery failure attempt $attempt mutated the marker"
   cmp "$case_root/expected installed" "$installed"
-  cmp "$case_root/expected staged" "$staged"
+  cmp "$case_source" "$staged"
   test -e "$daemon_marker" ||
     fail "repeated recovery failure attempt $attempt cleared the daemon"
   test "$(cat "$case_log")" = \
-    $'new-installed:post-update --mode dogfood-recover-inactive' ||
+    $'newer:post-update --mode dogfood-recover-inactive' ||
     fail "repeated recovery failure attempt $attempt invoked unexpected commands"
 done
 assert_boundary outcome forward-recovery-required
@@ -813,6 +966,34 @@ assert_boundary old_binary_policy allowed
 assert_boundary managed_daemon unchanged
 assert_no_temporary_install_files
 
+# A later dogfood attempt may fail before its own boundary after an earlier
+# attempt permanently forbade old binaries. Its rollback marker must remain a
+# valid v2 state and preserve that forbidden policy.
+setup_case pre-boundary-failure-after-reached-marker
+write_fake_binary "$case_source" newer
+write_fake_binary "$installed" retained-new-installed
+write_fake_binary "$staged" retained-new-staged
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+write_test_marker \
+  "$case_state" previous-attempt-retry04 validated reached forbidden verified-new-version
+fail_once="$case_root/install-failed"
+if run_case \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_INSTALL_PREFIX="$installed.new." \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_INSTALL_ONCE="$fail_once" \
+  >"$case_output" 2>&1; then
+  fail 'post-reached pre-boundary install failure unexpectedly succeeded'
+fi
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test ! -s "$case_log" || fail 'post-reached pre-boundary failure executed a binary'
+assert_boundary outcome safe-rollback-complete
+assert_boundary attempt_boundary not-reached
+assert_boundary old_binary_policy forbidden
+assert_boundary managed_daemon unchanged
+assert_valid_boundary_marker
+assert_no_temporary_install_files
+
 # Recovery markers are parsed as a strict, checksummed state machine. A
 # modified marker fails closed before either binary path changes.
 setup_case tampered-marker
@@ -831,6 +1012,29 @@ cmp "$case_root/expected staged" "$staged"
 test ! -s "$case_log" || fail 'tampered marker allowed a binary to execute'
 grep -Fq 'invalid dogfood migration marker' "$case_output" ||
   fail 'tampered marker rejection was not actionable'
+
+# The retained-binary binding is inside the v3 checksum envelope. Editing only
+# that field must fail before any binary path is executed or replaced.
+setup_case tampered-v3-retained-binding
+write_fake_binary "$case_source" new
+write_fake_binary "$installed" retained-new
+write_fake_binary "$staged" retained-staged
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+write_test_marker_v3 \
+  "$case_state" previous-attempt-0001b forward-recovery-required reached forbidden \
+  inactive "$(binary_checksum "$installed")"
+sed -i \
+  's/^retained_binary_sha256=.*/retained_binary_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$case_state"
+if run_case >"$case_output" 2>&1; then
+  fail 'tampered v3 retained binding unexpectedly validated'
+fi
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test ! -s "$case_log" || fail 'tampered v3 binding allowed a binary to execute'
+grep -Fq 'invalid dogfood migration marker checksum' "$case_output" ||
+  fail 'tampered v3 binding rejection did not identify its invalid checksum'
 
 # Even a correctly checksummed marker cannot encode an impossible/stale
 # transition.
