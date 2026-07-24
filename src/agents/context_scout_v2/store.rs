@@ -9,6 +9,7 @@ use super::{
     ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
     ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
     ContextScoutDurableStoreV1, ContextScoutFeedbackV1, ContextScoutLeaseV1,
+    ContextScoutRecentDeliveryV1, ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1,
     ContextScoutStoreFuture, ContextScoutWorkV1, MAX_SCOUT_ACTIVE_ADDRESSES,
     MAX_SCOUT_RECENT_DELIVERIES, validate_context_scout_delivery_receipt,
     validate_context_scout_feedback, validate_receipt_shape,
@@ -26,12 +27,24 @@ struct StoredQueueEntryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredDeliveryAddressV1 {
+    envelope_id: [u8; 16],
+    address: ContextScoutAddressV1,
+    #[serde(default)]
+    entry: Option<ContextScoutDurableQueueEntryV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredContextScoutStateV1 {
     project_id: [u8; 16],
     entries: Vec<StoredQueueEntryV1>,
     tombstones: Vec<ContextScoutWorkV1>,
     receipts: Vec<ContextScoutDeliveryReceiptV1>,
     feedback: Vec<ContextScoutFeedbackV1>,
+    #[serde(default)]
+    delivery_addresses: Vec<StoredDeliveryAddressV1>,
+    #[serde(default)]
+    delivery_provenance_complete: bool,
 }
 
 impl StoredContextScoutStateV1 {
@@ -42,6 +55,8 @@ impl StoredContextScoutStateV1 {
             tombstones: Vec::new(),
             receipts: Vec::new(),
             feedback: Vec::new(),
+            delivery_addresses: Vec::new(),
+            delivery_provenance_complete: true,
         }
     }
 
@@ -51,6 +66,7 @@ impl StoredContextScoutStateV1 {
             || self.tombstones.len() > MAX_SCOUT_ACTIVE_ADDRESSES
             || self.receipts.len() > MAX_SCOUT_RECENT_DELIVERIES
             || self.feedback.len() > MAX_SCOUT_RECENT_DELIVERIES
+            || self.delivery_addresses.len() > MAX_SCOUT_RECENT_DELIVERIES
         {
             return false;
         }
@@ -88,8 +104,45 @@ impl StoredContextScoutStateV1 {
                 .find(|receipt| receipt.receipt_id == feedback.receipt_id)
                 .is_some_and(|receipt| validate_context_scout_feedback(receipt, *feedback).is_ok())
         });
+        let mut delivery_envelopes = BTreeSet::new();
+        let delivery_addresses_valid = self.delivery_addresses.iter().all(|binding| {
+            binding.address.project_id == project_id
+                && binding.address.validate().is_ok()
+                && delivery_envelopes.insert(binding.envelope_id)
+                && binding.entry.as_ref().is_none_or(|entry| {
+                    entry.validate().is_ok()
+                        && entry.work.address == binding.address
+                        && entry.envelope.envelope_id == binding.envelope_id
+                })
+                && self
+                    .receipts
+                    .iter()
+                    .any(|receipt| receipt.envelope_id == binding.envelope_id)
+        });
+        let complete_delivery_provenance =
+            !self.delivery_provenance_complete || self.has_complete_delivery_provenance();
 
-        entries_valid && tombstones_valid && receipts_valid && feedback_valid
+        entries_valid
+            && tombstones_valid
+            && receipts_valid
+            && feedback_valid
+            && delivery_addresses_valid
+            && complete_delivery_provenance
+    }
+
+    fn has_complete_delivery_provenance(&self) -> bool {
+        self.delivery_addresses.len() == self.receipts.len()
+            && self.delivery_addresses.iter().all(|binding| {
+                binding.entry.is_some()
+                    && self
+                        .receipts
+                        .iter()
+                        .any(|receipt| receipt.envelope_id == binding.envelope_id)
+            })
+    }
+
+    fn refresh_delivery_provenance(&mut self) {
+        self.delivery_provenance_complete = self.has_complete_delivery_provenance();
     }
 
     fn recover_expired_claims(&mut self, now: UtcMicros) {
@@ -127,6 +180,13 @@ impl StoredContextScoutStateV1 {
             self.receipts.remove(index);
             self.feedback
                 .retain(|feedback| feedback.receipt_id != evicted);
+            let retained_envelopes = self
+                .receipts
+                .iter()
+                .map(|receipt| receipt.envelope_id)
+                .collect::<BTreeSet<_>>();
+            self.delivery_addresses
+                .retain(|binding| retained_envelopes.contains(&binding.envelope_id));
         }
     }
 }
@@ -169,6 +229,143 @@ impl ProjectContextScoutDurableStoreV1 {
         address.project_id == self.project_id && address.validate().is_ok()
     }
 
+    async fn recent_matching(
+        &self,
+        configuration_revision: [u8; 32],
+        observed_at: UtcMicros,
+        limit: usize,
+        matches: impl Fn(ContextScoutAddressV1) -> bool,
+    ) -> ContextScoutRecentReadOutcomeV1 {
+        if configuration_revision == [0; 32]
+            || observed_at.0 <= 0
+            || limit == 0
+            || limit > MAX_SCOUT_RECENT_DELIVERIES
+        {
+            return ContextScoutRecentReadOutcomeV1::Unavailable;
+        }
+        let Some(encoded) = self
+            .database
+            .get_metadata(STORE_KEY_V1)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+                configuration_revision,
+                observed_at,
+                pending: Vec::new(),
+                deliveries: Vec::new(),
+                omitted: 0,
+            });
+        };
+        if encoded.len() > MAX_STORED_STATE_BYTES_V1 {
+            return ContextScoutRecentReadOutcomeV1::Unavailable;
+        }
+        let Ok(state) = serde_json::from_str::<StoredContextScoutStateV1>(&encoded) else {
+            return ContextScoutRecentReadOutcomeV1::Unavailable;
+        };
+        if !state.validate(self.project_id) {
+            return ContextScoutRecentReadOutcomeV1::Unavailable;
+        }
+        if !state.has_complete_delivery_provenance() {
+            return ContextScoutRecentReadOutcomeV1::Unavailable;
+        }
+        let mut pending = state
+            .entries
+            .iter()
+            .filter(|stored| matches(stored.entry.work.address))
+            .filter(|stored| {
+                stored.entry.envelope.configuration_revision == configuration_revision
+                    && stored.entry.envelope.candidate.expires_at.0 > observed_at.0
+            })
+            .map(|stored| stored.entry.clone())
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|entry| std::cmp::Reverse(entry.work.generation));
+        let mut deliveries = state
+            .delivery_addresses
+            .iter()
+            .filter(|binding| matches(binding.address))
+            .filter_map(|binding| {
+                let entry = binding.entry.as_ref()?.clone();
+                if entry.envelope.configuration_revision != configuration_revision {
+                    return None;
+                }
+                let receipt = state
+                    .receipts
+                    .iter()
+                    .find(|receipt| receipt.envelope_id == binding.envelope_id)?
+                    .clone();
+                let feedback = state
+                    .feedback
+                    .iter()
+                    .rev()
+                    .find(|feedback| feedback.receipt_id == receipt.receipt_id)
+                    .copied();
+                Some(ContextScoutRecentDeliveryV1 {
+                    entry,
+                    receipt,
+                    feedback,
+                })
+            })
+            .collect::<Vec<_>>();
+        deliveries.sort_by_key(|delivery| std::cmp::Reverse(delivery.receipt.delivered_at));
+        let total = pending.len().saturating_add(deliveries.len());
+        pending.truncate(limit);
+        deliveries.truncate(limit.saturating_sub(pending.len()));
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            configuration_revision,
+            observed_at,
+            omitted: total.saturating_sub(pending.len().saturating_add(deliveries.len())),
+            pending,
+            deliveries,
+        })
+    }
+
+    pub(crate) async fn recent(
+        &self,
+        address: ContextScoutAddressV1,
+        configuration_revision: [u8; 32],
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> ContextScoutRecentReadOutcomeV1 {
+        if !self.in_scope(address) {
+            return ContextScoutRecentReadOutcomeV1::Unavailable;
+        }
+        self.recent_matching(configuration_revision, observed_at, limit, |candidate| {
+            candidate == address
+        })
+        .await
+    }
+
+    pub(crate) async fn recent_for_protected_session(
+        &self,
+        protected_session_id: [u8; 32],
+        configuration_revision: [u8; 32],
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> ContextScoutRecentReadOutcomeV1 {
+        if protected_session_id == [0; 32] {
+            return ContextScoutRecentReadOutcomeV1::Unavailable;
+        }
+        self.recent_matching(configuration_revision, observed_at, limit, |candidate| {
+            candidate.project_id == self.project_id
+                && candidate.protected_session_id == protected_session_id
+        })
+        .await
+    }
+
+    pub(crate) async fn recent_project(
+        &self,
+        configuration_revision: [u8; 32],
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> ContextScoutRecentReadOutcomeV1 {
+        self.recent_matching(configuration_revision, observed_at, limit, |candidate| {
+            candidate.project_id == self.project_id
+        })
+        .await
+    }
+
     async fn update_state<T: Send>(
         &self,
         operation: &str,
@@ -207,6 +404,7 @@ impl ProjectContextScoutDurableStoreV1 {
         }
 
         let original = state.clone();
+        state.refresh_delivery_provenance();
         let outcome = update(&mut state);
         if !state.validate(self.project_id) {
             return None;
@@ -426,11 +624,37 @@ impl ProjectContextScoutDurableStoreV1 {
                 .iter()
                 .find(|existing| existing.receipt_id == receipt.receipt_id)
             {
-                return if existing == &receipt {
-                    ContextScoutDurableStoreOutcomeV1::Duplicate
+                if existing != &receipt {
+                    return ContextScoutDurableStoreOutcomeV1::Superseded;
+                }
+                if let Some(binding) = state
+                    .delivery_addresses
+                    .iter_mut()
+                    .find(|binding| binding.envelope_id == receipt.envelope_id)
+                {
+                    if binding.address != entry.work.address {
+                        return ContextScoutDurableStoreOutcomeV1::Superseded;
+                    }
+                    if binding
+                        .entry
+                        .as_ref()
+                        .is_some_and(|stored| stored != &entry)
+                    {
+                        return ContextScoutDurableStoreOutcomeV1::Superseded;
+                    }
+                    if binding.entry.as_ref() == Some(&entry) {
+                        return ContextScoutDurableStoreOutcomeV1::Duplicate;
+                    }
+                    binding.entry = Some(entry.clone());
                 } else {
-                    ContextScoutDurableStoreOutcomeV1::Superseded
-                };
+                    state.delivery_addresses.push(StoredDeliveryAddressV1 {
+                        envelope_id: entry.envelope.envelope_id,
+                        address: entry.work.address,
+                        entry: Some(entry.clone()),
+                    });
+                }
+                state.refresh_delivery_provenance();
+                return ContextScoutDurableStoreOutcomeV1::Stored;
             }
             let Some(index) = state
                 .entries
@@ -442,7 +666,13 @@ impl ProjectContextScoutDurableStoreV1 {
             state.entries.remove(index);
             state.add_tombstone(entry.work);
             state.receipts.push(receipt);
+            state.delivery_addresses.push(StoredDeliveryAddressV1 {
+                envelope_id: entry.envelope.envelope_id,
+                address: entry.work.address,
+                entry: Some(entry.clone()),
+            });
             state.trim_receipts();
+            state.refresh_delivery_provenance();
             ContextScoutDurableStoreOutcomeV1::Stored
         })
         .await

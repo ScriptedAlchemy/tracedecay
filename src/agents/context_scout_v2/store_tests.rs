@@ -150,6 +150,41 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
         restarted.record_feedback(&receipt, feedback).await,
         ContextScoutDurableStoreOutcomeV1::Duplicate
     );
+    assert_eq!(
+        restarted
+            .recent(
+                pending.work.address,
+                pending.envelope.configuration_revision,
+                UtcMicros(31),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            configuration_revision: pending.envelope.configuration_revision,
+            observed_at: UtcMicros(31),
+            pending: Vec::new(),
+            deliveries: vec![ContextScoutRecentDeliveryV1 {
+                entry: pending.clone(),
+                receipt,
+                feedback: Some(feedback),
+            }],
+            omitted: 0,
+        })
+    );
+    assert!(matches!(
+        restarted
+            .recent_for_protected_session(
+                pending.work.address.protected_session_id,
+                pending.envelope.configuration_revision,
+                UtcMicros(31),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            deliveries,
+            ..
+        }) if deliveries.len() == 1
+    ));
 }
 
 #[tokio::test]
@@ -183,6 +218,145 @@ async fn exact_project_scope_and_durable_generation_are_enforced() {
             .startup(UtcMicros(1), MAX_SCOUT_ACTIVE_ADDRESSES + 1)
             .await,
         ContextScoutDurableStartupOutcomeV1::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn recent_is_current_and_protected_session_scoped() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let current = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(current.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+
+    let mut sibling = entry(project_id, 1);
+    sibling.work.address.protected_session_id = [31; 32];
+    sibling.work.address.logical_message_id = [32; 16];
+    sibling.envelope.address = sibling.work.address;
+    sibling.envelope.envelope_id = [33; 16];
+    sibling.envelope.candidate.dedupe_key = [34; 32];
+    assert_eq!(
+        store.enqueue(sibling).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+
+    assert!(matches!(
+        store
+            .recent_for_protected_session(
+                current.work.address.protected_session_id,
+                current.envelope.configuration_revision,
+                UtcMicros(999),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            pending,
+            ..
+        }) if pending == vec![current.clone()]
+    ));
+    assert!(matches!(
+        store
+            .recent(
+                current.work.address,
+                [99; 32],
+                UtcMicros(999),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            pending,
+            ..
+        }) if pending.is_empty()
+    ));
+    assert!(matches!(
+        store
+            .recent(
+                current.work.address,
+                current.envelope.configuration_revision,
+                current.envelope.candidate.expires_at,
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            pending,
+            ..
+        }) if pending.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn legacy_delivery_provenance_fails_closed_until_exact_replay_migrates_it() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let delivered = entry(project_id, 1);
+    let receipt = ContextScoutDeliveryReceiptV1 {
+        receipt_id: [23; 16],
+        envelope_id: delivered.envelope.envelope_id,
+        delivered_at: UtcMicros(30),
+        outcome: ContextScoutOutcomeV1::Displayed,
+    };
+    let feedback = ContextScoutFeedbackV1 {
+        receipt_id: receipt.receipt_id,
+        kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+    };
+    let legacy = serde_json::json!({
+        "project_id": project_id,
+        "entries": [],
+        "tombstones": [delivered.work],
+        "receipts": [receipt],
+        "feedback": [feedback],
+    });
+    database
+        .set_metadata("agents.context-scout.durable.v1", &legacy.to_string())
+        .await
+        .expect("legacy Context Scout state");
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database.clone(), project_id)
+            .expect("owned project store");
+
+    assert_eq!(
+        store
+            .recent(
+                delivered.work.address,
+                delivered.envelope.configuration_revision,
+                UtcMicros(31),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Unavailable
+    );
+    assert_eq!(
+        store.record_delivery(&delivered, &receipt).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    drop(store);
+
+    let restarted = ProjectContextScoutDurableStoreV1::from_project_database(database, project_id)
+        .expect("restarted project store");
+    assert_eq!(
+        restarted
+            .recent(
+                delivered.work.address,
+                delivered.envelope.configuration_revision,
+                UtcMicros(31),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            configuration_revision: delivered.envelope.configuration_revision,
+            observed_at: UtcMicros(31),
+            pending: Vec::new(),
+            deliveries: vec![ContextScoutRecentDeliveryV1 {
+                entry: delivered,
+                receipt,
+                feedback: Some(feedback),
+            }],
+            omitted: 0,
+        })
     );
 }
 

@@ -127,6 +127,7 @@ impl ContextScoutCandidateV1 {
             || self.suggestion_text.len() > limits.max_text_bytes
             || self.evidence.is_empty()
             || self.evidence.len() > limits.max_evidence
+            || self.expires_at.0 <= 0
         {
             return Err(ContextScoutErrorV1::InvalidCandidate);
         }
@@ -195,6 +196,52 @@ pub enum ContextScoutDeliveryWindowV1 {
     IdleWindow,
     OnRequest,
     Suppressed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutTriggerV1 {
+    SavedEdit,
+    StopBoundary,
+    ExplicitRequest,
+}
+
+/// Content-free daemon receptivity state. The selector owns delivery timing;
+/// candidates and model output cannot override it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutDeliverySelectionInputV1 {
+    pub trigger: ContextScoutTriggerV1,
+    pub quiet_mode: bool,
+    pub has_recent_delivery: bool,
+    pub has_unresolved_interaction: bool,
+    pub critical_safety_evidence: bool,
+    pub delivered_dedupe_keys: BTreeSet<[u8; 32]>,
+}
+
+pub const fn select_context_scout_delivery_window(
+    input: &ContextScoutDeliverySelectionInputV1,
+) -> ContextScoutDeliveryWindowV1 {
+    if let ContextScoutTriggerV1::ExplicitRequest = input.trigger {
+        return ContextScoutDeliveryWindowV1::OnRequest;
+    }
+    if input.critical_safety_evidence {
+        return ContextScoutDeliveryWindowV1::Immediate;
+    }
+    if input.quiet_mode {
+        return ContextScoutDeliveryWindowV1::Suppressed;
+    }
+    if input.has_unresolved_interaction {
+        return ContextScoutDeliveryWindowV1::NextBoundary;
+    }
+    if input.has_recent_delivery {
+        return ContextScoutDeliveryWindowV1::IdleWindow;
+    }
+    match input.trigger {
+        ContextScoutTriggerV1::SavedEdit => ContextScoutDeliveryWindowV1::NextBoundary,
+        ContextScoutTriggerV1::StopBoundary => ContextScoutDeliveryWindowV1::Immediate,
+        ContextScoutTriggerV1::ExplicitRequest => ContextScoutDeliveryWindowV1::OnRequest,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,6 +346,7 @@ pub fn select_deterministic_context_scout(
     if input.input_watermark == [0; 32]
         || input.configuration_revision == [0; 32]
         || input.envelope_id == [0; 16]
+        || input.now.0 <= 0
         || input.delivered_dedupe_keys.len() > MAX_SCOUT_RECENT_DELIVERIES
         || input.candidates.len() > limits.max_candidates
     {
@@ -670,7 +718,7 @@ fn valid_model_receipt(
         && receipt
             .actual_model
             .as_ref()
-            .is_none_or(|model| !model.trim().is_empty() && model.len() <= MAX_SCOUT_TEXT_BYTES)
+            .is_some_and(|model| !model.trim().is_empty() && model.len() <= MAX_SCOUT_TEXT_BYTES)
         && receipt
             .input_tokens
             .is_none_or(|tokens| tokens <= max_input_tokens as u64)
@@ -1039,6 +1087,8 @@ pub fn validate_context_scout_delivery_receipt(
     if receipt.receipt_id == [0; 16]
         || receipt.envelope_id != envelope.envelope_id
         || receipt.delivered_at.0 <= 0
+        || (receipt.outcome != ContextScoutOutcomeV1::ExpiredUnseen
+            && receipt.delivered_at.0 >= envelope.candidate.expires_at.0)
     {
         return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
     }
@@ -1059,6 +1109,30 @@ pub enum ContextScoutFeedbackKindV1 {
 pub struct ContextScoutFeedbackV1 {
     pub receipt_id: [u8; 16],
     pub kind: ContextScoutFeedbackKindV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutRecentDeliveryV1 {
+    pub entry: ContextScoutDurableQueueEntryV1,
+    pub receipt: ContextScoutDeliveryReceiptV1,
+    pub feedback: Option<ContextScoutFeedbackV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutRecentStateV1 {
+    pub configuration_revision: [u8; 32],
+    pub observed_at: UtcMicros,
+    pub pending: Vec<ContextScoutDurableQueueEntryV1>,
+    pub deliveries: Vec<ContextScoutRecentDeliveryV1>,
+    pub omitted: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextScoutRecentReadOutcomeV1 {
+    Ready(ContextScoutRecentStateV1),
+    Unavailable,
 }
 
 pub fn validate_context_scout_feedback(
@@ -1384,6 +1458,35 @@ pub struct ContextScoutStatusV1 {
     pub last_feedback: Option<ContextScoutFeedbackKindV1>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutExplanationV1 {
+    pub status: ContextScoutStatusV1,
+    pub recent: ContextScoutRecentStateV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutCapabilityStateV1 {
+    pub state: ContextScoutServiceStateV1,
+    pub mode: ContextScoutRuntimeModeV1,
+    pub deterministic_available: bool,
+    pub configured_model: Option<ContextScoutModelBackendV1>,
+    pub configured_model_available: bool,
+    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutBudgetStateV1 {
+    pub limits: ContextScoutLimitsV1,
+    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
+    pub exhausted: bool,
+    pub last_input_tokens: Option<u64>,
+    pub last_output_tokens: Option<u64>,
+    pub last_estimated_cost_microusd: Option<u64>,
+}
+
 /// Result of preparing one suggestion. Silence is a successful, normal output
 /// and does not create a durable queue entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1638,6 +1741,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn delivery_selector_uses_trigger_quiet_recent_and_unresolved_state() {
+        let base = ContextScoutDeliverySelectionInputV1 {
+            trigger: ContextScoutTriggerV1::StopBoundary,
+            quiet_mode: false,
+            has_recent_delivery: false,
+            has_unresolved_interaction: false,
+            critical_safety_evidence: false,
+            delivered_dedupe_keys: BTreeSet::new(),
+        };
+        assert_eq!(
+            select_context_scout_delivery_window(&base),
+            ContextScoutDeliveryWindowV1::Immediate
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                quiet_mode: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::Suppressed
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                has_recent_delivery: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::IdleWindow
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                has_unresolved_interaction: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::NextBoundary
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                trigger: ContextScoutTriggerV1::ExplicitRequest,
+                quiet_mode: true,
+                has_recent_delivery: true,
+                has_unresolved_interaction: true,
+                ..base.clone()
+            }),
+            ContextScoutDeliveryWindowV1::OnRequest
+        );
+        assert_eq!(
+            select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {
+                quiet_mode: true,
+                critical_safety_evidence: true,
+                ..base
+            }),
+            ContextScoutDeliveryWindowV1::Immediate
+        );
+    }
+
     fn evidence(generation: ContextScoutEvidenceGenerationV1) -> ContextScoutEvidenceBindingV1 {
         ContextScoutEvidenceBindingV1 {
             anchor_id: [10; 16],
@@ -1698,6 +1856,18 @@ mod tests {
     }
 
     #[test]
+    fn successful_model_receipt_requires_actual_model_identity() {
+        let mut receipt = model_receipt();
+        receipt.actual_model = None;
+        assert!(!valid_model_receipt(
+            &receipt,
+            ContextScoutModelBackendV1::CodexAppServer,
+            MAX_SCOUT_MODEL_INPUT_TOKENS,
+            MAX_SCOUT_MODEL_OUTPUT_TOKENS,
+        ));
+    }
+
+    #[test]
     fn deterministic_selection_is_stable_and_single_channel_coalesces() {
         let decision = select_deterministic_context_scout(
             &input(vec![candidate(2, 50), candidate(1, 50)]),
@@ -1723,6 +1893,68 @@ mod tests {
             assert_eq!(claim.envelope().envelope_id, [17; 16]);
         }
         assert!(channel.claim(address()).is_some());
+    }
+
+    #[test]
+    fn deterministic_selection_reuses_durable_dedupe_state() {
+        let mut selection = input(vec![candidate(1, 50), candidate(2, 40)]);
+        selection.delivered_dedupe_keys.insert([1; 32]);
+        let ContextScoutDecisionV1::Ready { envelope } = select_deterministic_context_scout(
+            &selection,
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap() else {
+            panic!("the next unseen candidate should be ready");
+        };
+        assert_eq!(envelope.candidate.dedupe_key, [2; 32]);
+
+        selection.delivered_dedupe_keys.insert([2; 32]);
+        assert_eq!(
+            select_deterministic_context_scout(
+                &selection,
+                ContextScoutLimitsV1::bounded_defaults()
+            )
+            .unwrap(),
+            ContextScoutDecisionV1::Suppressed {
+                reason: ContextScoutSuppressionV1::Duplicate
+            }
+        );
+    }
+
+    #[test]
+    fn selection_and_delivery_fail_closed_on_stale_time() {
+        let mut stale = input(vec![candidate(1, 10)]);
+        stale.now = UtcMicros(0);
+        assert_eq!(
+            select_deterministic_context_scout(&stale, ContextScoutLimitsV1::bounded_defaults()),
+            Err(ContextScoutErrorV1::InvalidCandidate)
+        );
+
+        let ContextScoutDecisionV1::Ready { envelope } = select_deterministic_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap() else {
+            panic!("candidate should be ready");
+        };
+        let receipt = ContextScoutDeliveryReceiptV1 {
+            receipt_id: [18; 16],
+            envelope_id: envelope.envelope_id,
+            delivered_at: envelope.candidate.expires_at,
+            outcome: ContextScoutOutcomeV1::Displayed,
+        };
+        assert_eq!(
+            validate_context_scout_delivery_receipt(&envelope, &receipt),
+            Err(ContextScoutErrorV1::ReceiptBindingMismatch)
+        );
+        validate_context_scout_delivery_receipt(
+            &envelope,
+            &ContextScoutDeliveryReceiptV1 {
+                outcome: ContextScoutOutcomeV1::ExpiredUnseen,
+                ..receipt
+            },
+        )
+        .unwrap();
     }
 
     #[test]

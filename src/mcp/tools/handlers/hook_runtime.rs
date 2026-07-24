@@ -301,9 +301,23 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
             return Ok(hook_v2_catchup_response(action));
         }
     };
-    let ready_guidance = match cg.context_scout_owner() {
-        Some(owner) => match owner
-            .claim_ready_guidance(&envelope, snapshot.revision, now)
+    let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
+    let claim_authority = match (
+        crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
+            envelope.clone(),
+            &snapshot.binding,
+        ),
+        lifecycle.as_ref(),
+    ) {
+        (Some(hook), Some(lifecycle)) => {
+            cg.resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
+                .await
+        }
+        _ => None,
+    };
+    let ready_guidance = match (cg.context_scout_owner(), claim_authority) {
+        (Some(owner), Some((address, input_watermark))) => match owner
+            .claim_ready_guidance_exact(&envelope, address, input_watermark, snapshot.revision, now)
             .await
         {
             Some((guidance, claim)) => {
@@ -329,9 +343,8 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
             }
             None => Value::Null,
         },
-        None => Value::Null,
+        _ => Value::Null,
     };
-    let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
     let orchestration = crate::daemon::admit_registered_pr13_hook_orchestration(
         envelope.clone(),
         snapshot.binding.clone(),
@@ -555,17 +568,28 @@ async fn hook_v2_scout_read(cg: &TraceDecay, args: &Value, action: &str) -> Resu
     let surface = ContextScoutReadSurfaceV1::from_action(action)
         .ok_or_else(|| config_error("unknown Context Scout read surface"))?;
     let envelope = hook_v2_envelope(args, action)?;
-    match hook_v2_binding_admission(cg, &envelope, hook_now()) {
-        HookV2BindingAdmission::Bound(_) => {}
+    let observed_at = hook_now();
+    let snapshot = match hook_v2_binding_admission(cg, &envelope, observed_at) {
+        HookV2BindingAdmission::Bound(snapshot) => snapshot,
         HookV2BindingAdmission::Unavailable => {
             return Ok(json!({ "action": action, "status": "unavailable" }));
         }
         HookV2BindingAdmission::CatchupRequired => {
             return Ok(hook_v2_catchup_response(action));
         }
-    }
-    let Some(protected_session_id) =
-        hook_v2_resolve_current_scout_read_locator(args, &envelope).await
+    };
+    let Some(lifecycle) = hook_v2_context_scout_lifecycle(args, &envelope).await else {
+        return Ok(json!({ "action": action, "status": "unavailable" }));
+    };
+    let Some(hook) = crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
+        envelope,
+        &snapshot.binding,
+    ) else {
+        return Ok(json!({ "action": action, "status": "unavailable" }));
+    };
+    let Some((address, _)) = cg
+        .resolve_current_context_scout_claim_authority(&hook, &lifecycle, observed_at)
+        .await
     else {
         return Ok(json!({ "action": action, "status": "unavailable" }));
     };
@@ -578,22 +602,23 @@ async fn hook_v2_scout_read(cg: &TraceDecay, args: &Value, action: &str) -> Resu
         .and_then(|limit| usize::try_from(limit).ok())
         .unwrap_or(8);
     let value = match surface {
-        ContextScoutReadSurfaceV1::Recent => owner
-            .recent(protected_session_id, limit)
-            .await
-            .and_then(|recent| {
+        ContextScoutReadSurfaceV1::Recent => {
+            owner.recent_exact(address, limit).await.and_then(|recent| {
                 serde_json::to_value(recent).map_err(|_| {
                     crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
                 })
-            }),
-        ContextScoutReadSurfaceV1::Explain => owner
-            .explain(protected_session_id, limit)
-            .await
-            .and_then(|explanation| {
-                serde_json::to_value(explanation).map_err(|_| {
-                    crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
+            })
+        }
+        ContextScoutReadSurfaceV1::Explain => {
+            owner
+                .explain_exact(address, limit)
+                .await
+                .and_then(|explanation| {
+                    serde_json::to_value(explanation).map_err(|_| {
+                        crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
+                    })
                 })
-            }),
+        }
         ContextScoutReadSurfaceV1::Capability => owner.capability().await.and_then(|capability| {
             serde_json::to_value(capability)
                 .map_err(|_| crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits)

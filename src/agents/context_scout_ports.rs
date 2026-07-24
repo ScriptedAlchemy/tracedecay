@@ -4,7 +4,6 @@
 //! Exact identity remains the typed lifecycle tuple retained in the durable
 //! registry and is always pinned to authenticated scope and configuration.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +16,10 @@ use tracedecay_domain::configuration::{
     ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
     ContextScoutConfiguredModelPathV1, SettingKey,
 };
-use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+use tracedecay_domain::feedback::{
+    FeedbackContentIdentityV1, FeedbackFindingLifecycleV1, FeedbackScopeV1,
+    ProviderEvaluationStateV1,
+};
 use tracedecay_domain::{
     AgentInstanceId, ManifestDigest, MessageId, ProjectId, ProviderId, SessionId, ThreadId, TurnId,
     UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
@@ -26,9 +28,10 @@ use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
 
 use super::context_scout_v2::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutControlV1,
-    ContextScoutDeliveryWindowV1, ContextScoutEvidenceBindingV1, ContextScoutEvidenceGenerationV1,
-    ContextScoutLimitsV1, ContextScoutModelBackendV1, ContextScoutRuntimeModeV1,
-    ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
+    ContextScoutDeliverySelectionInputV1, ContextScoutEvidenceBindingV1,
+    ContextScoutEvidenceGenerationV1, ContextScoutLimitsV1, ContextScoutModelBackendV1,
+    ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
+    select_context_scout_delivery_window,
 };
 use crate::application::configuration::ConfigurationCurrentStateV1;
 use crate::db::Database;
@@ -205,7 +208,14 @@ impl ContextScoutAuthorityPinV1 {
         context.admission_at(observed_at) == RequestAdmission::Admitted
             && context.scope().scope_digest == self.scope_digest
             && context.scope().project_id == self.feedback_scope.project_id
+            && context.scope().repository_id == self.feedback_scope.repository_id
             && context.scope().worktree_id == self.feedback_scope.worktree_id
+            && context
+                .scope()
+                .reference
+                .as_ref()
+                .map(|reference| reference.as_str())
+                == Some(self.feedback_scope.branch_ref.as_str())
     }
 
     pub fn configuration(&self) -> &ContextScoutConfigurationPinV1 {
@@ -250,6 +260,15 @@ impl StoredContextScoutAddressBindingV1 {
         self.hook_project_locator == hook.envelope.project_id
             && self.hook_worktree_locator == hook.envelope.worktree_id
             && self.protected_session_locator == hook.envelope.protected_session_id
+    }
+
+    fn matches_exact_lifecycle(
+        &self,
+        hook: &AdmittedContextScoutHookV1,
+        pin: &ContextScoutAuthorityPinV1,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+    ) -> bool {
+        self.lifecycle == *lifecycle && self.matches_hook_and_pin(hook, pin)
     }
 
     fn validate(&self, project_id: &ProjectId) -> bool {
@@ -298,9 +317,24 @@ impl StoredContextScoutAddressLedgerV1 {
         self.bindings.iter().enumerate().all(|(index, binding)| {
             self.bindings[index.saturating_add(1)..]
                 .iter()
-                .all(|other| other.address != binding.address)
+                .all(|other| {
+                    other.address != binding.address && !same_binding_authority(other, binding)
+                })
         })
     }
+}
+
+fn same_binding_authority(
+    left: &StoredContextScoutAddressBindingV1,
+    right: &StoredContextScoutAddressBindingV1,
+) -> bool {
+    left.lifecycle == right.lifecycle
+        && left.scope_digest == right.scope_digest
+        && left.configuration_revision == right.configuration_revision
+        && left.configuration_digest == right.configuration_digest
+        && left.hook_project_locator == right.hook_project_locator
+        && left.hook_worktree_locator == right.hook_worktree_locator
+        && left.protected_session_locator == right.protected_session_locator
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,7 +369,7 @@ impl ProjectContextScoutAddressRegistryV1 {
         }))
     }
 
-    pub async fn bind(
+    async fn bind(
         &self,
         hook: &AdmittedContextScoutHookV1,
         pin: &ContextScoutAuthorityPinV1,
@@ -360,22 +394,32 @@ impl ProjectContextScoutAddressRegistryV1 {
             Some(ledger) => ledger,
             None => return ContextScoutAddressBindOutcomeV1::Unavailable,
         };
-        if let Some(existing) = ledger.bindings.iter().find(|binding| {
-            binding.matches_session_key(&lifecycle) || binding.matches_hook_locator(hook)
+        let related = ledger
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.matches_session_key(&lifecycle) || binding.matches_hook_locator(hook)
+            })
+            .collect::<Vec<_>>();
+        if related.iter().any(|binding| {
+            binding.matches_session_key(&lifecycle) != binding.matches_hook_locator(hook)
         }) {
-            let exact = existing.lifecycle == lifecycle
-                && existing.scope_digest == pin.scope_digest
-                && existing.configuration_revision == pin.configuration.revision_id
-                && existing.configuration_digest == pin.configuration.configuration_digest
-                && existing.hook_project_locator == hook.envelope.project_id
-                && existing.hook_worktree_locator == hook.envelope.worktree_id
-                && existing.protected_session_locator == hook.envelope.protected_session_id;
             let _ = transaction.rollback().await;
-            return if exact {
+            return ContextScoutAddressBindOutcomeV1::Conflict;
+        }
+        let mut exact = related
+            .into_iter()
+            .filter(|binding| binding.lifecycle == lifecycle);
+        if let Some(existing) = exact.next() {
+            let outcome = if exact.next().is_some() {
+                ContextScoutAddressBindOutcomeV1::Unavailable
+            } else if existing.matches_hook_and_pin(hook, pin) {
                 ContextScoutAddressBindOutcomeV1::Existing(existing.address)
             } else {
                 ContextScoutAddressBindOutcomeV1::Conflict
             };
+            let _ = transaction.rollback().await;
+            return outcome;
         }
         if ledger.bindings.len() == MAX_ADDRESS_BINDINGS_V1 {
             let _ = transaction.rollback().await;
@@ -416,7 +460,7 @@ impl ProjectContextScoutAddressRegistryV1 {
         ContextScoutAddressBindOutcomeV1::Bound(address)
     }
 
-    pub async fn resolve(
+    async fn resolve(
         &self,
         hook: &AdmittedContextScoutHookV1,
         pin: &ContextScoutAuthorityPinV1,
@@ -450,6 +494,62 @@ impl ProjectContextScoutAddressRegistryV1 {
             (Some(_), Some(_)) => ContextScoutAddressResolveOutcomeV1::Ambiguous,
         }
     }
+
+    /// Resolves only the full typed lifecycle tuple after rechecking the
+    /// current request admission. A protected-session match is insufficient:
+    /// one session may contain several threads, turns, agents, or messages.
+    pub async fn resolve_current_exact(
+        &self,
+        hook: &AdmittedContextScoutHookV1,
+        pin: &ContextScoutAuthorityPinV1,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+        context: &RequestContext,
+        observed_at: UtcMicros,
+    ) -> ContextScoutAddressResolveOutcomeV1 {
+        if !pin.matches_context(context, observed_at)
+            || !lifecycle.validate()
+            || lifecycle.project_id != self.project_id
+            || lifecycle.project_id != pin.feedback_scope.project_id
+            || lifecycle.worktree_id != pin.feedback_scope.worktree_id
+        {
+            return ContextScoutAddressResolveOutcomeV1::Unavailable;
+        }
+        let ledger = match self.read_ledger().await {
+            Ok(Some(ledger)) => ledger,
+            Ok(None) => return ContextScoutAddressResolveOutcomeV1::Missing,
+            Err(()) => return ContextScoutAddressResolveOutcomeV1::Unavailable,
+        };
+        let mut matches = ledger
+            .bindings
+            .iter()
+            .filter(|binding| binding.matches_exact_lifecycle(hook, pin, lifecycle))
+            .map(|binding| binding.address);
+        match (matches.next(), matches.next()) {
+            (Some(address), None) => ContextScoutAddressResolveOutcomeV1::Resolved(address),
+            (None, _) => ContextScoutAddressResolveOutcomeV1::Missing,
+            (Some(_), Some(_)) => ContextScoutAddressResolveOutcomeV1::Ambiguous,
+        }
+    }
+
+    async fn read_ledger(&self) -> Result<Option<StoredContextScoutAddressLedgerV1>, ()> {
+        let encoded = self
+            .database
+            .get_metadata(ADDRESS_LEDGER_KEY_V1)
+            .await
+            .map_err(|_| ())?;
+        let Some(encoded) = encoded else {
+            return Ok(None);
+        };
+        if encoded.len() > MAX_ADDRESS_LEDGER_BYTES_V1 {
+            return Err(());
+        }
+        let ledger =
+            serde_json::from_str::<StoredContextScoutAddressLedgerV1>(&encoded).map_err(|_| ())?;
+        if !ledger.validate(&self.project_id) {
+            return Err(());
+        }
+        Ok(Some(ledger))
+    }
 }
 
 /// One complete daemon-owned input packet for asynchronous Scout execution.
@@ -469,7 +569,7 @@ impl ContextScoutCanonicalInputV1 {
         &self,
         hook: &AdmittedContextScoutHookV1,
         observed_at: UtcMicros,
-        delivery_window: ContextScoutDeliveryWindowV1,
+        delivery: ContextScoutDeliverySelectionInputV1,
     ) -> Option<ContextScoutSelectionInputV1> {
         let publication = self.latest_publication.as_ref()?;
         publication.validate().ok()?;
@@ -489,8 +589,8 @@ impl ContextScoutCanonicalInputV1 {
             configuration_revision: self.control.configuration_revision,
             envelope_id: hook.envelope().event_id,
             now: observed_at,
-            delivery_window,
-            delivered_dedupe_keys: BTreeSet::new(),
+            delivery_window: select_context_scout_delivery_window(&delivery),
+            delivered_dedupe_keys: delivery.delivered_dedupe_keys,
             candidates: self.candidates.clone(),
         })
     }
@@ -533,6 +633,24 @@ where
         self.assemble(address, pin, context, observed_at).await
     }
 
+    pub async fn assemble_registered_exact(
+        &self,
+        hook: &AdmittedContextScoutHookV1,
+        pin: &ContextScoutAuthorityPinV1,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+        context: &RequestContext,
+        observed_at: UtcMicros,
+    ) -> Option<ContextScoutCanonicalInputV1> {
+        let ContextScoutAddressResolveOutcomeV1::Resolved(address) = self
+            .registry
+            .resolve_current_exact(hook, pin, lifecycle, context, observed_at)
+            .await
+        else {
+            return None;
+        };
+        self.assemble(address, pin, context, observed_at).await
+    }
+
     pub async fn bind_and_assemble(
         &self,
         hook: &AdmittedContextScoutHookV1,
@@ -563,7 +681,8 @@ where
         let latest_publication = self
             .publications
             .latest_committed(context, observed_at)
-            .await;
+            .await
+            .filter(|publication| publication_matches_pin(publication, pin));
         let candidates = latest_publication
             .as_ref()
             .map(|publication| {
@@ -581,6 +700,24 @@ where
             candidates,
         })
     }
+}
+
+fn publication_matches_pin(
+    publication: &FeedbackCompletedPublicationV1,
+    pin: &ContextScoutAuthorityPinV1,
+) -> bool {
+    publication.validate().is_ok()
+        && publication.result.scope == pin.feedback_scope
+        && publication.authorized_scope.project_id == pin.feedback_scope.project_id
+        && publication.authorized_scope.repository_id == pin.feedback_scope.repository_id
+        && publication.authorized_scope.worktree_id == pin.feedback_scope.worktree_id
+        && publication
+            .authorized_scope
+            .reference
+            .as_ref()
+            .map(|reference| reference.as_str())
+            == Some(pin.feedback_scope.branch_ref.as_str())
+        && publication.result.configuration_digest == pin.configuration.configuration_digest
 }
 
 /// Converts only anchored, bounded, durable findings from the authorized
@@ -608,8 +745,17 @@ pub fn context_scout_candidates_from_publication(
         .findings
         .iter()
         .filter_map(|finding| {
+            if finding.lifecycle != FeedbackFindingLifecycleV1::Active
+                || finding.provider_state != ProviderEvaluationStateV1::SupportedCompletedComplete
+            {
+                return None;
+            }
             let anchor = finding.retrieval_anchor_id.as_ref()?;
-            let text = finding.safe_bounded_preview.as_ref()?.clone();
+            finding.safe_bounded_preview.as_ref()?;
+            let text = format!(
+                "Inspect anchored finding {} before changing code.",
+                finding.finding_id.as_str()
+            );
             if text.len() > control.limits.max_text_bytes {
                 return None;
             }
@@ -629,7 +775,7 @@ pub fn context_scout_candidates_from_publication(
             anchor_id.copy_from_slice(&anchor_digest[..16]);
             Some(ContextScoutCandidateV1 {
                 dedupe_key: dedupe,
-                category: ContextScoutCategoryV1::Diagnostic,
+                category: ContextScoutCategoryV1::Retrieval,
                 relevance_score: u16::MAX,
                 suggestion_text: text,
                 evidence: vec![ContextScoutEvidenceBindingV1 {
@@ -917,9 +1063,14 @@ mod tests {
 
         let mut mismatched = lifecycle();
         mismatched.logical_message_id = id("message.scout.other");
+        let next_message = match restarted.bind(&hook, &original_pin, mismatched).await {
+            ContextScoutAddressBindOutcomeV1::Bound(address) => address,
+            other => panic!("expected later message binding, got {other:?}"),
+        };
+        assert_ne!(next_message, original);
         assert_eq!(
-            restarted.bind(&hook, &original_pin, mismatched).await,
-            ContextScoutAddressBindOutcomeV1::Conflict
+            restarted.resolve(&hook, &original_pin).await,
+            ContextScoutAddressResolveOutcomeV1::Ambiguous
         );
         let mut mismatched_session = lifecycle();
         mismatched_session.session_id = id("session.scout.other");
@@ -949,7 +1100,7 @@ mod tests {
         duplicate.address = random_address(hook.envelope()).unwrap();
         assert_ne!(duplicate.address, original);
         ledger.bindings.push(duplicate);
-        assert!(ledger.validate(&id("project.scout.fixture")));
+        assert!(!ledger.validate(&id("project.scout.fixture")));
         let transaction = database
             .begin_write_transaction("inject ambiguous Scout address fixture")
             .await
@@ -965,7 +1116,7 @@ mod tests {
         transaction.commit().await.unwrap();
         assert_eq!(
             restarted.resolve(&hook, &original_pin).await,
-            ContextScoutAddressResolveOutcomeV1::Ambiguous
+            ContextScoutAddressResolveOutcomeV1::Unavailable
         );
     }
 
