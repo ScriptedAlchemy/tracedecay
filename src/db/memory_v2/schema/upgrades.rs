@@ -3,11 +3,10 @@
 //! Split out of the former single-file `schema` module as a pure mechanical
 //! move; contents are unchanged.
 
-use libsql::Connection;
-
+use crate::db::engine::Executor;
 use crate::errors::Result;
 
-use super::super::db_error;
+use super::super::{MemoryV2Executor, db_error};
 use super::baseline::create_schema;
 use super::compatibility::{
     install_v22_compatibility_schema, install_v23_compatibility_bank_schema,
@@ -21,7 +20,10 @@ use super::proposals::{
 
 /// Upgrades the v19 PR7 storage shape without starting a legacy-data
 /// backfill.  The caller owns the enclosing exclusive migration transaction.
-pub(in crate::db) async fn upgrade_v20_schema(conn: &Connection, operation: &str) -> Result<()> {
+pub(in crate::db) async fn upgrade_v20_schema(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     create_schema(conn, operation).await?;
 
     add_column_if_missing(
@@ -123,7 +125,10 @@ pub(in crate::db) async fn upgrade_v20_schema(conn: &Connection, operation: &str
 /// Adds the V21 compatibility projection fields without fabricating telemetry
 /// or vector readiness for already-migrated facts. The daemon-authorized
 /// compatibility store is the only writer that may advance these fields.
-pub(in crate::db) async fn upgrade_v21_schema(conn: &Connection, operation: &str) -> Result<()> {
+pub(in crate::db) async fn upgrade_v21_schema(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     for (column, definition) in [
         (
             "retrieval_count",
@@ -171,7 +176,10 @@ pub(in crate::db) async fn upgrade_v21_schema(conn: &Connection, operation: &str
 
 /// Installs V22's explicit compatibility state. V20/V21 upgrades deliberately
 /// do not call this installer so their `user_version` remains schema-accurate.
-pub(in crate::db) async fn upgrade_v22_schema(conn: &Connection, operation: &str) -> Result<()> {
+pub(in crate::db) async fn upgrade_v22_schema(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     install_v22_compatibility_schema(conn, operation).await?;
     ensure_v22_proposal_schema(conn, operation).await?;
     seed_v22_feedback_history_repairs(conn, operation).await
@@ -181,7 +189,7 @@ pub(in crate::db) async fn upgrade_v22_schema(conn: &Connection, operation: &str
 /// separate from the V19 baseline installer because V20/V21 upgrades call the
 /// baseline installer while advancing older databases.
 pub(in crate::db) async fn install_v22_fresh_schema(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     install_v22_compatibility_schema(conn, operation).await?;
@@ -192,7 +200,10 @@ pub(in crate::db) async fn install_v22_fresh_schema(
 /// rebuilds the constrained relation projection for full V1 parity, then adds
 /// owner-keyed compatibility-bank state. V22 data never relies on a silent
 /// latest-schema repair at open time.
-pub(in crate::db) async fn upgrade_v23_schema(conn: &Connection, operation: &str) -> Result<()> {
+pub(in crate::db) async fn upgrade_v23_schema(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     upgrade_v23_fact_relation_schema(conn, operation).await?;
     install_v23_compatibility_bank_schema(conn, operation).await
 }
@@ -201,7 +212,7 @@ pub(in crate::db) async fn upgrade_v23_schema(conn: &Connection, operation: &str
 /// newly-created database match the same V22-to-V23 contract used by durable
 /// dogfood databases.
 pub(in crate::db) async fn install_v23_fresh_schema(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     upgrade_v23_schema(conn, operation).await

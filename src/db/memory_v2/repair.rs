@@ -1,8 +1,8 @@
-use libsql::{Connection, params};
 use tracedecay_domain::{
     Confidence, FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, SourceStoreId,
 };
 
+use crate::db::engine::{self, Executor, params};
 use crate::errors::Result;
 
 use super::types::{
@@ -14,9 +14,9 @@ use super::writers::{
     legacy_feedback_mapping_can_be_recorded,
 };
 use super::{
-    MAX_FEEDBACK_HISTORY_REPAIR_BATCH_SIZE, OPERATION, db_error, db_message, now_micros,
-    optional_string, owner_key, row_exists, sanitize_legacy_feedback_details, seconds_to_micros,
-    validate_scope, validate_v1_compatibility_source,
+    MAX_FEEDBACK_HISTORY_REPAIR_BATCH_SIZE, MemoryV2Executor, OPERATION, db_error, db_message,
+    now_micros, optional_string, owner_key, row_exists, sanitize_legacy_feedback_details,
+    seconds_to_micros, validate_scope, validate_v1_compatibility_source,
 };
 #[cfg(test)]
 use super::{begin, finish_transaction};
@@ -24,7 +24,7 @@ use super::{begin, finish_transaction};
 /// Returns the V22-owned repair snapshot for an owner/source, if that owner
 /// had feedback already imported before V22 history projections existed.
 pub(in crate::db) async fn feedback_history_repair_progress(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
 ) -> Result<Option<MemoryV2FeedbackHistoryRepairProgress>> {
@@ -54,22 +54,22 @@ pub(in crate::db) async fn feedback_history_repair_progress(
 /// authority transaction.
 #[cfg(test)]
 pub(super) async fn repair_memory_v2_feedback_history_batch(
-    conn: &Connection,
+    conn: &engine::Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     batch_size: i64,
 ) -> Result<MemoryV2FeedbackHistoryRepairBatchOutcome> {
     let owner_key = feedback_history_repair_owner_key(owner, source_store_id, batch_size)?;
-    begin(conn, "memory_v2_feedback_history_repair").await?;
+    let transaction = begin(conn, "memory_v2_feedback_history_repair").await?;
     let result = repair_memory_v2_feedback_history_batch_inner(
-        conn,
+        &transaction,
         owner,
         &owner_key,
         source_store_id,
         batch_size,
     )
     .await;
-    finish_transaction(conn, result, "memory_v2_feedback_history_repair").await
+    finish_transaction(transaction, result, "memory_v2_feedback_history_repair").await
 }
 
 /// Repairs one bounded V22 feedback-history batch inside the caller's
@@ -77,7 +77,7 @@ pub(super) async fn repair_memory_v2_feedback_history_batch(
 /// transaction, so the projection, V1 repair, and operation receipt can commit
 /// or roll back together.
 pub(in crate::db) async fn repair_memory_v2_feedback_history_batch_in_transaction(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     batch_size: i64,
@@ -110,7 +110,7 @@ fn feedback_history_repair_owner_key(
 }
 
 async fn repair_memory_v2_feedback_history_batch_inner(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
@@ -184,7 +184,7 @@ async fn repair_memory_v2_feedback_history_batch_inner(
 /// exact owner. The V1 source tables are unscoped, so scanning them directly
 /// would quarantine or project another owner's rows.
 async fn load_owner_legacy_feedback_repair_batch(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     cursor: i64,
@@ -236,7 +236,7 @@ async fn load_owner_legacy_feedback_repair_batch(
 }
 
 async fn repair_legacy_feedback_history_item(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
@@ -437,7 +437,7 @@ async fn repair_legacy_feedback_history_item(
 }
 
 async fn load_feedback_history_repair_progress(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
 ) -> Result<Option<FeedbackHistoryRepairProgress>> {
@@ -486,7 +486,7 @@ async fn load_feedback_history_repair_progress(
 }
 
 async fn advance_feedback_history_repair(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     cursor: i64,
@@ -518,7 +518,7 @@ async fn advance_feedback_history_repair(
 }
 
 async fn complete_feedback_history_repair(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     cursor: i64,

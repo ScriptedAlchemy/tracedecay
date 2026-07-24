@@ -4,26 +4,26 @@
 //! Split out of the former single-file `writers` module as a pure mechanical
 //! move; contents are unchanged.
 
-use libsql::{Connection, params};
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
     FactEvidenceRelationV1, FactId, FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState,
     SourceStoreId, UtcMicros,
 };
 
+use crate::db::engine::{Executor, params};
 use crate::db::{AnchorDerivativeKindV1, RetrievalAnchorDerivativeV1, publish_anchor_derivative};
 use crate::errors::Result;
 
 use super::super::types::{OwnerKey, StoredAssertionHeaderV1};
 use super::super::{
-    OPERATION, canonical_mapping_replay, canonical_replay, db_error, db_message, json_text,
-    optional_i64, optional_string, payload_access_label, row_exists, scalar_i64_params,
+    MemoryV2Executor, OPERATION, canonical_mapping_replay, canonical_replay, db_error, db_message,
+    json_text, optional_i64, optional_string, payload_access_label, row_exists, scalar_i64_params,
     validate_v1_compatibility_source,
 };
 use super::purge::insert_quarantine;
 
 pub(in crate::db::memory_v2) async fn insert_fact_identity(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
     identity_json: &str,
@@ -57,7 +57,7 @@ pub(in crate::db::memory_v2) async fn insert_fact_identity(
 }
 
 pub(in crate::db::memory_v2) async fn insert_mapping(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
 ) -> Result<()> {
@@ -100,7 +100,7 @@ pub(in crate::db::memory_v2) async fn insert_mapping(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db::memory_v2) async fn insert_legacy_feedback_event_mapping(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     legacy_feedback_event_id: i64,
@@ -187,7 +187,7 @@ pub(in crate::db::memory_v2) async fn insert_legacy_feedback_event_mapping(
 /// divergent replays are quarantined while the caller advances its cursor.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db::memory_v2) async fn legacy_feedback_mapping_can_be_recorded(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     legacy_feedback_event_id: i64,
@@ -267,7 +267,7 @@ pub(in crate::db::memory_v2) async fn legacy_feedback_mapping_can_be_recorded(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db::memory_v2) async fn insert_feedback_history(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
     event_id: &FactEventId,
@@ -369,7 +369,7 @@ pub(in crate::db::memory_v2) async fn insert_feedback_history(
 }
 
 pub(in crate::db::memory_v2) async fn insert_event(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     event: &FactLineageEventV1,
     recorded_at: i64,
@@ -404,7 +404,7 @@ pub(in crate::db::memory_v2) async fn insert_event(
 }
 
 pub(in crate::db::memory_v2) async fn insert_assertion(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     assertion: &FactAssertionV1,
 ) -> Result<()> {
@@ -487,7 +487,7 @@ pub(in crate::db::memory_v2) async fn insert_assertion(
 }
 
 async fn insert_assertion_supersession(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     assertion: &FactAssertionV1,
 ) -> Result<()> {
@@ -556,7 +556,7 @@ async fn insert_assertion_supersession(
 }
 
 async fn insert_assertion_evidence(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     assertion: &FactAssertionV1,
 ) -> Result<()> {
@@ -661,7 +661,7 @@ async fn insert_assertion_evidence(
 }
 
 pub(in crate::db::memory_v2) async fn ensure_current(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
     event_id: &FactEventId,
@@ -697,7 +697,7 @@ pub(in crate::db::memory_v2) async fn ensure_current(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db::memory_v2) async fn update_current(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
     assertion_access: Option<(&FactAssertionId, PayloadAccessState)>,

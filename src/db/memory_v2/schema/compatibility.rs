@@ -4,15 +4,14 @@
 //! Split out of the former single-file `schema` module as a pure mechanical
 //! move; contents are unchanged.
 
-use libsql::Connection;
-
+use crate::db::engine::Executor;
 use crate::errors::Result;
 
-use super::super::{OPERATION, db_error, optional_string};
+use super::super::{MemoryV2Executor, OPERATION, db_error, optional_string};
 use super::introspection::{table_exists, table_has_column};
 
 pub(super) async fn install_v22_compatibility_schema(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     conn.execute_batch(
@@ -308,7 +307,7 @@ pub(super) async fn install_v22_compatibility_schema(
 }
 
 pub(super) async fn upgrade_v23_fact_relation_schema(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     if fact_relation_schema_is_v23(conn).await? {
@@ -343,7 +342,7 @@ pub(super) async fn upgrade_v23_fact_relation_schema(
     install_v23_fact_relation_support(conn, operation).await
 }
 
-async fn fact_relation_schema_is_v23(conn: &Connection) -> Result<bool> {
+async fn fact_relation_schema_is_v23(conn: &impl MemoryV2Executor) -> Result<bool> {
     if !table_exists(conn, "memory_v2_fact_relations").await?
         || !table_has_column(
             conn,
@@ -371,7 +370,10 @@ async fn fact_relation_schema_is_v23(conn: &Connection) -> Result<bool> {
         .all(|relation| sql.contains(&format!("'{relation}'"))))
 }
 
-async fn create_v23_fact_relation_table(conn: &Connection, operation: &str) -> Result<()> {
+async fn create_v23_fact_relation_table(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE memory_v2_fact_relations (
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
@@ -417,7 +419,10 @@ async fn create_v23_fact_relation_table(conn: &Connection, operation: &str) -> R
     .map_err(|error| db_error(operation, error))
 }
 
-async fn install_v23_fact_relation_support(conn: &Connection, operation: &str) -> Result<()> {
+async fn install_v23_fact_relation_support(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_memory_v2_fact_relations_source
             ON memory_v2_fact_relations(
@@ -482,7 +487,7 @@ async fn install_v23_fact_relation_support(conn: &Connection, operation: &str) -
 }
 
 pub(super) async fn install_v23_compatibility_bank_schema(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     conn.execute_batch(

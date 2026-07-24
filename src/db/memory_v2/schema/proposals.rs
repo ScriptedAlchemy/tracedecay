@@ -4,18 +4,19 @@
 //! Split out of the former single-file `schema` module as a pure mechanical
 //! move; contents are unchanged.
 
-use libsql::{Connection, params};
-
+use crate::db::engine::{Executor, params};
 use crate::errors::Result;
 
-use super::super::{V1_COMPATIBILITY_SOURCE_STORE, db_error, db_message, now_micros};
+use super::super::{
+    MemoryV2Executor, V1_COMPATIBILITY_SOURCE_STORE, db_error, db_message, now_micros,
+};
 use super::baseline::create_schema;
 use super::introspection::{proposal_schema_is_v22, table_exists, table_has_column};
 
 /// Captures only the already-processed V1 feedback frontier. The repair itself
 /// is deliberately daemon-driven in bounded batches after migration commits.
 pub(super) async fn seed_v22_feedback_history_repairs(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     if !table_exists(conn, "memory_v2_backfill_progress").await? {
@@ -44,7 +45,10 @@ pub(super) async fn seed_v22_feedback_history_repairs(
     .map_err(|error| db_error(operation, error))
 }
 
-pub(super) async fn ensure_v22_proposal_schema(conn: &Connection, operation: &str) -> Result<()> {
+pub(super) async fn ensure_v22_proposal_schema(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     let current_exists = table_exists(conn, "memory_v2_proposal_current").await?;
     let transitions_exists = table_exists(conn, "memory_v2_proposal_transitions").await?;
     if !current_exists && !transitions_exists {
@@ -65,7 +69,7 @@ pub(super) async fn ensure_v22_proposal_schema(conn: &Connection, operation: &st
     rebuild_v22_proposal_tables(conn, operation).await
 }
 
-async fn rebuild_v22_proposal_tables(conn: &Connection, operation: &str) -> Result<()> {
+async fn rebuild_v22_proposal_tables(conn: &impl MemoryV2Executor, operation: &str) -> Result<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_no_update;
          DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_no_delete;
@@ -190,7 +194,7 @@ async fn rebuild_v22_proposal_tables(conn: &Connection, operation: &str) -> Resu
 }
 
 pub(super) async fn add_column_if_missing(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     table: &str,
     column: &str,
     definition: &str,
@@ -222,7 +226,7 @@ pub(super) async fn add_column_if_missing(
 /// transition log and its current-state projection together so v19 databases
 /// retain every transition while allowing an applied, assertion-less batch.
 pub(super) async fn rebuild_v20_proposal_transition_tables(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     conn.execute_batch(
@@ -267,7 +271,7 @@ pub(super) async fn rebuild_v20_proposal_transition_tables(
 }
 
 pub(super) async fn install_v21_current_projection_indexes(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     if !table_has_column(
@@ -294,7 +298,7 @@ pub(super) async fn install_v21_current_projection_indexes(
 }
 
 pub(super) async fn install_v20_integrity_triggers(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
     let has_cutover_receipt = table_has_column(

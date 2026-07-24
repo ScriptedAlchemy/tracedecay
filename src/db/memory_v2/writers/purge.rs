@@ -3,19 +3,19 @@
 //! Split out of the former single-file `writers` module as a pure mechanical
 //! move; contents are unchanged.
 
-use libsql::{Connection, params};
 use tracedecay_domain::{
     FactEventId, FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1,
     PayloadAccessState, SourceStoreId, UtcMicros,
 };
 
+use crate::db::engine::{self, Executor, params};
 use crate::errors::Result;
 use crate::tracedecay::current_timestamp;
 
 use super::super::types::OwnerKey;
 use super::super::{
-    OPERATION, canonical_replay, current_fact_state, db_error, db_message, optional_i64,
-    optional_string, row_exists,
+    MemoryV2Executor, OPERATION, canonical_replay, current_fact_state, db_error, db_message,
+    optional_i64, optional_string, row_exists,
 };
 #[cfg(test)]
 use super::super::{
@@ -31,7 +31,7 @@ use super::lineage::insert_event;
 /// caller-owned authority transaction.
 #[cfg(test)]
 pub(in crate::db::memory_v2) async fn purge_memory_v2_fact(
-    conn: &Connection,
+    conn: &engine::Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     fact_id: &FactId,
@@ -47,9 +47,9 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact(
         .await
         .map_err(|error| db_error("memory_v2_purge", error))?;
     let owner_key = owner_key(owner)?;
-    begin(conn, "memory_v2_purge").await?;
+    let transaction = begin(conn, "memory_v2_purge").await?;
     let result = purge_memory_v2_fact_inner(
-        conn,
+        &transaction,
         owner,
         &owner_key,
         source_store_id,
@@ -58,7 +58,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact(
         occurred_at,
     )
     .await;
-    let purged = finish_transaction(conn, result, "memory_v2_purge").await?;
+    let purged = finish_transaction(transaction, result, "memory_v2_purge").await?;
     if purged {
         conn.execute_batch("PRAGMA incremental_vacuum(64)")
             .await
@@ -69,7 +69,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db::memory_v2) async fn quarantine_fact(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
@@ -130,7 +130,7 @@ pub(in crate::db::memory_v2) async fn quarantine_fact(
 }
 
 pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
@@ -230,7 +230,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
 }
 
 pub(in crate::db::memory_v2) async fn purge_payload_rows(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> Result<()> {
@@ -269,7 +269,7 @@ pub(in crate::db::memory_v2) async fn purge_payload_rows(
     Ok(())
 }
 
-async fn purge_legacy_fact(conn: &Connection, legacy_fact_id: i64) -> Result<()> {
+async fn purge_legacy_fact(conn: &impl MemoryV2Executor, legacy_fact_id: i64) -> Result<()> {
     conn.execute(
         "INSERT INTO memory_bank_dirty(bank_name, updated_at)
          SELECT bank_name, ?1 FROM memory_banks
@@ -322,7 +322,7 @@ async fn purge_legacy_fact(conn: &Connection, legacy_fact_id: i64) -> Result<()>
 }
 
 pub(in crate::db::memory_v2) async fn insert_quarantine(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     source_table: &'static str,

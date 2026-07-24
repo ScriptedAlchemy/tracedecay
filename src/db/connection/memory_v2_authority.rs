@@ -1,9 +1,8 @@
-use libsql::Transaction;
 use tracedecay_domain::{FactOwnerV1, SourceStoreId, UtcMicros};
 
 use crate::db::{
-    MemoryV2CutoverOutcome, MemoryV2CutoverReceipt, MemoryV2FeedbackHistoryRepairBatchOutcome,
-    MemoryV2FeedbackHistoryRepairProgress, memory_v2,
+    DatabaseMemoryTransaction, MemoryV2CutoverOutcome, MemoryV2CutoverReceipt,
+    MemoryV2FeedbackHistoryRepairBatchOutcome, MemoryV2FeedbackHistoryRepairProgress, memory_v2,
 };
 use crate::errors::Result;
 
@@ -32,7 +31,7 @@ impl Database {
     /// transaction without opening a second writer connection.
     pub(crate) async fn feedback_history_repair_progress_in_transaction(
         &self,
-        transaction: &Transaction,
+        transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
     ) -> Result<Option<MemoryV2FeedbackHistoryRepairProgress>> {
@@ -45,7 +44,7 @@ impl Database {
     /// repair, V1 mirror work, and receipt share one atomic outcome.
     pub(crate) async fn repair_memory_v2_feedback_history_batch_in_transaction(
         &self,
-        transaction: &Transaction,
+        transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
         batch_size: i64,
@@ -64,7 +63,7 @@ impl Database {
     /// already-open authoritative writer transaction.
     pub(crate) async fn mark_memory_v2_compatibility_bank_dirty_in_transaction(
         &self,
-        transaction: &Transaction,
+        transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
         bank_name: &str,
@@ -88,7 +87,7 @@ impl Database {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn upsert_memory_v2_compatibility_bank_in_transaction(
         &self,
-        transaction: &Transaction,
+        transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
         bank_name: &str,
@@ -115,7 +114,7 @@ impl Database {
     /// an already-open authoritative writer transaction.
     pub(crate) async fn delete_memory_v2_compatibility_bank_in_transaction(
         &self,
-        transaction: &Transaction,
+        transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
         bank_name: &str,
@@ -136,7 +135,7 @@ impl Database {
     /// the generation the caller rebuilt in this writer transaction.
     pub(crate) async fn clear_memory_v2_compatibility_bank_dirty_in_transaction(
         &self,
-        transaction: &Transaction,
+        transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
         bank_name: &str,

@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use libsql::{Connection, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     Confidence, FactAssertionKindV1, FactAssertionV1, FactId, FactIdentityMaterialV1,
@@ -9,6 +8,7 @@ use tracedecay_domain::{
     SanitizerDispositionV1, SourceStoreId, UtcMicros,
 };
 
+use crate::db::engine::{Executor, params};
 use crate::errors::Result;
 use crate::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
@@ -23,13 +23,13 @@ use super::super::writers::{
     mark_memory_v2_compatibility_bank_dirty_in_transaction, quarantine_fact, update_current,
 };
 use super::super::{
-    OPERATION, RETENTION_CLASS, category_label, current_fact_state, db_error, db_message,
-    json_text, load_legacy_entities, optional_i64, optional_string, parse_category,
+    MemoryV2Executor, OPERATION, RETENTION_CLASS, category_label, current_fact_state, db_error,
+    db_message, json_text, load_legacy_entities, optional_i64, optional_string, parse_category,
     seconds_to_micros, update_cursor, update_phase, value_strings,
 };
 
 pub(in crate::db) async fn backfill_fact_batch(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
@@ -118,7 +118,7 @@ pub(in crate::db) async fn backfill_fact_batch(
 
 #[allow(clippy::too_many_arguments)]
 async fn backfill_fact_payload(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
@@ -291,7 +291,7 @@ async fn backfill_fact_payload(
 }
 
 async fn existing_legacy_mapping_fact_id(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
     legacy_fact_id: i64,
@@ -312,7 +312,7 @@ async fn existing_legacy_mapping_fact_id(
 }
 
 pub(in crate::db) async fn ensure_legacy_identity(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
@@ -373,7 +373,7 @@ pub(in crate::db) async fn ensure_legacy_identity(
 /// its migration time, and `CompatibilityFactTelemetryV1` rejects recency
 /// timestamps earlier than creation, so historical values can never validate.
 async fn merge_legacy_fact_telemetry(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
     telemetry: &LegacyFactTelemetry,
@@ -412,7 +412,7 @@ struct SanitizedLegacyMirror<'a> {
 }
 
 async fn mirror_sanitized_legacy(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     mirror: SanitizedLegacyMirror<'_>,
 ) -> Result<()> {
     let SanitizedLegacyMirror {
@@ -436,7 +436,7 @@ async fn mirror_sanitized_legacy(
             json_text(tags)?,
             json_text(metadata)?,
             source,
-            invalidate_vector,
+            i64::from(invalidate_vector),
             legacy_fact_id
         ],
     )
@@ -461,7 +461,7 @@ async fn mirror_sanitized_legacy(
 }
 
 async fn rewrite_legacy_entity_links(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     legacy_fact_id: i64,
     entities: &[String],
 ) -> Result<()> {

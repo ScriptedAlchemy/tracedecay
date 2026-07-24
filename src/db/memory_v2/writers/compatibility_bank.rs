@@ -4,21 +4,22 @@
 //! Split out of the former single-file `writers` module as a pure mechanical
 //! move; contents are unchanged.
 
-use libsql::{Connection, params};
 use tracedecay_domain::{FactOwnerV1, SourceStoreId, UtcMicros};
 
+use crate::db::engine::{Executor, params};
 use crate::errors::Result;
 
 use super::super::types::OwnerKey;
 use super::super::{
-    OPERATION, V23_COMPATIBILITY_BANK_VECTOR_BYTES, V23_COMPATIBILITY_BANK_VECTOR_HEADER, db_error,
-    db_message, owner_key, validate_scope, validate_v1_compatibility_source,
+    MemoryV2Executor, OPERATION, V23_COMPATIBILITY_BANK_VECTOR_BYTES,
+    V23_COMPATIBILITY_BANK_VECTOR_HEADER, db_error, db_message, owner_key, validate_scope,
+    validate_v1_compatibility_source,
 };
 
 /// Marks one owner-bound V23 compatibility-bank projection dirty inside the
 /// caller's authoritative writer transaction.
 pub(in crate::db) async fn mark_memory_v2_compatibility_bank_dirty_in_transaction(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     bank_name: &str,
@@ -53,7 +54,7 @@ pub(in crate::db) async fn mark_memory_v2_compatibility_bank_dirty_in_transactio
 /// caller's authoritative writer transaction. The strict binary shape is the
 /// canonical f32-2048 FHRR encoding, never a legacy global-bank payload.
 pub(in crate::db) async fn upsert_memory_v2_compatibility_bank_in_transaction(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     bank_name: &str,
@@ -110,7 +111,7 @@ pub(in crate::db) async fn upsert_memory_v2_compatibility_bank_in_transaction(
 /// Deletes an empty owner-bound V23 compatibility-bank projection inside the
 /// caller's authoritative writer transaction.
 pub(in crate::db) async fn delete_memory_v2_compatibility_bank_in_transaction(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     bank_name: &str,
@@ -136,7 +137,7 @@ pub(in crate::db) async fn delete_memory_v2_compatibility_bank_in_transaction(
 /// Clears a V23 dirty projection only when the caller rebuilt the exact owner
 /// generation it observed. A concurrent mark therefore remains pending.
 pub(in crate::db) async fn clear_memory_v2_compatibility_bank_dirty_in_transaction(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     bank_name: &str,

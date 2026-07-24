@@ -3,16 +3,18 @@
 //! Split out of the former single-file `schema` module as a pure mechanical
 //! move; contents are unchanged.
 
-use libsql::Connection;
-
+use crate::db::engine::Executor;
 use crate::errors::Result;
 
-use super::super::db_error;
+use super::super::{MemoryV2Executor, db_error};
 use super::proposals::{install_v20_integrity_triggers, install_v21_current_projection_indexes};
 
 /// Installs only additive storage. Legacy data movement is daemon-authorized
 /// and deliberately absent from bare schema creation and database open.
-pub(in crate::db) async fn create_schema(conn: &Connection, operation: &str) -> Result<()> {
+pub(in crate::db) async fn create_schema(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
     conn.execute_batch("PRAGMA secure_delete = ON")
         .await
         .map_err(|error| db_error(operation, error))?;

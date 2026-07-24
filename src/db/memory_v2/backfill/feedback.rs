@@ -1,8 +1,8 @@
-use libsql::{Connection, params};
 use tracedecay_domain::{
     Confidence, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, SourceStoreId,
 };
 
+use crate::db::engine::{Executor, params};
 use crate::errors::Result;
 
 use super::super::schema::v22_feedback_history_schema_installed;
@@ -12,13 +12,13 @@ use super::super::writers::{
     legacy_feedback_mapping_can_be_recorded, update_current,
 };
 use super::super::{
-    OPERATION, db_error, db_message, sanitize_legacy_feedback_details, seconds_to_micros,
-    update_cursor, update_phase,
+    MemoryV2Executor, OPERATION, db_error, db_message, sanitize_legacy_feedback_details,
+    seconds_to_micros, update_cursor, update_phase,
 };
 use super::facts::ensure_legacy_identity;
 
 async fn load_legacy_feedback_batch(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     cursor: i64,
     frontier: i64,
     limit: i64,
@@ -54,7 +54,7 @@ async fn load_legacy_feedback_batch(
 }
 
 pub(in crate::db) async fn backfill_feedback_batch(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,

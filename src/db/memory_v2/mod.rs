@@ -1,12 +1,12 @@
 //! Owner-scoped V2 fact lineage schema and bounded legacy backfill.
 
-use libsql::{Connection, params};
 use serde::Serialize;
 use serde_json::Value;
 use tracedecay_domain::{
     FactAssertionId, FactEventId, FactId, FactOwnerV1, PayloadAccessState, SourceStoreId, UtcMicros,
 };
 
+use crate::db::engine::{self, Executor, params};
 use crate::errors::{Result, TraceDecayError};
 use crate::privacy::sanitize_provider_metadata_text;
 use crate::tracedecay::current_timestamp;
@@ -52,8 +52,12 @@ const V1_COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
 const V23_COMPATIBILITY_BANK_VECTOR_BYTES: usize = 8 + 2048 * 4;
 const V23_COMPATIBILITY_BANK_VECTOR_HEADER: [u8; 8] = 2048_u64.to_le_bytes();
 
+pub(in crate::db) trait MemoryV2Executor: Executor + Sync {}
+
+impl<T> MemoryV2Executor for T where T: Executor + Sync + ?Sized {}
+
 async fn load_or_create_progress(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     frontiers: CapturedMemoryV2Frontiers,
@@ -132,7 +136,7 @@ async fn load_or_create_progress(
 }
 
 async fn update_phase(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     phase: &str,
@@ -154,7 +158,7 @@ async fn update_phase(
 }
 
 async fn update_cursor(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     source_store_id: &SourceStoreId,
     column: &str,
@@ -194,7 +198,7 @@ async fn update_cursor(
 }
 
 async fn current_fact_state(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> Result<CurrentFactState> {
@@ -255,7 +259,10 @@ async fn current_fact_state(
     })
 }
 
-async fn load_legacy_entities(conn: &Connection, legacy_fact_id: i64) -> Result<Vec<String>> {
+async fn load_legacy_entities(
+    conn: &impl MemoryV2Executor,
+    legacy_fact_id: i64,
+) -> Result<Vec<String>> {
     let mut rows = conn
         .query(
             "SELECT e.name FROM memory_entities e
@@ -497,45 +504,40 @@ fn mapping_replay_identity(mapping_json: &str) -> Result<String> {
     json_text(&mapping)
 }
 
-async fn begin(conn: &Connection, operation: &str) -> Result<()> {
-    conn.execute_batch("BEGIN IMMEDIATE")
+async fn begin(conn: &engine::Connection, operation: &str) -> Result<engine::Transaction> {
+    conn.transaction_with_behavior(engine::TransactionBehavior::Immediate)
         .await
-        .map(|_| ())
         .map_err(|error| db_error(operation, error))
 }
 
-async fn finish_transaction<T>(conn: &Connection, result: Result<T>, operation: &str) -> Result<T> {
+async fn finish_transaction<T>(
+    transaction: engine::Transaction,
+    result: Result<T>,
+    operation: &str,
+) -> Result<T> {
     match result {
-        Ok(value) => match conn.execute_batch("COMMIT").await {
+        Ok(value) => match transaction.commit().await {
             Ok(_) => Ok(value),
-            Err(commit_error) => {
-                let rollback = conn.execute_batch("ROLLBACK").await;
-                let cleanup = if rollback.is_ok() {
-                    "rollback completed"
-                } else {
-                    "rollback failed; writer connection must be retired"
-                };
-                Err(db_message(
-                    operation,
-                    format!("commit failed ({cleanup}): {commit_error}"),
-                ))
-            }
+            Err(commit_error) => Err(db_message(
+                operation,
+                format!("commit failed; writer transaction retired: {commit_error}"),
+            )),
         },
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK").await;
+            let _ = transaction.rollback().await;
             Err(error)
         }
     }
 }
 
-async fn scalar_i64(conn: &Connection, sql: &str) -> Result<i64> {
+async fn scalar_i64(conn: &impl MemoryV2Executor, sql: &str) -> Result<i64> {
     scalar_i64_params(conn, sql, ()).await
 }
 
 async fn scalar_i64_params(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     sql: &str,
-    params: impl libsql::params::IntoParams,
+    params: impl engine::IntoParams,
 ) -> Result<i64> {
     let mut rows = conn
         .query(sql, params)
@@ -550,9 +552,9 @@ async fn scalar_i64_params(
 }
 
 async fn optional_string(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     sql: &str,
-    params: impl libsql::params::IntoParams,
+    params: impl engine::IntoParams,
 ) -> Result<Option<String>> {
     let mut rows = conn
         .query(sql, params)
@@ -566,9 +568,9 @@ async fn optional_string(
 }
 
 async fn optional_i64(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     sql: &str,
-    params: impl libsql::params::IntoParams,
+    params: impl engine::IntoParams,
 ) -> Result<Option<i64>> {
     let mut rows = conn
         .query(sql, params)
@@ -582,9 +584,9 @@ async fn optional_i64(
 }
 
 async fn row_exists(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     sql: &str,
-    params: impl libsql::params::IntoParams,
+    params: impl engine::IntoParams,
 ) -> Result<bool> {
     let mut rows = conn
         .query(sql, params)

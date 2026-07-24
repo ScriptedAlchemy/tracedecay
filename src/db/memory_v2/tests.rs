@@ -1,9 +1,10 @@
-use libsql::Builder;
 use tempfile::TempDir;
 use tracedecay_domain::{
     Confidence, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
     FactLineageEventV1, LegacyFactMappingV1, LegacyHistoryCoverageV1, ProvenanceId,
 };
+
+use crate::db::engine::{Connection, TestConnection, params};
 
 use super::backfill::backfill_feedback_batch;
 use super::backfill::facts::ensure_legacy_identity;
@@ -15,36 +16,36 @@ use super::writers::{
 };
 use super::*;
 
-async fn database() -> (Connection, libsql::Database, TempDir) {
+async fn database() -> (TestConnection, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory-v2.db");
-    let db = Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = TestConnection::open(&path);
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
         .await
         .unwrap();
-    crate::db::migrations::create_schema(&conn).await.unwrap();
-    (conn, db, dir)
+    crate::db::migrations::create_schema_connection(&conn)
+        .await
+        .unwrap();
+    (conn, dir)
 }
 
-async fn pre_v22_database() -> (Connection, libsql::Database, TempDir) {
+async fn pre_v22_database() -> (TestConnection, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory-v2-pre-v22.db");
-    let db = Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = TestConnection::open(&path);
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
         .await
         .unwrap();
-    create_schema(&conn, "memory_v2_pre_v22_test")
+    create_schema(&*conn, "memory_v2_pre_v22_test")
         .await
         .unwrap();
-    upgrade_v20_schema(&conn, "memory_v2_pre_v22_test")
+    upgrade_v20_schema(&*conn, "memory_v2_pre_v22_test")
         .await
         .unwrap();
-    upgrade_v21_schema(&conn, "memory_v2_pre_v22_test")
+    upgrade_v21_schema(&*conn, "memory_v2_pre_v22_test")
         .await
         .unwrap();
-    (conn, db, dir)
+    (conn, dir)
 }
 
 fn owner() -> FactOwnerV1 {
@@ -82,7 +83,8 @@ async fn scalar(conn: &Connection, sql: &str) -> i64 {
 
 #[tokio::test]
 async fn schema_install_does_not_start_unowned_backfill() {
-    let (conn, _db, _dir) = database().await;
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
     assert_eq!(
         scalar(&conn, "SELECT COUNT(*) FROM memory_v2_backfill_progress").await,
         0
@@ -104,7 +106,8 @@ async fn schema_install_does_not_start_unowned_backfill() {
 
 #[tokio::test]
 async fn v20_and_v21_installers_do_not_leak_v22_or_v23_schema() {
-    let (conn, _db, _dir) = pre_v22_database().await;
+    let (runtime, _dir) = pre_v22_database().await;
+    let conn = (*runtime).clone();
     assert!(
         !table_exists(&conn, "memory_v2_compatibility_operation_receipts")
             .await
@@ -198,8 +201,110 @@ async fn v20_and_v21_installers_do_not_leak_v22_or_v23_schema() {
 }
 
 #[tokio::test]
+async fn v20_scrubs_more_assertion_headers_than_the_engine_row_limit() {
+    const ASSERTION_COUNT: i64 = 10_001;
+    const SEED_BATCH_SIZE: i64 = 1_000;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory-v2-v20-large-scrub.db");
+    let runtime = TestConnection::open(&path);
+    let conn = (*runtime).clone();
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
+        .await
+        .unwrap();
+    create_schema(&conn, "memory_v2_v20_large_scrub_test")
+        .await
+        .unwrap();
+    let owner = owner_key(&owner()).unwrap();
+    let mut first = 1_i64;
+    while first <= ASSERTION_COUNT {
+        let last = (first + SEED_BATCH_SIZE - 1).min(ASSERTION_COUNT);
+        conn.execute(
+            "WITH RECURSIVE sequence(value) AS (
+                SELECT ?1
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < ?2
+             )
+             INSERT INTO memory_v2_facts(
+                fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+             )
+             SELECT printf('large-scrub.fact.%05d', value), ?3, ?4, ?5, '{}', value
+             FROM sequence",
+            params![
+                first,
+                last,
+                owner.kind,
+                owner.project_id.as_str(),
+                owner.json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "WITH RECURSIVE sequence(value) AS (
+                SELECT ?1
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < ?2
+             )
+             INSERT INTO memory_v2_assertions(
+                assertion_id, fact_id, owner_kind, project_id, owner_json,
+                assertion_header_json, kind_json, payload_reference_json,
+                receipt_json, asserted_at, actor_id
+             )
+             SELECT printf('large-scrub.assertion.%05d', value),
+                    printf('large-scrub.fact.%05d', value),
+                    ?3, ?4, ?5,
+                    json_object(
+                        'assertion_id', printf('large-scrub.assertion.%05d', value),
+                        'payload', 'must-be-removed'
+                    ),
+                    '{}', '{}', '{}', value, NULL
+             FROM sequence",
+            params![
+                first,
+                last,
+                owner.kind,
+                owner.project_id.as_str(),
+                owner.json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+        first = last + 1;
+    }
+
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM memory_v2_assertions
+             WHERE json_type(assertion_header_json, '$.payload') IS NOT NULL",
+        )
+        .await,
+        ASSERTION_COUNT
+    );
+    upgrade_v20_schema(&conn, "memory_v2_v20_large_scrub_test")
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM memory_v2_assertions
+             WHERE json_type(assertion_header_json, '$.payload') IS NOT NULL
+                OR json_type(assertion_header_json, '$.content') IS NOT NULL",
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertions").await,
+        ASSERTION_COUNT
+    );
+}
+
+#[tokio::test]
 async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
-    let (conn, _db, _dir) = pre_v22_database().await;
+    let (runtime, _dir) = pre_v22_database().await;
+    let conn = (*runtime).clone();
     install_v22_fresh_schema(&conn, "memory_v2_v23_relation_upgrade_test")
         .await
         .unwrap();
@@ -227,7 +332,7 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
 
     conn.execute("PRAGMA user_version = 22", ()).await.unwrap();
     assert!(
-        super::super::migrations::migrate(&conn)
+        super::super::migrations::migrate_connection(&conn)
             .await
             .expect("V22 relation fixture must migrate to V23")
     );
@@ -293,7 +398,8 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
 
 #[tokio::test]
 async fn v20_v21_feedback_backfill_does_not_require_v22_history_tables() {
-    let (conn, _db, _dir) = pre_v22_database().await;
+    let (runtime, _dir) = pre_v22_database().await;
+    let conn = (*runtime).clone();
     conn.execute_batch(
         "CREATE TABLE memory_feedback_events (
             event_id INTEGER PRIMARY KEY,
@@ -359,7 +465,8 @@ async fn v20_v21_feedback_backfill_does_not_require_v22_history_tables() {
 
 #[tokio::test]
 async fn v22_feedback_history_repair_is_bounded_idempotent_and_redactable() {
-    let (conn, _db, _dir) = pre_v22_database().await;
+    let (runtime, _dir) = pre_v22_database().await;
+    let conn = (*runtime).clone();
     conn.execute_batch(
         "CREATE TABLE memory_facts (
             fact_id INTEGER PRIMARY KEY,
@@ -634,7 +741,8 @@ async fn v22_feedback_history_repair_is_bounded_idempotent_and_redactable() {
 
 #[tokio::test]
 async fn v22_feedback_history_repair_skips_foreign_rows_and_yields_after_a_bounded_slice() {
-    let (conn, _db, _dir) = pre_v22_database().await;
+    let (runtime, _dir) = pre_v22_database().await;
+    let conn = (*runtime).clone();
     let owner = owner();
     let source = source_store_id();
     let primary_owner_key = owner_key(&owner).unwrap();
@@ -773,7 +881,9 @@ async fn v22_feedback_history_repair_skips_foreign_rows_and_yields_after_a_bound
 
 #[tokio::test]
 async fn bounded_backfill_resumes_with_fixed_frontiers_and_unknown_history() {
-    let (conn, db, _dir) = database().await;
+    let (runtime, dir) = database().await;
+    let path = dir.path().join("memory-v2.db");
+    let conn = (*runtime).clone();
     for id in 1..=3 {
         conn.execute(
             "INSERT INTO memory_facts(
@@ -797,7 +907,9 @@ async fn bounded_backfill_resumes_with_fixed_frontiers_and_unknown_history() {
         MemoryV2BackfillBatchOutcome::Advanced { processed: 0 }
     );
     drop(conn);
-    let restarted = db.connect().unwrap();
+    drop(runtime);
+    let restarted_runtime = TestConnection::open(&path);
+    let restarted = (*restarted_runtime).clone();
     restarted
         .execute_batch("PRAGMA foreign_keys = ON")
         .await
@@ -840,7 +952,8 @@ async fn bounded_backfill_resumes_with_fixed_frontiers_and_unknown_history() {
 
 #[tokio::test]
 async fn cutover_replay_preserves_first_completion_time_but_binds_frontier() {
-    let (conn, _db, _dir) = database().await;
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
     conn.execute(
         "INSERT INTO memory_facts(
             fact_id, content, category, tags, trust_score, source, metadata,
@@ -944,7 +1057,8 @@ async fn cutover_replay_preserves_first_completion_time_but_binds_frontier() {
 
 #[tokio::test]
 async fn malformed_and_secret_rows_quarantine_and_advance_without_raw_payload() {
-    let (conn, _db, _dir) = database().await;
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
     conn.execute(
         "INSERT INTO memory_facts(
             fact_id, content, category, tags, trust_score, source, metadata,
@@ -991,7 +1105,8 @@ async fn malformed_and_secret_rows_quarantine_and_advance_without_raw_payload() 
 
 #[tokio::test]
 async fn purge_is_owner_store_fact_scoped_and_clears_payload_fts_and_vectors() {
-    let (conn, _db, _dir) = database().await;
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
     conn.execute(
         "INSERT INTO memory_facts(
             fact_id, content, category, tags, trust_score, source, metadata,
@@ -1105,7 +1220,8 @@ async fn purge_is_owner_store_fact_scoped_and_clears_payload_fts_and_vectors() {
 
 #[tokio::test]
 async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
-    let (conn, _db, _dir) = database().await;
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
     let owner = owner();
     let owner_key = owner_key(&owner).unwrap();
     let material = FactIdentityMaterialV1::new(

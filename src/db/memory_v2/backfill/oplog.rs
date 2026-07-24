@@ -1,15 +1,17 @@
-use libsql::{Connection, params};
 use tracedecay_domain::{FactOwnerV1, SourceStoreId};
 
+use crate::db::engine::{Executor, params};
 use crate::errors::Result;
 
 use super::super::types::{LegacyOplog, MemoryV2BackfillBatchOutcome, OwnerKey, Progress};
 use super::super::writers::{insert_quarantine, purge_memory_v2_fact_inner};
-use super::super::{OPERATION, db_error, seconds_to_micros, update_cursor, update_phase};
+use super::super::{
+    MemoryV2Executor, OPERATION, db_error, seconds_to_micros, update_cursor, update_phase,
+};
 use super::facts::ensure_legacy_identity;
 
 pub(in crate::db) async fn backfill_oplog_batch(
-    conn: &Connection,
+    conn: &impl MemoryV2Executor,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
