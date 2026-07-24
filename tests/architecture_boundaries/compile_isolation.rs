@@ -140,6 +140,20 @@ fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
 }
 
 #[test]
+fn domain_dependencies_are_exactly_the_pure_value_allowlist() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-domain");
+    let expected_direct = ["serde", "serde_json", "sha2", "thiserror"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        direct, expected_direct,
+        "tracedecay-domain must not depend on I/O, stores, transports, providers, settings, credentials, lifecycle, UI, or the root crate"
+    );
+}
+
+#[test]
 fn policy_package_has_only_pure_value_dependencies() {
     let metadata = cargo_metadata();
     let policy = metadata
@@ -171,5 +185,48 @@ fn store_dependencies_are_exactly_the_contract_allowlist() {
     assert_eq!(
         direct, expected_direct,
         "tracedecay-store dependencies must remain exactly contract-only"
+    );
+}
+
+#[test]
+fn application_dependencies_are_exactly_the_use_case_allowlist() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-application");
+    let expected_direct = [
+        "serde",
+        "serde_json",
+        "thiserror",
+        "tracedecay-domain",
+        "tracedecay-policy",
+        "tracedecay-tool-catalog",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        direct, expected_direct,
+        "tracedecay-application must depend only on domain, policy, catalog, and value libraries"
+    );
+}
+
+#[test]
+fn api_dependencies_are_exactly_the_thin_adapter_allowlist() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-api");
+    let expected_direct = [
+        "axum",
+        "futures-util",
+        "serde",
+        "serde_json",
+        "thiserror",
+        "tracedecay-application",
+        "tracedecay-tool-catalog",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        direct, expected_direct,
+        "tracedecay-api must remain a transport adapter over application and catalog contracts"
     );
 }

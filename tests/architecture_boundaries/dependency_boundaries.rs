@@ -157,11 +157,14 @@ fn pr8_temporal_read_surfaces_cannot_import_refresh_or_writer_authorities() {
 }
 
 #[test]
-fn domain_session_contracts_are_runtime_and_store_free() {
+fn domain_contracts_are_runtime_and_store_free() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let sources = [PathBuf::from("crates/tracedecay-domain/src/session.rs")]
+    let roots = [PathBuf::from("crates/tracedecay-domain/src")]
         .into_iter()
         .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve domain contract sources");
+    assert!(!sources.is_empty(), "domain contract sources must exist");
     let forbidden: &[&[&str]] = &[
         &["tracedecay_store"],
         &["tracedecay"],
@@ -178,10 +181,122 @@ fn domain_session_contracts_are_runtime_and_store_free() {
         &["std", "time", "SystemTime"],
     ];
     let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
-        .expect("inspect domain session contracts");
+        .expect("inspect domain contracts");
     assert!(
         violations.is_empty(),
-        "domain session contracts must stay runtime/store free:\n{}",
+        "domain contracts must stay runtime/store free:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn application_contracts_are_store_runtime_and_transport_free() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-application/src")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve application contract sources");
+    assert!(
+        !sources.is_empty(),
+        "application contract sources must exist"
+    );
+
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay"],
+        &["tracedecay_api"],
+        &["tracedecay_hooks"],
+        &["tracedecay_store"],
+        &["tracedecay_rusqlite_runtime"],
+        &[FORBIDDEN_LIBSQL_CRATE],
+        &["rusqlite"],
+        &["sqlx"],
+        &["diesel"],
+        &["axum"],
+        &["tower"],
+        &["hyper"],
+        &["tokio"],
+        &["async_std"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect application contracts");
+    assert!(
+        violations.is_empty(),
+        "application contracts must coordinate domain/policy ports without concrete stores, runtimes, or transports:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn api_contracts_are_thin_application_adapters() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-api/src")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve API adapter sources");
+    assert!(!sources.is_empty(), "API adapter sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay"],
+        &["tracedecay_domain"],
+        &["tracedecay_hooks"],
+        &["tracedecay_policy"],
+        &["tracedecay_store"],
+        &["tracedecay_rusqlite_runtime"],
+        &[FORBIDDEN_LIBSQL_CRATE],
+        &["rusqlite"],
+        &["sqlx"],
+        &["diesel"],
+        &["tokio"],
+        &["async_std"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+        &["std", "thread"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect API adapter sources");
+    assert!(
+        violations.is_empty(),
+        "API adapters must translate application contracts without importing domain, policy, stores, or runtimes:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn store_contracts_are_application_adapter_and_runtime_free() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-store/src")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve store contract sources");
+    assert!(!sources.is_empty(), "store contract sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay"],
+        &["tracedecay_api"],
+        &["tracedecay_application"],
+        &["tracedecay_hooks"],
+        &["tracedecay_rusqlite_runtime"],
+        &[FORBIDDEN_LIBSQL_CRATE],
+        &["rusqlite"],
+        &["sqlx"],
+        &["diesel"],
+        &["sea_orm"],
+        &["tokio"],
+        &["async_std"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+        &["std", "thread"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect store contracts");
+    assert!(
+        violations.is_empty(),
+        "store contracts must depend inward on domain values without application, adapter, driver, or runtime authority:\n{}",
         violations.into_iter().collect::<Vec<_>>().join("\n")
     );
 }

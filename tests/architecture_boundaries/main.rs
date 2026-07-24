@@ -12,7 +12,7 @@
 //! - `query_kernel`: `src/query` purity guards (dependency roots, macros,
 //!   attributes, module graph) and the temporal kernel boundary test.
 //! - `dependency_boundaries`: forbidden-path layering guards for
-//!   application/domain/store session code.
+//!   application/domain/store/query/API code.
 
 mod compile_isolation;
 mod dependency_boundaries;

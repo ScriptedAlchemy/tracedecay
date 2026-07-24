@@ -392,7 +392,6 @@ fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {
             "serde_json",
             "thiserror",
             "tracedecay-application",
-            "tracedecay-domain",
             "tracedecay-tool-catalog",
         ],
         Some("crates/tracedecay-hooks/Cargo.toml") => &[
