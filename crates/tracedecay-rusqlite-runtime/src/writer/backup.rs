@@ -383,9 +383,7 @@ struct StagedFile {
 
 impl StagedFile {
     fn abandon(self) {
-        if self.pinned.verify_current_path(&self.path).is_ok() {
-            let _ = fs::remove_file(&self.path);
-        }
+        let _ = self.pinned.discard_created(&self.path);
     }
 }
 
@@ -396,9 +394,7 @@ struct CompletedStaging {
 
 impl CompletedStaging {
     fn abandon(self) {
-        if self.pinned.verify_current_path(&self.path).is_ok() {
-            let _ = fs::remove_file(&self.path);
-        }
+        let _ = self.pinned.discard_created(&self.path);
     }
 }
 

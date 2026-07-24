@@ -759,15 +759,16 @@ fn online_backup_authority_loss_before_publication_removes_staging() {
         }
     ));
     assert!(!destination.exists());
-    assert!(
-        std::fs::read_dir(destination.parent().unwrap())
-            .unwrap()
-            .all(|entry| !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains("backup-prepublish.sqlite3.tracedecay-backup"))
+    let staging_prefix = format!(
+        ".{}.tracedecay-backup-",
+        destination.file_name().unwrap().to_string_lossy()
     );
+    let leaked_staging = std::fs::read_dir(destination.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(&staging_prefix))
+        .collect::<Vec<_>>();
+    assert!(leaked_staging.is_empty(), "{leaked_staging:?}");
     writer.shutdown_and_join().unwrap();
 }
 
