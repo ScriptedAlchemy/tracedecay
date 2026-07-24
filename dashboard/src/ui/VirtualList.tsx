@@ -18,9 +18,23 @@ import { cn } from './cn';
 
 /** Result rows switch to windowing above this many entries. */
 const VIRTUALIZE_THRESHOLD = 200;
-/** DataRow is a fixed `h-9` (36px) button and never wraps, so a single fixed
- * estimate positions every row exactly with no measurement pass. */
-const ROW_HEIGHT = 36;
+/** DataRow is a fixed-height button that never wraps, so a single fixed
+ * estimate positions every row exactly with no measurement pass — provided the
+ * estimate matches the row. It is read from `--row-height-data`, the same token
+ * DataRow sizes itself from, because a hard-coded copy had already drifted 4px
+ * away from the real row height and offset every windowed row. */
+const ROW_HEIGHT_FALLBACK = 36;
+
+function rowHeight(): number {
+  if (typeof window === 'undefined' || typeof getComputedStyle !== 'function') {
+    return ROW_HEIGHT_FALLBACK;
+  }
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue('--row-height-data')
+    .trim();
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : ROW_HEIGHT_FALLBACK;
+}
 
 export interface VirtualListProps<T> {
   items: T[];
@@ -40,7 +54,7 @@ export function VirtualList<T>({
   renderItem,
   getKey,
   header,
-  estimateHeight = ROW_HEIGHT,
+  estimateHeight,
   overscan = 12,
   threshold = VIRTUALIZE_THRESHOLD,
   className,
@@ -61,7 +75,7 @@ export function VirtualList<T>({
       renderItem={renderItem}
       getKey={getKey}
       header={header}
-      estimateHeight={estimateHeight}
+      estimateHeight={estimateHeight ?? rowHeight()}
       overscan={overscan}
       className={className}
     />

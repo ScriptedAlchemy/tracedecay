@@ -94,15 +94,24 @@ export function ExplorerSplit({
  * hairline at the top of the column. */
 export function BayLegend({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-7 shrink-0 items-center gap-2 border-b border-edge-subtle px-2.5">
-      <span className="td-legend">{children}</span>
+    <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+      <span className="td-title">{children}</span>
       <span aria-hidden className="td-rule" />
     </div>
   );
 }
 
-/** 32px data row: hairline-ruled, monospaced, with a selection lamp in the
- * gutter so a picked row is legible without a fill wash. */
+/** The data row: hairline-ruled, monospaced, with a selection lamp in the
+ * gutter so a picked row is legible without a fill wash.
+ *
+ * Height comes from `--row-height-data` rather than a utility class, because
+ * `VirtualList` derives its windowing estimate from the same token — the two
+ * had drifted apart (32px rows measured as 36px), which mispositioned every
+ * row of a windowed list. One token, one truth.
+ *
+ * The row is a grid rather than a flex line: a fixed leading gutter means the
+ * magnitude rails in a column line up exactly, which is the entire point of
+ * drawing them. */
 export function DataRow({
   selected,
   onSelect,
@@ -119,8 +128,9 @@ export function DataRow({
       type="button"
       onClick={onSelect}
       aria-pressed={selected ?? false}
+      style={{ height: 'var(--row-height-data)' }}
       className={cn(
-        'relative flex h-8 w-full items-center gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
+        'relative flex w-full items-center gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
         'hover:bg-surface-1 focus-visible:bg-surface-1',
         selected && 'bg-surface-2',
         className,
@@ -149,8 +159,8 @@ export function InspectorPanel({
 }) {
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-7 shrink-0 items-center gap-2 border-b border-edge-subtle px-2.5">
-        <h2 className="td-legend truncate text-text-secondary">{title}</h2>
+      <header className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+        <h2 className="td-title truncate">{title}</h2>
         <span aria-hidden className="td-rule" />
         {onClose ? (
           <button
