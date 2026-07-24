@@ -2176,3 +2176,67 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
         "cleanup must preserve profile-sharded enrollment marker"
     );
 }
+
+/// `migrate storage-report` is read-only and works against an explicit
+/// `--profile-root` without any daemon or registered project, reporting a
+/// real registered store's size and an unregistered directory's presence
+/// (plan 38 §7 — size observability reachable from a command).
+#[test]
+fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let profile_root = profile_root(home.path());
+    std::fs::create_dir_all(&profile_root).unwrap();
+
+    // One registered store with a real graph database file. It needs actual
+    // content: `Connection::open` alone leaves a zero-length file on disk,
+    // which is not a store any profile would ever hold.
+    let registered_root = profile_root.join("projects/proj_cli");
+    std::fs::create_dir_all(&registered_root).unwrap();
+    let store_db = rusqlite::Connection::open(registered_root.join("tracedecay.db")).unwrap();
+    store_db
+        .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
+        .unwrap();
+    drop(store_db);
+    let global_db = rusqlite::Connection::open(profile_root.join("global.db")).unwrap();
+    global_db
+        .execute_batch(
+            "CREATE TABLE code_projects (project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL);",
+        )
+        .unwrap();
+    global_db
+        .execute(
+            "INSERT INTO code_projects (project_id, canonical_root) VALUES ('proj_cli', ?1)",
+            rusqlite::params![project.path().display().to_string()],
+        )
+        .unwrap();
+    drop(global_db);
+
+    // An unregistered leaf directory under `projects/`.
+    let unregistered = profile_root.join("projects/proj_ghost");
+    std::fs::create_dir_all(&unregistered).unwrap();
+    std::fs::write(unregistered.join("payload.bin"), vec![0u8; 4096]).unwrap();
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args([
+        "migrate",
+        "storage-report",
+        "--profile-root",
+        profile_root.to_str().unwrap(),
+        "--json",
+    ]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "storage-report should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report json");
+    assert_eq!(report["stores"].as_array().unwrap().len(), 1);
+    assert_eq!(report["stores"][0]["project_id"], "proj_cli");
+    assert!(report["stores"][0]["total_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(report["unregistered_dir_count"], 1);
+    assert!(report["unregistered_bytes"].as_u64().unwrap() >= 4096);
+}
