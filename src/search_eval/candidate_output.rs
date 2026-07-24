@@ -1968,6 +1968,55 @@ fn hardware_fingerprint() -> String {
 mod tests {
     use super::*;
 
+    struct TestRepositoryFixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+    }
+
+    impl TestRepositoryFixture {
+        fn clone(authenticate: bool) -> Self {
+            let temp = tempfile::tempdir().expect("temporary repository fixture");
+            let root = temp.path().join("repo");
+            let output = std::process::Command::new("git")
+                .arg("clone")
+                .arg("--quiet")
+                .arg(repo_root())
+                .arg(&root)
+                .output()
+                .expect("clone repository fixture");
+            assert!(
+                output.status.success(),
+                "clone repository fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if authenticate {
+                assert!(
+                    crate::storage::write_repository_identity_marker(
+                        &root,
+                        "project.search-eval-fixture"
+                    )
+                    .expect("write repository fixture identity")
+                );
+            }
+            Self { _temp: temp, root }
+        }
+    }
+
+    fn authenticated_repo_fixture() -> Arc<TestRepositoryFixture> {
+        static FIXTURE: std::sync::OnceLock<Mutex<std::sync::Weak<TestRepositoryFixture>>> =
+            std::sync::OnceLock::new();
+        let mut fixture = FIXTURE
+            .get_or_init(|| Mutex::new(std::sync::Weak::new()))
+            .lock()
+            .expect("repository fixture lock");
+        if let Some(fixture) = fixture.upgrade() {
+            return fixture;
+        }
+        let replacement = Arc::new(TestRepositoryFixture::clone(true));
+        *fixture = Arc::downgrade(&replacement);
+        replacement
+    }
+
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
@@ -1993,6 +2042,26 @@ mod tests {
                 "crates/tracedecay-domain/src/research/watermark.rs::VectorWatermark::merge_max"
             ),
             "watermark::VectorWatermark::merge_max"
+        );
+    }
+
+    #[test]
+    fn historical_candidates_require_product_repository_identity() {
+        let fixture = TestRepositoryFixture::clone(false);
+        let workload = load_candidate_workload(&fixture.root.join(WORKLOAD_RELATIVE))
+            .expect("markerless workload");
+        let published = publish_corpus(&fixture.root, &workload).expect("markerless corpus");
+        let query = workload
+            .queries
+            .iter()
+            .find(|query| query.query_id == "train-012")
+            .expect("historical query");
+
+        let error = historical_candidates(&published, query).expect_err("identity is required");
+        assert!(
+            error
+                .to_string()
+                .contains("authoritative repository identity marker")
         );
     }
 
@@ -2089,16 +2158,18 @@ mod tests {
 
     #[test]
     fn direct_outputs_cover_train_and_validation() {
+        let fixture = authenticated_repo_fixture();
+        let fixture_root = &fixture.root;
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: fixture_root,
             workload_path: None,
             profile_ids: Some(&["pr9-fallback".to_owned()]),
         })
         .expect("generate");
         assert_eq!(result.outputs.len(), 2);
         let expected_corpus_digest =
-            compute_corpus_digest(&repo_root(), &workload).expect("corpus digest");
+            compute_corpus_digest(fixture_root, &workload).expect("corpus digest");
         for output in &result.outputs {
             assert_eq!(output.schema_version, 2);
             assert!(output.partition == "train" || output.partition == "validation");
@@ -2175,8 +2246,9 @@ mod tests {
 
     #[test]
     fn published_corpus_maps_production_source_occurrences() {
+        let fixture = authenticated_repo_fixture();
         let workload = workload();
-        let published = publish_corpus(&repo_root(), &workload).expect("publish corpus");
+        let published = publish_corpus(&fixture.root, &workload).expect("publish corpus");
 
         for chunk in published.generation.chunks().chunks() {
             let chunk_occurrence = format!("code-chunk:{}", chunk.id.as_str());
@@ -2277,15 +2349,17 @@ mod tests {
 
     #[test]
     fn distinct_ten_x_corpus_produces_measured_resource_evidence() {
+        let fixture = authenticated_repo_fixture();
+        let fixture_root = &fixture.root;
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: fixture_root,
             workload_path: None,
             profile_ids: Some(&["pr9-fallback".to_owned()]),
         })
         .expect("generate");
         let report =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &result)
+            crate::search_eval::evaluate_generated_outputs(fixture_root, &workload, &result)
                 .expect("evaluate");
 
         let expected_status = if peak_rss_bytes().is_some() {
@@ -2301,8 +2375,8 @@ mod tests {
                 .all(|profile| { profile.resource_status == expected_status })
         );
 
-        let current = publish_corpus(&repo_root(), &workload).expect("current corpus");
-        let ten_x = publish_corpus_with_scale(&repo_root(), &workload, 10).expect("10x corpus");
+        let current = publish_corpus(fixture_root, &workload).expect("current corpus");
+        let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10).expect("10x corpus");
         assert_ne!(
             current.generation.manifest().generation_id,
             ten_x.generation.manifest().generation_id
@@ -2315,7 +2389,7 @@ mod tests {
         let mut missing_resource = result.clone();
         missing_resource.outputs[0].resources.remove("10x");
         let report = crate::search_eval::evaluate_generated_outputs(
-            &repo_root(),
+            fixture_root,
             &workload,
             &missing_resource,
         )
@@ -2394,9 +2468,10 @@ mod tests {
 
     #[test]
     fn evaluation_rejects_optional_stage_status_that_disagrees_with_profile() {
+        let fixture = authenticated_repo_fixture();
         let workload = workload();
         let mut result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: &fixture.root,
             workload_path: None,
             profile_ids: Some(&["hybrid-reranked".to_owned()]),
         })
@@ -2404,16 +2479,18 @@ mod tests {
         result.outputs[0].optional_stages.semantic = OptionalStageMeasurementV1::NotRequested;
 
         let error =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &result)
+            crate::search_eval::evaluate_generated_outputs(&fixture.root, &workload, &result)
                 .expect_err("configured semantic stage cannot be reported as not requested");
         assert!(error.to_string().contains("optional stage status"));
     }
 
     #[test]
     fn resource_evidence_enforces_state_budgets_and_exact_catalog() {
+        let fixture = authenticated_repo_fixture();
+        let fixture_root = &fixture.root;
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: fixture_root,
             workload_path: None,
             profile_ids: Some(&["pr9-fallback".to_owned()]),
         })
@@ -2427,7 +2504,7 @@ mod tests {
         current.status = ResourceMeasurementStatusV1::Pending;
         current.pending_reason = None;
         let report = crate::search_eval::evaluate_generated_outputs(
-            &repo_root(),
+            fixture_root,
             &workload,
             &invalid_pending,
         )
@@ -2449,7 +2526,7 @@ mod tests {
             .expect("10x resource")
             .eligible_chunks = current_chunks;
         let report =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &wrong_scale)
+            crate::search_eval::evaluate_generated_outputs(fixture_root, &workload, &wrong_scale)
                 .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
@@ -2472,7 +2549,7 @@ mod tests {
                 .saturating_add(1),
         );
         let report =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &over_budget)
+            crate::search_eval::evaluate_generated_outputs(fixture_root, &workload, &over_budget)
                 .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
@@ -2489,7 +2566,7 @@ mod tests {
             .resources
             .insert("synthetic".to_owned(), synthetic);
         let report = crate::search_eval::evaluate_generated_outputs(
-            &repo_root(),
+            fixture_root,
             &workload,
             &extra_resource,
         )
@@ -2502,9 +2579,10 @@ mod tests {
 
     #[test]
     fn candidate_bytes_match_direct_production_calls() {
+        let fixture = authenticated_repo_fixture();
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: &fixture.root,
             workload_path: None,
             profile_ids: Some(&["pr9-fallback".to_owned()]),
         })
@@ -2516,7 +2594,7 @@ mod tests {
             .expect("train output");
         let probe = train.queries.first().expect("at least one train query");
         let direct = retrieve_partition_query_bytes(
-            &repo_root(),
+            &fixture.root,
             &workload,
             "pr9-fallback",
             &probe.query_id,
@@ -2531,8 +2609,9 @@ mod tests {
 
     #[test]
     fn semantic_profiles_do_not_claim_a_comparison_when_only_fallback_ran() {
+        let fixture = authenticated_repo_fixture();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: &fixture.root,
             workload_path: None,
             profile_ids: Some(&["hybrid-conservative".to_owned()]),
         })
@@ -2552,8 +2631,9 @@ mod tests {
 
     #[test]
     fn rerank_profiles_remain_pending_when_no_rerank_measurement_ran() {
+        let fixture = authenticated_repo_fixture();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: &repo_root(),
+            repo_root: &fixture.root,
             workload_path: None,
             profile_ids: Some(&["hybrid-reranked".to_owned()]),
         })
