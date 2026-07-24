@@ -10,18 +10,19 @@ use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
     ApplicationOperation, ApplicationResult, AuthorizationPort, AuthorizationPortOutcome,
-    AuthorizationRequest, AuthorizationService, CancellationContext, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain, PageRequest, PageState,
-    RequestContext, RequestId, ResolvedScope, ResultContractRef, ResultProjection,
-    RetrievalEvidence, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
-    SourceAuthorizationSnapshot, SymbolRetrievalPort, SymbolSearchRequest, SymbolSearchResult,
-    SymbolSearchService, TemporalState, application_catalog_contributions,
+    AuthorizationRequest, AuthorizationService, CancellationContext, CapabilityGrantId,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain,
+    PageRequest, PageState, RequestContext, RequestId, ResolvedScope, ResultContractRef,
+    ResultProjection, RetrievalEvidence, RetrievalOrder, RetrievalPortContext,
+    RetrievalPortOutcome, SourceAuthorizationSnapshot, SymbolRetrievalPort, SymbolSearchRequest,
+    SymbolSearchResult, SymbolSearchService, TemporalState, application_catalog_contributions,
     application_handler_descriptors, retrieval::catalog::symbol_search_contribution,
 };
 use tracedecay_domain::{
-    ActorId, EphemeralSanitizedQueryViewV1, ManifestDigest, Pr9FallbackSubpayload, ProjectId,
-    PublicRetrieverStatus, QueryNormalizationRevision, RefId, RepositoryId, RetrieverKind,
-    SanitizerRevision, UtcMicros, WorktreeId,
+    ActorId, EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest, FusionProfileId,
+    ManifestDigest, Pr9FallbackSubpayload, ProjectId, PublicRetrieverStatus,
+    QueryNormalizationRevision, RefId, RepositoryId, RetrieverKind, SanitizerRevision, UtcMicros,
+    WorktreeId,
 };
 use tracedecay_policy::authorization::{
     SourceAuthorizationEvaluatorV1, SourceAuthorizationInputV1, SourceAuthorizationTruthTableV1,
@@ -402,7 +403,7 @@ fn request_context(operation: &ApplicationOperation) -> RequestContext {
     )
     .unwrap();
     let grant = CapabilityGrantSnapshot::new(
-        "grant.catalog-dispatch".try_into().unwrap(),
+        CapabilityGrantId::new("grant.catalog-dispatch").unwrap(),
         1,
         ManifestDigest::new(SHA256_A).unwrap(),
         ActorId::new("actor.issuer").unwrap(),
@@ -436,7 +437,7 @@ fn authorized_source_input() -> SourceAuthorizationInputV1 {
 
 fn pr9_fallback() -> Pr9FallbackSubpayload {
     let mut fallback = Pr9FallbackSubpayload {
-        profile_id: "profile.pr9.catalog-dispatch".try_into().unwrap(),
+        profile_id: FusionProfileId::new("profile.pr9.catalog-dispatch").unwrap(),
         ordered_candidates: Vec::new(),
         public_pr9_lane_coverage: BTreeMap::from([
             (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
@@ -445,7 +446,7 @@ fn pr9_fallback() -> Pr9FallbackSubpayload {
         ]),
         freshness: Vec::new(),
         cursor: None,
-        digest: ManifestDigest::new(SHA256_A).unwrap(),
+        digest: FallbackSubpayloadDigest::new(SHA256_A).unwrap(),
     };
     fallback.digest = fallback.compute_digest().unwrap();
     fallback

@@ -1,30 +1,19 @@
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, GlobalDb};
+use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay::sessions::lcm::LcmStorageKind;
 use tracedecay::sessions::{
-    SessionRecord, SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
+    SessionSearchScope, SessionSearchTimeRange,
 };
 
-use crate::common::{
-    global_message as sample_message, global_session as sample_session,
-    isolated_global_db_path as isolated_db_path, write_empty_global_db_schema,
-};
+use crate::common::{global_message as sample_message, global_session as sample_session};
 
-/// Opens the per-test global DB from the cached empty-schema template
-/// (mirrors `common::open_lcm_db`), skipping the full DDL + migration pass
-/// that `GlobalDb::open_at` pays on every fresh store. Tests that exercise
-/// schema upgrades build legacy DBs by hand and call `GlobalDb::open_at`
-/// directly, so they keep the real migration path.
-async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = isolated_db_path(tmp);
-    if !db_path.exists() {
-        write_empty_global_db_schema(&db_path).await;
-        return GlobalDb::open_at_assuming_schema(&db_path)
-            .await
-            .expect("global db open");
-    }
-    GlobalDb::open_at(&db_path).await.expect("global db open")
+async fn open_isolated_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("registered profile runtime")
 }
 
 fn sha256_hex(content: &str) -> String {
@@ -33,90 +22,224 @@ fn sha256_hex(content: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-async fn raw_message_count(db_path: &std::path::Path, provider: &str, message_id: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND message_id = ?2",
-            libsql::params![provider, message_id],
-        )
-        .await
-        .unwrap();
-    let count = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    drop(rows);
-    drop(conn);
-    drop(db);
-    count
+trait RegisteredSessionTestExt {
+    async fn append_analytics_event(
+        &self,
+        event: &AnalyticsEventInsert,
+    ) -> tracedecay::errors::Result<i64>;
+    async fn query_analytics_events(
+        &self,
+        query: &AnalyticsEventQuery,
+    ) -> tracedecay::errors::Result<Vec<tracedecay::global_db::AnalyticsEventRecord>>;
+    async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord>;
+    async fn get_session_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<SessionMessageRecord>;
+    async fn upsert_session(&self, session: &SessionRecord) -> bool;
+    async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool;
+    async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage>;
+    async fn search_session_messages(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Vec<SessionMessageSearchResult>;
+    async fn search_session_messages_filtered(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        filters: SessionSearchFilters<'_>,
+    ) -> Vec<SessionMessageSearchResult>;
+    async fn search_session_messages_git_scoped(
+        &self,
+        provider: Option<&str>,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        filters: SessionSearchFilters<'_>,
+        git_filter: &tracedecay::sessions::git_correlation::GitScopeFilter,
+    ) -> Vec<SessionMessageSearchResult>;
+    async fn git_record_span_observation(
+        &self,
+        observation: &tracedecay::sessions::git_correlation::SpanObservation,
+        merge_gap_secs: i64,
+    ) -> tracedecay::errors::Result<i64>;
+    async fn session_message_count(&self) -> tracedecay::errors::Result<i64>;
+    async fn session_message_count_for_project(
+        &self,
+        project_key: &str,
+    ) -> tracedecay::errors::Result<i64>;
+    async fn set_parse_offset(&self, path: &str, offset: tracedecay::global_db::ParseOffset);
+    async fn session_ingest_health(&self) -> tracedecay::global_db::SessionIngestHealth;
+    async fn session_ingest_health_for_provider(
+        &self,
+        provider: Option<&str>,
+    ) -> tracedecay::global_db::SessionIngestHealth;
 }
 
-async fn raw_snippet_and_index(
-    db_path: &std::path::Path,
-    provider: &str,
-    message_id: &str,
-) -> (String, String) {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT snippet_text, index_text
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND message_id = ?2",
-            libsql::params![provider, message_id],
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    let snippet_and_index = (row.get(0).unwrap(), row.get(1).unwrap());
-    drop(rows);
-    drop(conn);
-    drop(db);
-    snippet_and_index
-}
+impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
+    async fn append_analytics_event(
+        &self,
+        event: &AnalyticsEventInsert,
+    ) -> tracedecay::errors::Result<i64> {
+        self.append_profile_analytics_event_for_test(event).await
+    }
 
-async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_raw_messages_fts
-             WHERE lcm_raw_messages_fts MATCH ?1",
-            libsql::params![query],
-        )
-        .await
-        .unwrap();
-    let count = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    drop(rows);
-    drop(conn);
-    drop(db);
-    count
-}
+    async fn query_analytics_events(
+        &self,
+        query: &AnalyticsEventQuery,
+    ) -> tracedecay::errors::Result<Vec<tracedecay::global_db::AnalyticsEventRecord>> {
+        self.query_profile_analytics_events_for_test(query).await
+    }
 
-async fn raw_analytics_event_count(
-    db_path: &std::path::Path,
-    provider: &str,
-    session_id: &str,
-    event_kind: &str,
-) -> i64 {
-    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM analytics_events
-             WHERE provider = ?1 AND session_id = ?2 AND event_kind = ?3",
-            libsql::params![provider, session_id, event_kind],
+    async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
+        self.session_for_test(HostAdmissionScope::Profile, provider, session_id)
+            .await
+            .expect("registered session lookup")
+    }
+
+    async fn get_session_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<SessionMessageRecord> {
+        self.session_message_for_test(HostAdmissionScope::Profile, provider, message_id)
+            .await
+            .expect("registered session message lookup")
+    }
+
+    async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.upsert_session_for_test(HostAdmissionScope::Profile, session)
+            .await
+            .expect("registered session upsert")
+    }
+
+    async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
+        self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+        self.lcm_load_raw_message_for_test(provider, message_id)
+            .await
+    }
+
+    async fn search_session_messages(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_for_test(
+            HostAdmissionScope::Profile,
+            provider,
+            project_key,
+            query,
+            limit,
         )
         .await
-        .unwrap();
-    let count = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    drop(rows);
-    drop(conn);
-    drop(db);
-    count
+        .expect("registered session message search")
+    }
+
+    async fn search_session_messages_filtered(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        filters: SessionSearchFilters<'_>,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_filtered_for_test(
+            HostAdmissionScope::Profile,
+            provider,
+            project_key,
+            query,
+            limit,
+            filters,
+        )
+        .await
+        .expect("registered filtered session message search")
+    }
+
+    async fn search_session_messages_git_scoped(
+        &self,
+        provider: Option<&str>,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        filters: SessionSearchFilters<'_>,
+        git_filter: &tracedecay::sessions::git_correlation::GitScopeFilter,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_git_scoped_for_test(
+            HostAdmissionScope::Profile,
+            provider,
+            project_key,
+            query,
+            limit,
+            filters,
+            git_filter,
+        )
+        .await
+        .expect("registered git-scoped session message search")
+    }
+
+    async fn git_record_span_observation(
+        &self,
+        observation: &tracedecay::sessions::git_correlation::SpanObservation,
+        merge_gap_secs: i64,
+    ) -> tracedecay::errors::Result<i64> {
+        self.record_session_span_for_test(HostAdmissionScope::Profile, observation, merge_gap_secs)
+            .await
+    }
+
+    async fn session_message_count(&self) -> tracedecay::errors::Result<i64> {
+        self.session_message_count_for_test(HostAdmissionScope::Profile, None)
+            .await
+    }
+
+    async fn session_message_count_for_project(
+        &self,
+        project_key: &str,
+    ) -> tracedecay::errors::Result<i64> {
+        self.session_message_count_for_test(HostAdmissionScope::Profile, Some(project_key))
+            .await
+    }
+
+    async fn set_parse_offset(&self, path: &str, offset: tracedecay::global_db::ParseOffset) {
+        self.set_parse_offset_for_test(HostAdmissionScope::Profile, path, offset)
+            .await
+            .expect("registered parse offset write");
+    }
+
+    async fn session_ingest_health(&self) -> tracedecay::global_db::SessionIngestHealth {
+        self.session_ingest_health_for_test(HostAdmissionScope::Profile, None)
+            .await
+            .expect("registered session ingest health")
+    }
+
+    async fn session_ingest_health_for_provider(
+        &self,
+        provider: Option<&str>,
+    ) -> tracedecay::global_db::SessionIngestHealth {
+        self.session_ingest_health_for_test(HostAdmissionScope::Profile, provider)
+            .await
+            .expect("registered provider session ingest health")
+    }
 }
 
 fn analytics_event(
@@ -156,7 +279,11 @@ fn analytics_query(
     }
 }
 
-async fn append_analytics_event(db: &GlobalDb, event: &AnalyticsEventInsert, label: &str) -> i64 {
+async fn append_analytics_event(
+    db: &HostAdmissionTestRuntimeV1,
+    event: &AnalyticsEventInsert,
+    label: &str,
+) -> i64 {
     db.append_analytics_event(event).await.expect(label)
 }
 
@@ -199,12 +326,14 @@ async fn project_registry_path_aliases_resolve_exactly_without_active_fallback()
     let by_root = db
         .project_registry_context_by_alias(&target_root)
         .await
+        .expect("target root alias lookup should succeed")
         .expect("target root alias should resolve");
     assert_eq!(by_root.project.project_id, "proj_target");
 
     let by_nested_alias = db
         .project_registry_context_by_alias(&nested_target_alias)
         .await
+        .expect("nested target alias lookup should succeed")
         .expect("nested target alias should resolve");
     assert_eq!(by_nested_alias.project.project_id, "proj_target");
 
@@ -217,6 +346,7 @@ async fn project_registry_path_aliases_resolve_exactly_without_active_fallback()
     assert!(
         db.project_registry_context_by_alias(&missing_root)
             .await
+            .expect("missing path alias lookup should succeed")
             .is_none(),
         "unresolved path selectors must not fall back to the active registered project"
     );
@@ -330,8 +460,7 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
     let db_path = tmp.path().join(".tracedecay").join("global.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-    let old_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = old_db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -346,12 +475,12 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
             PRIMARY KEY(provider, session_id)
         );",
     )
-    .await
     .unwrap();
     drop(conn);
-    drop(old_db);
 
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let db = HostAdmissionTestRuntimeV1::profile(db_path.parent().expect("profile root"))
+        .await
+        .expect("registered profile runtime");
     let event = AnalyticsEventInsert {
         hook_name: Some("post-tool-use".to_string()),
         tool_name: Some("shell".to_string()),
@@ -371,23 +500,9 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
     assert_eq!(events[0].id, id);
     assert_eq!(events[0].hook_name.as_deref(), Some("post-tool-use"));
 
-    let verify_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let verify_conn = verify_db.connect().unwrap();
-    let mut index_rows = verify_conn
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'index'
-               AND name IN ('idx_analytics_events_project_time', 'idx_analytics_events_timestamp')",
-            (),
-        )
+    let index_count = db
+        .profile_analytics_indexes_present_for_test()
         .await
-        .unwrap();
-    let index_count = index_rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<i64>(0)
         .unwrap();
     assert_eq!(
         index_count, 2,
@@ -398,7 +513,6 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
 #[tokio::test]
 async fn analytics_events_preserve_assistant_hook_tool_and_skill_fields() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let db = open_isolated_db(&tmp).await;
 
     let assistant_id = append_analytics_event(
@@ -473,10 +587,15 @@ async fn analytics_events_preserve_assistant_hook_tool_and_skill_fields() {
         events[3].skill_name.as_deref(),
         Some("superpowers:test-driven-development")
     );
-    assert_eq!(
-        raw_analytics_event_count(&db_path, "codex", "session-required-fields", "assistant").await,
-        1
-    );
+    let assistant_events = db
+        .query_analytics_events(&analytics_query(
+            Some("session-required-fields"),
+            Some("assistant"),
+            10,
+        ))
+        .await
+        .expect("query assistant analytics events");
+    assert_eq!(assistant_events.len(), 1);
 }
 
 #[tokio::test]
@@ -544,7 +663,6 @@ async fn session_message_count_filters_by_project_key() {
 #[tokio::test]
 async fn upsert_session_message_round_trips_and_updates() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let db = open_isolated_db(&tmp).await;
     let session = sample_session("cursor", "session-1", "project-a");
     db.upsert_session(&session).await;
@@ -584,7 +702,6 @@ async fn upsert_session_message_round_trips_and_updates() {
     assert_eq!(fetched.tool_names.as_deref(), Some("tracedecay_context"));
     assert_eq!(fetched.source_offset, Some(99));
 
-    assert_eq!(raw_message_count(&db_path, "cursor", "message-1").await, 1);
     let raw = db
         .lcm_load_raw_message("cursor", "message-1")
         .await
@@ -592,7 +709,11 @@ async fn upsert_session_message_round_trips_and_updates() {
     assert_eq!(raw.content, updated);
     assert_eq!(raw.content_hash, sha256_hex(&updated));
 
-    let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "message-1").await;
+    let (snippet_text, index_text) = db
+        .lcm_raw_message_search_fields_for_test("cursor", "message-1")
+        .await
+        .expect("raw search fields")
+        .expect("raw message should exist");
     assert!(snippet_text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_SNIPPET_CHARS);
     assert!(snippet_text.contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
     assert!(index_text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
@@ -602,7 +723,6 @@ async fn upsert_session_message_round_trips_and_updates() {
 #[tokio::test]
 async fn upsert_session_message_rejects_missing_session_without_orphan_raw() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let db = open_isolated_db(&tmp).await;
     let message = sample_message("cursor", "orphan-message", "missing-session", "orphan text");
 
@@ -617,34 +737,18 @@ async fn upsert_session_message_rejects_missing_session_without_orphan_raw() {
             .await
             .is_none()
     );
-    assert_eq!(
-        raw_message_count(&db_path, "cursor", "orphan-message").await,
-        0
-    );
 }
 
 #[tokio::test]
 async fn upsert_session_message_rolls_back_raw_when_projection_fails() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
     let db = open_isolated_db(&tmp).await;
     let session = sample_session("cursor", "session-1", "project-a");
     assert!(db.upsert_session(&session).await);
 
-    let trigger_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let trigger_conn = trigger_db.connect().unwrap();
-    trigger_conn
-        .execute_batch(
-            "CREATE TRIGGER fail_session_message_projection
-             BEFORE INSERT ON session_messages
-             BEGIN
-                SELECT RAISE(ABORT, 'projection failure');
-             END;",
-        )
+    db.set_session_message_projection_failure_for_test(HostAdmissionScope::Profile, true)
         .await
-        .unwrap();
-    drop(trigger_conn);
-    drop(trigger_db);
+        .expect("install projection failure fixture");
 
     let message = sample_message(
         "cursor",
@@ -653,10 +757,6 @@ async fn upsert_session_message_rolls_back_raw_when_projection_fails() {
         "raw before failure",
     );
     assert!(!db.upsert_session_message(&message).await);
-    assert_eq!(
-        raw_message_count(&db_path, "cursor", "message-rollback").await,
-        0
-    );
     assert!(
         db.lcm_load_raw_message("cursor", "message-rollback")
             .await
@@ -701,8 +801,6 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
 #[tokio::test]
 async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_or_metadata() {
     let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tracedecay");
     let db = open_isolated_db(&tmp).await;
     let session = sample_session("cursor", "session-1", "project-a");
     assert!(db.upsert_session(&session).await);
@@ -729,7 +827,7 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
             .unwrap_or("")
             .contains(metadata_secret)
     );
-    let payload_ref = raw.payload_ref.as_deref().expect("payload ref");
+    let payload_ref = raw.payload_ref.expect("payload ref");
 
     let fetched = db
         .get_session_message("cursor", "tool-large")
@@ -745,30 +843,54 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
     let projection_metadata = fetched.metadata_json.as_deref().unwrap_or("");
     assert!(!projection_metadata.contains(metadata_secret));
     assert!(projection_metadata.contains("\"external_payload\":true"));
-    assert!(projection_metadata.contains(payload_ref));
+    assert!(projection_metadata.contains(&payload_ref));
 
-    let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "tool-large").await;
+    let (snippet_text, index_text) = db
+        .lcm_raw_message_search_fields_for_test("cursor", "tool-large")
+        .await
+        .expect("raw search fields")
+        .expect("raw message should exist");
     assert!(!snippet_text.contains(body_secret));
     assert!(!index_text.contains(body_secret));
     assert!(!snippet_text.contains(metadata_secret));
     assert!(!index_text.contains(metadata_secret));
-    assert_eq!(lcm_fts_count(&db_path, body_secret).await, 0);
-    assert_eq!(lcm_fts_count(&db_path, metadata_secret).await, 0);
+    assert_eq!(
+        db.lcm_raw_message_fts_count_for_test(body_secret)
+            .await
+            .expect("body FTS count"),
+        0
+    );
+    assert_eq!(
+        db.lcm_raw_message_fts_count_for_test(metadata_secret)
+            .await
+            .expect("metadata FTS count"),
+        0
+    );
     assert!(
         db.search_session_messages("cursor", Some("project-a"), body_secret, 10)
             .await
             .is_empty()
     );
+    assert!(
+        db.search_session_messages("cursor", Some("project-a"), metadata_secret, 10)
+            .await
+            .is_empty()
+    );
 
     let expanded = db
-        .lcm_store(&storage_root)
-        .lcm_expand_payload(
-            "cursor",
-            "session-1",
-            payload_ref,
-            0,
-            payload.chars().count(),
-        )
+        .lcm_expand_for_test(tracedecay::sessions::lcm::LcmExpandRequest {
+            provider: "cursor".to_string(),
+            session_id: "session-1".to_string(),
+            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload {
+                payload_ref: payload_ref.clone(),
+            },
+            content_slice: Some(tracedecay::sessions::lcm::LcmContentSlice {
+                offset: 0,
+                limit: payload.chars().count(),
+            }),
+            source_offset: 0,
+            source_limit: None,
+        })
         .await
         .expect("payload should expand");
     assert_eq!(expanded.content, payload);
@@ -977,11 +1099,11 @@ async fn search_session_messages_filters_by_message_timestamp() {
 #[tokio::test]
 async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("global.db");
+    let profile_root = tmp.path().join(".tracedecay");
+    let db_path = tracedecay::sessions::user_sessions_db_path(&profile_root);
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-    let old_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-    let conn = old_db.connect().unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -1003,12 +1125,12 @@ async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
             1715000000, NULL, '/tmp/project/old.jsonl', '{\"source\":\"old\"}'
         );",
     )
-    .await
     .unwrap();
     drop(conn);
-    drop(old_db);
 
-    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .expect("registered profile runtime");
     let session = db
         .get_session("cursor", "old-parent")
         .await
@@ -1244,7 +1366,7 @@ async fn session_ingest_health_can_filter_by_provider() {
 
 #[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
-    use tracedecay::analytics_bridge::{HookImportSource, import_hook_analytics};
+    use tracedecay::analytics_bridge::HookImportSource;
 
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;
@@ -1264,12 +1386,12 @@ async fn hook_analytics_import_is_incremental_and_idempotent() {
         default_project_root: Some(tmp.path().to_path_buf()),
     }];
 
-    let outcome = import_hook_analytics(&db, &sources).await;
+    let outcome = db.import_profile_hook_analytics_for_test(&sources).await;
     assert_eq!(outcome.imported(), 2);
     assert!(outcome.sources[0].error.is_none());
 
     // Re-running without new rows imports nothing.
-    let outcome = import_hook_analytics(&db, &sources).await;
+    let outcome = db.import_profile_hook_analytics_for_test(&sources).await;
     assert_eq!(outcome.imported(), 0);
 
     // Appending one complete row plus a partial trailing line imports only
@@ -1281,7 +1403,7 @@ async fn hook_analytics_import_is_incremental_and_idempotent() {
     text.push('\n');
     text.push_str(r#"{"agent":"kiro","event":"hook_invo"#);
     std::fs::write(&jsonl, text).unwrap();
-    let outcome = import_hook_analytics(&db, &sources).await;
+    let outcome = db.import_profile_hook_analytics_for_test(&sources).await;
     assert_eq!(outcome.imported(), 1);
 
     let events = db
@@ -1300,7 +1422,7 @@ async fn hook_analytics_import_is_incremental_and_idempotent() {
     assert!(providers.contains(&"hook_claude"));
     assert!(providers.contains(&"hook_codex"));
     assert!(providers.contains(&"hook_cursor"));
-    let expected_project = GlobalDb::canonical_project_key(tmp.path());
+    let expected_project = HostAdmissionTestRuntimeV1::canonical_project_key(tmp.path());
     assert!(
         events
             .iter()
