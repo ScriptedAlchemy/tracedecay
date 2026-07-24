@@ -6,6 +6,14 @@ import { DoctorInspector } from './DoctorInspector.tsx';
 import { saveActiveDoctorOperation } from './doctorModel.ts';
 
 const operation = 'use-case.application.configuration.protected-apply';
+const projectAuthorityScope = {
+  scope_kind: 'project' as const,
+  project_id: 'project.doctor-test',
+  repository_id: 'repository.doctor-test',
+  worktree_id: 'worktree.doctor-test',
+  reference: null,
+  scope_digest: `sha256:${'a'.repeat(64)}`,
+};
 
 describe('DoctorInspector', () => {
   beforeEach(() => {
@@ -52,6 +60,27 @@ describe('DoctorInspector', () => {
     expect(screen.queryByText(/zero findings/i)).toBeNull();
   });
 
+  it('renders per-family denied and unknown coverage instead of hiding it in aggregate state', async () => {
+    const response = findingsEnvelope();
+    response.payload.report_coverage!.families.push(
+      {
+        family: 'semantic_index',
+        consultation: { status: 'unavailable', reason: 'denied' },
+      },
+      {
+        family: 'language_server',
+        consultation: { status: 'unavailable', reason: 'unknown' },
+      },
+    );
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(response)));
+
+    renderDoctor();
+
+    expect(await screen.findByLabelText('Doctor source coverage gaps')).toBeTruthy();
+    expect(screen.getByText(/Semantic index denied/)).toBeTruthy();
+    expect(screen.getByText(/Language server unknown/)).toBeTruthy();
+  });
+
   it('previews and explicitly confirms only the exact server-authorized operation', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal(
@@ -86,6 +115,8 @@ describe('DoctorInspector', () => {
     expect(await screen.findByText('Remediation previewed')).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Review remediation' }));
+    expect(screen.getByLabelText('Remediation authority scope')).toBeTruthy();
+    expect(screen.getByText('project.doctor-test')).toBeTruthy();
     const apply = screen.getByRole('button', { name: 'Apply remediation' });
     expect((apply as HTMLButtonElement).disabled).toBe(true);
 
@@ -97,7 +128,7 @@ describe('DoctorInspector', () => {
     expect((apply as HTMLButtonElement).disabled).toBe(false);
     await user.click(apply);
 
-    expect(await screen.findByText(/denied/)).toBeTruthy();
+    expect((await screen.findAllByText(/denied/)).length).toBeGreaterThan(0);
     const applyCall = calls.find(({ url }) => url === '/api/doctor/remediations/apply');
     expect(JSON.parse(String(applyCall?.init?.body))).toMatchObject({
       operation,
@@ -122,15 +153,60 @@ describe('DoctorInspector', () => {
     expect(applyBodies[1]?.idempotency_key).toBe(applyBodies[0]?.idempotency_key);
   });
 
+  it('allows a legal direct action while leaving authority resolution to the owner', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, init });
+        if (url === '/api/doctor/findings') {
+          return jsonResponse(directActionFindingsEnvelope());
+        }
+        if (url === '/api/doctor/remediations/apply') {
+          return jsonResponse(envelope({ status: 'unavailable', reason: 'denied' }, 'denied'));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderDoctor();
+
+    await user.click(await screen.findByRole('button', { name: 'Review remediation' }));
+    expect(
+      screen.getByText(/authority scope will be resolved and rechecked by the owner/),
+    ).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Preview' })).toBeNull();
+
+    const apply = screen.getByRole('button', { name: 'Apply remediation' });
+    expect((apply as HTMLButtonElement).disabled).toBe(true);
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /owner must resolve and recheck authority/,
+      }),
+    );
+    expect((apply as HTMLButtonElement).disabled).toBe(false);
+    await user.click(apply);
+
+    expect((await screen.findAllByText(/denied/)).length).toBeGreaterThan(0);
+    const applyCall = calls.find(({ url }) => url === '/api/doctor/remediations/apply');
+    expect(JSON.parse(String(applyCall?.init?.body))).toMatchObject({
+      operation,
+      preview_id: null,
+      confirmed: true,
+    });
+  });
+
   it('resumes the durable owner status identity after a reload', async () => {
     saveActiveDoctorOperation({
-      schema_revision: 1,
+      schema_revision: 2,
       operation_id: 'request.doctor.resume',
-      scope: {
+      transport_scope: {
         project_id: 'project.doctor-test',
         storage_mode: 'project_local',
         store_root: '/project',
       },
+      authority_scope: projectAuthorityScope,
     });
     const calls: string[] = [];
     vi.stubGlobal(
@@ -167,14 +243,64 @@ describe('DoctorInspector', () => {
     expect(calls).toContain('/api/doctor/remediations/request.doctor.resume');
   });
 
+  it('rejects a resumed status response with a different authority scope', async () => {
+    saveActiveDoctorOperation({
+      schema_revision: 2,
+      operation_id: 'request.doctor.authority-mismatch',
+      transport_scope: {
+        project_id: 'project.doctor-test',
+        storage_mode: 'project_local',
+        store_root: '/project',
+      },
+      authority_scope: projectAuthorityScope,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/doctor/findings') {
+          return jsonResponse(findingsEnvelope());
+        }
+        if (url === '/api/doctor/remediations/request.doctor.authority-mismatch') {
+          return jsonResponse(
+            operationEnvelope('failed', 'request.doctor.authority-mismatch', {
+              ...projectAuthorityScope,
+              project_id: 'project.other',
+              scope_digest: `sha256:${'d'.repeat(64)}`,
+            }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    renderDoctor();
+
+    expect(
+      await screen.findByText(/owner returned a different remediation authority scope/),
+    ).toBeTruthy();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Review remediation' }));
+    expect(screen.queryByText('project.other')).toBeNull();
+    expect(
+      screen.getByText(/authority scope will be resolved and rechecked by the owner/),
+    ).toBeTruthy();
+  });
+
   it('does not query a saved operation through a different project scope', async () => {
     saveActiveDoctorOperation({
-      schema_revision: 1,
+      schema_revision: 2,
       operation_id: 'request.doctor.other-project',
-      scope: {
+      transport_scope: {
         project_id: 'project.other',
         storage_mode: 'project_local',
         store_root: '/other',
+      },
+      authority_scope: {
+        ...projectAuthorityScope,
+        project_id: 'project.other',
+        scope_digest: `sha256:${'b'.repeat(64)}`,
       },
     });
     const calls: string[] = [];
@@ -220,10 +346,10 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-function envelope(
-  payload: unknown,
+function envelope<T>(
+  payload: T,
   state: string,
-  legalActions: unknown[] = [],
+  legalActions: Array<{ kind: string; operation?: string }> = [],
 ) {
   return {
     schema_revision: 1,
@@ -274,7 +400,7 @@ function envelope(
 }
 
 function findingsEnvelope() {
-  return envelope(
+  return envelope<import('../../contracts/generated.ts').DoctorFindingsPayload>(
     {
       family_filter: null,
       entries: [
@@ -334,15 +460,31 @@ function findingsEnvelope() {
   );
 }
 
-function operationEnvelope(phase: 'previewed' | 'failed', operationId: string) {
+function directActionFindingsEnvelope() {
+  const result = findingsEnvelope();
+  result.payload.remediations[0]!.preview_available = false;
+  result.legal_actions = result.legal_actions.filter(
+    (action: { kind: string }) => action.kind !== 'request_dry_run',
+  );
+  return result;
+}
+
+function operationEnvelope(
+  phase: 'previewed' | 'failed',
+  operationId: string,
+  authorityScope = projectAuthorityScope,
+) {
   return envelope(
     {
       status: 'operation',
       operation: {
         operation_id: operationId,
         owning_operation: operation,
+        authority_scope: authorityScope,
         phase,
         preview_id: 'preview.doctor.preview',
+        idempotency_key:
+          phase === 'previewed' ? null : 'idempotency.dashboard-doctor.fixture',
         execution: {
           started_at: 1,
           ended_at: 2,
