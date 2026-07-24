@@ -27,6 +27,20 @@
 //!
 //! Everything else (orphan store manifests, stale rows outside the temp
 //! directory, registry/manifest identity drift) is only reported.
+//!
+//! # `--strict` and store durability
+//!
+//! `tracedecay dogfood` runs this pass with `--strict`
+//! ([`crate::update_cmd::run_post_update_command`]), which used to fail the
+//! whole upgrade on *any* warning. That is what disabled a real daemon: the
+//! pass tried to mount and repair a 15GB `sessions.db`, an in-place schema
+//! migration on that store's bulk evidence tables got interrupted, and the
+//! resulting warning failed the strict gate even though nothing durable was
+//! at risk -- `sessions.db` is dominated by data that is safe to lose or
+//! retry (see `crate::migrate::durability`). Every [`HealthPassWarning`] now
+//! carries a [`StoreDurabilityClass`], and only warnings proven `Durable`
+//! can fail `--strict` (see [`HealthPassWarning::blocks_strict_upgrade`] and
+//! `crate::update_cmd::health_pass_failure_result`).
 
 use std::{
     path::{Path, PathBuf},
@@ -34,6 +48,7 @@ use std::{
 };
 
 use crate::global_db::{CodeProjectRecord, RegisteredGlobalDb};
+use crate::migrate::durability::{StoreDurabilityClass, StoreShardKind, shard_kind_durability_class};
 use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_code_projects};
 use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 
@@ -46,6 +61,61 @@ use report::{render_health_pass_report, render_missing_profile_report, render_wa
 pub struct BranchMetaQuarantine {
     pub original: PathBuf,
     pub quarantined: PathBuf,
+}
+
+/// One warning surfaced by the post-update health pass, tagged with the
+/// [`StoreDurabilityClass`] of the data it concerns.
+///
+/// `--strict` post-update only fails the process on warnings whose class
+/// proves the underlying data is [`StoreDurabilityClass::Durable`] --
+/// irreplaceable, curated data worth blocking an upgrade over. Warnings
+/// about `Derived` or `Recoverable` data are always advisory: the upgrade
+/// must never block on data that is safe to lose or safe to retry on a
+/// later open (`crate::migrate::durability`, and
+/// `docs/plans/tracedecay-v2/38-storage-retention-size-and-efficiency.md`).
+///
+/// Classifying every warning at its construction site -- rather than
+/// defaulting an untyped `Vec<String>` to "always blocking" -- is what makes
+/// that guarantee explicit instead of a comment: nothing can become
+/// non-blocking except through [`Self::new`]/[`Self::about_store`] naming a
+/// class that [`StoreDurabilityClass::may_block_upgrade`] agrees is safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthPassWarning {
+    pub message: String,
+    pub class: StoreDurabilityClass,
+}
+
+impl HealthPassWarning {
+    /// The conservative default: a warning about data that has not been
+    /// proven safe to lose or defer. Every health-pass warning that has not
+    /// been explicitly classified otherwise uses this constructor.
+    pub fn durable(message: impl Into<String>) -> Self {
+        Self::new(message, StoreDurabilityClass::Durable)
+    }
+
+    pub fn new(message: impl Into<String>, class: StoreDurabilityClass) -> Self {
+        Self {
+            message: message.into(),
+            class,
+        }
+    }
+
+    /// A warning about the store identified by `kind`, classified through
+    /// `crate::migrate::durability` rather than a hand-picked class.
+    pub fn about_store(message: impl Into<String>, kind: StoreShardKind) -> Self {
+        Self::new(message, shard_kind_durability_class(kind))
+    }
+
+    /// Whether this warning must fail a `--strict` post-update.
+    pub fn blocks_strict_upgrade(&self) -> bool {
+        self.class.may_block_upgrade()
+    }
+}
+
+impl std::fmt::Display for HealthPassWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.message)
+    }
 }
 
 /// Outcome of one post-update health pass.
@@ -61,7 +131,7 @@ pub struct HealthPassReport {
     /// Stale store manifests reconciled to the registry canonical path.
     pub reconciled_store_roots: Vec<super::registry_drift::ReconciledStoreRoot>,
     pub remaining_findings: Vec<String>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<HealthPassWarning>,
 }
 
 #[doc(hidden)]
@@ -77,7 +147,7 @@ pub async fn run_post_update_health_pass_under_lease(
         crate::daemon::daemon_reachable(),
     ) {
         let report = HealthPassReport {
-            warnings: vec![warning],
+            warnings: vec![HealthPassWarning::durable(warning)],
             ..HealthPassReport::default()
         };
         render_warnings(&report.warnings);
@@ -91,9 +161,9 @@ pub async fn run_post_update_health_pass_under_lease(
         Ok(scope) => scope,
         Err(error) => {
             let report = HealthPassReport {
-                warnings: vec![format!(
+                warnings: vec![HealthPassWarning::durable(format!(
                     "could not enter maintenance database scope for the post-update health pass: {error}"
-                )],
+                ))],
                 ..HealthPassReport::default()
             };
             render_warnings(&report.warnings);
@@ -104,9 +174,9 @@ pub async fn run_post_update_health_pass_under_lease(
         Ok(identity) => identity,
         Err(error) => {
             let report = HealthPassReport {
-                warnings: vec![format!(
+                warnings: vec![HealthPassWarning::durable(format!(
                     "could not load the profile identity for the post-update health pass: {error}"
-                )],
+                ))],
                 ..HealthPassReport::default()
             };
             render_warnings(&report.warnings);
@@ -122,9 +192,9 @@ pub async fn run_post_update_health_pass_under_lease(
             Ok(registry) => registry,
             Err(error) => {
                 let report = HealthPassReport {
-                    warnings: vec![format!(
+                    warnings: vec![HealthPassWarning::durable(format!(
                         "could not mount the profile runtime for the post-update health pass: {error}"
-                    )],
+                    ))],
                     ..HealthPassReport::default()
                 };
                 render_warnings(&report.warnings);
@@ -173,8 +243,17 @@ async fn compute_health_pass_report(
 
     let (quarantined, warnings) = quarantine_corrupt_branch_meta(profile_root);
     report.quarantined_branch_meta = quarantined;
-    report.warnings.extend(warnings);
+    report
+        .warnings
+        .extend(warnings.into_iter().map(HealthPassWarning::durable));
 
+    // The current project's sessions store is dominated by recoverable bulk
+    // data (transcripts and the evidence derived from them -- see
+    // `crate::migrate::durability::session_authority_table_class`), so a
+    // failure to mount or repair it here is advisory: it must never block a
+    // `--strict` upgrade the way it did in the diagnosed failure (mounting a
+    // 15GB `sessions.db` triggered an in-place schema rewrite that got
+    // interrupted, and the resulting warning failed the whole upgrade).
     if let Ok(project_root) = std::env::current_dir()
         && let Ok(layout) = crate::storage::resolve_layout(&project_root, profile_root)
         && layout.sessions_db_path.is_file()
@@ -193,18 +272,25 @@ async fn compute_health_pass_report(
                         if let Err(error) =
                             crate::global_db::repair_session_temporal_store(&session_database).await
                         {
-                            report.warnings.push(format!(
-                                "could not repair the current project session store: {error}"
+                            report.warnings.push(HealthPassWarning::about_store(
+                                format!("could not repair the current project session store: {error}"),
+                                StoreShardKind::ProjectSessions,
                             ));
                         }
                     }
-                    Err(error) => report.warnings.push(format!(
-                        "could not mount the current project session store for repair: {error}"
+                    Err(error) => report.warnings.push(HealthPassWarning::about_store(
+                        format!(
+                            "could not mount the current project session store for repair: {error}"
+                        ),
+                        StoreShardKind::ProjectSessions,
                     )),
                 }
             }
-            Err(error) => report.warnings.push(format!(
-                "could not repair the current project session store because its identity is invalid: {error}"
+            Err(error) => report.warnings.push(HealthPassWarning::about_store(
+                format!(
+                    "could not repair the current project session store because its identity is invalid: {error}"
+                ),
+                StoreShardKind::ProjectSessions,
             )),
         }
     }
@@ -212,8 +298,9 @@ async fn compute_health_pass_report(
     let global_db = match runtime_registry.profile_database().await {
         Ok(global_db) => global_db,
         Err(error) => {
-            report.warnings.push(format!(
-                "could not mount the global DB for the health pass: {error}"
+            report.warnings.push(HealthPassWarning::about_store(
+                format!("could not mount the global DB for the health pass: {error}"),
+                StoreShardKind::Profile,
             ));
             return report;
         }
@@ -228,8 +315,9 @@ async fn compute_health_pass_report(
     let projects = match global_db.list_code_projects(usize::MAX).await {
         Ok(projects) => projects,
         Err(error) => {
-            report.warnings.push(format!(
-                "could not read the global project registry: {error}"
+            report.warnings.push(HealthPassWarning::about_store(
+                format!("could not read the global project registry: {error}"),
+                StoreShardKind::Profile,
             ));
             return report;
         }
@@ -240,9 +328,10 @@ async fn compute_health_pass_report(
             purged_ids
         }
         Err(error) => {
-            report
-                .warnings
-                .push(format!("could not purge stale temp registry rows: {error}"));
+            report.warnings.push(HealthPassWarning::about_store(
+                format!("could not purge stale temp registry rows: {error}"),
+                StoreShardKind::Profile,
+            ));
             Vec::new()
         }
     };
@@ -254,7 +343,11 @@ async fn compute_health_pass_report(
     let remaining_registry_drift_count =
         count_remaining_registry_drift(&registry_drift, &reconciled);
     report.reconciled_store_roots = reconciled;
-    report.warnings.extend(reconcile_warnings);
+    report.warnings.extend(
+        reconcile_warnings
+            .into_iter()
+            .map(|message| HealthPassWarning::about_store(message, StoreShardKind::Profile)),
+    );
 
     let (findings, warnings) = collect_remaining_findings(
         &global_db,
@@ -265,7 +358,11 @@ async fn compute_health_pass_report(
     )
     .await;
     report.remaining_findings = findings;
-    report.warnings.extend(warnings);
+    report.warnings.extend(
+        warnings
+            .into_iter()
+            .map(|message| HealthPassWarning::about_store(message, StoreShardKind::Profile)),
+    );
     report
 }
 
@@ -278,7 +375,12 @@ async fn retire_completed_consolidation_manifests(
         crate::migrate::consolidate::retire_applied_input_manifests(profile_root, global_db).await;
     report.retired_consolidation_manifests = retirement.retired;
     report.retired_consolidation_registry_projects = retirement.retired_registry_projects;
-    report.warnings.extend(retirement.warnings);
+    report.warnings.extend(
+        retirement
+            .warnings
+            .into_iter()
+            .map(|message| HealthPassWarning::about_store(message, StoreShardKind::Profile)),
+    );
 }
 
 /// Renames every `branch-meta.json` under `<profile_root>/projects/*` that is

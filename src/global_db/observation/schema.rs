@@ -109,6 +109,23 @@ async fn migrate_observation_schema(
         return Ok(());
     }
 
+    // This full-table rewrite is exactly the operation that interrupted a
+    // real dogfood upgrade on a 15GB `sessions.db` and, before the
+    // `crate::migrate::durability` model existed, failed the whole strict
+    // post-update because of it (see `crate::doctor::heal`'s module doc).
+    // `observations` must stay classified `Recoverable` -- re-derivable by
+    // re-running sanitization/projection over recoverable transcript
+    // sources -- for that failure to stay non-blocking; assert it here so a
+    // future reclassification cannot silently drift from the code it
+    // documents.
+    debug_assert!(
+        matches!(
+            crate::migrate::durability::session_authority_table_class("observations"),
+            crate::migrate::durability::StoreDurabilityClass::Recoverable
+        ),
+        "the observations full-table rewrite must only ever run against a table \
+         proven Recoverable by the upgrade durability model"
+    );
     conn.execute_batch(
         "PRAGMA defer_foreign_keys = ON;
              DROP TRIGGER IF EXISTS observations_immutable_update;
