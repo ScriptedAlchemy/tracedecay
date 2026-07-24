@@ -654,6 +654,88 @@ fn unresolved_conflict_is_exposed_in_result_and_canonical_context() {
 }
 
 #[test]
+fn reciprocal_corrections_remain_visible_as_a_conflicted_context_cycle() {
+    block_on(async {
+        let port = FakeReadPort::new(
+            vec![
+                candidate("left", "left", 20),
+                candidate("right", "right", 10),
+            ],
+            vec![
+                TemporalRecord::Occurrence(occurrence('a', "left", 1)),
+                TemporalRecord::Occurrence(occurrence('b', "right", 2)),
+                TemporalRecord::Assertion(assertion(
+                    TemporalAssertionKindV1::Corrects,
+                    "right",
+                    "left",
+                    3,
+                )),
+                TemporalRecord::Assertion(assertion(
+                    TemporalAssertionKindV1::Corrects,
+                    "left",
+                    "right",
+                    4,
+                )),
+            ],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Current, 2),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("conflicted correction cycle");
+
+        assert_eq!(result.ranked.len(), 2);
+        assert_eq!(result.conflicts.len(), 2);
+        assert_eq!(result.lineage.len(), 2);
+        assert_eq!(result.context.bundle.conflicts, result.conflicts);
+        assert_eq!(result.context.bundle.lineage, result.lineage);
+    });
+}
+
+#[test]
+fn context_excludes_unrelated_off_page_conflicts_and_lineage() {
+    block_on(async {
+        let port = FakeReadPort::new(
+            vec![
+                candidate("selected", "selected", 30),
+                candidate("left", "left", 20),
+                candidate("right", "right", 10),
+            ],
+            vec![
+                TemporalRecord::Occurrence(occurrence('a', "selected", 1)),
+                TemporalRecord::Occurrence(occurrence('b', "left", 2)),
+                TemporalRecord::Occurrence(occurrence('c', "right", 3)),
+                TemporalRecord::Assertion(assertion(
+                    TemporalAssertionKindV1::Contradicts,
+                    "right",
+                    "left",
+                    4,
+                )),
+            ],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Current, 1),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("first page");
+
+        assert_eq!(result.ranked[0].anchor_id, anchor("selected"));
+        assert!(result.conflicts.is_empty());
+        assert!(result.lineage.is_empty());
+    });
+}
+
+#[test]
 fn unauthorized_assertion_metadata_never_enters_resolution_or_context() {
     block_on(async {
         let mut denied = assertion(TemporalAssertionKindV1::Contradicts, "right", "left", 3);

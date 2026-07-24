@@ -117,10 +117,7 @@ fn transaction_ranges<'a>(
             }
             end += 1;
         }
-        if !found_ids.is_empty()
-            && found_ids.is_subset(&expected_ids)
-            && end - index - 1 == found_ids.len()
-        {
+        if found_ids == expected_ids && end - index - 1 == found_ids.len() {
             ranges.push((index, end));
             index = end;
         } else {
@@ -355,4 +352,57 @@ fn legacy_active_replay_message_from_metadata(metadata: &Value) -> Option<Map<St
     replay.remove("char_count");
     replay.remove("sha256");
     Some(replay)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sessions::lcm::LcmStorageKind;
+
+    fn replay_message(store_id: i64, role: &str, replay: Value) -> LcmRawMessage {
+        LcmRawMessage {
+            provider: "provider".to_string(),
+            message_id: format!("message-{store_id}"),
+            session_id: "session".to_string(),
+            store_id,
+            role: role.to_string(),
+            ordinal: store_id,
+            timestamp: Some(store_id),
+            content: String::new(),
+            content_hash: "hash".to_string(),
+            storage_kind: LcmStorageKind::Inline,
+            payload_ref: None,
+            legacy_source: false,
+            legacy_truncated: false,
+            metadata_json: Some(
+                json!({
+                    ACTIVE_REPLAY_METADATA_KEY: true,
+                    ACTIVE_REPLAY_MESSAGE_KEY: replay,
+                })
+                .to_string(),
+            ),
+        }
+    }
+
+    #[test]
+    fn incomplete_multi_call_results_are_not_an_atomic_transaction() {
+        let assistant = replay_message(
+            1,
+            "assistant",
+            json!({
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call-a"},
+                    {"id": "call-b"},
+                ],
+            }),
+        );
+        let one_result =
+            replay_message(2, "tool", json!({"role": "tool", "tool_call_id": "call-a"}));
+        let messages = [assistant, one_result];
+
+        assert_eq!(bounded_atomic_prefix_len(&messages, 1), 1);
+        assert_eq!(atomic_tail_start(&messages, 1), 1);
+        assert!(replay_units(&messages.iter().collect::<Vec<_>>()).is_empty());
+    }
 }

@@ -1,8 +1,9 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 use tracedecay_domain::{
-    CompactContextBundleV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
-    ContextOmissionReasonV1, RetrievalAnchorId, RetrievalGrainV1,
+    CompactContextBundleV1, CompactContextConflictV1, CompactContextLineageEdgeV1,
+    CompactContextOmissionV1, ContextOmissionReasonV1, RetrievalAnchorId, RetrievalGrainV1,
 };
 
 use super::super::hydration::HydrationBatch;
@@ -271,7 +272,7 @@ fn canonicalize_frames(frames: &mut TemporalContextFrames) -> Result<(), Context
         ));
     }
     frames.summary_omissions.sort_by(compare_summary_omissions);
-    validate_lineage_acyclic(&frames.lineage)
+    validate_lineage_cycles_are_conflicted(&frames.lineage, &frames.conflicts)
 }
 
 pub fn compare_omissions(
@@ -522,7 +523,10 @@ fn preserve_rejected_summary_details(
     Ok(())
 }
 
-fn validate_lineage_acyclic(lineage: &[CompactContextLineageEdgeV1]) -> Result<(), ContextError> {
+fn validate_lineage_cycles_are_conflicted(
+    lineage: &[CompactContextLineageEdgeV1],
+    conflicts: &[CompactContextConflictV1],
+) -> Result<(), ContextError> {
     for edge in lineage {
         edge.validate()
             .map_err(|error| ContextError::InvalidBundle(error.to_string()))?;
@@ -604,9 +608,34 @@ fn validate_lineage_acyclic(lineage: &[CompactContextLineageEdgeV1]) -> Result<(
         }
     }
     if visited != nodes.len() {
-        return Err(ContextError::InvalidBundle(
-            "cyclic compact context lineage".to_string(),
-        ));
+        let conflicted = conflicts
+            .iter()
+            .map(|conflict| &conflict.anchor_id)
+            .collect::<BTreeSet<_>>();
+        for start in 0..nodes.len() {
+            if indegree[start] == 0 {
+                continue;
+            }
+            let mut stack = targets[offsets[start]..offsets[start + 1]].to_vec();
+            let mut seen = vec![false; nodes.len()];
+            seen[start] = true;
+            let mut cyclic = false;
+            while let Some(node) = stack.pop() {
+                if node == start {
+                    cyclic = true;
+                    break;
+                }
+                if std::mem::replace(&mut seen[node], true) {
+                    continue;
+                }
+                stack.extend_from_slice(&targets[offsets[node]..offsets[node + 1]]);
+            }
+            if cyclic && !conflicted.contains(&nodes[start]) {
+                return Err(ContextError::InvalidBundle(
+                    "unresolved compact context lineage cycle".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }

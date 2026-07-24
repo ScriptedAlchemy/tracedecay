@@ -428,9 +428,10 @@ pub fn resolve_temporal_with_checkpoints(
             if suppression_edges.contains(&(object.clone(), subject.clone())) {
                 conflict_anchors.insert(subject.clone());
                 conflict_anchors.insert(object.clone());
+                suppressed_anchors.remove(subject);
+                suppressed_anchors.remove(object);
             }
         }
-        suppressed_anchors.retain(|anchor| !conflict_anchors.contains(anchor));
     } else {
         conflict_anchors.extend(
             eligible_assertions

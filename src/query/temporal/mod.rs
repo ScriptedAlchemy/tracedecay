@@ -608,16 +608,31 @@ fn temporal_context_frames(
             coverage.hidden += 1;
         }
     }
+    let mut lineage: Vec<CompactContextLineageEdgeV1> = lineage_edges
+        .iter()
+        .filter(|edge| {
+            ranked_anchors.contains(&edge.subject_anchor_id)
+                || ranked_anchors.contains(&edge.object_anchor_id)
+        })
+        .map(context_lineage_edge)
+        .collect();
+    let lineage_anchors = lineage
+        .iter()
+        .flat_map(|edge| [&edge.subject_anchor_id, &edge.object_anchor_id])
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let conflicts = resolved
         .iter()
-        .filter(|item| item.conflicted)
+        .filter(|item| {
+            item.conflicted
+                && (ranked_anchors.contains(&item.occurrence.anchor_id)
+                    || lineage_anchors.contains(&item.occurrence.anchor_id))
+        })
         .map(|item| CompactContextConflictV1 {
             anchor_id: item.occurrence.anchor_id.clone(),
             supporting_anchor_ids: item.supporting_anchor_ids.clone(),
         })
         .collect();
-    let mut lineage: Vec<CompactContextLineageEdgeV1> =
-        lineage_edges.iter().map(context_lineage_edge).collect();
     // Ranked summaries carry their own provenance: each summary anchor
     // supports-derives from its source anchors. Surfacing that as Supports
     // lineage keeps summary describes traceable without a stored assertion

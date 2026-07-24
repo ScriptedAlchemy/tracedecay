@@ -1567,6 +1567,51 @@ fn as_of_missing_valid_horizon_is_reported_as_missing() {
 }
 
 #[test]
+fn non_as_of_modes_preserve_summary_with_unknown_valid_horizon() {
+    let session_id: SessionId = serde_json::from_str("\"session-1\"").expect("valid session id");
+    let missing_horizon = SessionSummaryRecordV1::new(
+        SessionSummaryIdV1::new("missing-horizon").expect("valid summary id"),
+        session_id.clone(),
+        anchor("summary-missing-horizon"),
+        vec![anchor("source-ok")],
+        SummarySourceHorizonV1 {
+            knowledge_through: UtcMicros(4),
+            valid_through: None,
+        },
+        UtcMicros(4),
+    )
+    .expect("valid summary");
+    let source_states = [(
+        anchor("source-ok"),
+        SummarySourceState::Covered {
+            knowledge_at: UtcMicros(4),
+            valid_time: TemporalValidityV1::Unknown,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    for mode in [
+        TemporalModeV1::Current,
+        TemporalModeV1::Evolution,
+        TemporalModeV1::Forensic,
+    ] {
+        let eligibility = evaluate_summary_lineage_eligibility(
+            std::slice::from_ref(&missing_horizon),
+            &source_states,
+            &session_id,
+            mode,
+        )
+        .expect("eligibility");
+        assert_eq!(
+            eligibility.eligible_anchor_ids,
+            [anchor("summary-missing-horizon")].into_iter().collect(),
+            "{mode:?} must preserve authorized unknown validity"
+        );
+    }
+}
+
+#[test]
 fn current_suppresses_only_an_eligible_predecessor() {
     let session_id: SessionId = serde_json::from_str("\"session-1\"").expect("valid session id");
     let predecessor = summary("predecessor", "summary-old", "source-old", 5, 5);
@@ -1811,6 +1856,60 @@ fn current_mutual_corrections_surface_conflict_instead_of_empty_set() {
 
     assert_eq!(resolved.len(), 2);
     assert!(resolved.iter().all(|item| item.conflicted));
+}
+
+#[test]
+fn unrelated_conflict_does_not_cancel_authoritative_supersession() {
+    let old = occurrence(
+        'a',
+        "old",
+        1,
+        TemporalValidityV1::Known {
+            valid_at: UtcMicros(1),
+        },
+    );
+    let disputed = occurrence(
+        'b',
+        "disputed",
+        2,
+        TemporalValidityV1::Known {
+            valid_at: UtcMicros(2),
+        },
+    );
+    let successor = occurrence(
+        'c',
+        "successor",
+        3,
+        TemporalValidityV1::Known {
+            valid_at: UtcMicros(3),
+        },
+    );
+
+    let resolved = resolve_temporal(
+        &[old, disputed, successor],
+        &[],
+        &[
+            assertion(TemporalAssertionKindV1::Contradicts, "old", "disputed", 4),
+            assertion(TemporalAssertionKindV1::Supersedes, "successor", "old", 5),
+        ],
+        TemporalModeV1::Current,
+    )
+    .expect("resolution succeeds");
+
+    assert_eq!(
+        resolved
+            .iter()
+            .map(|item| item.occurrence.anchor_id.clone())
+            .collect::<BTreeSet<_>>(),
+        [anchor("disputed"), anchor("successor")]
+            .into_iter()
+            .collect()
+    );
+    assert!(
+        resolved
+            .iter()
+            .any(|item| { item.occurrence.anchor_id == anchor("disputed") && item.conflicted })
+    );
 }
 
 #[test]

@@ -460,7 +460,7 @@ fn paginate_summary_sources(
     let total_sources = sources.len();
     let source_offset = source_offset.min(total_sources);
     let remaining = total_sources - source_offset;
-    let source_limit = source_limit.map_or(remaining, |limit| limit.min(remaining));
+    let source_limit = source_limit.map_or(remaining, |limit| limit.max(1).min(remaining));
     let page: Vec<LcmExpandedSummarySource> = sources
         .into_iter()
         .skip(source_offset)
@@ -1055,5 +1055,31 @@ fn sort_hits(hits: &mut [LcmGrepHit], sort: LcmGrepSort) {
                 .unwrap_or(i64::MIN)
                 .cmp(&left.store_id.unwrap_or(i64::MIN))
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary_source(store_id: i64) -> LcmExpandedSummarySource {
+        LcmExpandedSummarySource {
+            source_ref: LcmSourceRef::RawMessage { store_id },
+            content: format!("source-{store_id}"),
+            content_range: None,
+            content_truncated: false,
+            raw_message: None,
+            summary_node: None,
+        }
+    }
+
+    #[test]
+    fn explicit_zero_summary_page_limit_still_advances() {
+        let (page, pagination) =
+            paginate_summary_sources(vec![summary_source(1), summary_source(2)], 0, Some(0));
+
+        assert_eq!(page.len(), 1);
+        assert_eq!(pagination.next_source_offset, Some(1));
+        assert!(pagination.has_more);
     }
 }

@@ -1389,7 +1389,7 @@ fn assemble_frames(frames: TemporalContextFrames) -> Result<CompactContext, Cont
 }
 
 #[test]
-fn duplicate_self_and_multi_edge_cycle_lineage_are_rejected() {
+fn duplicate_self_and_unresolved_cycle_lineage_are_rejected() {
     let edge = lineage("b", "a", 1);
     for lineage in [
         vec![edge.clone(), edge],
@@ -1408,6 +1408,32 @@ fn duplicate_self_and_multi_edge_cycle_lineage_are_rejected() {
             Err(ContextError::InvalidBundle(_))
         ));
     }
+}
+
+#[test]
+fn conflict_marked_cycle_lineage_is_preserved() {
+    let cycle = vec![
+        lineage("b", "a", 1),
+        lineage("c", "b", 2),
+        lineage("a", "c", 3),
+    ];
+    let conflicts = ["a", "b", "c"]
+        .into_iter()
+        .map(|anchor_id| CompactContextConflictV1 {
+            anchor_id: anchor(anchor_id),
+            supporting_anchor_ids: BTreeSet::new(),
+        })
+        .collect();
+
+    let context = assemble_frames(TemporalContextFrames {
+        conflicts,
+        lineage: cycle.clone(),
+        ..TemporalContextFrames::default()
+    })
+    .expect("conflict-marked cycle remains visible");
+
+    assert_eq!(context.bundle.lineage.len(), cycle.len());
+    assert_eq!(context.bundle.conflicts.len(), 3);
 }
 
 #[test]
