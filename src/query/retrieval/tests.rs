@@ -1,6 +1,7 @@
 mod composition;
 mod cursor;
 mod request;
+mod rerank;
 
 use std::collections::BTreeMap;
 use std::fmt;

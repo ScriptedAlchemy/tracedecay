@@ -22,6 +22,7 @@ pub mod graph;
 pub mod hydrate;
 pub mod lexical;
 pub mod ports;
+pub mod rerank;
 pub mod request;
 pub mod semantic;
 pub mod unavailable;
