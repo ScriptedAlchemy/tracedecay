@@ -121,6 +121,11 @@ export function StateChip({
         // reads at a glance across a dense panel.
         'relative inline-flex items-center gap-1.5 border border-edge-subtle bg-surface-2',
         'py-[3px] pl-2.5 pr-2 text-3xs font-medium',
+        // Wrap as a block, not as a column. Without this the detail text kept
+        // its narrow slot beside the label in a constrained rail and broke one
+        // word per line into a four-line ribbon; wrapping lets it drop to its
+        // own full-width line under the label instead.
+        'max-w-full flex-wrap',
         className,
       )}
       data-state={kind}
@@ -134,7 +139,7 @@ export function StateChip({
       <Icon aria-hidden size={11} className={cn(s.tokenClass, s.spin && 'animate-spin')} />
       <span className="uppercase tracking-[0.1em] text-text-secondary">{s.label}</span>
       {detail ? (
-        <span className="tracking-[0.02em] text-text-muted">· {detail}</span>
+        <span className="min-w-0 tracking-[0.02em] text-text-muted">· {detail}</span>
       ) : null}
     </span>
   );

@@ -98,8 +98,36 @@
   --raw-membrane-lift: oklch(0.34 0.016 262 / 0.55);
   --raw-depth: oklch(0.07 0.012 262 / 0.6);
 
-  /* ---- rhythm ---- */
-  --row-height-data: 32px;
+  /* ---- elevation: the chassis has three planes, and they are three verbs ----
+   *
+   * Every panel used to sit at one depth with one hairline, which is why the
+   * console read as a spreadsheet with borders. The plane a region occupies
+   * now says what you do with it:
+   *
+   *   well    recessed — regions you look INTO (result lists, canvases, the
+   *           fields where data streams past). Milled out of the face.
+   *   face    the machined plate itself (panels, rails, headers). Neutral.
+   *   raised  proud of the face — the readouts you READ OFF. The numbers that
+   *           are the point of a surface stand on a lit ledge.
+   *
+   * The recipe is fixed and tiny: one inset hairline of light along the top
+   * edge, one soft shadow below. Never a bevel, never a stack. */
+  --raw-well: oklch(0.118 0.0035 262);
+  /* A raised face catches the light, so it moves AWAY from the substrate in
+   * whichever direction "toward the lamp" means for the current theme. On
+   * graphite that is upward in lightness; on paper it is upward too, which is
+   * why this cannot simply be surface-2 -- on the light ramp surface-2 is
+   * DARKER than the panel it sits on and a raised readout read as a recess. */
+  --raw-raised: oklch(0.228 0.004 260);
+  --shadow-well:
+    inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
+  --shadow-raised:
+    inset 0 1px 0 var(--raw-membrane-lift), 0 1px 2px var(--raw-depth);
+
+  /* ---- rhythm ----
+   * 36px data row: the VirtualList windowing estimate is derived from this, so
+   * the two can never drift apart again. */
+  --row-height-data: 36px;
   --touch-target-min: 44px;
   /* Instrument geometry: bezels are milled square. Both radius token names
    * survive so existing call sites keep compiling; both resolve to a hard
@@ -164,6 +192,10 @@
     radial-gradient(140% 120% at 50% 45%, oklch(0.965 0.008 264) 0%, oklch(0.918 0.012 268) 100%);
   --raw-membrane-lift: oklch(1 0 0 / 0.9);
   --raw-depth: oklch(0.52 0.03 262 / 0.16);
+  /* Light: a well is a shallow tray cut into paper, so it goes DOWN in
+   * lightness from surface-0 by about the same step the dark theme goes. */
+  --raw-well: oklch(0.945 0.0018 260);
+  --raw-raised: oklch(1 0 0);
 }
 
 [data-contrast='more'] {
@@ -176,6 +208,13 @@
   --raw-graph-field: var(--raw-surface-0);
   --raw-membrane-lift: transparent;
   --raw-depth: transparent;
+  /* With atmosphere gone, the three planes stop being lit and become ruled:
+   * a well is told apart by its border alone, which is what high contrast
+   * asked for. */
+  --raw-well: var(--raw-surface-0);
+  --raw-raised: var(--raw-surface-0);
+  --shadow-well: none;
+  --shadow-raised: none;
 }
 
 @media (forced-colors: active) {
@@ -207,7 +246,14 @@
 }
 
 /** Bezel screen ruling: the faint horizontal discipline of a CRT face, used
- * only on the graph field so the canvas reads as an instrument screen. */
+ * only on the graph field so the canvas reads as an instrument screen.
+ *
+ * At a 3px period and 0.3 opacity the ruling was reading as texture rather
+ * than discipline: over the empty field it was about right, but across a lit
+ * node body -- which is saturated and small -- it corrugated the disc into
+ * visible corduroy and made the graph look cheap. A 4px period at less than
+ * half the opacity keeps the CRT hint on the field and stops fighting the one
+ * thing on the canvas that is actually supposed to be looked at. */
 .td-scanlines::after {
   content: '';
   position: absolute;
@@ -215,10 +261,10 @@
   pointer-events: none;
   background-image: repeating-linear-gradient(
     to bottom,
-    color-mix(in oklab, var(--raw-surface-0) 60%, transparent) 0 1px,
-    transparent 1px 3px
+    color-mix(in oklab, var(--raw-surface-0) 55%, transparent) 0 1px,
+    transparent 1px 4px
   );
-  opacity: 0.3;
+  opacity: 0.13;
 }
 
 /** Live signal: a slow, low-amplitude flash on the single element that proves

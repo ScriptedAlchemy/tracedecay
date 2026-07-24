@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { Meter } from '../../ui/instrument.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 
@@ -72,17 +73,32 @@ export function AgentsPage() {
                 {rows.length === 0 ? (
                   <p className="text-2xs text-text-muted">no usage recorded</p>
                 ) : (
-                  <div className="flex flex-col gap-1">
+                  // Ten right-aligned four-digit numbers in a column say almost
+                  // nothing about their own shape. Scaled against the busiest
+                  // category, the same figures become a ranking you can read
+                  // without looking at a single digit.
+                  <div className="flex flex-col gap-1.5">
                     {rows.slice(0, 10).map((row) => (
                       <div
                         key={`${row.kind}:${row.category}`}
-                        className="flex items-baseline gap-2 text-xs"
+                        className="flex items-center gap-2 text-xs"
                       >
-                        <span className="w-16 shrink-0 text-2xs text-text-muted">
-                          {row.kind}
+                        <span className="td-legend w-12 shrink-0 truncate">{row.kind}</span>
+                        <span className="min-w-0 flex-1 truncate text-text-primary">
+                          {row.category}
                         </span>
-                        <span className="min-w-0 flex-1 truncate">{row.category}</span>
-                        <span className="tabular shrink-0 text-2xs text-text-muted">
+                        <Meter
+                          fraction={
+                            (rows[0]?.events ?? 0) > 0
+                              ? row.events / (rows[0]?.events ?? 1)
+                              : null
+                          }
+                          className="h-[3px] w-20 shrink-0 max-sm:hidden"
+                        />
+                        <span
+                          className="td-value w-12 shrink-0 text-right text-2xs text-text-secondary"
+                          data-cell="numeric"
+                        >
                           {row.events.toLocaleString()}
                         </span>
                       </div>

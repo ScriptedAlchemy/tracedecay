@@ -43,12 +43,19 @@
 
   --color-grid: var(--raw-grid);
   --color-grid-minor: var(--raw-grid-minor);
+  --color-well: var(--raw-well);
+  --color-raised: var(--raw-raised);
 
   --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
 
   /* Instrument type scale. `3xs` is the annotation size — used only for
-   * letterspaced uppercase legends and units, never for prose. */
+   * letterspaced uppercase legends and units, never for prose.
+   *
+   * The scale runs 10 → 60px on purpose. The old ceiling was 26px, which meant
+   * a surface's headline quantity was set barely larger than its own row text
+   * and the eye had nowhere to land first. The top three steps are the display
+   * tier: they are for the ONE number a surface exists to report. */
   --text-3xs: 10px;
   --text-2xs: 11px;
   --text-xs: 12px;
@@ -56,6 +63,9 @@
   --text-base: 15px;
   --text-lg: 19px;
   --text-xl: 26px;
+  --text-2xl: 34px;
+  --text-3xl: 44px;
+  --text-4xl: 60px;
 
   --radius-standard: var(--radius-standard);
   --radius-chip: var(--radius-chip);
@@ -117,5 +127,63 @@
     height: 1px;
     min-width: 8px;
     background: var(--raw-edge-subtle);
+  }
+
+  /* The display numeral. A monospaced face set large keeps its default wide
+   * sidebearings and goes limp — at 34px and above the figures need to be
+   * pulled together and given a little more weight, or the headline number
+   * reads as a terminal echo instead of a gauge. The tight tracking here plus
+   * the 0.16em tracking on `.td-legend` is the whole typographic idea: the two
+   * extremes of the scale are also the two extremes of fit, so a readout has
+   * an unmistakable top and bottom even in a monochrome screenshot. */
+  .td-display {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    font-weight: 500;
+    letter-spacing: -0.035em;
+    line-height: 0.92;
+    color: var(--raw-text-primary);
+  }
+
+  /* The title tier: what names a region a reader is meant to navigate by, as
+   * opposed to `.td-legend`, which annotates a cell. Sized and weighted to sit
+   * clearly above the legend without shouting. */
+  .td-title {
+    font-size: var(--text-2xs);
+    line-height: 1;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--raw-text-secondary);
+  }
+
+  /* ---- elevation planes (see tokens.css) ---- */
+  /* Recessed: milled out of the face. Things you look into. */
+  .td-well {
+    background: var(--raw-well);
+    box-shadow: var(--shadow-well);
+  }
+  /* Proud of the face: things you read off. */
+  .td-raised {
+    background: var(--raw-raised);
+    box-shadow: var(--shadow-raised);
+  }
+
+  /* ---- the magnitude rail ----
+   * A quantity printed as text has no size; the same quantity given a length
+   * can be compared across a column without reading a single digit. Every list
+   * of numbers in this console wears one of these under or beside its value,
+   * which is what turns thirty identical rows into a distribution. */
+  .td-meter {
+    position: relative;
+    overflow: hidden;
+    background: var(--raw-surface-3);
+  }
+  .td-meter-fill {
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    background: var(--raw-accent);
   }
 }
