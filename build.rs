@@ -277,7 +277,128 @@ fn generate_plugin_bundle() {
     }
 }
 
+
+/// The single-app dashboard (dashboard/app-dist, built by rsbuild). The build
+/// keeps a content stamp over the frontend sources; when stale (or app-dist is
+/// missing) it shells out to `npm run build` (npm ci first when node_modules
+/// is absent) and fails fast on error. The dist is then embedded via a
+/// generated manifest in OUT_DIR so the installed binary serves the UI with
+/// zero filesystem dependency.
+fn build_and_embed_dashboard_app() {
+    let dashboard = Path::new("dashboard");
+    let app_dist = dashboard.join("app-dist");
+
+    // Content stamp over frontend inputs (sources, config, lockfile).
+    let mut hasher = DefaultHasher::new();
+    for root in ["dashboard/src", "dashboard/codegen/schemas"] {
+        println!("cargo::rerun-if-changed={root}");
+        let root_path = Path::new(root);
+        for relative in collect_files_relative(root_path) {
+            relative.hash(&mut hasher);
+            if let Ok(bytes) = fs::read(root_path.join(&relative)) {
+                bytes.hash(&mut hasher);
+            }
+        }
+    }
+    for file in [
+        "dashboard/package.json",
+        "dashboard/package-lock.json",
+        "dashboard/rsbuild.config.ts",
+        "dashboard/tsconfig.json",
+    ] {
+        println!("cargo::rerun-if-changed={file}");
+        file.hash(&mut hasher);
+        if let Ok(bytes) = fs::read(file) {
+            bytes.hash(&mut hasher);
+        }
+    }
+    let source_stamp = format!("{:016x}", hasher.finish());
+    let stamp_path = app_dist.join(".source-stamp");
+    let fresh = fs::read_to_string(&stamp_path)
+        .map(|current| current.trim() == source_stamp)
+        .unwrap_or(false)
+        && app_dist.join("index.html").exists();
+
+    if !fresh {
+        if std::env::var_os("TRACEDECAY_SKIP_DASHBOARD_BUILD").is_some() {
+            println!(
+                "cargo::warning=dashboard app-dist is stale but TRACEDECAY_SKIP_DASHBOARD_BUILD is set; embedding existing dist"
+            );
+        } else {
+            if !dashboard.join("node_modules").exists() {
+                run_npm(dashboard, &["ci"]);
+            }
+            run_npm(dashboard, &["run", "build"]);
+            fs::write(&stamp_path, &source_stamp)
+                .unwrap_or_else(|e| panic!("failed to write app-dist stamp: {e}"));
+        }
+    }
+    assert!(
+        app_dist.join("index.html").exists(),
+        "dashboard/app-dist/index.html is missing after build; the dashboard frontend build failed"
+    );
+
+    // Generated manifest: one embedded entry per dist file.
+    let mut code = String::from(
+        "pub struct AppAsset { pub path: &'static str, pub contents: &'static [u8], pub content_type: &'static str }\n",
+    );
+    let mut app_hasher = DefaultHasher::new();
+    let _ = writeln!(code, "pub const APP_ASSETS: &[AppAsset] = &[");
+    for relative in collect_files_relative(&app_dist) {
+        if relative == ".source-stamp" {
+            continue;
+        }
+        println!("cargo::rerun-if-changed=dashboard/app-dist/{relative}");
+        relative.hash(&mut app_hasher);
+        if let Ok(bytes) = fs::read(app_dist.join(&relative)) {
+            bytes.hash(&mut app_hasher);
+        }
+        let content_type = match relative.rsplit('.').next().unwrap_or("") {
+            "html" => "text/html; charset=utf-8",
+            "js" | "mjs" => "application/javascript",
+            "css" => "text/css",
+            "json" | "map" => "application/json",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "ico" => "image/x-icon",
+            "woff2" => "font/woff2",
+            "woff" => "font/woff",
+            "ttf" => "font/ttf",
+            "txt" => "text/plain; charset=utf-8",
+            _ => "application/octet-stream",
+        };
+        let _ = writeln!(
+            code,
+            "    AppAsset {{ path: {relative:?}, contents: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/dashboard/app-dist/{relative}\")), content_type: {content_type:?} }},"
+        );
+    }
+    code.push_str("];\n");
+    let app_stamp = format!("{:016x}", app_hasher.finish());
+    let _ = writeln!(code, "pub const APP_ASSET_STAMP: &str = {app_stamp:?};");
+
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    let out = Path::new(&out_dir).join("dashboard_app_assets.rs");
+    if !matches!(fs::read_to_string(&out), Ok(current) if current == code) {
+        fs::write(&out, code).unwrap_or_else(|e| panic!("failed to write app asset manifest: {e}"));
+    }
+}
+
+fn run_npm(dir: &Path, args: &[&str]) {
+    let status = Command::new("npm")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run npm {}: {e}", args.join(" ")));
+    assert!(
+        status.success(),
+        "npm {} failed in {} (status {status}); the dashboard frontend must build for the binary to embed it",
+        args.join(" "),
+        dir.display()
+    );
+}
+
 fn main() {
+    build_and_embed_dashboard_app();
     generate_plugin_bundle();
     let out_path = Path::new("src/resources/logo.ansi");
     let logo_bytes = include_bytes!("src/resources/logo.png");

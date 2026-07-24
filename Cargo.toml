@@ -89,6 +89,7 @@ include = [
     "/plugin/cursor-native-extension/LICENSE",
     "/plugin/cursor-native-extension/dist/extension.js",
     "/vendor/**",
+    "/dashboard/app-dist/**",
     "/dashboard/shell/dist/**",
     "/dashboard/holographic/dist/**",
     "/dashboard/lcm/dist/**",
