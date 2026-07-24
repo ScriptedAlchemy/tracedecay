@@ -19,6 +19,7 @@ import { StorageFindingsPayloadSchema } from '../../contracts/wire.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
+import { CHANNELS, channelNumber } from '../channels.ts';
 
 const ICONS: Record<string, LucideIcon> = {
   brain: Brain,
@@ -35,20 +36,11 @@ const ICONS: Record<string, LucideIcon> = {
   settings: Settings,
 };
 
-const MAIN = [
-  { path: 'brain', label: 'Brain' },
-  { path: 'explorer', label: 'Explorer' },
-  { path: 'loom', label: 'Loom' },
-  { path: 'sessions', label: 'Sessions' },
-  { path: 'agents', label: 'Agents' },
-  { path: 'code', label: 'Code' },
-  { path: 'knowledge', label: 'Knowledge' },
-  { path: 'delivery', label: 'Delivery' },
-  { path: 'automations', label: 'Automations' },
-  { path: 'observatory', label: 'Observatory' },
-  { path: 'costs', label: 'Costs' },
-];
+const MAIN = CHANNELS.filter((channel) => channel.path !== 'settings');
 
+/** A channel selector, not a menu: numbered, letterspaced, hairline-divided.
+ * The active channel is marked by a solid signal bar in the gutter — colour
+ * used as position, not decoration. */
 function RailLink({
   path,
   label,
@@ -62,24 +54,47 @@ function RailLink({
   return (
     <NavLink
       to={`/${path}`}
+      aria-label={label}
       className={({ isActive }) =>
         cn(
-          'group flex h-9 items-center gap-2.5 rounded-[var(--radius-standard)] px-2.5 text-sm',
+          'group relative flex h-8 items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2',
           'text-text-secondary transition-colors duration-[var(--dur-state)]',
-          'hover:bg-surface-2 hover:text-text-primary',
+          'hover:bg-surface-2 hover:text-text-primary max-md:justify-center max-md:px-0',
           isActive && 'bg-surface-2 text-text-primary',
         )
       }
     >
-      <Icon aria-hidden size={16} strokeWidth={1.5} className="shrink-0" />
-      <span className="truncate group-data-[collapsed=true]/rail:hidden">{label}</span>
-      {attention ? (
-        <span
-          className="ml-auto size-1.5 shrink-0 rounded-full bg-state-partial"
-          role="status"
-          aria-label="Doctor has findings needing attention"
-        />
-      ) : null}
+      {({ isActive }) => (
+        <>
+          <span
+            aria-hidden
+            className={cn(
+              'absolute inset-y-0 left-0 w-[3px]',
+              isActive ? 'bg-accent' : 'bg-transparent',
+            )}
+          />
+          <span
+            aria-hidden
+            className={cn(
+              'td-value w-4 shrink-0 text-3xs max-md:hidden',
+              isActive ? 'text-accent' : 'text-text-muted',
+            )}
+          >
+            {channelNumber(path)}
+          </span>
+          <Icon aria-hidden size={13} strokeWidth={1.75} className="shrink-0" />
+          <span className="truncate text-3xs font-medium uppercase tracking-[0.14em] max-md:hidden">
+            {label}
+          </span>
+          {attention ? (
+            <span
+              className="ml-auto size-1.5 shrink-0 bg-state-partial max-md:absolute max-md:right-1 max-md:top-1 max-md:ml-0"
+              role="status"
+              aria-label="Doctor has findings needing attention"
+            />
+          ) : null}
+        </>
+      )}
     </NavLink>
   );
 }
@@ -110,18 +125,33 @@ export function NavRail() {
   return (
     <nav
       aria-label="Workspaces"
-      className="group/rail flex w-52 shrink-0 flex-col gap-0.5 border-r border-edge-subtle bg-surface-1 p-2 max-md:w-14"
+      className="group/rail relative flex w-48 shrink-0 flex-col border-r border-edge-subtle bg-surface-1 max-md:w-12"
       data-collapsed="false"
     >
-      <div className="mb-2 flex h-9 items-center gap-2 px-2.5">
-        <span className="size-2 rounded-full bg-accent" aria-hidden />
-        <span className="text-sm font-semibold tracking-tight max-md:hidden">TraceDecay</span>
+      <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3 max-md:justify-center max-md:px-0">
+        <span aria-hidden className="relative size-3 shrink-0 border border-accent">
+          <span className="absolute inset-[3px] bg-accent" />
+        </span>
+        <span className="min-w-0 max-md:hidden">
+          <span className="block truncate text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+            TraceDecay
+          </span>
+          <span className="td-legend mt-0.5 block truncate">Local daemon</span>
+        </span>
       </div>
-      {MAIN.map((w) => (
-        <RailLink key={w.path} {...w} attention={w.path === 'observatory' && attention} />
-      ))}
-      <div className="flex-1" />
-      <RailLink path="settings" label="Settings" />
+      <div className="min-h-0 flex-1 overflow-auto">
+        {MAIN.map((channel) => (
+          <RailLink
+            key={channel.path}
+            path={channel.path}
+            label={channel.label}
+            attention={channel.path === 'observatory' && attention}
+          />
+        ))}
+      </div>
+      <div className="shrink-0 border-t border-edge-subtle">
+        <RailLink path="settings" label="Settings" />
+      </div>
     </nav>
   );
 }

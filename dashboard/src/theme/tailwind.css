@@ -41,15 +41,21 @@
   --color-sev-high: var(--raw-sev-high);
   --color-sev-critical: var(--raw-sev-critical);
 
+  --color-grid: var(--raw-grid);
+  --color-grid-minor: var(--raw-grid-minor);
+
   --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
 
-  --text-2xs: 12px;
-  --text-xs: 13px;
-  --text-sm: 14px;
-  --text-base: 16px;
-  --text-lg: 20px;
-  --text-xl: 24px;
+  /* Instrument type scale. `3xs` is the annotation size — used only for
+   * letterspaced uppercase legends and units, never for prose. */
+  --text-3xs: 10px;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 19px;
+  --text-xl: 26px;
 
   --radius-standard: var(--radius-standard);
   --radius-chip: var(--radius-chip);
@@ -62,12 +68,54 @@
     font-family: var(--font-sans);
     font-size: 14px;
   }
+  /* Every numeral in the instrument is measured: tabular figures everywhere,
+   * so a column of readouts aligns on the decimal without per-site classes. */
+  body {
+    font-variant-numeric: tabular-nums;
+  }
   [data-cell='numeric'],
   .tabular {
     font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
   }
   :focus-visible {
     outline: 2px solid var(--raw-accent);
     outline-offset: 1px;
+  }
+}
+
+@layer components {
+  /* The engraved legend: every panel, region and column header in the app
+   * wears this — small, letterspaced, uppercase, quiet. */
+  .td-legend {
+    font-size: var(--text-3xs);
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    font-weight: 500;
+    color: var(--raw-text-muted);
+    white-space: nowrap;
+  }
+  /* A measured value: monospaced, tabular, ink-coloured. */
+  .td-value {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+    color: var(--raw-text-primary);
+  }
+  /* The unit that sits beside a value — small, quiet, never bold. */
+  .td-unit {
+    font-size: var(--text-3xs);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--raw-text-muted);
+  }
+  /* Hairline fill rule: the horizontal line that runs from a legend to the
+   * edge of its region, the single most repeated mark in this design. */
+  .td-rule {
+    flex: 1 1 0%;
+    height: 1px;
+    min-width: 8px;
+    background: var(--raw-edge-subtle);
   }
 }

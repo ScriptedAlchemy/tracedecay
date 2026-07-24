@@ -1,14 +1,27 @@
 import { useRef, type ReactNode } from 'react';
 import { cn } from '../cn';
+import { WorkspaceHeader } from '../instrument.tsx';
 
 /** Archetype 2 (plan 11a): left filter column, center result list, right
- * inspector. Regions are slots; workspaces own only read-model wiring. */
+ * inspector. Regions are slots; workspaces own only read-model wiring.
+ *
+ * The three columns are divided by hairlines and each carries an engraved
+ * legend so the split reads as three instrument bays rather than three
+ * unlabeled scroll areas. */
 export function ExplorerSplit({
+  path,
+  title,
+  note,
   filters,
   list,
   inspector,
   className,
 }: {
+  /** Workspace path — supplies the channel number in the header. Omit to
+   * render the split without a header (embedded use). */
+  path?: string;
+  title?: string;
+  note?: ReactNode;
   filters?: ReactNode;
   list: ReactNode;
   inspector?: ReactNode;
@@ -44,36 +57,52 @@ export function ExplorerSplit({
     rows[next]?.scrollIntoView({ block: 'nearest' });
   };
   return (
-    <div className={cn('flex h-full min-h-0', className)}>
-      {filters ? (
-        <aside
-          aria-label="Filters"
-          className="w-56 shrink-0 overflow-auto border-r border-edge-subtle bg-surface-1 p-3 max-lg:hidden"
+    <div className={cn('flex h-full min-h-0 flex-col', className)}>
+      {path && title ? <WorkspaceHeader path={path} title={title} note={note} /> : null}
+      <div className="flex min-h-0 flex-1">
+        {filters ? (
+          <aside
+            aria-label="Filters"
+            className="flex w-56 shrink-0 flex-col border-r border-edge-subtle bg-surface-1 max-lg:hidden"
+          >
+            <BayLegend>Query</BayLegend>
+            <div className="min-h-0 flex-1 overflow-auto p-2.5">{filters}</div>
+          </aside>
+        ) : null}
+        <section
+          ref={resultsRef}
+          aria-label="Results"
+          className="flex min-w-0 flex-1 flex-col overflow-hidden"
+          onKeyDown={onResultsKeyDown}
         >
-          {filters}
-        </aside>
-      ) : null}
-      <section
-        ref={resultsRef}
-        aria-label="Results"
-        className="min-w-0 flex-1 overflow-auto"
-        onKeyDown={onResultsKeyDown}
-      >
-        {list}
-      </section>
-      {inspector ? (
-        <aside
-          aria-label="Inspector"
-          className="w-[22rem] shrink-0 overflow-auto border-l border-edge-subtle bg-surface-1 max-xl:w-72 max-md:hidden"
-        >
-          {inspector}
-        </aside>
-      ) : null}
+          <div className="min-h-0 flex-1 overflow-auto">{list}</div>
+        </section>
+        {inspector ? (
+          <aside
+            aria-label="Inspector"
+            className="w-[22rem] shrink-0 overflow-auto border-l border-edge-subtle bg-surface-1 max-xl:w-72 max-md:hidden"
+          >
+            {inspector}
+          </aside>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-/** 36px data row (plan 11a rhythm) with leading state/selection affordance. */
+/** The engraved legend that names an instrument bay, sitting on its own
+ * hairline at the top of the column. */
+export function BayLegend({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex h-7 shrink-0 items-center gap-2 border-b border-edge-subtle px-2.5">
+      <span className="td-legend">{children}</span>
+      <span aria-hidden className="td-rule" />
+    </div>
+  );
+}
+
+/** 32px data row: hairline-ruled, monospaced, with a selection lamp in the
+ * gutter so a picked row is legible without a fill wash. */
 export function DataRow({
   selected,
   onSelect,
@@ -91,12 +120,19 @@ export function DataRow({
       onClick={onSelect}
       aria-pressed={selected ?? false}
       className={cn(
-        'flex h-9 w-full items-center gap-3 border-b border-edge-subtle px-3 text-left text-xs',
+        'relative flex h-8 w-full items-center gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
         'hover:bg-surface-1 focus-visible:bg-surface-1',
         selected && 'bg-surface-2',
         className,
       )}
     >
+      <span
+        aria-hidden
+        className={cn(
+          'absolute inset-y-0 left-0 w-[2px]',
+          selected ? 'bg-accent' : 'bg-transparent',
+        )}
+      />
       {children}
     </button>
   );
@@ -113,20 +149,21 @@ export function InspectorPanel({
 }) {
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-10 shrink-0 items-center justify-between border-b border-edge-subtle px-3">
-        <h2 className="truncate text-xs font-semibold tracking-tight">{title}</h2>
+      <header className="flex h-7 shrink-0 items-center gap-2 border-b border-edge-subtle px-2.5">
+        <h2 className="td-legend truncate text-text-secondary">{title}</h2>
+        <span aria-hidden className="td-rule" />
         {onClose ? (
           <button
             type="button"
             onClick={onClose}
             aria-label="Close inspector"
-            className="rounded px-1.5 text-text-muted hover:text-text-primary"
+            className="shrink-0 px-1 text-text-muted hover:text-text-primary"
           >
             ×
           </button>
         ) : null}
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-3">{children}</div>
+      <div className="min-h-0 flex-1 overflow-auto p-2.5">{children}</div>
     </div>
   );
 }
@@ -138,17 +175,20 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
     return <span className="text-text-muted">—</span>;
   }
   if (typeof value !== 'object') {
-    return <span className="tabular break-all text-text-secondary">{String(value)}</span>;
+    return <span className="td-value break-all text-2xs text-text-secondary">{String(value)}</span>;
   }
   const entries = Array.isArray(value)
     ? value.map((v, i) => [String(i), v] as const)
     : Object.entries(value as Record<string, unknown>);
   if (entries.length === 0) return <span className="text-text-muted">empty</span>;
   return (
-    <dl className={cn('flex flex-col gap-1', depth > 0 && 'border-l border-edge-subtle pl-2')}>
+    <dl className={cn('flex flex-col', depth > 0 && 'border-l border-edge-subtle pl-2')}>
       {entries.slice(0, 60).map(([k, v]) => (
-        <div key={k} className="grid grid-cols-[9rem_1fr] gap-2 text-2xs">
-          <dt className="truncate text-text-muted" title={k}>
+        <div
+          key={k}
+          className="grid grid-cols-[8rem_1fr] gap-2 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0"
+        >
+          <dt className="td-legend truncate pt-px" title={k}>
             {k}
           </dt>
           <dd className="min-w-0">

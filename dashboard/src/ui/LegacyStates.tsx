@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { StateChip, type DomainStateKind } from './StateChip';
+import { Corners, Readout } from './instrument.tsx';
 import type { LegacyResult } from '../data/query/legacy.ts';
 
 /** Renders truthful states around a legacy fetch; children render only on ok. */
@@ -60,21 +61,31 @@ export function CenteredState({
   detail?: string | undefined;
 }) {
   const guidance = STATE_GUIDANCE[kind];
+  // A dead channel on an instrument still shows its ruled field and its bezel:
+  // the reader can see the surface is present and simply carrying no signal.
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
-      <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
-      <StateChip kind={kind} detail={detail} />
-      {guidance ? (
-        <p className="max-w-sm text-xs leading-relaxed text-text-muted">
-          {guidance.sentence}{' '}
-          <span className="text-text-secondary">{guidance.action}</span>
-        </p>
-      ) : null}
+    <div className="td-graticule flex h-full min-h-48 items-center justify-center bg-surface-0 p-8">
+      <div className="relative flex max-w-md flex-col items-center gap-3 border border-edge-subtle bg-surface-1 px-8 py-6 text-center">
+        <Corners />
+        <h1 className="text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+          {title}
+        </h1>
+        <span aria-hidden className="h-px w-10 bg-edge-strong" />
+        <StateChip kind={kind} detail={detail} />
+        {guidance ? (
+          <p className="max-w-xs text-xs leading-relaxed text-text-muted">
+            {guidance.sentence}{' '}
+            <span className="text-text-secondary">{guidance.action}</span>
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-/** Compact stat tile for overview grids. */
+/** Compact readout tile. Kept as a named export because a dozen workspaces
+ * call it; the presentation is now the instrument readout — engraved legend,
+ * monospaced tabular value, quiet annotation — inside a hairline cell. */
 export function StatTile({
   label,
   value,
@@ -88,19 +99,8 @@ export function StatTile({
   dense?: boolean;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-0.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2.5">
-      <span className="truncate text-2xs uppercase tracking-wide text-text-muted">{label}</span>
-      <span
-        className={
-          dense
-            ? 'tabular truncate text-sm font-semibold leading-tight text-text-primary'
-            : 'tabular truncate text-xl font-semibold leading-tight text-text-primary'
-        }
-        data-cell="numeric"
-      >
-        {value}
-      </span>
-      {hint ? <span className="text-2xs text-text-muted">{hint}</span> : null}
+    <div className="min-w-0 border border-edge-subtle bg-surface-1 px-3 py-2">
+      <Readout label={label} value={value} note={hint} size={dense ? 'sm' : 'lg'} />
     </div>
   );
 }

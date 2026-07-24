@@ -1,22 +1,24 @@
 import type { ReactNode } from 'react';
 import { cn } from '../cn';
+import { Panel } from '../instrument.tsx';
 
-/** Archetype 1 (plan 11a): responsive card grid. Each card is one read model
- * with its truth strip; no card renders a computed grade. */
+/** Archetype 1 (plan 11a): responsive panel grid. Each panel is one read model
+ * with its truth strip; no panel renders a computed grade.
+ *
+ * The gutter is one grid cell so panels land on the same rhythm the graticule
+ * and the readout bars use — the whole console is ruled to a single module. */
 export function OverviewGrid({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <div
-      className={cn(
-        'grid gap-3 p-4',
-        'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
-        className,
-      )}
+      className={cn('grid gap-2 p-2', 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3', className)}
     >
       {children}
     </div>
   );
 }
 
+/** One bracketed instrument panel in the grid. `title` becomes the engraved
+ * legend and the region's accessible name, exactly as before. */
 export function OverviewCard({
   title,
   actions,
@@ -31,19 +33,8 @@ export function OverviewCard({
   className?: string;
 }) {
   return (
-    <section
-      className={cn(
-        'flex min-w-0 flex-col gap-2 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-4',
-        className,
-      )}
-      aria-label={title}
-    >
-      <header className="flex items-center justify-between gap-2">
-        <h2 className="truncate text-sm font-semibold tracking-tight">{title}</h2>
-        {actions}
-      </header>
-      <div className="min-w-0 flex-1">{children}</div>
-      {footer ? <footer className="border-t border-edge-subtle pt-2">{footer}</footer> : null}
-    </section>
+    <Panel legend={title} actions={actions} footer={footer} className={className}>
+      {children}
+    </Panel>
   );
 }

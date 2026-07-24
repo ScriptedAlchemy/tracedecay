@@ -74,6 +74,29 @@ const STATE: Record<
   },
 };
 
+/** The lamp bar down the chip's leading edge. Spelled out per state (rather
+ * than derived from `tokenClass`) because Tailwind resolves utilities by
+ * scanning literal source text — a computed class name would never be built. */
+const LAMP: Record<DomainStateKind, string> = {
+  loading: 'bg-state-loading',
+  complete_zero_findings: 'bg-state-complete-zero',
+  ready: 'bg-state-ready',
+  partial: 'bg-state-partial',
+  stale: 'bg-state-stale',
+  locked: 'bg-state-locked',
+  denied: 'bg-state-denied',
+  unauthorized: 'bg-state-unauthorized',
+  redacted: 'bg-state-redacted',
+  conflicting: 'bg-state-conflicting',
+  offline: 'bg-state-offline',
+  unknown: 'bg-state-unknown',
+  cancelled: 'bg-state-cancelled',
+  timed_out: 'bg-state-timed-out',
+  error: 'bg-state-error',
+  unsupported: 'bg-state-unsupported-schema',
+  unsupported_schema: 'bg-state-unsupported-schema',
+};
+
 export function StateChip({
   kind,
   detail,
@@ -88,21 +111,31 @@ export function StateChip({
     icon: Ban,
     tokenClass: 'text-state-unsupported-schema',
   };
+  const lampClass = LAMP[kind] ?? 'bg-state-unsupported-schema';
   const Icon = s.icon;
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle',
-        'bg-surface-2 px-2 py-0.5 text-2xs font-medium',
+        // An indicator segment, not a pill: square, hairline-bezelled, with the
+        // state hue carried by a lamp bar down its leading edge so the chip
+        // reads at a glance across a dense panel.
+        'relative inline-flex items-center gap-1.5 border border-edge-subtle bg-surface-2',
+        'py-[3px] pl-2.5 pr-2 text-3xs font-medium',
         className,
       )}
       data-state={kind}
     >
-      {/* State hue rides the icon only; label text stays AA-contrast tokens
+      <span
+        aria-hidden
+        className={cn('absolute inset-y-0 left-0 w-[2px]', lampClass)}
+      />
+      {/* State hue rides the lamp and icon; label text stays AA-contrast tokens
        * (state meaning = icon + label + data-state, never color alone). */}
-      <Icon aria-hidden size={12} className={cn(s.tokenClass, s.spin && 'animate-spin')} />
-      <span className="text-text-secondary">{s.label}</span>
-      {detail ? <span className="text-text-muted">· {detail}</span> : null}
+      <Icon aria-hidden size={11} className={cn(s.tokenClass, s.spin && 'animate-spin')} />
+      <span className="uppercase tracking-[0.1em] text-text-secondary">{s.label}</span>
+      {detail ? (
+        <span className="tracking-[0.02em] text-text-muted">· {detail}</span>
+      ) : null}
     </span>
   );
 }

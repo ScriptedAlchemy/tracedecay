@@ -4,39 +4,52 @@
  * the non-inline @theme in tailwind.css maps semantic tokens onto these
  * variables so runtime theme switching works (values are never baked at
  * build time). Components consume ONLY semantic tokens.
+ *
+ * Visual direction — "instrument": the surfaces are a machined bezel, not a
+ * card deck. Neutral graphite panels carry almost no chroma so that the few
+ * saturated tokens (accent = signal, state hues = condition) read as the only
+ * colour in the frame. Rules are hairlines; corners are square; numbers are
+ * monospaced and tabular. Colour never decorates — it reports.
  */
 
 :root {
-  /* ---- raw scales: dark is the default theme ---- */
-  --raw-surface-0: oklch(0.145 0.008 260);
-  --raw-surface-1: oklch(0.185 0.009 260);
-  --raw-surface-2: oklch(0.225 0.01 260);
-  --raw-surface-3: oklch(0.27 0.011 260);
-  --raw-text-primary: oklch(0.93 0.005 260);
-  --raw-text-secondary: oklch(0.78 0.008 260);
+  /* ---- raw scales: dark is the default theme ----
+   * Chroma is deliberately near-zero on the surface ramp: an instrument face
+   * is grey so the lit segments mean something. */
+  --raw-surface-0: oklch(0.145 0.003 260);
+  --raw-surface-1: oklch(0.178 0.0035 260);
+  --raw-surface-2: oklch(0.215 0.004 260);
+  --raw-surface-3: oklch(0.262 0.0045 260);
+  --raw-text-primary: oklch(0.945 0.002 260);
+  --raw-text-secondary: oklch(0.79 0.003 260);
   /* ≥4.5:1 on surface-0..3 for small text (axe color-contrast). */
-  --raw-text-muted: oklch(0.68 0.008 260);
-  --raw-edge-subtle: oklch(0.32 0.01 260);
-  --raw-edge-strong: oklch(0.45 0.012 260);
-  --raw-accent: oklch(0.72 0.14 250);
-  --raw-accent-emphasis: oklch(0.62 0.16 250);
+  --raw-text-muted: oklch(0.685 0.004 260);
+  --raw-edge-subtle: oklch(0.315 0.004 260);
+  --raw-edge-strong: oklch(0.46 0.006 260);
+  --raw-accent: oklch(0.75 0.15 200);
+  --raw-accent-emphasis: oklch(0.64 0.16 200);
+
+  /* Graticule: the instrument grid drawn behind canvases and readout fields.
+   * Must stay at the edge of visibility — discipline, never texture. */
+  --raw-grid: oklch(0.24 0.004 260);
+  --raw-grid-minor: oklch(0.195 0.003 260);
 
   /* ---- domain-state hues (plan 11 sixteen-state taxonomy) ---- */
   --raw-state-loading: oklch(0.65 0.02 260);
-  --raw-state-ready: oklch(0.7 0.12 155);
-  --raw-state-complete-zero: oklch(0.7 0.12 155);
-  --raw-state-partial: oklch(0.75 0.12 85);
-  --raw-state-stale: oklch(0.72 0.1 85);
+  --raw-state-ready: oklch(0.72 0.14 155);
+  --raw-state-complete-zero: oklch(0.72 0.14 155);
+  --raw-state-partial: oklch(0.78 0.14 85);
+  --raw-state-stale: oklch(0.74 0.11 85);
   --raw-state-locked: oklch(0.68 0.1 300);
-  --raw-state-denied: oklch(0.62 0.14 25);
-  --raw-state-unauthorized: oklch(0.62 0.14 25);
+  --raw-state-denied: oklch(0.64 0.16 25);
+  --raw-state-unauthorized: oklch(0.64 0.16 25);
   --raw-state-redacted: oklch(0.6 0.04 300);
-  --raw-state-conflicting: oklch(0.68 0.13 55);
-  --raw-state-offline: oklch(0.6 0.02 260);
-  --raw-state-unknown: oklch(0.6 0.02 260);
-  --raw-state-cancelled: oklch(0.62 0.05 260);
-  --raw-state-timed-out: oklch(0.68 0.1 55);
-  --raw-state-error: oklch(0.6 0.16 25);
+  --raw-state-conflicting: oklch(0.7 0.14 55);
+  --raw-state-offline: oklch(0.6 0.015 260);
+  --raw-state-unknown: oklch(0.6 0.015 260);
+  --raw-state-cancelled: oklch(0.62 0.04 260);
+  --raw-state-timed-out: oklch(0.7 0.11 55);
+  --raw-state-error: oklch(0.62 0.18 25);
   --raw-state-unsupported-schema: oklch(0.65 0.1 320);
 
   /* ---- severity ramp (single hue, five ordered steps) ---- */
@@ -65,57 +78,65 @@
   );
 
   /* ---- rhythm ---- */
-  --row-height-data: 36px;
+  --row-height-data: 32px;
   --touch-target-min: 44px;
-  --radius-standard: 6px;
-  --radius-chip: 4px;
+  /* Instrument geometry: bezels are milled square. Both radius token names
+   * survive so existing call sites keep compiling; both resolve to a hard
+   * corner now. */
+  --radius-standard: 2px;
+  --radius-chip: 1px;
+  --radius-card: 2px;
+  --grid-cell: 32px;
   --dur-state: 120ms;
   --dur-panel: 180ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 }
 
 [data-theme='light'] {
-  --raw-surface-0: oklch(0.985 0.002 260);
-  --raw-surface-1: oklch(0.965 0.003 260);
-  --raw-surface-2: oklch(0.94 0.004 260);
-  --raw-surface-3: oklch(0.91 0.005 260);
-  --raw-text-primary: oklch(0.22 0.01 260);
-  --raw-text-secondary: oklch(0.38 0.01 260);
+  --raw-surface-0: oklch(0.985 0.001 260);
+  --raw-surface-1: oklch(0.962 0.0015 260);
+  --raw-surface-2: oklch(0.936 0.002 260);
+  --raw-surface-3: oklch(0.9 0.0025 260);
+  --raw-text-primary: oklch(0.2 0.004 260);
+  --raw-text-secondary: oklch(0.37 0.005 260);
   /* ≥4.5:1 on surface-0..3 for small text (axe color-contrast). */
-  --raw-text-muted: oklch(0.46 0.01 260);
-  --raw-edge-subtle: oklch(0.88 0.005 260);
-  --raw-edge-strong: oklch(0.75 0.008 260);
-  --raw-accent: oklch(0.55 0.16 250);
-  --raw-accent-emphasis: oklch(0.48 0.17 250);
+  --raw-text-muted: oklch(0.45 0.005 260);
+  --raw-edge-subtle: oklch(0.855 0.003 260);
+  --raw-edge-strong: oklch(0.7 0.005 260);
+  --raw-accent: oklch(0.5 0.14 220);
+  --raw-accent-emphasis: oklch(0.43 0.15 220);
+  --raw-grid: oklch(0.895 0.002 260);
+  --raw-grid-minor: oklch(0.945 0.001 260);
   /* Complete first-class light mappings for every domain state (plan 11a:
    * "complete mappings, not overrides of a few tokens"). */
   --raw-state-loading: oklch(0.5 0.02 260);
-  --raw-state-ready: oklch(0.55 0.14 155);
-  --raw-state-complete-zero: oklch(0.55 0.14 155);
-  --raw-state-partial: oklch(0.6 0.13 85);
-  --raw-state-stale: oklch(0.58 0.11 85);
-  --raw-state-locked: oklch(0.5 0.12 300);
-  --raw-state-denied: oklch(0.52 0.17 25);
-  --raw-state-unauthorized: oklch(0.52 0.17 25);
-  --raw-state-redacted: oklch(0.48 0.05 300);
-  --raw-state-conflicting: oklch(0.52 0.15 55);
-  --raw-state-offline: oklch(0.48 0.02 260);
-  --raw-state-unknown: oklch(0.48 0.02 260);
-  --raw-state-cancelled: oklch(0.5 0.06 260);
-  --raw-state-timed-out: oklch(0.52 0.12 55);
-  --raw-state-error: oklch(0.5 0.19 25);
-  --raw-state-unsupported-schema: oklch(0.5 0.12 320);
+  --raw-state-ready: oklch(0.52 0.14 155);
+  --raw-state-complete-zero: oklch(0.52 0.14 155);
+  --raw-state-partial: oklch(0.56 0.13 85);
+  --raw-state-stale: oklch(0.55 0.11 85);
+  --raw-state-locked: oklch(0.48 0.13 300);
+  --raw-state-denied: oklch(0.5 0.18 25);
+  --raw-state-unauthorized: oklch(0.5 0.18 25);
+  --raw-state-redacted: oklch(0.46 0.05 300);
+  --raw-state-conflicting: oklch(0.5 0.15 55);
+  --raw-state-offline: oklch(0.46 0.015 260);
+  --raw-state-unknown: oklch(0.46 0.015 260);
+  --raw-state-cancelled: oklch(0.48 0.05 260);
+  --raw-state-timed-out: oklch(0.5 0.13 55);
+  --raw-state-error: oklch(0.48 0.19 25);
+  --raw-state-unsupported-schema: oklch(0.48 0.13 320);
   --raw-sev-info: oklch(0.55 0.08 250);
-  --raw-sev-low: oklch(0.58 0.12 85);
-  --raw-sev-medium: oklch(0.56 0.14 55);
-  --raw-sev-high: oklch(0.52 0.17 35);
-  --raw-sev-critical: oklch(0.47 0.2 25);
+  --raw-sev-low: oklch(0.55 0.12 85);
+  --raw-sev-medium: oklch(0.53 0.14 55);
+  --raw-sev-high: oklch(0.5 0.17 35);
+  --raw-sev-critical: oklch(0.45 0.2 25);
 }
 
 [data-contrast='more'] {
   --raw-text-secondary: var(--raw-text-primary);
   --raw-text-muted: var(--raw-text-secondary);
   --raw-edge-subtle: var(--raw-edge-strong);
+  --raw-grid: var(--raw-edge-subtle);
 }
 
 @media (forced-colors: active) {
@@ -125,9 +146,69 @@
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Instrument surfaces
+ * ------------------------------------------------------------------------- */
+
+/** The graticule: a two-step hairline grid, major every four minor cells.
+ * Drawn behind canvases and empty measuring fields so a region reads as ruled
+ * space rather than blank background. */
+.td-graticule {
+  background-image:
+    linear-gradient(to right, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to right, var(--raw-grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid-minor) 1px, transparent 1px);
+  background-size:
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    var(--grid-cell) var(--grid-cell),
+    var(--grid-cell) var(--grid-cell);
+  background-position: center center;
+}
+
+/** Bezel screen ruling: the faint horizontal discipline of a CRT face, used
+ * only on the graph field so the canvas reads as an instrument screen. */
+.td-scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    color-mix(in oklab, var(--raw-surface-0) 60%, transparent) 0 1px,
+    transparent 1px 3px
+  );
+  opacity: 0.3;
+}
+
+/** Live signal: a slow, low-amplitude flash on the single element that proves
+ * the stream is moving. Reduced motion pins it fully lit — the state still
+ * reads, nothing moves. */
+@keyframes td-signal {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.td-signal {
+  animation: td-signal 1.8s var(--ease-standard) infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dur-state: 0ms;
     --dur-panel: 0ms;
+  }
+  .td-signal {
+    animation: none;
+    opacity: 1;
+  }
+  .td-scanlines::after {
+    display: none;
   }
 }
