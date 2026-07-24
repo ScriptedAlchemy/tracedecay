@@ -259,6 +259,30 @@ struct DaemonAdmissionPort<'a> {
     project_root: &'a Path,
 }
 
+fn daemon_admission_response(response: &serde_json::Value) -> HookImmediateAdmissionV1 {
+    let disposition = response
+        .get("disposition")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<HookTransportDispositionV1>(value).ok());
+    if disposition == Some(HookTransportDispositionV1::CatchupRequired) {
+        return HookImmediateAdmissionV1::CatchupRequired;
+    }
+    match response.get("status").and_then(serde_json::Value::as_str) {
+        Some("accepted" | "committed" | "exact_duplicate") => {
+            let ready_guidance = response
+                .get("ready_guidance")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<HookReadyGuidanceV1>(value).ok());
+            HookImmediateAdmissionV1::Accepted {
+                admitted_at: now_utc(),
+                ready_guidance,
+            }
+        }
+        Some("backpressured") => HookImmediateAdmissionV1::Backpressured,
+        _ => HookImmediateAdmissionV1::Unavailable,
+    }
+}
+
 impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
     fn try_admit_async<'a>(
         &'a self,
@@ -281,20 +305,7 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
             else {
                 return HookImmediateAdmissionV1::Unavailable;
             };
-            match response.get("status").and_then(serde_json::Value::as_str) {
-                Some("accepted" | "committed" | "exact_duplicate") => {
-                    let ready_guidance =
-                        response.get("ready_guidance").cloned().and_then(|value| {
-                            serde_json::from_value::<HookReadyGuidanceV1>(value).ok()
-                        });
-                    HookImmediateAdmissionV1::Accepted {
-                        admitted_at: now_utc(),
-                        ready_guidance,
-                    }
-                }
-                Some("backpressured") => HookImmediateAdmissionV1::Backpressured,
-                _ => HookImmediateAdmissionV1::Unavailable,
-            }
+            daemon_admission_response(&response)
         })
     }
 }
@@ -383,16 +394,19 @@ async fn dispatch_decoded(
         Ok(Err(_)) => HookImmediateAdmissionV1::Unavailable,
         Err(_) => HookImmediateAdmissionV1::TimedOut,
     };
-    let replay = if matches!(immediate, HookImmediateAdmissionV1::Accepted { .. }) {
-        None
-    } else {
-        Some(append_for_replay(
+    let replay = match immediate {
+        HookImmediateAdmissionV1::Accepted { .. } | HookImmediateAdmissionV1::CatchupRequired => {
+            None
+        }
+        HookImmediateAdmissionV1::Unavailable
+        | HookImmediateAdmissionV1::TimedOut
+        | HookImmediateAdmissionV1::Backpressured => Some(append_for_replay(
             &layout.data_root,
             host,
             &envelope,
             binding,
             now,
-        ))
+        )),
     };
     let control = HookRuntimeControlV1::from_configuration(&snapshot, HookGuidanceStateV1::Active);
     match finish_synchronous_hook(
@@ -519,6 +533,19 @@ mod tests {
         assert_ne!(first.2, second.2);
         assert_eq!(first.3, 17);
         assert_eq!(second.3, 19);
+    }
+
+    #[test]
+    fn daemon_catchup_disposition_is_not_reclassified_as_unavailable() {
+        let response = serde_json::json!({
+            "status": "rejected",
+            "disposition": HookTransportDispositionV1::CatchupRequired,
+        });
+
+        assert!(matches!(
+            daemon_admission_response(&response),
+            HookImmediateAdmissionV1::CatchupRequired
+        ));
     }
 
     #[test]

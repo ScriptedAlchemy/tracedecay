@@ -106,6 +106,7 @@ pub enum HookImmediateAdmissionV1 {
         admitted_at: UtcMicros,
         ready_guidance: Option<HookReadyGuidanceV1>,
     },
+    CatchupRequired,
     Unavailable,
     TimedOut,
     Backpressured,
@@ -115,6 +116,7 @@ impl HookImmediateAdmissionV1 {
     const fn state(&self) -> HookImmediateAdmissionStateV1 {
         match self {
             Self::Accepted { .. } => HookImmediateAdmissionStateV1::Accepted,
+            Self::CatchupRequired => HookImmediateAdmissionStateV1::CatchupRequired,
             Self::Unavailable => HookImmediateAdmissionStateV1::Unavailable,
             Self::TimedOut => HookImmediateAdmissionStateV1::TimedOut,
             Self::Backpressured => HookImmediateAdmissionStateV1::Backpressured,
@@ -126,6 +128,7 @@ impl HookImmediateAdmissionV1 {
 #[serde(rename_all = "snake_case")]
 pub enum HookImmediateAdmissionStateV1 {
     Accepted,
+    CatchupRequired,
     Unavailable,
     TimedOut,
     Backpressured,
@@ -239,6 +242,9 @@ pub fn finish_synchronous_hook(
     let immediate_state = immediate.state();
     let disposition = match immediate_state {
         HookImmediateAdmissionStateV1::Accepted => HookTransportDispositionV1::Accepted,
+        HookImmediateAdmissionStateV1::CatchupRequired => {
+            HookTransportDispositionV1::CatchupRequired
+        }
         HookImmediateAdmissionStateV1::Unavailable
         | HookImmediateAdmissionStateV1::TimedOut
         | HookImmediateAdmissionStateV1::Backpressured => match replay_append {
