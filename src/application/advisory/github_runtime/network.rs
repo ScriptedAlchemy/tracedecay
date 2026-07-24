@@ -2221,6 +2221,8 @@ mod tests {
         next_comment["databaseId"] = json!(3_556_767_424_u64);
         next_comment["url"] =
             json!("https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767424");
+        serde_json::from_value::<GraphQlResponseV1>(first_page.clone())
+            .expect("synthetic first page must satisfy the production response contract");
         let second_page = json!({
             "data": {
                 "node": {
@@ -2238,11 +2240,25 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let server = std::thread::spawn(move || {
             for response in [first_page, second_page] {
-                let (mut stream, _) = listener.accept().unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "production client did not request the expected GraphQL page"
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("GraphQL fixture accept failed: {error}"),
+                    }
+                };
                 captured
                     .lock()
                     .unwrap()
