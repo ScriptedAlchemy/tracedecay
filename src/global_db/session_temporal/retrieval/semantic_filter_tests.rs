@@ -27,12 +27,24 @@ fn receipt(payload: &Value) -> SanitizationReceiptV1 {
 }
 
 fn encoded_observation(facts: Vec<CanonicalObservationFactV1>) -> String {
+    encoded_observation_at(facts, None)
+}
+
+fn encoded_observation_at(
+    facts: Vec<CanonicalObservationFactV1>,
+    native_timestamp: Option<i64>,
+) -> String {
     let session_id = SessionId::new("session-semantic-filter").unwrap();
     let provider = ProviderId::new("codex").unwrap();
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
     let range = ObservationSourceRangeV1::new(1, 2).unwrap();
     let record_id = ObservationId::new("record-semantic-filter").unwrap();
+    let mut evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range);
+    if let Some(native_timestamp) = native_timestamp {
+        evidence = evidence.with_native_timestamp(native_timestamp);
+    }
     let envelope = CanonicalObservationEnvelopeV1::new(
         provider,
         "message",
@@ -40,7 +52,7 @@ fn encoded_observation(facts: Vec<CanonicalObservationFactV1>) -> String {
         CanonicalObservationRelationsV1::new(session_id)
             .with_message_id(ObservationId::new("message-semantic-filter").unwrap()),
         facts,
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        evidence,
     )
     .unwrap();
     let payload = serde_json::to_value(envelope).unwrap();
@@ -63,6 +75,47 @@ fn encoded_observation(facts: Vec<CanonicalObservationFactV1>) -> String {
         .unwrap(),
     )
     .unwrap()
+}
+
+#[test]
+fn goal_only_time_filter_uses_canonical_observation_timestamp() {
+    let goal = CanonicalObservationFactV1::WorkflowLifecycle {
+        semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
+        provider_reference: Some("thread-goal-only".to_string()),
+        item_id: None,
+        parent_reference: None,
+        list_reference: None,
+        state: None,
+        status: Some("active".to_string()),
+        item_order: None,
+        revision: None,
+        event_sequence: None,
+        content: Some(json!({"objective": "finish PR8"})),
+    };
+    let encoded = encoded_observation_at(vec![goal.clone()], Some(42));
+    let filter = TemporalCandidateFilterV1 {
+        start_time: Some(40),
+        end_time: Some(50),
+        goals: true,
+        ..TemporalCandidateFilterV1::default()
+    };
+
+    assert!(observation_matches_filter(&encoded, "user", &filter).unwrap());
+    assert!(
+        !observation_matches_filter(
+            &encoded,
+            "user",
+            &TemporalCandidateFilterV1 {
+                start_time: Some(43),
+                ..filter.clone()
+            },
+        )
+        .unwrap()
+    );
+    assert!(
+        !observation_matches_filter(&encoded_observation(vec![goal]), "user", &filter,).unwrap(),
+        "a Goal without Message.timestamp or canonical observation time stays ineligible"
+    );
 }
 
 #[test]

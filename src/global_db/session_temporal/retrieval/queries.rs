@@ -23,7 +23,7 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(json_extract(
           provider_observation.observation_json, '$.identity.source.provider'
       ), 'claude') AS BLOB)) <= ?9
-      AND length(CAST(o.snippet_text AS BLOB)) <= ?10
+      AND length(CAST(o.snippet_text AS BLOB)) <= ?11
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
@@ -32,11 +32,9 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
           + length(CAST(o.role AS BLOB))
           + length(CAST(COALESCE(json_extract(
               provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') AS BLOB))
-          + length(CAST(o.snippet_text AS BLOB))
-          + length(CAST(?4 AS BLOB)) <= ?10
+          ), 'claude') AS BLOB)) <= ?10
     ORDER BY o.knowledge_at DESC, o.occurrence_id
-    LIMIT ?11";
+    LIMIT ?12";
 
 pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
@@ -325,20 +323,18 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = "
       AND length(CAST(o.session_id AS BLOB)) <= ?9
       AND length(CAST(o.role AS BLOB)) <= ?9
       AND length(CAST(authority_session.provider AS BLOB)) <= ?9
-      AND length(CAST(o.snippet_text AS BLOB)) <= ?10
+      AND length(CAST(o.snippet_text AS BLOB)) <= ?12
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
           + length(CAST(o.role AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB))
-          + length(CAST(o.snippet_text AS BLOB))
-          + length(CAST(?3 AS BLOB)) <= ?10
+          + length(CAST(authority_session.provider AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?12";
+    LIMIT ?13";
 
 pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,

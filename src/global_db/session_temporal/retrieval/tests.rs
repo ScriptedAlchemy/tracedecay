@@ -1,6 +1,7 @@
 use tempfile::tempdir;
 use tracedecay_domain::{
-    RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros,
+    MAX_OBSERVATION_RECORD_BYTES, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
+    UtcMicros,
 };
 
 use super::candidates::*;
@@ -13,7 +14,7 @@ use crate::db::engine::{Connection, Executor, ReadSnapshot, TestConnection, Valu
 use crate::query::temporal::candidates::CandidateChannel;
 use crate::query::temporal::ports::{
     BindingDigest, KernelVersions, PageRequest, TemporalAuthorizedRoot, TemporalExecutionSnapshot,
-    TemporalRetrievalScope, TemporalSnapshotRequest, TemporalWatermarks,
+    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalWatermarks,
 };
 use crate::query::temporal::ranking::RankingCandidate;
 use crate::query::temporal::resolution::ValidatedAuthorization;
@@ -218,6 +219,38 @@ impl RegisteredTemporalRead {
         kinds
     }
 
+    async fn records(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        candidate: RankingCandidate,
+        request: &PageRequest,
+    ) -> Vec<TemporalRecord> {
+        let query = build_record_query(
+            snapshot.retrieval_scope(),
+            snapshot,
+            &[candidate],
+            0,
+            &RecordCursor {
+                candidate: 0,
+                kind: 0,
+                session_id: String::new(),
+                stable_id: String::new(),
+            },
+            request.page_item_limit().saturating_add(1),
+            request,
+        )
+        .expect("record query");
+        let mut rows =
+            crate::db::engine::QueryExecutor::query(&self.read, &query.sql, query.params)
+                .await
+                .expect("record rows");
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().await.expect("record row") {
+            records.push(temporal_record_from_row(&row).expect("typed temporal record"));
+        }
+        records
+    }
+
     async fn explain_record_query(&self, query: RecordQuery) -> usize {
         let explain = format!("EXPLAIN QUERY PLAN {}", query.sql);
         let mut rows = crate::db::engine::QueryExecutor::query(&self.read, &explain, query.params)
@@ -388,6 +421,67 @@ impl HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("cross-session retrieval fixture");
+    }
+
+    async fn seed_derived_record_fixture_for_test(&self) {
+        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
+            .await;
+        let database = self
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        Executor::execute_batch(
+            &database
+                .writer_connection()
+                .expect("registered profile writer"),
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO sessions (
+                provider, session_id, project_key, project_path
+             ) VALUES ('claude', 'session-snapshot', 'user', '/derived-record-test');
+             INSERT INTO observations (
+                observation_id, payload_digest, receipt_id, observation_json,
+                committed_cursor_json
+             ) VALUES (
+                'derived-observation', 'sha256:derived', 'derived-receipt',
+                '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
+             );
+             INSERT INTO session_occurrences (
+                session_id, generation, occurrence_id, source_observation_id,
+                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
+                valid_time_json, evidence_json, snippet_text, index_text
+             ) VALUES (
+                'session-snapshot', 1, 'derived-member', 'derived-observation', 0,
+                'source-occurrence-anchor', 'user', 5, '{\"kind\":\"unknown\"}',
+                '{
+                    \"authority\":\"provider_native\",
+                    \"evidence_class\":\"provider_declared\",
+                    \"source_anchor_id\":\"source-evidence-anchor\",
+                    \"sanitization_receipt\":{
+                        \"receipt_id\":\"derived-receipt\",
+                        \"sanitizer_version\":\"derived-sanitizer\"
+                    }
+                }',
+                'derived content', 'derived content'
+             );
+             INSERT INTO session_derived_evidence (
+                session_id, generation, evidence_kind, evidence_id,
+                retrieval_anchor_id, thread_id, first_occurrence_id, last_occurrence_id,
+                algorithm_version, configuration_digest, member_count, member_digest,
+                evidence_json
+             ) VALUES (
+                'session-snapshot', 1, 'span', 'span-evidence-id',
+                'derived-span-anchor', NULL, 'derived-member', 'derived-member',
+                'span-v1', 'sha256:configuration', 1, 'sha256:members', '{}'
+             );
+             INSERT INTO session_derived_evidence_members (
+                session_id, generation, evidence_kind, evidence_id,
+                ordinal, occurrence_id, member_role
+             ) VALUES (
+                'session-snapshot', 1, 'span', 'span-evidence-id',
+                0, 'derived-member', 'first'
+             );",
+        )
+        .await
+        .expect("derived retrieval fixture");
     }
 
     async fn seed_oversized_record_fixture_for_test(&self) {
@@ -693,6 +787,18 @@ fn mode_sql_is_shaped_without_optional_or_fallback_predicates() {
     );
     assert!(as_of.occurrence_predicate.contains("o.knowledge_at <= ?9"));
     assert!(as_of.assertion_predicate.contains("a.knowledge_at <= ?9"));
+    assert!(as_of.copy_predicate.contains("e.knowledge_at <= ?9"));
+    assert!(
+        as_of
+            .copy_predicate
+            .contains("json_extract(e.valid_time_json, '$.kind') = 'known'")
+    );
+    assert!(
+        as_of
+            .copy_predicate
+            .contains("json_extract(e.valid_time_json, '$.valid_at') <= ?9")
+    );
+    assert!(!as_of.copy_predicate.contains("e.created_at"));
 
     let evolution = RecordModeSql::new(TemporalModeV1::Evolution, 9);
     assert!(evolution.summary_predicate.contains("availability"));
@@ -713,6 +819,7 @@ fn candidate_queries_use_keysets_limits_and_mode_indexes() {
     }
     assert!(TIME_CANDIDATE_QUERY.contains("idx_session_occurrences_generation_order"));
     assert!(EXACT_CANDIDATE_QUERY.contains("instr(o.snippet_text, ?4) > 0"));
+    assert!(EXACT_CANDIDATE_QUERY.contains("length(CAST(o.snippet_text AS BLOB)) <= ?11"));
     assert!(!EXACT_CANDIDATE_QUERY.contains("session_occurrences_fts MATCH"));
     assert!(OCCURRENCE_FTS_QUERY.contains("session_occurrences_fts MATCH"));
     assert!(SUMMARY_CANDIDATE_QUERY.contains("session_summary_nodes_fts MATCH"));
@@ -774,6 +881,9 @@ async fn exact_candidate_matches_embedded_literal_and_returns_utf8_byte_range() 
                 SqlValue::Integer(128),
                 SqlValue::Integer(128),
                 SqlValue::Integer(1_024),
+                SqlValue::Integer(
+                    i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap"),
+                ),
                 SqlValue::Integer(10),
             ],
         )
@@ -815,6 +925,152 @@ async fn exact_candidate_matches_embedded_literal_and_returns_utf8_byte_range() 
     );
 }
 
+#[tokio::test]
+async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_item_cap() {
+    let dir = tempdir().expect("temporary directory");
+    let conn = TestConnection::open(&dir.path().join("exact-large-source.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+             provider TEXT NOT NULL,
+             session_id TEXT NOT NULL,
+             project_key TEXT NOT NULL,
+             PRIMARY KEY(provider, session_id)
+         );
+         CREATE TABLE retrieval_anchors (
+             anchor_id TEXT PRIMARY KEY,
+             owner_json TEXT NOT NULL
+         );
+         CREATE TABLE session_temporal_generations (
+             session_id TEXT NOT NULL,
+             generation INTEGER NOT NULL,
+             state TEXT NOT NULL,
+             PRIMARY KEY(session_id, generation)
+         );
+         CREATE TABLE observations (
+             observation_id TEXT PRIMARY KEY,
+             observation_json TEXT NOT NULL
+         );
+         CREATE TABLE session_occurrences (
+             session_id TEXT NOT NULL,
+             generation INTEGER NOT NULL,
+             occurrence_id TEXT NOT NULL,
+             source_observation_id TEXT NOT NULL,
+             retrieval_anchor_id TEXT NOT NULL,
+             message_id TEXT,
+             turn_id TEXT,
+             role TEXT NOT NULL,
+             knowledge_at INTEGER NOT NULL,
+             snippet_text TEXT NOT NULL,
+             PRIMARY KEY(session_id, generation, occurrence_id)
+         );
+         INSERT INTO sessions VALUES ('claude', 'session-large', 'user');
+         INSERT INTO retrieval_anchors VALUES (
+             'anchor-large',
+             '{\"kind\":\"profile\"}'
+         );
+         INSERT INTO session_temporal_generations VALUES (
+             'session-large', 1, 'active'
+         );
+         INSERT INTO observations VALUES (
+             'observation-large',
+             '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}'
+         );",
+    )
+    .await
+    .expect("large exact fixture schema");
+    let literal = "exact-tail-🚨";
+    let prefix_bytes = 768 * 1024;
+    let snippet = format!("{}{literal}", "x".repeat(prefix_bytes));
+    assert!(snippet.len() < MAX_OBSERVATION_RECORD_BYTES);
+    conn.execute(
+        "INSERT INTO session_occurrences VALUES (
+             'session-large', 1, 'occurrence-large', 'observation-large',
+             'anchor-large', 'message-large', 'turn-large', 'user', 1, ?1
+         )",
+        vec![SqlValue::Text(snippet)],
+    )
+    .await
+    .expect("large exact occurrence");
+    let oversized_snippet = format!(
+        "{}{literal}",
+        "y".repeat(MAX_OBSERVATION_RECORD_BYTES.saturating_add(1))
+    );
+    conn.execute(
+        "INSERT INTO session_occurrences VALUES (
+             'session-large', 1, 'occurrence-oversized', 'observation-large',
+             'anchor-large', 'message-oversized', 'turn-oversized', 'user', 2, ?1
+         )",
+        vec![SqlValue::Text(oversized_snippet)],
+    )
+    .await
+    .expect("oversized hostile occurrence");
+
+    let candidate_item_bytes = 256 * 1024;
+    let source_bytes = i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap");
+    let mut session_rows = conn
+        .query(
+            EXACT_CANDIDATE_QUERY,
+            vec![
+                SqlValue::Text("session-large".to_string()),
+                SqlValue::Integer(1),
+                SqlValue::Null,
+                SqlValue::Text(literal.to_string()),
+                SqlValue::Integer(i64::MAX),
+                SqlValue::Text(String::new()),
+                SqlValue::Integer(128),
+                SqlValue::Integer(128),
+                SqlValue::Integer(128),
+                SqlValue::Integer(candidate_item_bytes),
+                SqlValue::Integer(source_bytes),
+                SqlValue::Integer(1),
+            ],
+        )
+        .await
+        .expect("session exact query");
+    assert_eq!(
+        session_rows
+            .next()
+            .await
+            .expect("session row read")
+            .expect("large session exact candidate")
+            .get::<String>(0)
+            .expect("session occurrence id"),
+        "occurrence-large"
+    );
+
+    let mut root_rows = conn
+        .query(
+            ROOT_EXACT_CANDIDATE_QUERY,
+            vec![
+                SqlValue::Text("user".to_string()),
+                SqlValue::Null,
+                SqlValue::Text(literal.to_string()),
+                SqlValue::Integer(i64::MAX),
+                SqlValue::Text(String::new()),
+                SqlValue::Text(String::new()),
+                SqlValue::Integer(128),
+                SqlValue::Integer(128),
+                SqlValue::Integer(128),
+                SqlValue::Integer(candidate_item_bytes),
+                SqlValue::Integer(128),
+                SqlValue::Integer(source_bytes),
+                SqlValue::Integer(1),
+            ],
+        )
+        .await
+        .expect("root exact query");
+    assert_eq!(
+        root_rows
+            .next()
+            .await
+            .expect("root row read")
+            .expect("large root exact candidate")
+            .get::<String>(0)
+            .expect("root occurrence id"),
+        "occurrence-large"
+    );
+}
+
 #[test]
 fn authorized_root_candidate_queries_use_composite_session_keysets() {
     for sql in [
@@ -832,6 +1088,7 @@ fn authorized_root_candidate_queries_use_composite_session_keysets() {
             .contains("ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id")
     );
     assert!(ROOT_EXACT_CANDIDATE_QUERY.contains("instr(o.snippet_text, ?3) > 0"));
+    assert!(ROOT_EXACT_CANDIDATE_QUERY.contains("length(CAST(o.snippet_text AS BLOB)) <= ?12"));
     assert!(!ROOT_EXACT_CANDIDATE_QUERY.contains("session_occurrences_fts MATCH"));
     assert!(
         ROOT_SUMMARY_CANDIDATE_QUERY
@@ -1330,6 +1587,42 @@ async fn root_record_hydration_rejects_cross_session_copy_and_assertion_traps() 
 }
 
 #[tokio::test]
+async fn derived_candidate_materializes_members_with_canonical_evidence_linkage() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_derived_record_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let snapshot = scoped_snapshot_with_mode(1, None, TemporalModeV1::Forensic);
+    let mut candidate = candidate_for_anchor("derived-span-anchor");
+    candidate.channel = CandidateChannel::Span;
+    candidate.retriever_record_id = "span-evidence-id".to_string();
+
+    let records = read.records(&snapshot, candidate, &record_request()).await;
+    assert_eq!(records.len(), 1);
+    let TemporalRecord::Occurrence(member) = &records[0] else {
+        panic!("derived candidate must materialize its member occurrence");
+    };
+    assert_eq!(
+        member.anchor_id,
+        RetrievalAnchorId::new("source-occurrence-anchor").unwrap()
+    );
+    assert!(
+        member
+            .evidence
+            .supporting_anchor_ids
+            .contains(&RetrievalAnchorId::new("source-evidence-anchor").unwrap())
+    );
+    assert!(
+        member
+            .evidence
+            .supporting_anchor_ids
+            .contains(&RetrievalAnchorId::new("derived-span-anchor").unwrap())
+    );
+}
+
+#[tokio::test]
 async fn oversized_evidence_publication_and_source_json_never_reach_record_rows() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1463,7 +1756,7 @@ async fn explain_record_query_stays_bounded_after_hundred_thousand_candidates() 
     )
     .expect("bounded record query");
     assert_eq!(candidates.len(), 38);
-    assert!(query.params.len() <= candidates.len() * 3 + 14);
+    assert!(query.params.len() <= candidates.len() * 5 + 14);
 
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1623,7 +1916,7 @@ fn record_query_has_no_offset_or_per_candidate_subqueries() {
     let builder = &source[start..end];
     assert!(!builder.to_ascii_uppercase().contains(" OFFSET "));
     assert!(!builder.contains("for candidate in candidates {\n        conn.query"));
-    assert!(builder.contains("candidate_input(ordinal, session_id, anchor_id)"));
+    assert!(builder.contains("ordinal, session_id, anchor_id, derived_kind, retriever_record_id"));
     assert!(builder.contains("ORDER BY ordinal, kind_rank, scope_session, stable_id"));
 }
 
@@ -1650,7 +1943,7 @@ fn root_record_query_carries_session_identity_through_hydration() {
     assert!(
         query
             .sql
-            .contains("candidate_input(ordinal, session_id, anchor_id)")
+            .contains("ordinal, session_id, anchor_id, derived_kind, retriever_record_id")
     );
     assert!(query.sql.contains("o.session_id = c.session_id"));
     assert!(query.sql.contains("a.session_id = c.session_id"));

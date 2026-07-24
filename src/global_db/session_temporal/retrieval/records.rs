@@ -29,13 +29,13 @@ pub(super) fn build_record_query(
             resource: "record candidate window",
         });
     }
-    let mut params = Vec::with_capacity(candidates.len().saturating_mul(3).saturating_add(14));
+    let mut params = Vec::with_capacity(candidates.len().saturating_mul(5).saturating_add(14));
     let mut values = String::new();
     for (local, candidate) in candidates.iter().enumerate() {
         if local != 0 {
             values.push(',');
         }
-        values.push_str("(?, ?, ?)");
+        values.push_str("(?, ?, ?, ?, ?)");
         params.push(SqlValue::Integer(
             i64::try_from(candidate_offset.saturating_add(local))
                 .map_err(|error| read_error(RECORD_OPERATION, error))?,
@@ -55,6 +55,16 @@ pub(super) fn build_record_query(
         };
         params.push(SqlValue::Text(session_id.to_string()));
         params.push(SqlValue::Text(candidate.anchor_id.to_string()));
+        params.push(match candidate.channel {
+            crate::query::temporal::candidates::CandidateChannel::Span => {
+                SqlValue::Text("span".to_string())
+            }
+            crate::query::temporal::candidates::CandidateChannel::Burst => {
+                SqlValue::Text("burst".to_string())
+            }
+            _ => SqlValue::Null,
+        });
+        params.push(SqlValue::Text(candidate.retriever_record_id.clone()));
     }
     let scope_param = params.len() + 1;
     params.push(SqlValue::Text(
@@ -125,9 +135,14 @@ pub(super) fn build_record_query(
     let mode = RecordModeSql::new(snapshot.temporal_mode(), cutoff_param);
     let record_scope = RecordScopeSql::new(scope, scope_param, generation_param);
     let sql = format!(
-        "WITH candidate_input(ordinal, session_id, anchor_id) AS (VALUES {values}),
-         candidate(ordinal, session_id, anchor_id) AS (
-             SELECT MIN(input.ordinal), input.session_id, input.anchor_id
+        "WITH candidate_input(
+             ordinal, session_id, anchor_id, derived_kind, retriever_record_id
+         ) AS (VALUES {values}),
+         candidate(
+             ordinal, session_id, anchor_id, derived_kind, retriever_record_id
+         ) AS (
+             SELECT MIN(input.ordinal), input.session_id, input.anchor_id,
+                    input.derived_kind, input.retriever_record_id
              FROM candidate_input AS input
              WHERE ?{root_param} IS NULL
                 OR EXISTS (
@@ -141,7 +156,8 @@ pub(super) fn build_record_query(
                       )
                     LIMIT 1
                 )
-             GROUP BY input.session_id, input.anchor_id
+             GROUP BY input.session_id, input.anchor_id, input.derived_kind,
+                      input.retriever_record_id
          ),
          records AS (
              SELECT c.ordinal, 0 AS kind_rank, o.occurrence_id AS stable_id,
@@ -158,7 +174,8 @@ pub(super) fn build_record_query(
              JOIN observations AS occurrence_provider
                ON occurrence_provider.observation_id = o.source_observation_id
              {occurrence_join}
-             WHERE {occurrence_predicate}
+             WHERE c.derived_kind IS NULL
+               AND {occurrence_predicate}
                AND (?{provider_param} IS NULL OR COALESCE(json_extract(
                    occurrence_provider.observation_json, '$.identity.source.provider'
                ), 'claude') = ?{provider_param})
@@ -168,6 +185,46 @@ pub(super) fn build_record_query(
                AND length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
                AND length(CAST(o.occurrence_id AS BLOB))
                    + length(CAST(o.retrieval_anchor_id AS BLOB))
+                   + length(CAST(o.valid_time_json AS BLOB))
+                   + length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
+             UNION ALL
+             SELECT c.ordinal, 0, o.occurrence_id, 'occurrence',
+                    o.occurrence_id, o.retrieval_anchor_id, c.anchor_id,
+                    o.knowledge_at, o.valid_time_json, o.evidence_json,
+                    NULL, NULL, NULL, NULL, NULL, o.session_id
+             FROM candidate AS c
+             JOIN session_derived_evidence AS derived
+               ON derived.session_id = c.session_id
+              AND derived.retrieval_anchor_id = c.anchor_id
+              AND derived.evidence_kind = c.derived_kind
+              AND derived.evidence_id = c.retriever_record_id
+             JOIN session_derived_evidence_members AS member
+               ON member.session_id = derived.session_id
+              AND member.generation = derived.generation
+              AND member.evidence_kind = derived.evidence_kind
+              AND member.evidence_id = derived.evidence_id
+             JOIN session_occurrences AS o
+               ON o.session_id = member.session_id
+              AND o.generation = member.generation
+              AND o.occurrence_id = member.occurrence_id
+              {occurrence_condition}
+             {occurrence_generation_join}
+             JOIN observations AS occurrence_provider
+               ON occurrence_provider.observation_id = o.source_observation_id
+             {occurrence_join}
+             WHERE c.derived_kind IS NOT NULL
+               AND {occurrence_predicate}
+               AND (?{provider_param} IS NULL OR COALESCE(json_extract(
+                   occurrence_provider.observation_json, '$.identity.source.provider'
+               ), 'claude') = ?{provider_param})
+               AND length(CAST(o.occurrence_id AS BLOB)) <= ?{item_cap_param}
+               AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?{item_cap_param}
+               AND length(CAST(c.anchor_id AS BLOB)) <= ?{item_cap_param}
+               AND length(CAST(o.valid_time_json AS BLOB)) <= ?{item_cap_param}
+               AND length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
+               AND length(CAST(o.occurrence_id AS BLOB))
+                   + length(CAST(o.retrieval_anchor_id AS BLOB))
+                   + length(CAST(c.anchor_id AS BLOB))
                    + length(CAST(o.valid_time_json AS BLOB))
                    + length(CAST(o.evidence_json AS BLOB)) <= ?{item_cap_param}
              UNION ALL
@@ -635,7 +692,11 @@ impl RecordModeSql {
                      AND json_extract(a.valid_time_json, '$.valid_at') <= ?{cutoff_param}"
                 ),
                 copy_join: String::new(),
-                copy_predicate: format!("e.created_at <= ?{cutoff_param}"),
+                copy_predicate: format!(
+                    "e.knowledge_at <= ?{cutoff_param}
+                     AND json_extract(e.valid_time_json, '$.kind') = 'known'
+                     AND json_extract(e.valid_time_json, '$.valid_at') <= ?{cutoff_param}"
+                ),
                 summary_predicate: format!(
                     "n.created_at <= ?{cutoff_param}
                      AND COALESCE(availability.availability, 'unavailable') <> 'unavailable'"

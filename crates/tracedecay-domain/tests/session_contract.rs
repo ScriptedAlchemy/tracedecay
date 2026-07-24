@@ -178,6 +178,20 @@ fn exact_byte_ranges_are_canonical_half_open_domain_values() {
 }
 
 #[test]
+fn exact_byte_range_deserialization_rejects_invalid_domain_values() {
+    for invalid_range in [json!({"start": 3, "end": 3}), json!({"start": 4, "end": 3})] {
+        let error = serde_json::from_value::<ByteRangeV1>(invalid_range)
+            .expect_err("deserialization must enforce the byte-range invariant");
+        assert!(
+            error
+                .to_string()
+                .contains("a byte range must be non-empty and ordered"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn temporal_values_round_trip_every_variant_and_reject_unknown_variants() {
     for mode in [
         TemporalModeV1::Current,

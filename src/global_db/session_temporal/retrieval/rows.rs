@@ -28,12 +28,17 @@ pub(super) fn temporal_record_from_row(
             let valid_time = required_string(row, 8)?;
             let evidence = required_string(row, 9)?;
             let evidence: SessionEvidenceMetadataV1 = parse_json(&evidence, RECORD_OPERATION)?;
+            let mut evidence = authorized_evidence(evidence);
+            if let Some(derived_anchor) = optional_string(row, 6)? {
+                evidence =
+                    evidence.with_supporting_anchor(parse_text(derived_anchor, RECORD_OPERATION)?);
+            }
             Ok(TemporalRecord::Occurrence(ResolutionOccurrence {
                 occurrence_id: parse_text(occurrence_id, RECORD_OPERATION)?,
                 anchor_id: parse_text(anchor_id, RECORD_OPERATION)?,
                 knowledge_at: UtcMicros(knowledge_at),
                 valid_time: parse_json(&valid_time, RECORD_OPERATION)?,
-                evidence: authorized_evidence(evidence),
+                evidence,
             }))
         }
         "assertion" => {

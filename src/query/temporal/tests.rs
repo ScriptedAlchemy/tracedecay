@@ -782,6 +782,46 @@ fn summary_lineage_is_limited_to_the_selected_ranked_page() {
 }
 
 #[test]
+fn derived_candidate_ranks_when_its_member_occurrence_has_a_distinct_anchor() {
+    block_on(async {
+        let derived_anchor = anchor("derived-span");
+        let mut derived = candidate("derived-span", "derived-span", 20);
+        derived.channel = CandidateChannel::Span;
+        derived.retriever_record_id = "span-evidence-id".to_string();
+        let mut member = occurrence('a', "source-occurrence", 20);
+        member.evidence = member
+            .evidence
+            .with_supporting_anchor(derived_anchor.clone());
+        let port = FakeReadPort::new(
+            vec![derived],
+            vec![TemporalRecord::Occurrence(member.clone())],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Current, 1),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("derived span member");
+
+        assert_eq!(result.ranked.len(), 1);
+        assert_eq!(result.ranked[0].anchor_id, derived_anchor);
+        assert_eq!(result.ranked[0].stable_id, "derived-span");
+        assert_eq!(result.coverage.visible, 1);
+        assert_eq!(result.coverage.total(), Some(1));
+        assert!(
+            result
+                .ranked
+                .iter()
+                .all(|candidate| candidate.anchor_id != member.anchor_id)
+        );
+    });
+}
+
+#[test]
 fn summary_availability_maps_to_explicit_coverage_and_canonical_omissions() {
     block_on(async {
         let port = FakeReadPort::new(

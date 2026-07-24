@@ -341,8 +341,7 @@ impl RetrievalGrainV1 {
 }
 
 /// Canonical half-open UTF-8 byte range retained by exact retrieval evidence.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteRangeV1 {
     start: u64,
     end: u64,
@@ -362,6 +361,23 @@ impl ByteRangeV1 {
 
     pub const fn end(self) -> u64 {
         self.end
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteRangeV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SerializedByteRange {
+            start: u64,
+            end: u64,
+        }
+
+        let range = SerializedByteRange::deserialize(deserializer)?;
+        Self::new(range.start, range.end).map_err(serde::de::Error::custom)
     }
 }
 

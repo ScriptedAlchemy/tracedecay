@@ -111,13 +111,18 @@ fn cycle_members_among(
 
 fn copy_sources(
     copies: &[LogicalCopyRecordV1],
+    mode: TemporalModeV1,
     control: &ExecutionControl,
     hook: &mut dyn FnMut(ResolutionCheckpoint) -> Result<(), TemporalPortError>,
 ) -> Result<BTreeMap<MessageOccurrenceIdV1, MessageOccurrenceIdV1>, TemporalPortError> {
     let mut validated = Vec::with_capacity(copies.len());
     for copy in copies {
         checkpoint(control, hook, ResolutionCheckpoint::Copy)?;
-        if copy.validate().is_ok() {
+        if copy.validate().is_ok()
+            && copy
+                .valid_time
+                .is_representative_at(copy.knowledge_at, mode)
+        {
             validated.push(copy);
         }
     }
@@ -352,7 +357,7 @@ pub fn resolve_temporal_with_checkpoints(
         .iter()
         .map(|occurrence| occurrence.anchor_id.clone())
         .collect::<BTreeSet<_>>();
-    let copy_sources = copy_sources(copies, control, hook)?;
+    let copy_sources = copy_sources(copies, mode, control, hook)?;
     let mut eligible_assertions = Vec::with_capacity(assertions.len());
     for assertion in assertions {
         checkpoint(control, hook, ResolutionCheckpoint::Assertion)?;

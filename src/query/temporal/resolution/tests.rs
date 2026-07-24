@@ -1325,6 +1325,57 @@ fn forensic_preserves_explicit_logical_copy_occurrences() {
 }
 
 #[test]
+fn as_of_requires_logical_copy_knowledge_and_valid_time() {
+    for (knowledge_at, valid_time) in [
+        (
+            UtcMicros(6),
+            TemporalValidityV1::Known {
+                valid_at: UtcMicros(2),
+            },
+        ),
+        (
+            UtcMicros(2),
+            TemporalValidityV1::Known {
+                valid_at: UtcMicros(6),
+            },
+        ),
+        (UtcMicros(2), TemporalValidityV1::Unknown),
+    ] {
+        let original = occurrence(
+            'a',
+            "original",
+            1,
+            TemporalValidityV1::Known {
+                valid_at: UtcMicros(1),
+            },
+        );
+        let copied = occurrence(
+            'b',
+            "copied",
+            2,
+            TemporalValidityV1::Known {
+                valid_at: UtcMicros(2),
+            },
+        );
+        let mut ineligible_copy = provider_copy(&copied, &original);
+        ineligible_copy.knowledge_at = knowledge_at;
+        ineligible_copy.valid_time = valid_time;
+
+        let resolved = resolve_temporal(
+            &[original, copied],
+            &[ineligible_copy],
+            &[],
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(5),
+            },
+        )
+        .expect("resolution succeeds");
+
+        assert_eq!(resolved.len(), 2);
+    }
+}
+
+#[test]
 fn as_of_cutoff_is_inclusive_for_occurrences_and_assertions() {
     let boundary = occurrence(
         'a',

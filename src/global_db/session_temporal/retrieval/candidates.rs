@@ -1,7 +1,8 @@
 use std::cmp;
 
-use crate::db::engine::Value as SqlValue;
+use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 
+use crate::db::engine::Value as SqlValue;
 use crate::query::temporal::candidates::{CandidateChannel, CandidateClause};
 use crate::query::temporal::ports::{
     CandidateFieldCaps, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
@@ -316,6 +317,8 @@ pub(super) async fn query_candidate_clause(
         i64::try_from(metadata_cap).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let item_cap = i64::try_from(request.max_item_bytes())
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+    let exact_source_cap = i64::try_from(MAX_OBSERVATION_RECORD_BYTES)
+        .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let provider = snapshot
         .provider_scope()
         .map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()));
@@ -358,6 +361,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(metadata_cap),
                 SqlValue::Integer(item_cap),
                 SqlValue::Integer(stable_cap),
+                SqlValue::Integer(exact_source_cap),
                 SqlValue::Integer(limit),
             ],
         ),
@@ -460,6 +464,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(anchor_cap),
                 SqlValue::Integer(metadata_cap),
                 SqlValue::Integer(item_cap),
+                SqlValue::Integer(exact_source_cap),
                 SqlValue::Integer(limit),
             ],
         ),

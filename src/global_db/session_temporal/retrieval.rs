@@ -93,7 +93,11 @@ fn observation_matches_filter(
         }
         TemporalMessageTypeFilterV1::DirectUser | TemporalMessageTypeFilterV1::ToolResult => {}
     }
-    let timestamp = message.and_then(|(_, timestamp)| timestamp);
+    let timestamp = message.and_then(|(_, timestamp)| timestamp).or_else(|| {
+        is_goal
+            .then(|| envelope.evidence().native_timestamp())
+            .flatten()
+    });
     Ok(filter
         .start_time
         .is_none_or(|start| timestamp.is_some_and(|value| value >= start))
