@@ -238,6 +238,14 @@ impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
         preview: &GitIndexPreviewV1,
     ) -> Result<CurrentGitIndexPolicyStateV1, GitIndexTransactionPortError> {
         let current = self.authority.current(request.binding.operation)?;
+        let capability_granted = request
+            .context
+            .allows(&request.binding.capability_id, &request.binding.use_case_id)
+            && current
+                .effective_capabilities
+                .contains(&request.binding.capability_id);
+        let owner_scope_matches =
+            scope_matches_snapshot(&current.scope, &preview.repository_snapshot);
         if request.context.scope() != &current.scope
             || request.context.actor() != &current.requester
             || current.evaluated_at >= current.grant_expires_at
@@ -248,21 +256,15 @@ impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
             || current.catalog_digest != request.proof.catalog_digest
             || current.privacy_digest != request.proof.privacy_digest
             || request.proof.external_proof.is_some()
+            || !capability_granted
+            || !owner_scope_matches
         {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
         Ok(CurrentGitIndexPolicyStateV1 {
             authorization: GitEffectAuthorizationV1 {
-                capability_granted: request
-                    .context
-                    .allows(&request.binding.capability_id, &request.binding.use_case_id)
-                    && current
-                        .effective_capabilities
-                        .contains(&request.binding.capability_id),
-                owner_scope_matches: scope_matches_snapshot(
-                    &current.scope,
-                    &preview.repository_snapshot,
-                ),
+                capability_granted,
+                owner_scope_matches,
             },
             conflict_risk: GitConflictRiskV1::NoneKnown,
             policy_revision: current.policy_revision,

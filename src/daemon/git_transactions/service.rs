@@ -4,7 +4,7 @@ use tracedecay_application::{
     EffectId, EffectTermination, GitIndexApplyPortResultV1, GitIndexApplyRequestV1,
     GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
     GitIndexTransactionPort, GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, ReconciliationState,
+    OperationTermination, ReconciliationState, RequestAdmission,
 };
 #[cfg(test)]
 use tracedecay_domain::GitIndexIdempotencyKey;
@@ -399,7 +399,8 @@ where
             GitIndexTransactionOperationV1::CommitIndex => GitIndexEffectV1::CommitIndex,
         };
         let current = self.authorization.recheck(request, preview)?;
-        if current.policy_digest != request.proof.policy_digest
+        if request.context.admission_at(current.evaluated_at) != RequestAdmission::Admitted
+            || current.policy_digest != request.proof.policy_digest
             || current.configuration_digest != request.proof.configuration_digest
             || current.policy_revision != request.authority.policy.revision
         {

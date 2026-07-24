@@ -432,10 +432,12 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         }
         let snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let disposition = unsupported_state(&current, &runner).map_or(
-            GitIndexPreviewDispositionV1::Applicable,
-            GitIndexPreviewDispositionV1::Unsupported,
-        );
+        let disposition = unsupported_hunk_selection(&request.selected_hunks)
+            .or_else(|| unsupported_state(&current, &runner))
+            .map_or(
+                GitIndexPreviewDispositionV1::Applicable,
+                GitIndexPreviewDispositionV1::Unsupported,
+            );
         let (selected_hunks, patches, candidate_index_tree) = if disposition.is_applicable() {
             let patches = self.materialize_patches(request, &snapshot_digest)?;
             let selected_hunks = patches
@@ -515,12 +517,12 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             .map_err(map_native_error)?;
         let current =
             self.capture_snapshot(&preview.preview.repository_snapshot, &preview.runner, &lock)?;
-        if preview.preview.candidate_index_tree != current.index.tree_id {
-            return Err(GitIndexTransactionPortError::NeedsInspection);
-        }
-        if preview.preview.operation == GitIndexTransactionOperationV1::CommitIndex
-            && current.head.commit() != created_commit
-        {
+        if !live_result_matches_preview(
+            &self.repository_root,
+            &preview.preview,
+            &current,
+            created_commit,
+        ) {
             return Err(GitIndexTransactionPortError::NeedsInspection);
         }
         let final_snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)
@@ -675,6 +677,15 @@ fn unsupported_state(
             }
         }
     }
+}
+
+fn unsupported_hunk_selection(
+    selected_hunks: &[tracedecay_domain::HunkRefV1],
+) -> Option<GitIndexUnsupportedStateV1> {
+    selected_hunks
+        .iter()
+        .any(|hunk| hunk.original_path.is_some())
+        .then_some(GitIndexUnsupportedStateV1::RenameOrCopy)
 }
 
 #[derive(Serialize)]
@@ -844,6 +855,62 @@ fn hunk_commit_matches_preview(
         && current.head == old.head
         && current.refs_digest == old.refs_digest
         && same_stable_native_evidence(current, old)
+}
+
+/// Verify the complete operation-specific terminal state before emitting a
+/// success receipt. Native publication proves which process crossed the
+/// boundary; this observation additionally refuses success if HEAD/ref or
+/// stable repository authority drifted before the terminal receipt.
+fn live_result_matches_preview(
+    repository_root: &Path,
+    preview: &GitIndexPreviewV1,
+    current: &RepositoryStateSnapshotV1,
+    created_commit: Option<&tracedecay_domain::GitOidV1>,
+) -> bool {
+    let old = &preview.repository_snapshot;
+    match preview.operation {
+        GitIndexTransactionOperationV1::StageHunks
+        | GitIndexTransactionOperationV1::UnstageHunks => {
+            created_commit.is_none() && hunk_commit_matches_preview(current, old, preview)
+        }
+        GitIndexTransactionOperationV1::CommitIndex => {
+            let (
+                GitHeadStateV1::Attached {
+                    branch: old_branch,
+                    commit: old_head,
+                },
+                GitHeadStateV1::Attached {
+                    branch: current_branch,
+                    commit: current_head,
+                },
+                Some(created_commit),
+                Some(expected_tree),
+            ) = (
+                &old.head,
+                &current.head,
+                created_commit,
+                preview.candidate_index_tree.as_ref(),
+            )
+            else {
+                return false;
+            };
+            if old_branch != current_branch
+                || current_head != created_commit
+                || current.index.tree_id.as_ref() != Some(expected_tree)
+                || current.working_tree != old.working_tree
+                || current.submodule_digest != old.submodule_digest
+                || !same_stable_native_evidence(current, old)
+            {
+                return false;
+            }
+            let tree_expression = format!("{}^{{tree}}", created_commit.as_str());
+            let parent_expression = format!("{}^", created_commit.as_str());
+            read_git_value(repository_root, &tree_expression).as_deref()
+                == Some(expected_tree.as_str())
+                && read_git_value(repository_root, &parent_expression).as_deref()
+                    == Some(old_head.as_str())
+        }
+    }
 }
 
 /// Compare native facts that must remain unchanged across an index-only
@@ -1519,6 +1586,13 @@ mod tests {
             .into_iter()
             .next()
             .expect("one hunk");
+        let mut rename_hunk = hunk.clone();
+        rename_hunk.original_path = Some("packet-old.txt".to_owned());
+        assert_eq!(
+            unsupported_hunk_selection(&[rename_hunk]),
+            Some(GitIndexUnsupportedStateV1::RenameOrCopy),
+            "rename/copy hunks remain explicit read-only previews"
+        );
         let patch = extract_patch(directory.path(), &GitDiffScopeV1::WorkingTree, &hunk)
             .expect("extract exact packet");
         let patch = ValidatedIndexPatch::new(hunk, patch).expect("validate exact packet");
@@ -1650,6 +1724,15 @@ mod tests {
         git(
             directory.path(),
             &["commit", "--quiet", "-m", "external ref drift"],
+        );
+        let lock = runner.acquire_index_lock().expect("drift snapshot lock");
+        let current = assembler
+            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
+            .expect("drift snapshot");
+        drop(lock);
+        assert!(
+            !live_result_matches_preview(directory.path(), &preview, &current, None),
+            "a hunk mutation must not report success after HEAD/ref drift"
         );
 
         let record = recovery_record(&preview, GitIndexJournalPhaseV1::IndexCommitted);
@@ -1889,6 +1972,30 @@ mod tests {
                 .as_ref()
                 .expect("candidate tree")
                 .as_str()
+        );
+        let lock = runner.acquire_index_lock().expect("commit snapshot lock");
+        let committed = assembler
+            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
+            .expect("committed snapshot");
+        drop(lock);
+        assert!(live_result_matches_preview(
+            directory.path(),
+            &preview,
+            &committed,
+            Some(&commit)
+        ));
+
+        git(directory.path(), &["checkout", "-q", "-b", "same-tip"]);
+        let lock = runner
+            .acquire_index_lock()
+            .expect("branch drift snapshot lock");
+        let branch_drift = assembler
+            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
+            .expect("branch drift snapshot");
+        drop(lock);
+        assert!(
+            !live_result_matches_preview(directory.path(), &preview, &branch_drift, Some(&commit)),
+            "the same commit on a different attached branch is not the previewed HEAD state"
         );
     }
 }
