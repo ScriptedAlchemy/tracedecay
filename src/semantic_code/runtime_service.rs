@@ -126,7 +126,7 @@ pub(crate) struct SemanticRuntimeScheduleCancellationV1 {
 }
 
 impl SemanticRuntimeScheduleCancellationV1 {
-    fn new(total_units: u64) -> Self {
+    pub(super) fn new(total_units: u64) -> Self {
         Self {
             cancelled: AtomicBool::new(false),
             completed_units: AtomicU64::new(0),
@@ -291,52 +291,59 @@ impl SemanticRuntimeSchedulingHandleV1 {
         };
 
         let handle = self.clone();
+        let watcher = self.clone();
         tokio::spawn(async move {
-            let prepared = (work.prepare)(Arc::clone(&cancellation)).await;
-            let prepared = match prepared {
-                Ok(prepared) if !cancellation.cancelled() => prepared,
-                Ok(_) => {
-                    handle.finish_failure(sequence, SemanticRuntimeScheduleFailureV1::Cancelled);
-                    return;
-                }
-                Err(reason) => {
-                    handle.finish_failure(sequence, reason);
-                    return;
-                }
-            };
+            let worker = tokio::spawn(async move {
+                let prepared = (work.prepare)(Arc::clone(&cancellation)).await;
+                let prepared = match prepared {
+                    Ok(prepared) if !cancellation.cancelled() => prepared,
+                    Ok(_) => {
+                        handle
+                            .finish_failure(sequence, SemanticRuntimeScheduleFailureV1::Cancelled);
+                        return;
+                    }
+                    Err(reason) => {
+                        handle.finish_failure(sequence, reason);
+                        return;
+                    }
+                };
 
-            {
+                {
+                    let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    if state.sequence != sequence || cancellation.cancelled() || state.committing {
+                        return;
+                    }
+                    state.committing = true;
+                }
+
+                let committed = prepared.commit().await;
                 let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
-                if state.sequence != sequence || cancellation.cancelled() || state.committing {
+                if state.sequence != sequence {
+                    state.committing = false;
                     return;
                 }
-                state.committing = true;
-            }
-
-            let committed = prepared.commit().await;
-            let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.sequence != sequence {
                 state.committing = false;
-                return;
-            }
-            state.committing = false;
-            state.cancellation = None;
-            match committed {
-                Ok(pointer) => {
-                    state.current = Some(pointer.clone());
-                    state.status = SemanticRuntimeScheduleStatusV1::Current {
-                        generation: pointer.generation,
-                    };
+                state.cancellation = None;
+                match committed {
+                    Ok(pointer) => {
+                        state.current = Some(pointer.clone());
+                        state.status = SemanticRuntimeScheduleStatusV1::Current {
+                            generation: pointer.generation,
+                        };
+                    }
+                    Err(reason) => {
+                        state.status = SemanticRuntimeScheduleStatusV1::Failed {
+                            reason,
+                            prior_generation: state
+                                .current
+                                .as_ref()
+                                .map(|pointer| pointer.generation.clone()),
+                        };
+                    }
                 }
-                Err(reason) => {
-                    state.status = SemanticRuntimeScheduleStatusV1::Failed {
-                        reason,
-                        prior_generation: state
-                            .current
-                            .as_ref()
-                            .map(|pointer| pointer.generation.clone()),
-                    };
-                }
+            });
+            if worker.await.is_err() {
+                watcher.finish_worker_terminated(sequence);
             }
         });
         true
@@ -404,6 +411,21 @@ impl SemanticRuntimeSchedulingHandleV1 {
             state.cancellation = None;
             state.status = SemanticRuntimeScheduleStatusV1::Failed {
                 reason,
+                prior_generation: state
+                    .current
+                    .as_ref()
+                    .map(|pointer| pointer.generation.clone()),
+            };
+        }
+    }
+
+    fn finish_worker_terminated(&self, sequence: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.sequence == sequence {
+            state.committing = false;
+            state.cancellation = None;
+            state.status = SemanticRuntimeScheduleStatusV1::Failed {
+                reason: SemanticRuntimeScheduleFailureV1::Runtime,
                 prior_generation: state
                     .current
                     .as_ref()
@@ -594,6 +616,35 @@ mod tests {
     use super::super::fastembed_adapter::FakeEmbeddingRuntime;
     use super::super::session_pool::tests::{authority, config};
     use super::*;
+    use tracedecay_domain::ManifestDigest;
+
+    fn pointer(value: char) -> SemanticGenerationPointerV1 {
+        SemanticGenerationPointerV1 {
+            generation: VectorGenerationIdV1::new(
+                ManifestDigest::new(format!("sha256:{}", value.to_string().repeat(64)))
+                    .expect("vector generation"),
+            ),
+            source_generation: CodeGenerationId::new(format!("code-generation.{value}"))
+                .expect("source generation"),
+            projection_key: authority().projection().projection_key().clone(),
+        }
+    }
+
+    async fn wait_until(
+        handle: &SemanticRuntimeSchedulingHandleV1,
+        predicate: impl Fn(&SemanticRuntimeScheduleStatusV1) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if predicate(&handle.status()) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scheduler reached expected state");
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_reload_keeps_prior_runtime_available_until_atomic_swap() {
@@ -652,5 +703,67 @@ mod tests {
         let restart = service.restart_async().await.expect("async restart");
         assert_eq!(restart.prior_generation, 2);
         assert_eq!(restart.current_generation, 3);
+    }
+
+    #[tokio::test]
+    async fn panicked_publication_worker_fails_closed_and_retains_prior_generation() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let prior_pointer = pointer('a');
+        let prior_generation = prior_pointer.generation.clone();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            prior_pointer.source_generation.clone(),
+            1,
+            move |_cancellation| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    Ok(prior_pointer)
+                }))
+            },
+        )));
+        wait_until(&handle, |status| {
+            matches!(
+                status,
+                SemanticRuntimeScheduleStatusV1::Current { generation }
+                    if generation == &prior_generation
+            )
+        })
+        .await;
+
+        let next = pointer('b');
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            next.source_generation.clone(),
+            1,
+            move |_cancellation| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    panic!("injected publication worker failure");
+                    #[allow(unreachable_code)]
+                    Ok(next)
+                }))
+            },
+        )));
+        wait_until(&handle, |status| {
+            matches!(
+                status,
+                SemanticRuntimeScheduleStatusV1::Failed {
+                    reason: SemanticRuntimeScheduleFailureV1::Runtime,
+                    prior_generation: Some(generation),
+                } if generation == &prior_generation
+            )
+        })
+        .await;
+
+        assert_eq!(
+            handle.current().map(|pointer| pointer.generation),
+            Some(prior_generation)
+        );
+        assert!(
+            handle.schedule(SemanticRuntimeWorkV1::new(
+                CodeGenerationId::new("code-generation.c").expect("source generation"),
+                1,
+                move |_cancellation| async move {
+                    Err(SemanticRuntimeScheduleFailureV1::Cancelled)
+                },
+            )),
+            "worker termination must not leave publication permanently locked"
+        );
     }
 }

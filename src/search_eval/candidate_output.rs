@@ -2,8 +2,8 @@
 //!
 //! Builds one published code generation from checked-in sanitized corpus
 //! fixtures, then runs the shared `CompositionKernel` over the real exact,
-//! lexical, and graph production lanes. Optional semantic and rerank stages
-//! remain explicitly pending until their real runtimes and generations run.
+//! lexical, and graph production lanes. A separate native entry point accepts
+//! admitted semantic/rerank authorities; missing optional stages stay pending.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
 //! plus current/10x resource samples, cancellation, offline, and fallback
@@ -20,7 +20,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::application::code_index::open_production_code_index_owner_v1;
+use super::pr10_native::{
+    Pr10ChannelAblationV1, Pr10NativeHydrationMeasurementV1, Pr10NativePendingReasonV1,
+    Pr10NativePr9StageMeasurementsV1, Pr10NativeQueryInputV1, Pr10NativeQueryOutputV1,
+    Pr10NativeRerankInputV1, Pr10NativeResourceEvidenceV1, Pr10NativeResourceSampleV1,
+    Pr10NativeSemanticInputV1, Pr10NativeStageMeasurementV1, Pr10NativeStageResultV1,
+    Pr10ProjectionCaseSampleV1, Pr10ProjectionCaseV1, evaluate_native_query,
+};
+use crate::application::code_index::{
+    ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
+};
 use crate::application::git_reads::{
     GitReadAuthorityV1, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
     execute_historical_git_read,
@@ -50,6 +59,10 @@ use crate::query::retrieval::graph::{
     CodeGraphEvidenceAdapterV1, GraphLane, GraphLaneRequest, GraphLaneRetriever,
     production_code_index_freshness,
 };
+use crate::query::retrieval::hydrate::{
+    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    HydrationReadOutcomeV1, HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
+};
 use crate::query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever,
@@ -58,21 +71,26 @@ use crate::query::retrieval::ports::CodeCandidateBindingV1;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
-    CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision,
-    DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
-    ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId, LanguageId, ManifestDigest,
-    PolicyRevisionId, Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId, ProjectId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryNormalizationRevision,
-    RelationEdgeKindV1, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrievalFailure,
+    CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
+    ComponentRevision, DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId,
+    HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest, PolicyRevisionId,
+    Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, PublicRetrieverStatus, QueryNormalizationRevision, RelationEdgeKindV1,
+    RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalFailure,
     RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
     ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SnapshotFileDispositionV1,
-    TemporalModeV1, UtcMicros, VectorWatermark,
+    TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 
 const WORKLOAD_RELATIVE: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
 pub(super) const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
+pub(super) const EVALUATION_MODEL_REVISION: &str =
+    "JinaEmbeddingsV2BaseCode@516f4baf13dec4ddddda8631e019b5737c8bc250";
+pub(super) const EVALUATION_PROJECTION_REVISION: &str = "retriever.semantic-flat.evaluation.v1";
+pub(super) const EVALUATION_RUNTIME_REVISION: &str = "semantic.fastembed.production.v1";
 const REQUIRED_CANCELLATION: &str = "bounded_typed_cancelled";
 const REQUIRED_OFFLINE: &str = "no_network_and_pr9_fallback_available";
 pub(super) const EVALUATION_SEED: &str = "not_applicable_deterministic_no_rng";
@@ -107,11 +125,45 @@ pub struct CandidateWorkloadV1 {
     pub workload_id: String,
     pub source_repository_commit: String,
     pub source_repository_tree: String,
+    pub execution_contract: EvaluationExecutionContractV1,
+    pub incremental_fixture: IncrementalFixtureV1,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
     pub resource_budgets: ResourceBudgetsV1,
     pub decision_policy: DecisionPolicySliceV1,
     pub queries: Vec<WorkloadQueryV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationExecutionContractV1 {
+    pub exact_file_count: u64,
+    pub exact_corpus_bytes: u64,
+    pub exact_eligible_chunks_current: u64,
+    pub exact_eligible_chunks_10x: u64,
+    pub exact_query_count: u64,
+    pub model_revision: String,
+    pub projection_revision: String,
+    pub fusion_revision: String,
+    pub runtime_revision: String,
+    pub cache_state: String,
+    pub concurrency: EvaluationConcurrencyContractV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationConcurrencyContractV1 {
+    pub query_workers: u32,
+    pub projection_workers: u32,
+    pub query_execution: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IncrementalFixtureV1 {
+    pub document_id: String,
+    pub after_path: String,
+    pub after_sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +199,16 @@ pub struct ProfileSpecV1 {
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
     pub calibration_threshold_ppm: u32,
+}
+
+/// Exact domain material exercised by the direct evaluator for one checked-in
+/// profile. Evaluation anchors are placeholders until a passing report is
+/// derived and must be replaced by the publishing operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectEvaluatedProfileMaterialV1 {
+    pub profile: FusionProfile,
+    pub diversity: DiversityPolicy,
+    pub rerank: Option<RerankPolicy>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,6 +262,8 @@ pub struct QueryCandidateRowV1 {
     pub ranked: Vec<RankedCandidateRowV1>,
     pub abstained: bool,
     pub historical: HistoricalQueryExecutionV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<Pr10NativeQueryOutputV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -219,6 +283,7 @@ pub enum HistoricalQueryExecutionV1 {
 pub enum OptionalStageMeasurementV1 {
     NotRequested,
     Pending,
+    Complete,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,12 +328,15 @@ pub struct ProductionCandidateOutputV1 {
     pub cache_state: String,
     pub toolchain: String,
     pub hardware: String,
+    pub profile_material_digest: String,
     pub fallback_digest: String,
     pub pr9_fallback_digest: String,
     pub cancellation: String,
     pub offline: String,
     pub optional_stages: OptionalStageMeasurementsV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_resources: Option<Pr10NativeResourceEvidenceV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }
 
@@ -283,6 +351,88 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     pub repo_root: &'a Path,
     pub workload_path: Option<&'a Path>,
     pub profile_ids: Option<&'a [String]>,
+}
+
+/// Immutable identity and request material prepared by the production PR9
+/// generator for one native PR10 query.
+pub struct ProductionCandidateNativeQueryContextV1<'a> {
+    pub profile: &'a ProfileSpecV1,
+    pub query: &'a WorkloadQueryV1,
+    pub request: &'a RetrievalRequest,
+    pub query_view: &'a EphemeralSanitizedQueryViewV1,
+    pub code: &'a CodeIndexPublishedGenerationV1,
+    pub code_generation: &'a CodeGenerationId,
+    pub semantic_allowed_chunks: &'a BTreeSet<CodeSearchChunkId>,
+}
+
+/// Genuine optional runtime inputs borrowed only for the evaluator call.
+pub struct ProductionCandidateNativeQueryInputsV1<'a> {
+    pub semantic: Option<Pr10NativeSemanticInputV1<'a>>,
+    pub rerank: Option<Pr10NativeRerankInputV1<'a>>,
+}
+
+/// Genuine code generations used as canonical inputs to the production
+/// semantic projector/store case matrix. Replay, cancellation, and
+/// incompatibility are store operations over these exact generations.
+pub struct ProductionCandidateSemanticProjectionSourcesV1<'a> {
+    pub one_symbol: &'a CodeIndexPublishedGenerationV1,
+    pub deletion: &'a CodeIndexPublishedGenerationV1,
+    pub no_op: &'a CodeIndexPublishedGenerationV1,
+}
+
+/// Exact immutable generation whose resource use must be measured.
+pub struct ProductionCandidateNativeResourceContextV1<'a> {
+    pub profile: &'a ProfileSpecV1,
+    pub queries: &'a [&'a WorkloadQueryV1],
+    pub code: &'a CodeIndexPublishedGenerationV1,
+    pub incremental_code: &'a CodeIndexPublishedGenerationV1,
+    pub incremental_before_content_digest: &'a str,
+    pub incremental_after_content_digest: &'a str,
+    pub code_generation: &'a CodeGenerationId,
+    pub workload_digest: &'a str,
+    pub corpus_digest: &'a str,
+    pub scale: &'a str,
+    pub eligible_chunks: u64,
+    pub semantic_projection_sources: ProductionCandidateSemanticProjectionSourcesV1<'a>,
+}
+
+/// Production-observed generation resources. Candidate generation supplies
+/// query latency/CPU/RSS and rejects any mismatched returned identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProductionCandidateNativeGenerationResourcesV1 {
+    pub source_generation: CodeGenerationId,
+    pub source_manifest_digest: ManifestDigest,
+    pub incremental_source_generation: CodeGenerationId,
+    pub incremental_source_manifest_digest: ManifestDigest,
+    pub vector_generation: Option<VectorGenerationIdV1>,
+    pub artifact_digest: Option<ManifestDigest>,
+    pub model_bytes: u64,
+    pub vector_bytes: u64,
+    pub index_bytes: u64,
+    pub cache_bytes: u64,
+    pub clean_projection_build_micros: u64,
+    pub incremental_rebuild_micros: u64,
+    pub projection_cases: BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
+}
+
+/// Production authority that supplies admitted semantic/rerank runtimes.
+///
+/// The callback is the only way to produce a query result: candidate
+/// generation invokes `pr10_native::evaluate_native_query` inside it.
+pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
+    fn with_query_inputs(
+        &self,
+        context: ProductionCandidateNativeQueryContextV1<'_>,
+        evaluate: &mut dyn for<'inputs> FnMut(
+            ProductionCandidateNativeQueryInputsV1<'inputs>,
+        ) -> Result<(), CandidateOutputError>,
+    ) -> Result<(), CandidateOutputError>;
+
+    fn measure_resources(
+        &self,
+        context: ProductionCandidateNativeResourceContextV1<'_>,
+        execute_queries: &mut dyn FnMut() -> Result<Vec<u64>, CandidateOutputError>,
+    ) -> Result<Pr10NativeStageResultV1<Pr10NativeResourceSampleV1>, CandidateOutputError>;
 }
 
 #[derive(Clone, Default)]
@@ -383,12 +533,16 @@ impl CodeIndexExecutionControlV1 for CancelledControl {
 struct OccurrenceMapEntry {
     document_id: String,
     scope: String,
+    fixture_path: String,
     display_anchor: String,
     display_anchors: Vec<String>,
 }
 
 struct PublishedCorpus {
     generation: CodeIndexPublishedGenerationV1,
+    incremental_generation: CodeIndexPublishedGenerationV1,
+    incremental_before_content_digest: String,
+    incremental_after_content_digest: String,
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
     file_scopes: BTreeMap<String, String>,
     repo_root: PathBuf,
@@ -396,6 +550,8 @@ struct PublishedCorpus {
     corpus: Vec<CorpusDocumentV1>,
     corpus_digest: String,
     eligible_chunks: u64,
+    no_op_generation: CodeIndexPublishedGenerationV1,
+    deletion_generation: CodeIndexPublishedGenerationV1,
 }
 
 /// Load the checked-in PR9/PR10 direct-evaluation workload.
@@ -419,6 +575,12 @@ pub fn compute_workload_digest(
     canonical_sha256(workload)
 }
 
+pub fn compute_profile_material_digest(
+    profile: &ProfileSpecV1,
+) -> Result<String, CandidateOutputError> {
+    canonical_sha256(&("tracedecay.search-eval.profile-material.v1", profile))
+}
+
 /// Hash the declared corpus and every byte-exact checked-in document.
 ///
 /// Including document metadata prevents ambiguous concatenation while each
@@ -429,12 +591,18 @@ pub fn compute_corpus_digest(
 ) -> Result<String, CandidateOutputError> {
     validate_source_bindings(repo_root, workload)?;
     let mut bindings = Vec::with_capacity(workload.corpus.len());
+    let mut corpus_bytes = 0_u64;
     for document in &workload.corpus {
         let absolute = repo_root.join(&document.path);
         let bytes = fs::read(&absolute).map_err(|source| CandidateOutputError::Read {
             path: absolute,
             source,
         })?;
+        corpus_bytes = corpus_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| {
+                CandidateOutputError::Contract("corpus byte count overflows".to_owned())
+            })?;
         bindings.push(CorpusContentBindingV1 {
             document_id: &document.document_id,
             source_path: &document.source_path,
@@ -444,6 +612,12 @@ pub fn compute_corpus_digest(
             eligibility: &document.eligibility,
             content_digest: content_digest(&bytes).as_str().to_owned(),
         });
+    }
+    if corpus_bytes != workload.execution_contract.exact_corpus_bytes {
+        return Err(CandidateOutputError::Contract(format!(
+            "corpus byte count mismatch: declared {}, observed {corpus_bytes}",
+            workload.execution_contract.exact_corpus_bytes
+        )));
     }
     canonical_sha256(&(CORPUS_DIGEST_DOMAIN, bindings))
 }
@@ -503,6 +677,34 @@ fn validate_source_bindings(
                 document.source_path
             )));
         }
+        let mut pinned_blob = entry
+            .object()
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!(
+                    "open pinned corpus blob {}: {error}",
+                    document.source_path
+                ))
+            })?
+            .try_into_blob()
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!(
+                    "pinned corpus source is not a blob {}: {error}",
+                    document.source_path
+                ))
+            })?;
+        let pinned_bytes = pinned_blob.take_data();
+        let fixture_path = repo_root.join(&document.path);
+        let fixture_bytes =
+            fs::read(&fixture_path).map_err(|source| CandidateOutputError::Read {
+                path: fixture_path,
+                source,
+            })?;
+        if fixture_bytes != pinned_bytes {
+            return Err(CandidateOutputError::Contract(format!(
+                "corpus fixture bytes differ from pinned source blob: {}",
+                document.document_id
+            )));
+        }
     }
     Ok(())
 }
@@ -520,6 +722,46 @@ pub fn validate_workload_for_tuning(
     {
         return Err(CandidateOutputError::Contract(
             "fixture source commit/tree must not be empty".to_owned(),
+        ));
+    }
+    let contract = &workload.execution_contract;
+    if contract.exact_file_count != workload.corpus.len() as u64
+        || contract.exact_query_count != workload.queries.len() as u64
+        || contract.exact_corpus_bytes == 0
+        || contract.exact_eligible_chunks_current == 0
+        || contract.exact_eligible_chunks_10x
+            != contract
+                .exact_eligible_chunks_current
+                .checked_mul(10)
+                .ok_or_else(|| {
+                    CandidateOutputError::Contract(
+                        "evaluation current chunk count overflows 10x".to_owned(),
+                    )
+                })?
+        || contract.model_revision != EVALUATION_MODEL_REVISION
+        || contract.projection_revision != EVALUATION_PROJECTION_REVISION
+        || contract.fusion_revision != PRODUCTION_BOUNDARY
+        || contract.runtime_revision != EVALUATION_RUNTIME_REVISION
+        || contract.cache_state != EVALUATION_CACHE_STATE
+        || contract.concurrency.query_workers != 1
+        || contract.concurrency.projection_workers != 1
+        || contract.concurrency.query_execution != "serial_exact_workload_order"
+    {
+        return Err(CandidateOutputError::Contract(
+            "evaluation execution contract does not match the production workload".to_owned(),
+        ));
+    }
+    if workload.incremental_fixture.document_id.trim().is_empty()
+        || !is_canonical_repository_relative_path(&workload.incremental_fixture.after_path)
+        || workload.incremental_fixture.after_sha256.len() != 64
+        || !workload
+            .incremental_fixture
+            .after_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CandidateOutputError::Contract(
+            "incremental fixture identity/path/digest is invalid".to_owned(),
         ));
     }
     let mut document_ids = BTreeSet::new();
@@ -569,6 +811,11 @@ pub fn validate_workload_for_tuning(
     if document_ids.is_empty() {
         return Err(CandidateOutputError::Contract(
             "corpus must not be empty".to_owned(),
+        ));
+    }
+    if !document_ids.contains(workload.incremental_fixture.document_id.as_str()) {
+        return Err(CandidateOutputError::Contract(
+            "incremental fixture document_id is absent from the corpus".to_owned(),
         ));
     }
     let mut profile_ids = BTreeSet::new();
@@ -728,6 +975,542 @@ pub fn generate_candidate_outputs(
     })
 }
 
+/// Generate the same byte-stable PR9 fallback plus evidence-bearing native
+/// PR10 semantic/rerank results. Missing optional authorities remain pending.
+pub fn generate_candidate_outputs_with_native(
+    options: &GenerateCandidateOutputsOptions<'_>,
+    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
+) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
+    let mut generated = generate_candidate_outputs(options)?;
+    let workload_path = options.workload_path.map_or_else(
+        || options.repo_root.join(WORKLOAD_RELATIVE),
+        Path::to_path_buf,
+    );
+    let workload = load_candidate_workload(&workload_path)?;
+    let published = publish_corpus(options.repo_root, &workload)?;
+    let ten_x_published = publish_corpus_with_scale(options.repo_root, &workload, 10)?;
+    if ten_x_published.eligible_chunks
+        != published.eligible_chunks.checked_mul(10).ok_or_else(|| {
+            CandidateOutputError::Contract("current eligible chunk count overflows 10x".to_owned())
+        })?
+    {
+        return Err(CandidateOutputError::Contract(
+            "native 10x generation does not contain exactly ten times the eligible chunks"
+                .to_owned(),
+        ));
+    }
+    let corpus_digest = compute_corpus_digest(options.repo_root, &workload)?;
+
+    for output in &mut generated.outputs {
+        let profile = workload
+            .profile_matrix
+            .iter()
+            .find(|profile| profile.profile_id == output.profile_id)
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "native output references unknown profile {}",
+                    output.profile_id
+                ))
+            })?;
+        let queries = workload
+            .queries
+            .iter()
+            .filter(|query| query.partition == output.partition)
+            .collect::<Vec<_>>();
+        let (rows, current) = measure_native_partition(
+            &published,
+            profile,
+            &queries,
+            authority,
+            &generated.workload_digest,
+            &corpus_digest,
+            "current",
+        )?;
+        let (_, ten_x) = measure_native_partition(
+            &ten_x_published,
+            profile,
+            &queries,
+            authority,
+            &generated.workload_digest,
+            &corpus_digest,
+            "10x",
+        )?;
+        let evidence = Pr10NativeResourceEvidenceV1 {
+            samples: BTreeMap::from([("current".to_owned(), current), ("10x".to_owned(), ten_x)]),
+        };
+        evidence
+            .validate()
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+        output.optional_stages = native_optional_stage_measurements(profile, &rows)?;
+        apply_native_resource_evidence(output, &evidence)?;
+        output.queries = rows;
+    }
+    Ok(generated)
+}
+
+fn measure_native_partition(
+    published: &PublishedCorpus,
+    profile: &ProfileSpecV1,
+    queries: &[&WorkloadQueryV1],
+    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
+    workload_digest: &str,
+    corpus_digest: &str,
+    scale: &str,
+) -> Result<
+    (
+        Vec<QueryCandidateRowV1>,
+        Pr10NativeStageResultV1<Pr10NativeResourceSampleV1>,
+    ),
+    CandidateOutputError,
+> {
+    let mut rows = None;
+    let generation = &published.generation;
+    let mut execute_queries = || {
+        let mut measured_rows = Vec::with_capacity(queries.len());
+        let mut latency_samples_us = Vec::with_capacity(queries.len());
+        for query in queries {
+            let started = Instant::now();
+            measured_rows.push(retrieve_one_native_query(
+                published, profile, query, authority,
+            )?);
+            latency_samples_us.push(elapsed_micros(started));
+        }
+        rows = Some(measured_rows);
+        Ok(latency_samples_us)
+    };
+    let evidence = authority.measure_resources(
+        ProductionCandidateNativeResourceContextV1 {
+            profile,
+            queries,
+            code: generation,
+            incremental_code: &published.incremental_generation,
+            incremental_before_content_digest: &published.incremental_before_content_digest,
+            incremental_after_content_digest: &published.incremental_after_content_digest,
+            code_generation: &generation.manifest().generation_id,
+            workload_digest,
+            corpus_digest,
+            scale,
+            eligible_chunks: published.eligible_chunks,
+            semantic_projection_sources: ProductionCandidateSemanticProjectionSourcesV1 {
+                one_symbol: &published.incremental_generation,
+                deletion: &published.deletion_generation,
+                no_op: &published.no_op_generation,
+            },
+        },
+        &mut execute_queries,
+    )?;
+    let rows = rows.ok_or_else(|| {
+        CandidateOutputError::Contract(
+            "native resource authority did not execute the exact query workload".to_owned(),
+        )
+    })?;
+    if let Pr10NativeStageResultV1::Complete(sample) = &evidence {
+        let source_manifest_digest = &generation.projection().request().changes.manifest_digest;
+        if sample.provenance.workload_digest != workload_digest
+            || sample.provenance.corpus_digest != corpus_digest
+            || sample.provenance.scale != scale
+            || sample.provenance.code_generation_id != generation.manifest().generation_id.as_str()
+            || sample.provenance.code_source_manifest_digest != source_manifest_digest.as_str()
+            || sample.provenance.incremental_code_generation_id
+                != published
+                    .incremental_generation
+                    .manifest()
+                    .generation_id
+                    .as_str()
+            || sample.provenance.incremental_code_source_manifest_digest
+                != published
+                    .incremental_generation
+                    .projection()
+                    .request()
+                    .changes
+                    .manifest_digest
+                    .as_str()
+            || sample.provenance.incremental_before_content_digest
+                != published.incremental_before_content_digest
+            || sample.provenance.incremental_after_content_digest
+                != published.incremental_after_content_digest
+            || sample.eligible_chunks != published.eligible_chunks
+            || sample.measured_queries != queries.len() as u64
+        {
+            return Err(CandidateOutputError::Contract(
+                "native resource evidence is not bound to the exact evaluator workload".to_owned(),
+            ));
+        }
+    }
+    Ok((rows, evidence))
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn retriever_outcome_candidate_count<E>(
+    outcome: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<E>>,
+) -> u64 {
+    match outcome {
+        RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
+            batch.candidates.len() as u64
+        }
+        RetrieverOutcome::Unavailable(_)
+        | RetrieverOutcome::Denied
+        | RetrieverOutcome::Stale(_)
+        | RetrieverOutcome::BudgetExceeded(_)
+        | RetrieverOutcome::Cancelled => 0,
+    }
+}
+
+fn retrieve_one_native_query(
+    published: &PublishedCorpus,
+    profile: &ProfileSpecV1,
+    query: &WorkloadQueryV1,
+    authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
+) -> Result<QueryCandidateRowV1, CandidateOutputError> {
+    let prepared = prepare_production_query(published, profile, query)?;
+    let mut fusion = fusion_profile(profile, &retrieval_budget(), true)?;
+    let mut native = None;
+    let semantic_allowed_chunks = published
+        .generation
+        .chunks()
+        .chunks()
+        .iter()
+        .filter(|chunk| {
+            published
+                .file_scopes
+                .get(chunk.anchor.file_occurrence_id.as_str())
+                .is_some_and(|scope| query.allowed_scopes.contains(scope))
+        })
+        .map(|chunk| chunk.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut evaluate = |inputs: ProductionCandidateNativeQueryInputsV1<'_>| {
+        if native.is_some() {
+            return Err(CandidateOutputError::Contract(format!(
+                "native authority evaluated query {} more than once",
+                query.query_id
+            )));
+        }
+        fusion.rerank_policy_id = inputs
+            .rerank
+            .as_ref()
+            .map(|rerank| rerank.policy.policy_id.clone());
+        native = Some(
+            evaluate_native_query(Pr10NativeQueryInputV1 {
+                profile_spec: profile,
+                fusion_profile: &fusion,
+                diversity_policy: &prepared.diversity,
+                kernel: &prepared.kernel,
+                pr9_lanes: &prepared.pr9_lanes,
+                pr9_measurements: prepared.pr9_measurements,
+                semantic: inputs.semantic,
+                fallback: &prepared.fallback,
+                rerank: inputs.rerank,
+            })
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        );
+        Ok(())
+    };
+    authority.with_query_inputs(
+        ProductionCandidateNativeQueryContextV1 {
+            profile,
+            query,
+            request: &prepared.request,
+            query_view: &prepared.query_view,
+            code: &published.generation,
+            code_generation: &prepared.code_generation,
+            semantic_allowed_chunks: &semantic_allowed_chunks,
+        },
+        &mut evaluate,
+    )?;
+    let mut native = native.ok_or_else(|| {
+        CandidateOutputError::Contract(format!(
+            "native authority did not evaluate query {}",
+            query.query_id
+        ))
+    })?;
+    let ranked = match &native.rerank.on {
+        Pr10NativeStageResultV1::Complete(ranked) => ranked.clone(),
+        Pr10NativeStageResultV1::NotRequested | Pr10NativeStageResultV1::Pending { .. } => {
+            native.rerank.off.clone()
+        }
+    };
+    native.measurements.hydration = Some(measure_late_hydration(
+        published,
+        &prepared.request,
+        &ranked,
+        &retrieval_budget(),
+    )?);
+    validate_native_query_output(profile, &prepared.fallback, &native)?;
+    let mut ranked = map_ranked_candidate_list(published, &ranked)?;
+    let (historical, historical_ranked) = historical_candidates(published, query)?;
+    ranked.extend(historical_ranked);
+    Ok(QueryCandidateRowV1 {
+        query_id: query.query_id.clone(),
+        abstained: ranked.is_empty(),
+        ranked,
+        historical,
+        native: Some(native),
+    })
+}
+
+fn validate_native_query_output(
+    profile: &ProfileSpecV1,
+    fallback: &Pr9FallbackSubpayload,
+    native: &Pr10NativeQueryOutputV1,
+) -> Result<(), CandidateOutputError> {
+    if native.profile_id != profile.profile_id
+        || native.fallback_digest != fallback.digest.as_str()
+        || !native.fallback_bytes_unchanged
+    {
+        return Err(CandidateOutputError::Contract(format!(
+            "native query output does not preserve the exact PR9 fallback for {}",
+            profile.profile_id
+        )));
+    }
+    let observed = native
+        .ablations
+        .iter()
+        .map(|result| result.ablation)
+        .collect::<BTreeSet<_>>();
+    if observed.len() != native.ablations.len()
+        || !observed.contains(&Pr10ChannelAblationV1::ExactLexical)
+        || !observed.contains(&Pr10ChannelAblationV1::Pr9ExactLexicalGraph)
+    {
+        return Err(CandidateOutputError::Contract(
+            "native query output is missing required PR9 baseline ablations".to_owned(),
+        ));
+    }
+    for ablation in &native.ablations {
+        if ablation.measurement.output_candidates != ablation.ranked_candidates.len() as u64 {
+            return Err(CandidateOutputError::Contract(
+                "native fusion measurement does not match its ranked output".to_owned(),
+            ));
+        }
+    }
+    let hydration = native.measurements.hydration.ok_or_else(|| {
+        CandidateOutputError::Contract(
+            "native query output is missing genuine late-hydration measurements".to_owned(),
+        )
+    })?;
+    if hydration.source_fetches != hydration.receipts
+        || hydration.receipts > hydration.selected_candidates
+        || (hydration.receipts != 0 && hydration.bytes_hydrated == 0)
+    {
+        return Err(CandidateOutputError::Contract(
+            "native late-hydration measurements do not match source receipts".to_owned(),
+        ));
+    }
+    let semantic_ablations = [
+        Pr10ChannelAblationV1::ExactLexicalSemantic,
+        Pr10ChannelAblationV1::HybridExactLexicalGraphSemantic,
+    ];
+    match (&native.exact_flat_oracle, &native.measurements.semantic) {
+        (
+            Pr10NativeStageResultV1::Complete(oracle),
+            Pr10NativeStageResultV1::Complete(measurement),
+        ) => {
+            if measurement.output_candidates != oracle.hits.len() as u64 {
+                return Err(CandidateOutputError::Contract(
+                    "native semantic measurement does not match the exact-flat oracle".to_owned(),
+                ));
+            }
+            if semantic_ablations
+                .iter()
+                .any(|ablation| !observed.contains(ablation))
+            {
+                return Err(CandidateOutputError::Contract(
+                    "complete semantic output is missing required channel ablations".to_owned(),
+                ));
+            }
+        }
+        (Pr10NativeStageResultV1::NotRequested, Pr10NativeStageResultV1::NotRequested)
+        | (Pr10NativeStageResultV1::Pending { .. }, Pr10NativeStageResultV1::Pending { .. }) => {
+            if semantic_ablations
+                .iter()
+                .any(|ablation| observed.contains(ablation))
+            {
+                return Err(CandidateOutputError::Contract(
+                    "semantic ablations cannot exist without a complete semantic run".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(CandidateOutputError::Contract(
+                "native semantic result and measurement states disagree".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn native_optional_stage_measurements(
+    profile: &ProfileSpecV1,
+    rows: &[QueryCandidateRowV1],
+) -> Result<OptionalStageMeasurementsV1, CandidateOutputError> {
+    let native = rows
+        .iter()
+        .map(|row| {
+            row.native.as_ref().ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "native generation omitted query evidence {}",
+                    row.query_id
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(OptionalStageMeasurementsV1 {
+        semantic: aggregate_native_stage(
+            profile.semantic_weight_ppm != 0,
+            native.iter().map(|native| &native.exact_flat_oracle),
+        )?,
+        rerank: aggregate_native_rerank_stage(profile.rerank_weight_ppm != 0, &native)?,
+    })
+}
+
+fn aggregate_native_stage<'a, T: 'a>(
+    requested: bool,
+    results: impl Iterator<Item = &'a Pr10NativeStageResultV1<T>>,
+) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
+    let results = results.collect::<Vec<_>>();
+    if !requested {
+        if results
+            .iter()
+            .any(|result| !matches!(result, Pr10NativeStageResultV1::NotRequested))
+        {
+            return Err(CandidateOutputError::Contract(
+                "unrequested native stage reported execution".to_owned(),
+            ));
+        }
+        return Ok(OptionalStageMeasurementV1::NotRequested);
+    }
+    if results
+        .iter()
+        .any(|result| matches!(result, Pr10NativeStageResultV1::NotRequested))
+    {
+        return Err(CandidateOutputError::Contract(
+            "requested native stage reported not_requested".to_owned(),
+        ));
+    }
+    Ok(
+        if results
+            .iter()
+            .all(|result| matches!(result, Pr10NativeStageResultV1::Complete(_)))
+        {
+            OptionalStageMeasurementV1::Complete
+        } else {
+            OptionalStageMeasurementV1::Pending
+        },
+    )
+}
+
+fn aggregate_native_rerank_stage(
+    requested: bool,
+    native: &[&Pr10NativeQueryOutputV1],
+) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
+    for output in native {
+        let states_agree = match (&output.rerank.on, &output.rerank.execution) {
+            (Pr10NativeStageResultV1::NotRequested, Pr10NativeStageResultV1::NotRequested)
+            | (Pr10NativeStageResultV1::Complete(_), Pr10NativeStageResultV1::Complete(_)) => true,
+            (
+                Pr10NativeStageResultV1::Pending { reason: left },
+                Pr10NativeStageResultV1::Pending { reason: right },
+            ) => left == right,
+            _ => false,
+        };
+        if !states_agree {
+            return Err(CandidateOutputError::Contract(
+                "rerank output and resource execution states disagree".to_owned(),
+            ));
+        }
+    }
+    aggregate_native_stage(requested, native.iter().map(|native| &native.rerank.on))
+}
+
+fn apply_native_resource_evidence(
+    output: &mut ProductionCandidateOutputV1,
+    evidence: &Pr10NativeResourceEvidenceV1,
+) -> Result<(), CandidateOutputError> {
+    let expected_chunks = output
+        .resources
+        .iter()
+        .map(|(scale, sample)| (scale.clone(), sample.eligible_chunks))
+        .collect::<BTreeMap<_, _>>();
+    let mut projected = BTreeMap::new();
+    for (scale, stage) in &evidence.samples {
+        let eligible_chunks = expected_chunks.get(scale).copied().ok_or_else(|| {
+            CandidateOutputError::Contract(format!("unknown native resource scale {scale}"))
+        })?;
+        let sample = match stage {
+            Pr10NativeStageResultV1::Complete(sample) => {
+                let projected = sample.as_existing_evaluator_sample().ok_or_else(|| {
+                    CandidateOutputError::Contract(format!(
+                        "complete native resource sample {scale} is incomplete"
+                    ))
+                })?;
+                if projected.eligible_chunks != eligible_chunks {
+                    return Err(CandidateOutputError::Contract(format!(
+                        "native resource sample {scale} has the wrong eligible chunk count"
+                    )));
+                }
+                projected
+            }
+            Pr10NativeStageResultV1::Pending { reason } => ResourceSampleV1 {
+                status: ResourceMeasurementStatusV1::Pending,
+                eligible_chunks,
+                peak_rss_bytes: None,
+                latency_samples_us: Vec::new(),
+                measured_queries: 0,
+                pending_reason: Some(format!(
+                    "native PR10 resource measurement pending: {reason:?}"
+                )),
+            },
+            Pr10NativeStageResultV1::NotRequested => {
+                return Err(CandidateOutputError::Contract(format!(
+                    "native resource sample {scale} cannot be not_requested"
+                )));
+            }
+        };
+        projected.insert(scale.clone(), sample);
+    }
+    output.resources = projected;
+    output.native_resources = Some(evidence.clone());
+    Ok(())
+}
+
+pub fn load_direct_evaluated_profile_material(
+    repo_root: &Path,
+    workload_path: Option<&Path>,
+    profile_id: &str,
+) -> Result<DirectEvaluatedProfileMaterialV1, CandidateOutputError> {
+    let workload_path =
+        workload_path.map_or_else(|| repo_root.join(WORKLOAD_RELATIVE), Path::to_path_buf);
+    let workload = load_candidate_workload(&workload_path)?;
+    validate_workload_for_tuning(&workload)?;
+    direct_evaluated_profile_material(&workload, profile_id)
+}
+
+pub fn direct_evaluated_profile_material(
+    workload: &CandidateWorkloadV1,
+    profile_id: &str,
+) -> Result<DirectEvaluatedProfileMaterialV1, CandidateOutputError> {
+    validate_workload_for_tuning(workload)?;
+    let profile = workload
+        .profile_matrix
+        .iter()
+        .find(|profile| profile.profile_id == profile_id)
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(format!("unknown requested profile_id {profile_id}"))
+        })?;
+    if profile.rerank_weight_ppm != 0 {
+        return Err(CandidateOutputError::Contract(format!(
+            "profile {profile_id} requires the exact bounded rerank policy from native evaluation"
+        )));
+    }
+    Ok(DirectEvaluatedProfileMaterialV1 {
+        profile: fusion_profile(profile, &retrieval_budget(), true)?,
+        diversity: no_caps()?,
+        rerank: None,
+    })
+}
+
 /// Direct production call for one query/profile — used by tests to prove the
 /// generator emits identical candidate bytes.
 pub fn retrieve_partition_query_bytes(
@@ -818,11 +1601,26 @@ fn generate_partition_output(
         rows.len() as u64,
     );
 
-    let probe = queries.first().copied().ok_or_else(|| {
-        CandidateOutputError::Contract(format!("partition {partition} has no queries"))
-    })?;
-    let fallback_digest = fallback_digest_for_query(published, profile, probe)?;
-    let pr9_digest = pr9_fallback_digest_for_query(published, profile, probe)?;
+    let mut fallback_digests = Vec::with_capacity(queries.len());
+    let mut pr9_digests = Vec::with_capacity(queries.len());
+    for query in &queries {
+        fallback_digests.push((
+            query.query_id.as_str(),
+            fallback_digest_for_query(published, profile, query)?,
+        ));
+        pr9_digests.push((
+            query.query_id.as_str(),
+            pr9_fallback_digest_for_query(published, profile, query)?,
+        ));
+    }
+    let fallback_digest = canonical_sha256(&(
+        "tracedecay.search-eval.partition-fallbacks.v1",
+        &fallback_digests,
+    ))?;
+    let pr9_digest = canonical_sha256(&(
+        "tracedecay.search-eval.partition-fallbacks.v1",
+        &pr9_digests,
+    ))?;
 
     let mut resources = BTreeMap::new();
     resources.insert("current".to_owned(), current);
@@ -840,12 +1638,14 @@ fn generate_partition_output(
         cache_state: EVALUATION_CACHE_STATE.to_owned(),
         toolchain: toolchain_fingerprint(),
         hardware: hardware_fingerprint(),
+        profile_material_digest: compute_profile_material_digest(profile)?,
         fallback_digest,
         pr9_fallback_digest: pr9_digest,
         cancellation: REQUIRED_CANCELLATION.to_owned(),
         offline: REQUIRED_OFFLINE.to_owned(),
         optional_stages: optional_stage_measurements(profile),
         resources,
+        native_resources: None,
         queries: rows,
     })
 }
@@ -909,6 +1709,7 @@ fn retrieve_one_query(
         ranked,
         abstained,
         historical,
+        native: None,
     })
 }
 
@@ -932,6 +1733,26 @@ fn compose_production_query(
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<CompositionOutputV1, CandidateOutputError> {
+    Ok(prepare_production_query(published, profile, query)?.pr9_output)
+}
+
+struct PreparedProductionQueryV1 {
+    code_generation: CodeGenerationId,
+    request: RetrievalRequest,
+    query_view: EphemeralSanitizedQueryViewV1,
+    kernel: CompositionKernel,
+    pr9_lanes: Vec<CompositionLaneInput>,
+    pr9_measurements: Pr10NativePr9StageMeasurementsV1,
+    pr9_output: CompositionOutputV1,
+    fallback: Pr9FallbackSubpayload,
+    diversity: DiversityPolicy,
+}
+
+fn prepare_production_query(
+    published: &PublishedCorpus,
+    profile: &ProfileSpecV1,
+    query: &WorkloadQueryV1,
+) -> Result<PreparedProductionQueryV1, CandidateOutputError> {
     let generation_id = published.generation.manifest().generation_id.clone();
     let request = retrieval_request(&profile.profile_id, published)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
@@ -1014,9 +1835,15 @@ fn compose_production_query(
         literals: authority.parse_literals(&query_view, &request),
         budget,
     };
+    let exact_started = Instant::now();
     let exact_outcome = exact_lane
         .retrieve_exact(&exact_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let exact_measurement = Pr10NativeStageMeasurementV1 {
+        elapsed_micros: elapsed_micros(exact_started),
+        input_candidates: exact_request.literals.len() as u64,
+        output_candidates: retriever_outcome_candidate_count(&exact_outcome),
+    };
 
     let (whole_terms, subtokens) = lexical_terms(&query.query);
     let lexical_request = LexicalLaneRequest {
@@ -1032,11 +1859,26 @@ fn compose_production_query(
         score_domain: id("score.lexical.candidate.v1")?,
         budget,
     };
+    let lexical_input_candidates = lexical_request
+        .whole_terms
+        .len()
+        .saturating_add(lexical_request.subtokens.len())
+        .saturating_add(lexical_request.phrases.len())
+        .saturating_add(lexical_request.field_filters.len())
+        as u64;
+    let lexical_started = Instant::now();
     let lexical_outcome = lexical_lane
         .retrieve_lexical(&lexical_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let lexical_measurement = Pr10NativeStageMeasurementV1 {
+        elapsed_micros: elapsed_micros(lexical_started),
+        input_candidates: lexical_input_candidates,
+        output_candidates: retriever_outcome_candidate_count(&lexical_outcome),
+    };
 
     let seed_anchors = graph_seeds_from_outcomes(&exact_outcome, &lexical_outcome);
+    let graph_input_candidates = seed_anchors.len() as u64;
+    let graph_started = Instant::now();
     let graph_outcome = if seed_anchors.is_empty() {
         RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
             detail: "no graph seeds from exact/lexical".to_owned(),
@@ -1058,6 +1900,11 @@ fn compose_production_query(
             .retrieve_graph(&graph_request)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
     };
+    let graph_measurement = Pr10NativeStageMeasurementV1 {
+        elapsed_micros: elapsed_micros(graph_started),
+        input_candidates: graph_input_candidates,
+        output_candidates: retriever_outcome_candidate_count(&graph_outcome),
+    };
 
     let kernel = CompositionKernel::new(id::<ComponentRevision>(
         crate::query::retrieval::PR9_RANKING_REVISION_V1,
@@ -1071,15 +1918,32 @@ fn compose_production_query(
         CompositionLaneInput::new(RetrieverKind::Graph, graph_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
     ];
-    kernel
+    let diversity = no_caps()?;
+    let pr9_output = kernel
         .compose(
             &FusionStageInput {
                 profile: fusion_profile,
-                lanes: pr9_lanes,
+                lanes: pr9_lanes.clone(),
             },
-            &no_caps()?,
+            &diversity,
         )
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let fallback = pr9_fallback_from_composition(&pr9_output)?;
+    Ok(PreparedProductionQueryV1 {
+        code_generation: generation_id,
+        request,
+        query_view,
+        kernel,
+        pr9_lanes,
+        pr9_measurements: Pr10NativePr9StageMeasurementsV1 {
+            exact: exact_measurement,
+            lexical: lexical_measurement,
+            graph: graph_measurement,
+        },
+        pr9_output,
+        fallback,
+        diversity,
+    })
 }
 
 fn pr9_fallback_digest_for_query(
@@ -1136,8 +2000,156 @@ fn map_ranked_candidates(
     published: &PublishedCorpus,
     output: &CompositionOutputV1,
 ) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
+    map_ranked_candidate_list(published, &output.ranked_candidates)
+}
+
+struct CandidateCorpusHydrationSourceV1<'a> {
+    published: &'a PublishedCorpus,
+    source_fetches: u64,
+}
+
+impl CandidateCorpusHydrationSourceV1<'_> {
+    fn binding<'a>(
+        &'a self,
+        candidate: &'a tracedecay_domain::RankedCandidate,
+    ) -> Option<(
+        &'a OccurrenceMapEntry,
+        &'a tracedecay_domain::OccurrenceProvenance,
+    )> {
+        candidate
+            .candidate
+            .occurrences
+            .iter()
+            .find_map(|occurrence| {
+                self.published
+                    .occurrence_map
+                    .get(occurrence.source_occurrence_id.as_str())
+                    .map(|entry| (entry, occurrence))
+            })
+            .or_else(|| {
+                self.published
+                    .occurrence_map
+                    .get(candidate.candidate.anchor_id.as_str())
+                    .and_then(|entry| {
+                        candidate
+                            .candidate
+                            .occurrences
+                            .first()
+                            .map(|occurrence| (entry, occurrence))
+                    })
+            })
+    }
+}
+
+impl LateHydrationSource<Vec<u8>> for CandidateCorpusHydrationSourceV1<'_> {
+    fn authorize(
+        &mut self,
+        _request: &RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+    ) -> HydrationAuthorizationV1 {
+        if self.binding(candidate).is_some() {
+            HydrationAuthorizationV1::Authorized
+        } else {
+            HydrationAuthorizationV1::Unavailable(HydrationUnavailableV1::Invalid)
+        }
+    }
+
+    fn preflight_authorized(
+        &mut self,
+        _request: &RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1 {
+        let Some((entry, occurrence)) = self.binding(candidate) else {
+            return HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
+        };
+        if !permit
+            .source_occurrence_ids
+            .contains(&occurrence.source_occurrence_id)
+        {
+            return HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
+        }
+        match fs::metadata(self.published.repo_root.join(&entry.fixture_path)) {
+            Ok(metadata) if metadata.len() <= permit.remaining_bytes => {
+                HydrationPreflightOutcomeV1::Ready {
+                    estimated_bytes: metadata.len(),
+                }
+            }
+            Ok(_) => HydrationPreflightOutcomeV1::BudgetExceeded,
+            Err(_) => HydrationPreflightOutcomeV1::Unavailable(HydrationUnavailableV1::Internal),
+        }
+    }
+
+    fn hydrate_authorized(
+        &mut self,
+        _request: &RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        _permit: &HydrationWorkPermitV1,
+    ) -> HydrationReadOutcomeV1<Vec<u8>> {
+        let Some((entry, occurrence)) = self.binding(candidate) else {
+            return HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Invalid);
+        };
+        let anchor_id = candidate.candidate.anchor_id.clone();
+        let source_occurrence_id = occurrence.source_occurrence_id.clone();
+        let freshness = occurrence.freshness.clone();
+        let path = self.published.repo_root.join(&entry.fixture_path);
+        match fs::read(path) {
+            Ok(payload) => {
+                self.source_fetches = self.source_fetches.saturating_add(1);
+                HydrationReadOutcomeV1::Complete {
+                    receipt: HydrationReceipt {
+                        anchor_id,
+                        source_occurrence_id,
+                        hydration_revision: HydrationRevision::new(
+                            "hydration.search-eval.corpus.v1",
+                        )
+                        .expect("static hydration revision"),
+                        bytes_hydrated: payload.len() as u64,
+                        authorized: true,
+                        freshness,
+                    },
+                    payload,
+                }
+            }
+            Err(_) => HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Internal),
+        }
+    }
+}
+
+fn measure_late_hydration(
+    published: &PublishedCorpus,
+    request: &RetrievalRequest,
+    ranked: &[tracedecay_domain::RankedCandidate],
+    budget: &RetrievalBudget,
+) -> Result<Pr10NativeHydrationMeasurementV1, CandidateOutputError> {
+    let mut source = CandidateCorpusHydrationSourceV1 {
+        published,
+        source_fetches: 0,
+    };
+    let started = Instant::now();
+    let page = DeterministicLateHydration::new(&mut source)
+        .hydrate(request, ranked, budget)
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let bytes_hydrated = page
+        .receipts
+        .iter()
+        .map(|receipt| receipt.bytes_hydrated)
+        .sum();
+    Ok(Pr10NativeHydrationMeasurementV1 {
+        elapsed_micros: elapsed_micros(started),
+        selected_candidates: page.results.len() as u64,
+        source_fetches: source.source_fetches,
+        receipts: page.receipts.len() as u64,
+        bytes_hydrated,
+    })
+}
+
+fn map_ranked_candidate_list(
+    published: &PublishedCorpus,
+    ranked_candidates: &[tracedecay_domain::RankedCandidate],
+) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
     let mut rows = Vec::new();
-    for ranked in &output.ranked_candidates {
+    for ranked in ranked_candidates {
         let entry = published
             .occurrence_map
             .get(ranked.candidate.anchor_id.as_str())
@@ -1383,17 +2395,20 @@ fn publish_corpus_with_scale(
         captured_at: UtcMicros(1_000_000),
         files,
     };
+    let incremental_snapshot_base = snapshot.clone();
+    let incremental_captured_base = captured.clone();
+    let target_projection_key = ProjectionKeyV1 {
+        kind: ProjectionKindV1::Lexical,
+        schema_revision: "lexical.candidate.v1".to_owned(),
+        profile_digest: lexical_projection_profile_digest()?,
+    };
     let request = CodeIndexBuildRequestV1 {
         snapshot,
         captured_files: captured,
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
         sealed_at: UtcMicros(1_100_000),
-        target_projection_key: ProjectionKeyV1 {
-            kind: ProjectionKindV1::Lexical,
-            schema_revision: "lexical.candidate.v1".to_owned(),
-            profile_digest: lexical_projection_profile_digest()?,
-        },
+        target_projection_key: target_projection_key.clone(),
     };
     let config = CodeIndexProductionConfigV1 {
         repository: id::<RepositoryId>("repository.candidate.fixture")?,
@@ -1405,13 +2420,215 @@ fn publish_corpus_with_scale(
         max_snapshot_age_micros: None,
     };
     let store = SharedPublicationStore::default();
-    let mut owner = open_production_code_index_owner_v1(config, store, ApplyingProjectionSink)
-        .map_err(|error| {
-            CandidateOutputError::Contract(format!("open production owner: {error}"))
-        })?;
+    let mut owner =
+        open_production_code_index_owner_v1(config, store.clone(), ApplyingProjectionSink)
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!("open production owner: {error}"))
+            })?;
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
+    let expected_chunks = match copies {
+        1 => workload.execution_contract.exact_eligible_chunks_current,
+        10 => workload.execution_contract.exact_eligible_chunks_10x,
+        _ => {
+            return Err(CandidateOutputError::Contract(
+                "evaluation corpus scale must be current or exact 10x".to_owned(),
+            ));
+        }
+    };
+    let observed_chunks = generation.chunks().chunks().len() as u64;
+    if observed_chunks != expected_chunks {
+        return Err(CandidateOutputError::Contract(format!(
+            "eligible chunk count mismatch for {copies}x corpus: declared {expected_chunks}, observed {observed_chunks}"
+        )));
+    }
+    let mut incremental_snapshot = incremental_snapshot_base;
+    incremental_snapshot.captured_at = UtcMicros(1_150_000);
+    let mut incremental_captured = incremental_captured_base;
+    let incremental_document = workload
+        .corpus
+        .iter()
+        .find(|document| document.document_id == workload.incremental_fixture.document_id)
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(
+                "incremental fixture names an unknown corpus document".to_owned(),
+            )
+        })?;
+    let changed_file =
+        id::<FileOccurrenceId>(&format!("file.{}", incremental_document.document_id))?;
+    let canonical_root =
+        fs::canonicalize(repo_root).map_err(|source| CandidateOutputError::Read {
+            path: repo_root.to_path_buf(),
+            source,
+        })?;
+    let expected_after_path = canonical_root.join(&workload.incremental_fixture.after_path);
+    let after_path =
+        fs::canonicalize(&expected_after_path).map_err(|source| CandidateOutputError::Read {
+            path: expected_after_path.clone(),
+            source,
+        })?;
+    if after_path != expected_after_path {
+        return Err(CandidateOutputError::Contract(
+            "incremental fixture must be a checked-in non-symlink path".to_owned(),
+        ));
+    }
+    let after_bytes = fs::read(&after_path).map_err(|source| CandidateOutputError::Read {
+        path: after_path,
+        source,
+    })?;
+    let observed_after_sha256 = hex::encode(Sha256::digest(&after_bytes));
+    if observed_after_sha256 != workload.incremental_fixture.after_sha256 {
+        return Err(CandidateOutputError::Contract(
+            "incremental fixture bytes do not match the workload digest".to_owned(),
+        ));
+    }
+    let changed = incremental_captured
+        .iter_mut()
+        .find(|file| file.file_occurrence_id == changed_file)
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(
+                "incremental fixture corpus document is not eligible".to_owned(),
+            )
+        })?;
+    if changed.sanitized_bytes == after_bytes {
+        return Err(CandidateOutputError::Contract(
+            "incremental before/after fixture bytes are identical".to_owned(),
+        ));
+    }
+    changed.sanitized_bytes = after_bytes;
+    let changed_digest = content_digest(&changed.sanitized_bytes);
+    let snapshot_file = incremental_snapshot
+        .files
+        .iter_mut()
+        .find(|file| file.file_occurrence_id == changed_file)
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(
+                "incremental resource file is absent from the sanitized snapshot".to_owned(),
+            )
+        })?;
+    let incremental_before_content_digest = snapshot_file.content_digest.as_str().to_owned();
+    snapshot_file.content_digest = changed_digest.clone();
+    let incremental_after_content_digest = changed_digest.as_str().to_owned();
+    incremental_snapshot.content_identity = id(&canonical_sha256(&(
+        "tracedecay.search-eval.incremental-corpus.v1",
+        generation.manifest().generation_id.clone(),
+        changed_file.clone(),
+        changed_digest,
+    ))?)?;
+    let scenario_snapshot = incremental_snapshot.clone();
+    let scenario_captured = incremental_captured.clone();
+    let incremental_generation = owner
+        .build_and_publish(
+            CodeIndexBuildRequestV1 {
+                snapshot: incremental_snapshot,
+                captured_files: incremental_captured,
+                changed_files: BTreeSet::from([incremental_document.source_path.clone()]),
+                invalidations: BTreeSet::new(),
+                sealed_at: UtcMicros(1_200_000),
+                target_projection_key: target_projection_key.clone(),
+            },
+            &ActiveControl,
+        )
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!(
+                "publish incremental resource generation: {error}"
+            ))
+        })?;
+    let incremental_changes = &incremental_generation.projection().request().changes;
+    let changed_chunks = incremental_changes
+        .added_or_changed
+        .iter()
+        .filter_map(|change| {
+            incremental_generation
+                .chunks()
+                .chunks()
+                .iter()
+                .find(|chunk| chunk.id == change.chunk_id)
+        })
+        .collect::<Vec<_>>();
+    let deleted_chunks = incremental_changes
+        .deleted
+        .iter()
+        .filter_map(|change| {
+            generation
+                .chunks()
+                .chunks()
+                .iter()
+                .find(|chunk| chunk.id == change.chunk_id)
+        })
+        .collect::<Vec<_>>();
+    let affected_count = incremental_changes
+        .added_or_changed
+        .len()
+        .saturating_add(incremental_changes.deleted.len());
+    if incremental_generation.manifest().parent_generation
+        != Some(generation.manifest().generation_id.clone())
+        || affected_count == 0
+        || affected_count >= incremental_generation.chunks().chunks().len()
+        || changed_chunks.len() != incremental_changes.added_or_changed.len()
+        || deleted_chunks.len() != incremental_changes.deleted.len()
+        || changed_chunks
+            .iter()
+            .chain(deleted_chunks.iter())
+            .any(|chunk| chunk.anchor.file_occurrence_id != changed_file)
+        || !changed_chunks
+            .iter()
+            .any(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
+    {
+        return Err(CandidateOutputError::Contract(
+            "resource corpus did not produce a genuine changed-chunk incremental generation"
+                .to_owned(),
+        ));
+    }
+
+    let no_op_generation = build_projection_source_generation(
+        &mut owner,
+        scenario_snapshot.clone(),
+        scenario_captured.clone(),
+        BTreeSet::new(),
+        UtcMicros(1_250_000),
+        target_projection_key.clone(),
+        "no-op",
+    )?;
+    if !no_op_generation
+        .projection()
+        .request()
+        .changes
+        .added_or_changed
+        .is_empty()
+        || !no_op_generation
+            .projection()
+            .request()
+            .changes
+            .deleted
+            .is_empty()
+    {
+        return Err(CandidateOutputError::Contract(
+            "no-op projection case performed projection work".to_owned(),
+        ));
+    }
+
+    let mut deletion_snapshot = scenario_snapshot.clone();
+    deletion_snapshot.captured_at = UtcMicros(1_300_000);
+    deletion_snapshot
+        .files
+        .retain(|file| file.file_occurrence_id != changed_file);
+    deletion_snapshot.content_identity = id(&canonical_sha256(&(
+        "tracedecay.search-eval.deletion-case.v1",
+        &deletion_snapshot.files,
+    ))?)?;
+    let mut deletion_captured = scenario_captured.clone();
+    deletion_captured.retain(|file| file.file_occurrence_id != changed_file);
+    let deletion_generation = build_projection_source_generation(
+        &mut owner,
+        deletion_snapshot,
+        deletion_captured,
+        BTreeSet::from([incremental_document.source_path.clone()]),
+        UtcMicros(1_350_000),
+        target_projection_key,
+        "deletion",
+    )?;
 
     let qualified_names: BTreeMap<_, _> = generation
         .symbols()
@@ -1440,6 +2657,7 @@ fn publish_corpus_with_scale(
                 OccurrenceMapEntry {
                     document_id: document.document_id.clone(),
                     scope: document.scope.clone(),
+                    fixture_path: document.path.clone(),
                     display_anchor: display.clone(),
                     display_anchors: display_anchors.clone(),
                 },
@@ -1450,6 +2668,7 @@ fn publish_corpus_with_scale(
             OccurrenceMapEntry {
                 document_id: document.document_id.clone(),
                 scope: document.scope.clone(),
+                fixture_path: document.path.clone(),
                 display_anchor: display,
                 display_anchors,
             },
@@ -1462,6 +2681,9 @@ fn publish_corpus_with_scale(
         .len() as u64;
     Ok(PublishedCorpus {
         generation,
+        incremental_generation,
+        incremental_before_content_digest,
+        incremental_after_content_digest,
         occurrence_map,
         file_scopes,
         repo_root: repo_root.to_path_buf(),
@@ -1470,7 +2692,39 @@ fn publish_corpus_with_scale(
         corpus: workload.corpus.clone(),
         corpus_digest,
         eligible_chunks,
+        no_op_generation,
+        deletion_generation,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_projection_source_generation(
+    owner: &mut ProductionCodeIndexOwnerV1<SharedPublicationStore, ApplyingProjectionSink>,
+    mut snapshot: SanitizedCodeSnapshotV1,
+    captured_files: Vec<CodeIndexCapturedFileV1>,
+    changed_files: BTreeSet<String>,
+    sealed_at: UtcMicros,
+    target_projection_key: ProjectionKeyV1,
+    label: &str,
+) -> Result<CodeIndexPublishedGenerationV1, CandidateOutputError> {
+    snapshot.captured_at = UtcMicros(sealed_at.0.saturating_sub(10_000));
+    owner
+        .build_and_publish(
+            CodeIndexBuildRequestV1 {
+                snapshot,
+                captured_files,
+                changed_files,
+                invalidations: BTreeSet::new(),
+                sealed_at,
+                target_projection_key,
+            },
+            &ActiveControl,
+        )
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!(
+                "publish {label} semantic projection source: {error}"
+            ))
+        })
 }
 
 fn display_anchors_for_chunk(
@@ -2026,6 +3280,86 @@ mod tests {
     }
 
     #[test]
+    fn direct_evaluated_material_matches_checked_in_profile() {
+        let workload = workload();
+        let spec = workload
+            .profile_matrix
+            .iter()
+            .find(|profile| profile.profile_id == "pr9-fallback")
+            .expect("checked-in fallback profile");
+        let material = load_direct_evaluated_profile_material(&repo_root(), None, &spec.profile_id)
+            .expect("evaluated profile material");
+
+        assert_eq!(
+            material.profile.profile_id.as_str(),
+            format!("profile.{}", spec.profile_id)
+        );
+        assert_eq!(
+            material.profile.weights_micros.get(&RetrieverKind::Lexical),
+            Some(&spec.lexical_weight_ppm)
+        );
+        assert_eq!(
+            material.profile.weights_micros.get(&RetrieverKind::Graph),
+            Some(&spec.graph_weight_ppm)
+        );
+        assert!(
+            !material
+                .profile
+                .weights_micros
+                .contains_key(&RetrieverKind::Semantic)
+        );
+        assert!(material.rerank.is_none());
+
+        let semantic =
+            load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-conservative")
+                .expect("semantic material");
+        assert!(
+            semantic
+                .profile
+                .weights_micros
+                .contains_key(&RetrieverKind::Semantic)
+        );
+        let error = load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
+            .expect_err("rerank policy must come from native evaluation");
+        assert!(error.to_string().contains("exact bounded rerank policy"));
+    }
+
+    #[test]
+    fn profile_material_digest_binds_every_checked_in_weight() {
+        let workload = workload();
+        let profile = workload.profile_matrix.first().expect("profile");
+        let digest = compute_profile_material_digest(profile).expect("digest");
+        let mut changed = profile.clone();
+        changed.semantic_weight_ppm = changed.semantic_weight_ppm.saturating_add(1);
+
+        assert_ne!(
+            digest,
+            compute_profile_material_digest(&changed).expect("changed digest")
+        );
+    }
+
+    #[test]
+    fn native_stage_completes_only_when_every_query_has_real_evidence() {
+        let complete = Pr10NativeStageResultV1::Complete(());
+        let pending = Pr10NativeStageResultV1::<()>::Pending {
+            reason: Pr10NativePendingReasonV1::SemanticGenerationUnavailable,
+        };
+
+        assert_eq!(
+            aggregate_native_stage(true, [&complete, &complete].into_iter()).expect("complete"),
+            OptionalStageMeasurementV1::Complete
+        );
+        assert_eq!(
+            aggregate_native_stage(true, [&complete, &pending].into_iter()).expect("pending"),
+            OptionalStageMeasurementV1::Pending
+        );
+        assert!(
+            aggregate_native_stage(false, [&complete].into_iter()).is_err(),
+            "unrequested execution must fail closed"
+        );
+    }
+
+    #[test]
     fn qualified_display_anchor_strips_exact_source_identity() {
         let document = CorpusDocumentV1 {
             document_id: "watermark".to_owned(),
@@ -2338,13 +3672,65 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_complete_optional_stage_claim_is_rejected() {
-        let error = serde_json::from_value::<OptionalStageMeasurementsV1>(serde_json::json!({
+    fn complete_optional_stage_status_requires_native_evidence_at_validation() {
+        let stages = serde_json::from_value::<OptionalStageMeasurementsV1>(serde_json::json!({
             "semantic": "complete",
             "rerank": "not_requested"
         }))
-        .expect_err("complete requires an evidence-bearing schema");
-        assert!(error.to_string().contains("unknown variant"));
+        .expect("complete is an evidence-bearing native state");
+        assert_eq!(stages.semantic, OptionalStageMeasurementV1::Complete);
+    }
+
+    #[test]
+    fn native_pr9_stages_and_late_hydration_emit_raw_measurements() {
+        let fixture = authenticated_repo_fixture();
+        let workload = workload();
+        let published = publish_corpus(&fixture.root, &workload).expect("published corpus");
+        let profile = workload
+            .profile_matrix
+            .iter()
+            .find(|profile| profile.profile_id == "pr9-fallback")
+            .expect("fallback profile");
+        let query = workload.queries.first().expect("query");
+        let prepared =
+            prepare_production_query(&published, profile, query).expect("prepared query");
+        let fusion = fusion_profile(profile, &retrieval_budget(), true).expect("fusion");
+        let mut native = evaluate_native_query(Pr10NativeQueryInputV1 {
+            profile_spec: profile,
+            fusion_profile: &fusion,
+            diversity_policy: &prepared.diversity,
+            kernel: &prepared.kernel,
+            pr9_lanes: &prepared.pr9_lanes,
+            pr9_measurements: prepared.pr9_measurements,
+            semantic: None,
+            fallback: &prepared.fallback,
+            rerank: None,
+        })
+        .expect("native PR9 evaluation");
+        let ranked = native.rerank.off.clone();
+        native.measurements.hydration = Some(
+            measure_late_hydration(&published, &prepared.request, &ranked, &retrieval_budget())
+                .expect("late hydration"),
+        );
+
+        assert_eq!(
+            native.measurements.pr9.lexical.output_candidates,
+            prepared
+                .pr9_lanes
+                .iter()
+                .find(|lane| lane.lane == RetrieverKind::Lexical)
+                .map(|lane| retriever_outcome_candidate_count(&lane.outcome))
+                .expect("lexical lane")
+        );
+        assert!(native.ablations.iter().all(|ablation| {
+            ablation.measurement.output_candidates == ablation.ranked_candidates.len() as u64
+        }));
+        let hydration = native
+            .measurements
+            .hydration
+            .expect("hydration measurement");
+        assert_eq!(hydration.source_fetches, hydration.receipts);
+        assert!(hydration.receipts <= hydration.selected_candidates);
     }
 
     #[test]
@@ -2385,6 +3771,17 @@ mod tests {
             ten_x.eligible_chunks,
             current.eligible_chunks.saturating_mul(10)
         );
+        for published in [&current, &ten_x] {
+            let no_op = &published.no_op_generation.projection().request().changes;
+            assert!(no_op.added_or_changed.is_empty());
+            assert!(no_op.deleted.is_empty());
+            let deletion = &published.deletion_generation.projection().request().changes;
+            assert!(!deletion.deleted.is_empty());
+            assert_eq!(
+                deletion.from_generation.as_ref(),
+                Some(&published.no_op_generation.manifest().generation_id)
+            );
+        }
 
         let mut missing_resource = result.clone();
         missing_resource.outputs[0].resources.remove("10x");
