@@ -419,6 +419,8 @@ pub(super) async fn plan_session_offsets(
     target: &Path,
     source: &Path,
 ) -> Result<SessionMergeOffsets> {
+    reject_future_lcm_schema_path(target, "target sessions").await?;
+    reject_future_lcm_schema_path(source, "source sessions").await?;
     normalize_sessions(target).await?;
     normalize_sessions(source).await?;
     reject_session_registry_rows(source).await?;
@@ -454,6 +456,9 @@ pub(super) async fn merge_sessions(
     source_project_id: &str,
     offsets: &SessionMergeOffsets,
 ) -> Result<()> {
+    reject_future_lcm_schema_path(target_path, "target sessions").await?;
+    reject_future_lcm_schema_path(source_path, "source sessions").await?;
+    reject_future_lcm_schema_path(target_input_path, "target input sessions").await?;
     normalize_sessions(target_path).await?;
     normalize_sessions(source_path).await?;
     let target = open_migration_database(target_path, "merge consolidated session store").await?;
@@ -463,6 +468,9 @@ pub(super) async fn merge_sessions(
         .map_err(|error| db_error("merge_sessions", error))?;
     attach_as(&transaction, source_path, "source").await?;
     attach_as(&transaction, target_input_path, "target_input").await?;
+    reject_future_lcm_schema(&transaction, "main", "target sessions").await?;
+    reject_future_lcm_schema(&transaction, "source", "source sessions").await?;
+    reject_future_lcm_schema(&transaction, "target_input", "target input sessions").await?;
     transaction
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
@@ -500,6 +508,9 @@ pub(super) async fn merge_registered_sessions(
         .map_err(|error| db_error("merge_sessions", error))?;
     attach_token_as(&transaction, source, "source").await?;
     attach_token_as(&transaction, target_input, "target_input").await?;
+    reject_future_lcm_schema(&transaction, "main", "target sessions").await?;
+    reject_future_lcm_schema(&transaction, "source", "source sessions").await?;
+    reject_future_lcm_schema(&transaction, "target_input", "target input sessions").await?;
     transaction
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
@@ -535,6 +546,7 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
         .begin_write_transaction("normalize consolidated session store")
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
+    reject_future_lcm_schema(&transaction, "main", "sessions database").await?;
     crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
@@ -574,6 +586,53 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
         .commit()
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn reject_future_lcm_schema_path(path: &Path, role: &str) -> Result<()> {
+    let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let database = crate::sqlite_read_snapshot::open_in(path, scratch_root)
+        .await
+        .map_err(|error| db_error("validate_lcm_schema", error))?;
+    reject_future_lcm_schema(database.connection(), "main", role).await
+}
+
+async fn reject_future_lcm_schema(
+    conn: &impl QueryExecutor,
+    schema: &str,
+    role: &str,
+) -> Result<()> {
+    if !table_exists(conn, schema, "session_schema_migrations").await? {
+        return Ok(());
+    }
+    let sql = format!(
+        "SELECT version FROM {}.session_schema_migrations WHERE name='lcm'",
+        quote_identifier(schema)
+    );
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .map_err(|error| db_error("validate_lcm_schema", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error("validate_lcm_schema", error))?
+    else {
+        return Ok(());
+    };
+    let version = row
+        .get::<i64>(0)
+        .map_err(|error| db_error("validate_lcm_schema", error))?;
+    if version > crate::sessions::lcm::LCM_SCHEMA_VERSION {
+        return Err(db_message(
+            "validate_lcm_schema",
+            format!(
+                "{role} uses newer LCM schema version {version}; supported maximum is {}",
+                crate::sessions::lcm::LCM_SCHEMA_VERSION
+            ),
+        ));
+    }
     Ok(())
 }
 

@@ -3,6 +3,183 @@
 
 use super::*;
 
+async fn session_runtime(fixture: &Fixture, project_id: &str) -> HostAdmissionTestRuntimeV1 {
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        &fixture.profile,
+        &fixture.project,
+        ProjectId::new(project_id.to_string()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let expected = layout_for_id(&fixture.project, &fixture.profile, project_id)
+        .unwrap()
+        .sessions_db_path;
+    assert_eq!(
+        runtime.database_path(HostAdmissionScope::Project).unwrap(),
+        expected
+    );
+    runtime
+}
+
+fn session_database(runtime: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
+    runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap()
+}
+
+async fn execute_owned_session_sql(fixture: &Fixture, project_id: &str, sql: &str) {
+    let runtime = session_runtime(fixture, project_id).await;
+    let database = session_database(&runtime);
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction.execute_batch(sql).await.unwrap();
+    transaction.commit().await.unwrap();
+    database.checkpoint().await;
+}
+
+async fn set_lcm_schema_version(path: &Path, version: i64) {
+    let (database, _) = test_open(path).await;
+    let transaction = database
+        .begin_write_transaction("set consolidation LCM schema fixture")
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE session_schema_migrations SET version=?1 WHERE name='lcm'",
+            params![version],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    database.checkpoint().await.unwrap();
+    database.close();
+}
+
+async fn session_table_exists(path: &Path, table: &str) -> bool {
+    let (database, _) = test_open_read_only(path).await;
+    let snapshot = database
+        .begin_engine_read_snapshot("inspect consolidation session fixture")
+        .await
+        .unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1",
+            params![table],
+        )
+        .await
+        .unwrap();
+    let exists = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap() > 0;
+    drop(rows);
+    drop(snapshot);
+    database.close();
+    exists
+}
+
+#[tokio::test]
+async fn planning_rejects_future_source_lcm_schema_before_target_normalization() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id)
+        .unwrap()
+        .sessions_db_path;
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id)
+        .unwrap()
+        .sessions_db_path;
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
+        "DROP TABLE dashboard_token_counts",
+    )
+    .await;
+    set_lcm_schema_version(
+        &source,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
+    )
+    .await;
+    let target_before = file_digest(&target).unwrap();
+
+    let error = sqlite::plan_session_offsets(&target, &source)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("newer LCM schema version"),
+        "{error}"
+    );
+    assert_eq!(file_digest(&target).unwrap(), target_before);
+    assert!(!session_table_exists(&target, "dashboard_token_counts").await);
+}
+
+#[tokio::test]
+async fn planning_rejects_future_target_lcm_schema_without_normalization() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id)
+        .unwrap()
+        .sessions_db_path;
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id)
+        .unwrap()
+        .sessions_db_path;
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
+        &format!(
+            "DROP TABLE dashboard_token_counts;
+             UPDATE session_schema_migrations SET version={}
+             WHERE name='lcm'",
+            crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1)
+        ),
+    )
+    .await;
+    let target_before = file_digest(&target).unwrap();
+
+    let error = sqlite::plan_session_offsets(&target, &source)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("newer LCM schema version"),
+        "{error}"
+    );
+    assert_eq!(file_digest(&target).unwrap(), target_before);
+    assert!(!session_table_exists(&target, "dashboard_token_counts").await);
+}
+
+#[tokio::test]
+async fn merge_rejects_future_target_input_lcm_schema_before_destination_mutation() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id)
+        .unwrap()
+        .sessions_db_path;
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id)
+        .unwrap()
+        .sessions_db_path;
+    let target_input = fixture.profile.join("future-target-input-sessions.db");
+    let offsets = sqlite::plan_session_offsets(&target, &source)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target, &target_input).unwrap();
+    set_lcm_schema_version(
+        &target_input,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
+    )
+    .await;
+    let target_before = file_digest(&target).unwrap();
+
+    let error = sqlite::merge_sessions(
+        &target,
+        &source,
+        &target_input,
+        &fixture.source_id,
+        &offsets,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("newer LCM schema version"),
+        "{error}"
+    );
+    assert_eq!(file_digest(&target).unwrap(), target_before);
+}
+
 #[tokio::test]
 async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
     let fixture = fixture().await;
@@ -81,12 +258,9 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
     )
     .await
     .unwrap_err();
-    let sessions = report
-        .destination_data_root
-        .join(storage::SESSIONS_DB_FILENAME);
-
-    execute_sql(
-        &sessions,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         "UPDATE sessions SET ended_at=42 WHERE session_id='legacy-session'",
     )
     .await;
@@ -100,8 +274,9 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
         "{error}"
     );
 
-    execute_sql(
-        &sessions,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         "UPDATE sessions SET ended_at=1800000001 WHERE session_id='legacy-session';
          UPDATE session_messages SET text='corrupted text'
          WHERE message_id='message-legacy-session';",
@@ -117,8 +292,9 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
         "{error}"
     );
 
-    execute_sql(
-        &sessions,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         "UPDATE session_messages SET text='message from legacy-session'
          WHERE message_id='message-legacy-session';
          UPDATE lcm_raw_messages SET content_hash='corrupted-hash'
@@ -139,13 +315,9 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
 #[tokio::test]
 async fn divergent_session_message_projections_preserve_a_source_variant() {
     let fixture = fixture().await;
-    let source_sessions = fixture
-        .profile
-        .join("projects")
-        .join(&fixture.source_id)
-        .join(storage::SESSIONS_DB_FILENAME);
-    execute_sql(
-        &source_sessions,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
         "INSERT INTO session_messages(
              provider, message_id, session_id, role, timestamp, ordinal, text, kind, model
          ) VALUES
@@ -162,13 +334,8 @@ async fn divergent_session_message_projections_preserve_a_source_variant() {
     assert_eq!(report.collisions.divergent_lcm_messages, 0);
 
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
-    let sessions = GlobalDb::open_read_only_at(
-        &applied
-            .destination_data_root
-            .join(storage::SESSIONS_DB_FILENAME),
-    )
-    .await
-    .unwrap();
+    let runtime = session_runtime(&fixture, &applied.destination_project_id).await;
+    let sessions = session_database(&runtime);
     let selected = sessions
         .get_session_message("codex", "message-current-session")
         .await
@@ -190,31 +357,19 @@ async fn divergent_session_message_projections_preserve_a_source_variant() {
         .unwrap();
     assert_eq!(source_only.session_id, "legacy-session");
     assert_eq!(source_only.text, "source-only projection");
-    sessions.close();
 }
 
 #[tokio::test]
 async fn lcm_representation_drift_uses_the_selected_target_row() {
     let fixture = fixture().await;
-    let source_sessions = fixture
-        .profile
-        .join("projects")
-        .join(&fixture.source_id)
-        .join(storage::SESSIONS_DB_FILENAME);
-    let target_sessions = fixture
-        .profile
-        .join("projects")
-        .join(&fixture.target_id)
-        .join(storage::SESSIONS_DB_FILENAME);
-    let target = GlobalDb::open_read_only_at(&target_sessions).await.unwrap();
-    let target_raw = target
+    let target_runtime = session_runtime(&fixture, &fixture.target_id).await;
+    let target_raw = session_database(&target_runtime)
         .lcm_load_raw_message("codex", "message-current-session")
         .await
         .unwrap();
-    target.close();
-    let source = GlobalDb::open_at_without_structured_backfill(&source_sessions)
-        .await
-        .unwrap();
+    drop(target_runtime);
+    let source_runtime = session_runtime(&fixture, &fixture.source_id).await;
+    let source = session_database(&source_runtime);
     let transaction = source.begin_write_transaction().await.unwrap();
     transaction
         .execute(
@@ -222,7 +377,7 @@ async fn lcm_representation_drift_uses_the_selected_target_row() {
              SET message_id=?1, content=?2, content_hash=?3,
                  storage_kind='external', payload_ref=NULL
              WHERE provider='codex' AND message_id='message-legacy-session'",
-            libsql::params![
+            params![
                 target_raw.message_id.clone(),
                 target_raw.content.clone(),
                 target_raw.content_hash.clone()
@@ -232,7 +387,7 @@ async fn lcm_representation_drift_uses_the_selected_target_row() {
         .unwrap();
     transaction.commit().await.unwrap();
     source.checkpoint().await;
-    source.close();
+    drop(source_runtime);
 
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
@@ -244,13 +399,8 @@ async fn lcm_representation_drift_uses_the_selected_target_row() {
     assert_eq!(report.collisions.divergent_lcm_payload_refs, 0);
 
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
-    let destination = GlobalDb::open_read_only_at(
-        &applied
-            .destination_data_root
-            .join(storage::SESSIONS_DB_FILENAME),
-    )
-    .await
-    .unwrap();
+    let destination_runtime = session_runtime(&fixture, &applied.destination_project_id).await;
+    let destination = session_database(&destination_runtime);
     assert_eq!(
         destination
             .lcm_load_raw_message("codex", "message-current-session")
@@ -258,7 +408,6 @@ async fn lcm_representation_drift_uses_the_selected_target_row() {
             .unwrap(),
         target_raw
     );
-    destination.close();
 }
 
 #[tokio::test]
@@ -277,8 +426,9 @@ async fn session_only_divergence_does_not_duplicate_identical_external_raw_famil
         )
         .unwrap();
     }
-    execute_sql(
-        &source.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
         &format!(
             "UPDATE session_messages
              SET message_id='message-current-session', text='source projection'
@@ -296,8 +446,9 @@ async fn session_only_divergence_does_not_duplicate_identical_external_raw_famil
         ),
     )
     .await;
-    execute_sql(
-        &target.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         &format!(
             "UPDATE lcm_raw_messages
              SET content=NULL, content_hash='{content_hash}', storage_kind='external',
@@ -316,13 +467,8 @@ async fn session_only_divergence_does_not_duplicate_identical_external_raw_famil
     let report = plan(&options).await.unwrap();
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
     let variant_id = format!("consolidated/{}/message-current-session", fixture.source_id);
-    let sessions = GlobalDb::open_read_only_at(
-        &applied
-            .destination_data_root
-            .join(storage::SESSIONS_DB_FILENAME),
-    )
-    .await
-    .unwrap();
+    let runtime = session_runtime(&fixture, &applied.destination_project_id).await;
+    let sessions = session_database(&runtime);
     assert!(
         sessions
             .get_session_message("codex", &variant_id)
@@ -341,8 +487,8 @@ async fn session_only_divergence_does_not_duplicate_identical_external_raw_famil
         .unwrap();
     assert_eq!(raw.content_hash, content_hash);
     assert_eq!(raw.payload_ref.as_deref(), Some(payload_ref));
-    let mut rows = sessions
-        .conn()
+    let snapshot = sessions.read_snapshot().await.unwrap();
+    let mut rows = snapshot
         .query(
             "SELECT message_id FROM lcm_external_payloads WHERE payload_ref=?1",
             [payload_ref],
@@ -358,7 +504,8 @@ async fn session_only_divergence_does_not_duplicate_identical_external_raw_famil
             .unwrap(),
         "message-current-session"
     );
-    sessions.close();
+    drop(rows);
+    drop(snapshot);
 }
 
 #[tokio::test]
@@ -367,15 +514,17 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
     let mut source_ref = None;
-    for (layout, session_id, old_message_id, content) in [
+    for (layout, project_id, session_id, old_message_id, content) in [
         (
             &source,
+            fixture.source_id.as_str(),
             "legacy-session",
             "message-legacy-session",
             "source external body",
         ),
         (
             &target,
+            fixture.target_id.as_str(),
             "current-session",
             "message-current-session",
             "target external body",
@@ -394,9 +543,8 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
         if session_id == "legacy-session" {
             source_ref = Some(payload.payload_ref.clone());
         }
-        let db = GlobalDb::open_at_without_structured_backfill(&layout.sessions_db_path)
-            .await
-            .unwrap();
+        let runtime = session_runtime(&fixture, project_id).await;
+        let db = session_database(&runtime);
         let writer = db.begin_write_transaction().await.unwrap();
         crate::sessions::lcm::payload::upsert_payload_metadata(&writer, &payload)
             .await
@@ -406,7 +554,7 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
                 "UPDATE session_messages
                  SET message_id='message-current-session', text=?1
                  WHERE provider='codex' AND message_id=?2",
-                libsql::params![content, old_message_id],
+                params![content, old_message_id],
             )
             .await
             .unwrap();
@@ -416,13 +564,13 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
                  SET message_id='message-current-session', content=NULL,
                      content_hash=?1, storage_kind='external', payload_ref=?2
                  WHERE provider='codex' AND message_id=?3",
-                libsql::params![payload.content_hash, payload.payload_ref, old_message_id],
+                params![payload.content_hash, payload.payload_ref, old_message_id],
             )
             .await
             .unwrap();
         writer.commit().await.unwrap();
         db.checkpoint().await;
-        db.close();
+        drop(runtime);
     }
 
     let options = fixture.options();
@@ -430,20 +578,15 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
     let variant_id = format!("consolidated/{}/message-current-session", fixture.source_id);
     let source_ref = source_ref.unwrap();
-    let sessions = GlobalDb::open_read_only_at(
-        &applied
-            .destination_data_root
-            .join(storage::SESSIONS_DB_FILENAME),
-    )
-    .await
-    .unwrap();
+    let runtime = session_runtime(&fixture, &applied.destination_project_id).await;
+    let sessions = session_database(&runtime);
     let raw = sessions
         .lcm_load_raw_message("codex", &variant_id)
         .await
         .unwrap();
     assert_eq!(raw.payload_ref.as_deref(), Some(source_ref.as_str()));
-    let mut owners = sessions
-        .conn()
+    let snapshot = sessions.read_snapshot().await.unwrap();
+    let mut owners = snapshot
         .query(
             "SELECT message_id FROM lcm_external_payloads WHERE payload_ref=?1",
             [source_ref.as_str()],
@@ -462,7 +605,7 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
     );
     drop(owners);
     let expanded = crate::sessions::lcm::payload::expand_payload(
-        sessions.conn(),
+        &snapshot,
         &applied.destination_data_root,
         "codex",
         "legacy-session",
@@ -473,7 +616,8 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
     .await
     .unwrap();
     assert_eq!(expanded.content, "source external body");
-    sessions.close();
+    drop(snapshot);
+    drop(runtime);
 
     let retried = apply(&options, &report.confirmation_token).await.unwrap();
     assert_eq!(retried.state, ConsolidationState::Applied);
@@ -482,18 +626,9 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
 #[tokio::test]
 async fn divergent_projection_and_raw_content_preserve_a_linked_source_variant() {
     let fixture = fixture().await;
-    let source_sessions = fixture
-        .profile
-        .join("projects")
-        .join(&fixture.source_id)
-        .join(storage::SESSIONS_DB_FILENAME);
-    let target_sessions = fixture
-        .profile
-        .join("projects")
-        .join(&fixture.target_id)
-        .join(storage::SESSIONS_DB_FILENAME);
-    execute_sql(
-        &source_sessions,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
         "UPDATE session_messages
          SET message_id='message-current-session', text='source divergent projection',
              metadata_json='{\"parent_message_id\":\"message-current-session\"}'
@@ -538,8 +673,9 @@ async fn divergent_projection_and_raw_content_preserve_a_linked_source_variant()
          FROM lcm_raw_messages WHERE message_id='message-current-session';",
     )
     .await;
-    execute_sql(
-        &target_sessions,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         "INSERT INTO session_messages(
              provider, message_id, session_id, role, timestamp, ordinal, text,
              kind, metadata_json
@@ -570,13 +706,8 @@ async fn divergent_projection_and_raw_content_preserve_a_linked_source_variant()
 
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
     let variant_id = format!("consolidated/{}/message-current-session", fixture.source_id);
-    let sessions = GlobalDb::open_read_only_at(
-        &applied
-            .destination_data_root
-            .join(storage::SESSIONS_DB_FILENAME),
-    )
-    .await
-    .unwrap();
+    let runtime = session_runtime(&fixture, &applied.destination_project_id).await;
+    let sessions = session_database(&runtime);
     assert_eq!(
         sessions
             .get_session_message("codex", "message-current-session")
@@ -637,8 +768,8 @@ async fn divergent_projection_and_raw_content_preserve_a_linked_source_variant()
         thinking_raw_metadata["parent_message_id"],
         "message-current-session"
     );
-    let mut turn_rows = sessions
-        .conn()
+    let snapshot = sessions.read_snapshot().await.unwrap();
+    let mut turn_rows = snapshot
         .query(
             "SELECT message_id FROM turns WHERE session_id='legacy-session'",
             (),
@@ -656,8 +787,7 @@ async fn divergent_projection_and_raw_content_preserve_a_linked_source_variant()
         variant_id
     );
     drop(turn_rows);
-    let mut rows = sessions
-        .conn()
+    let mut rows = snapshot
         .query(
             "SELECT r.message_id
              FROM lcm_summary_sources s
@@ -678,19 +808,14 @@ async fn divergent_projection_and_raw_content_preserve_a_linked_source_variant()
     );
     assert!(rows.next().await.unwrap().is_none());
     drop(rows);
-    sessions.close();
+    drop(snapshot);
+    drop(runtime);
 
     let retried = apply(&options, &report.confirmation_token).await.unwrap();
     assert_eq!(retried.state, ConsolidationState::Applied);
-    let sessions = GlobalDb::open_read_only_at(
-        &retried
-            .destination_data_root
-            .join(storage::SESSIONS_DB_FILENAME),
-    )
-    .await
-    .unwrap();
+    let runtime = session_runtime(&fixture, &retried.destination_project_id).await;
+    let sessions = session_database(&runtime);
     assert_eq!(sessions.session_message_count().await.unwrap(), 4);
-    sessions.close();
 }
 
 #[tokio::test]
@@ -701,8 +826,9 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
     let fixture = fixture().await;
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
-    execute_sql(
-        &source.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
         "UPDATE session_messages
          SET message_id='message-current-session', text='source divergent projection'
          WHERE provider='codex' AND message_id='message-legacy-session';",
@@ -742,20 +868,27 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
             ordinal = DEPTH + width + 2,
         );
     }
-    execute_sql(&source.sessions_db_path, &family_sql).await;
-    execute_sql(&target.sessions_db_path, &family_sql).await;
-    sqlite::plan_session_offsets(&target.sessions_db_path, &source.sessions_db_path)
+    execute_owned_session_sql(&fixture, &fixture.source_id, &family_sql).await;
+    execute_owned_session_sql(&fixture, &fixture.target_id, &family_sql).await;
+    let staging = fixture.profile.join("session-map-staging");
+    fs::create_dir_all(&staging).unwrap();
+    let staged_source = staging.join("source.db");
+    let staged_target = staging.join("target.db");
+    fs::copy(&source.sessions_db_path, &staged_source).unwrap();
+    fs::copy(&target.sessions_db_path, &staged_target).unwrap();
+    sqlite::plan_session_offsets(&staged_target, &staged_source)
         .await
         .unwrap();
 
-    let target_db = GlobalDb::open_at_without_structured_backfill(&target.sessions_db_path)
+    let (target_db, _) = test_open(&staged_target).await;
+    let writer = target_db
+        .begin_write_transaction("attach consolidation test input")
         .await
         .unwrap();
-    let writer = target_db.begin_write_transaction().await.unwrap();
     writer
         .execute(
             "ATTACH DATABASE ?1 AS source_input",
-            libsql::params![source.sessions_db_path.to_string_lossy().to_string()],
+            params![staged_source.to_string_lossy().to_string()],
         )
         .await
         .unwrap();
@@ -842,17 +975,17 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
 #[tokio::test]
 async fn numeric_and_boolean_parent_ids_expand_the_variant_family() {
     let fixture = fixture().await;
-    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
-    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
-    execute_sql(
-        &source.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
         "UPDATE session_messages
          SET message_id='7', text='source divergent projection'
          WHERE provider='codex' AND message_id='message-legacy-session';",
     )
     .await;
-    execute_sql(
-        &target.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         "UPDATE session_messages SET message_id='7'
          WHERE provider='codex' AND message_id='message-current-session';",
     )
@@ -872,19 +1005,14 @@ async fn numeric_and_boolean_parent_ids_expand_the_variant_family() {
              'codex', 'boolean-child', 'scalar-family', 'assistant', 2,
              'boolean child', 'message', '{\"parent_message_id\":true}'
          );";
-    execute_sql(&source.sessions_db_path, family_sql).await;
-    execute_sql(&target.sessions_db_path, family_sql).await;
+    execute_owned_session_sql(&fixture, &fixture.source_id, family_sql).await;
+    execute_owned_session_sql(&fixture, &fixture.target_id, family_sql).await;
 
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
-    let sessions = GlobalDb::open_read_only_at(
-        &applied
-            .destination_data_root
-            .join(storage::SESSIONS_DB_FILENAME),
-    )
-    .await
-    .unwrap();
+    let runtime = session_runtime(&fixture, &applied.destination_project_id).await;
+    let sessions = session_database(&runtime);
     let numeric_id = format!("consolidated/{}/1", fixture.source_id);
     let boolean_id = format!("consolidated/{}/boolean-child", fixture.source_id);
     let numeric = sessions
@@ -904,17 +1032,14 @@ async fn numeric_and_boolean_parent_ids_expand_the_variant_family() {
         format!("consolidated/{}/7", fixture.source_id)
     );
     assert_eq!(boolean_metadata["parent_message_id"], numeric_id);
-    sessions.close();
 }
 
 #[tokio::test]
 async fn synthetic_message_key_parent_reference_collision_fails_before_merge() {
     let fixture = fixture().await;
-    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let synthetic = format!("consolidated/{}/message-current-session", fixture.source_id);
-    let source_db = GlobalDb::open_at_without_structured_backfill(&source.sessions_db_path)
-        .await
-        .unwrap();
+    let source_runtime = session_runtime(&fixture, &fixture.source_id).await;
+    let source_db = session_database(&source_runtime);
     let transaction = source_db.begin_write_transaction().await.unwrap();
     transaction
         .execute(
@@ -928,7 +1053,7 @@ async fn synthetic_message_key_parent_reference_collision_fails_before_merge() {
         .unwrap();
     transaction.commit().await.unwrap();
     source_db.checkpoint().await;
-    source_db.close();
+    drop(source_runtime);
 
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
@@ -946,15 +1071,9 @@ async fn synthetic_message_key_parent_reference_collision_fails_before_merge() {
 #[tokio::test]
 async fn synthetic_message_key_collision_fails_before_merge() {
     let fixture = fixture().await;
-    let source_sessions = fixture
-        .profile
-        .join("projects")
-        .join(&fixture.source_id)
-        .join(storage::SESSIONS_DB_FILENAME);
     let synthetic = format!("consolidated/{}/message-current-session", fixture.source_id);
-    let source = GlobalDb::open_at_without_structured_backfill(&source_sessions)
-        .await
-        .unwrap();
+    let source_runtime = session_runtime(&fixture, &fixture.source_id).await;
+    let source = session_database(&source_runtime);
     let transaction = source.begin_write_transaction().await.unwrap();
     transaction
         .execute(
@@ -976,7 +1095,7 @@ async fn synthetic_message_key_collision_fails_before_merge() {
         .unwrap();
     transaction.commit().await.unwrap();
     source.checkpoint().await;
-    source.close();
+    drop(source_runtime);
 
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
@@ -1001,10 +1120,9 @@ async fn synthetic_message_key_collision_fails_before_merge() {
 #[tokio::test]
 async fn ambiguous_cross_provider_turn_mapping_fails_closed() {
     let fixture = fixture().await;
-    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
-    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
-    execute_sql(
-        &source.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
         "UPDATE session_messages
          SET message_id='shared-message', text='source codex'
          WHERE provider='codex' AND message_id='message-legacy-session';
@@ -1021,8 +1139,9 @@ async fn ambiguous_cross_provider_turn_mapping_fails_closed() {
                   1800000000, 1, 1, 0.0, 'task');",
     )
     .await;
-    execute_sql(
-        &target.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         "UPDATE session_messages SET message_id='shared-message'
          WHERE provider='codex' AND message_id='message-current-session';
          INSERT INTO sessions(provider, session_id, project_key, project_path)
@@ -1050,10 +1169,9 @@ async fn ambiguous_cross_provider_turn_mapping_fails_closed() {
 #[tokio::test]
 async fn divergent_external_payload_identity_remains_a_hard_error() {
     let fixture = fixture().await;
-    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
-    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
-    execute_sql(
-        &source.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
         "INSERT INTO lcm_external_payloads(
              payload_ref, provider, session_id, message_id, kind, content_hash,
              byte_count, char_count, metadata_json
@@ -1061,8 +1179,9 @@ async fn divergent_external_payload_identity_remains_a_hard_error() {
                   'tool', 'source-hash', 10, 10, NULL);",
     )
     .await;
-    execute_sql(
-        &target.sessions_db_path,
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
         "INSERT INTO lcm_external_payloads(
              payload_ref, provider, session_id, message_id, kind, content_hash,
              byte_count, char_count, metadata_json
@@ -1087,35 +1206,36 @@ async fn divergent_external_payload_identity_remains_a_hard_error() {
 #[tokio::test]
 async fn divergent_summary_node_identity_remains_a_hard_error() {
     let fixture = fixture().await;
-    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
-    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
-    for (path, session, text, hash) in [
+    for (project_id, session, text, hash) in [
         (
-            &source.sessions_db_path,
+            fixture.source_id.as_str(),
             "legacy-session",
             "source summary",
             "source-hash",
         ),
         (
-            &target.sessions_db_path,
+            fixture.target_id.as_str(),
             "current-session",
             "target summary",
             "target-hash",
         ),
     ] {
-        let (db, _) = test_open(path).await;
-        db.execute_write(
-                "seed summary collision fixture",
+        let runtime = session_runtime(&fixture, project_id).await;
+        let db = session_database(&runtime);
+        let transaction = db.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
                 "INSERT INTO lcm_summary_nodes(
                      node_id, provider, conversation_id, session_id, depth, summary_text,
                      summary_hash, summary_token_count, source_token_count, created_at
                  ) VALUES('shared-summary', 'codex', 'conversation', ?1, 1, ?2, ?3, 1, 1, 1800000002)",
-                libsql::params![session, text, hash],
+                params![session, text, hash],
             )
             .await
             .unwrap();
-        db.checkpoint().await.unwrap();
-        db.close();
+        transaction.commit().await.unwrap();
+        db.checkpoint().await;
+        drop(runtime);
     }
 
     let options = fixture.options();
