@@ -239,13 +239,25 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
           // Side-by-side columns compound: each nesting level reserves its
           // own label track, so three or four levels deep — ordinary for a
           // settings payload — the reservations alone exceed a 320px
-          // viewport. CSS Grid sizes non-flexible tracks (the label's
-          // minmax) before flexible ones, so the value's `1fr` track was
-          // starving to a *measured* 0px and every value wrapped one
-          // character per line. Stacking label-above-value below `sm` gives
-          // each its own full row width regardless of depth; the ruled
-          // side-by-side layout returns once there is room to share.
-          className="grid grid-cols-1 gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0 sm:grid-cols-[minmax(5rem,9rem)_1fr] sm:gap-y-0"
+          // viewport, or even a 768px one once depth stacks up (the
+          // reservation is up to 9rem *per level*). CSS Grid sizes
+          // non-flexible tracks (the label's minmax) before flexible ones,
+          // so the value's `1fr` track was measuring 0px and every value
+          // wrapped one character per line — reproduced with a Playwright
+          // probe at depth 3 even inside a full-width card.
+          //
+          // Only the outermost level reserves a label column; every level
+          // below it stacks label above value unconditionally. That caps the
+          // total reservation at one track no matter how deep the payload
+          // nests or how narrow the surrounding container is (this also
+          // renders inside 352px-wide inspector rails at desktop widths, not
+          // just the full page).
+          className={cn(
+            'grid gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0',
+            depth === 0
+              ? 'grid-cols-1 sm:grid-cols-[minmax(5rem,9rem)_1fr] sm:gap-y-0'
+              : 'grid-cols-1',
+          )}
         >
           <dt className="td-legend truncate pt-px" title={k}>
             {k}
