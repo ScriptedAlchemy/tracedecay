@@ -119,6 +119,10 @@ struct WatchState {
     /// Dirty flag + affected-branch set. Coalesces a 50-commit rebase into a
     /// single sync — an unbounded queue would fire 50 times.
     dirty: Mutex<DirtySet>,
+    /// Set before every notify callback attempts the non-blocking dirty lock.
+    /// If that lock is contended, the debounce task turns this latch into one
+    /// bounded full reconciliation instead of dropping the event.
+    reconciliation_pending: AtomicBool,
     /// Raised by the notify callback (or degraded poller) on every metadata
     /// event; the debounce task waits on it instead of polling.
     wake: Notify,
@@ -148,6 +152,10 @@ struct DirtySet {
     new_worktrees: HashSet<String>,
     /// A ref or worktree was deleted → GC is eligible on the next cycle.
     gc_eligible: bool,
+    /// Path-level event detail was lost to callback lock contention. The next
+    /// cycle must inventory linked worktrees and consider GC, not merely sync
+    /// the current branch.
+    reconcile_metadata: bool,
     /// Instant of the first event since the last drain (for the hard cap).
     first_event: Option<Instant>,
     /// Instant of the most recent event (for the quiet-window deadline).
@@ -163,6 +171,7 @@ impl DirtySet {
             && self.branches.is_empty()
             && self.new_worktrees.is_empty()
             && !self.gc_eligible
+            && !self.reconcile_metadata
     }
     fn take(&mut self) -> DirtyPlan {
         let plan = DirtyPlan {
@@ -170,9 +179,11 @@ impl DirtySet {
             branches: std::mem::take(&mut self.branches),
             new_worktrees: std::mem::take(&mut self.new_worktrees),
             gc_eligible: self.gc_eligible,
+            reconcile_metadata: self.reconcile_metadata,
         };
         self.dirty = false;
         self.gc_eligible = false;
+        self.reconcile_metadata = false;
         self.first_event = None;
         self.last_event = None;
         plan
@@ -185,6 +196,7 @@ struct DirtyPlan {
     branches: HashSet<String>,
     new_worktrees: HashSet<String>,
     gc_eligible: bool,
+    reconcile_metadata: bool,
 }
 
 impl DirtyPlan {
@@ -193,6 +205,7 @@ impl DirtyPlan {
             && self.branches.is_empty()
             && self.new_worktrees.is_empty()
             && !self.gc_eligible
+            && !self.reconcile_metadata
     }
 }
 
@@ -338,6 +351,7 @@ impl GitWatcher {
         let state = Arc::new(WatchState {
             project_root: canonical.clone(),
             dirty: Mutex::new(DirtySet::default()),
+            reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
             health: ProjectHealth::default(),
             task: Mutex::new(None),
@@ -582,8 +596,26 @@ fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
                 }
             }
         }
+    } else {
+        state.reconciliation_pending.store(true, Ordering::Release);
     }
     state.wake.notify_one();
+}
+
+/// Converts any callback event that could not record detailed path evidence
+/// into one conservative reconciliation plan.
+async fn materialize_pending_reconciliation(state: &WatchState) {
+    if !state.reconciliation_pending.load(Ordering::Acquire) {
+        return;
+    }
+    let mut dirty = state.dirty.lock().await;
+    if state.reconciliation_pending.swap(false, Ordering::AcqRel) {
+        let now = Instant::now();
+        dirty.dirty = true;
+        dirty.reconcile_metadata = true;
+        dirty.first_event.get_or_insert(now);
+        dirty.last_event = Some(now);
+    }
 }
 
 /// The debounce state machine for a healthy watcher. Wakes on events, sleeps
@@ -605,6 +637,7 @@ async fn debounce_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState>, co
         // the hard cap. If a rebase/merge is mid-flight, HOLD (keep waiting)
         // until the markers disappear so we sync exactly once, after.
         loop {
+            materialize_pending_reconciliation(state).await;
             let (first, last) = {
                 let dirty = state.dirty.lock().await;
                 (dirty.first_event, dirty.last_event)
@@ -675,7 +708,11 @@ async fn execute_plan(
     let root = &state.project_root;
     let retained_graph = retained_project_graph(inner, root).await;
     // 1. Proactively track newly-created linked worktrees.
-    for name in &plan.new_worktrees {
+    let mut worktrees = plan.new_worktrees;
+    if plan.reconcile_metadata {
+        worktrees.extend(store_maintenance::linked_worktree_names(common));
+    }
+    for name in &worktrees {
         if let Some((wt_root, branch)) = store_maintenance::resolve_worktree(common, name) {
             let _permit = inner.sync_semaphore.acquire().await;
             let outcome = match retained_graph.as_deref() {
@@ -773,7 +810,7 @@ async fn execute_plan(
     }
 
     // 3. GC eligibility on ref/worktree deletion.
-    if plan.gc_eligible
+    if (plan.gc_eligible || plan.reconcile_metadata)
         && let Some(cg) = retained_graph.as_ref()
     {
         store_maintenance::run_gc(inner, cg).await;

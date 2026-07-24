@@ -27,6 +27,7 @@ fn ref_event_marks_branch_and_delete_marks_gc() {
     let state = Arc::new(WatchState {
         project_root: PathBuf::from("/tmp/x"),
         dirty: Mutex::new(DirtySet::default()),
+        reconciliation_pending: AtomicBool::new(false),
         wake: Notify::new(),
         health: ProjectHealth::default(),
         task: Mutex::new(None),
@@ -51,6 +52,8 @@ fn ref_event_marks_branch_and_delete_marks_gc() {
     assert!(dirty.dirty);
     assert!(dirty.branches.contains("feat/x"));
     assert!(dirty.gc_eligible);
+    assert!(!dirty.reconcile_metadata);
+    assert!(!state.reconciliation_pending.load(Ordering::Acquire));
 }
 
 #[test]
@@ -58,6 +61,7 @@ fn ref_lock_sidecar_does_not_become_a_branch() {
     let state = Arc::new(WatchState {
         project_root: PathBuf::from("/repo"),
         dirty: Mutex::new(DirtySet::default()),
+        reconciliation_pending: AtomicBool::new(false),
         wake: Notify::new(),
         health: ProjectHealth::default(),
         task: Mutex::new(None),
@@ -78,6 +82,60 @@ fn ref_lock_sidecar_does_not_become_a_branch() {
         .try_lock()
         .expect("dirty set should be unlocked");
     assert!(dirty.branches.is_empty(), "git lock sidecars are not refs");
+}
+
+#[tokio::test]
+async fn contended_event_requests_a_bounded_reconciliation() {
+    let state = Arc::new(WatchState {
+        project_root: PathBuf::from("/repo"),
+        dirty: Mutex::new(DirtySet::default()),
+        reconciliation_pending: AtomicBool::new(false),
+        wake: Notify::new(),
+        health: ProjectHealth::default(),
+        task: Mutex::new(None),
+        entered_debounce: Notify::new(),
+        drained_plans: AtomicU64::new(0),
+        plan_drained: Notify::new(),
+    });
+    let event = notify::Event {
+        kind: EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )),
+        paths: vec![PathBuf::from("/repo/.git/HEAD")],
+        attrs: EventAttributes::new(),
+    };
+
+    let dirty = state.dirty.lock().await;
+    classify_and_mark(&state, &event);
+    assert!(
+        state.reconciliation_pending.load(Ordering::Acquire),
+        "lock contention must preserve a reconciliation request"
+    );
+    drop(dirty);
+
+    materialize_pending_reconciliation(&state).await;
+
+    let dirty = state.dirty.lock().await;
+    assert!(dirty.dirty);
+    assert!(dirty.reconcile_metadata);
+    assert!(dirty.first_event.is_some());
+    assert!(dirty.last_event.is_some());
+    assert!(!state.reconciliation_pending.load(Ordering::Acquire));
+}
+
+#[test]
+fn linked_worktree_inventory_ignores_non_directories() {
+    let common = tempfile::tempdir().unwrap();
+    let worktrees = common.path().join("worktrees");
+    std::fs::create_dir_all(worktrees.join("wt-a")).unwrap();
+    std::fs::create_dir_all(worktrees.join("nested")).unwrap();
+    std::fs::write(worktrees.join("not-a-worktree"), b"ignored").unwrap();
+
+    let names = store_maintenance::linked_worktree_names(common.path());
+
+    assert_eq!(names.len(), 2);
+    assert!(names.contains("wt-a"));
+    assert!(names.contains("nested"));
 }
 
 #[test]

@@ -85,6 +85,21 @@ pub(super) fn resolve_worktree(common: &Path, name: &str) -> Option<(PathBuf, St
     Some((wt_root, branch))
 }
 
+/// Returns the current linked-worktree metadata leaves for one conservative
+/// reconciliation pass. Native Git remains authoritative when each leaf is
+/// resolved; this inventory only recovers callback path detail lost to lock
+/// contention.
+pub(super) fn linked_worktree_names(common: &Path) -> std::collections::HashSet<String> {
+    let Ok(entries) = std::fs::read_dir(common.join("worktrees")) else {
+        return std::collections::HashSet::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
+}
+
 /// Runs branch-store GC for a project through the daemon administration
 /// coordinator, logging what it removed. Returns `false` when layout resolution
 /// or administration fails so the backstop keeps the GC cadence eligible for a
