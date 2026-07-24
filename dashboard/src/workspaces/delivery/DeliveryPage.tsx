@@ -68,12 +68,17 @@ export function DeliveryPage() {
                   const branches = new Set<string>();
                   for (const group of tree) for (const branch of group.branches) branches.add(branch);
                   return (
-                    // "repositories" is 13 letterspaced caps in a 74px cell, so
-                    // every tile in this 2x2 was printing a clipped label
-                    // ("REPOSIT…", "CHECKO…"). The counts are the same counts;
-                    // the names just fit now.
-                    <div className="grid grid-cols-2 gap-2">
-                      <StatTile label="repos" value={data.summary?.repo_count ?? tree.length} />
+                    // A 2x2 of tiles inside a ~200px rail leaves each label
+                    // under 60px, which is narrower than the words this
+                    // workspace is made of: every tile printed a clipped legend
+                    // ("REPOSIT…", "BRANCH…", "CHECKO…"). One column per row
+                    // gives each label the full rail and costs vertical space
+                    // the rail had going spare.
+                    <div className="grid grid-cols-1 gap-2">
+                      <StatTile
+                        label="repositories"
+                        value={data.summary?.repo_count ?? tree.length}
+                      />
                       <StatTile label="branches" value={branches.size} />
                       <StatTile label="worktrees" value={worktrees} />
                       <StatTile

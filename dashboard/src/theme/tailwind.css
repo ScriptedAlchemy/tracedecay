@@ -44,6 +44,7 @@
   --color-grid: var(--raw-grid);
   --color-grid-minor: var(--raw-grid-minor);
   --color-well: var(--raw-well);
+  --color-raised: var(--raw-raised);
 
   --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
@@ -165,7 +166,7 @@
   }
   /* Proud of the face: things you read off. */
   .td-raised {
-    background: var(--raw-surface-2);
+    background: var(--raw-raised);
     box-shadow: var(--shadow-raised);
   }
 
