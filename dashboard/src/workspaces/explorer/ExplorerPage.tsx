@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Search } from 'lucide-react';
 import { z } from 'zod';
 import {
   DataRow,
@@ -124,9 +125,7 @@ export function ExplorerPage() {
       }
       list={
         !enabled ? (
-          <p className="p-6 text-center text-sm text-text-muted">
-            search across sessions, code, and knowledge
-          </p>
+          <EmptyQuery sourceNames={sources.map((s) => s.name)} />
         ) : (
           <VirtualList
             items={sources.flatMap((s) =>
@@ -171,5 +170,30 @@ export function ExplorerPage() {
         ) : undefined
       }
     />
+  );
+}
+
+/** Composed empty state for the query-before-results gap: the frame stays
+ * and names what will actually be searched (the real fan-out sources, not
+ * invented ones), matching the answered-question idiom the rest of the
+ * workspaces use rather than one bare line of muted text in a void. */
+function EmptyQuery({ sourceNames }: { sourceNames: readonly string[] }) {
+  return (
+    <div className="flex h-full items-center justify-center p-8">
+      <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+        <span
+          aria-hidden
+          className="flex size-10 items-center justify-center rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 text-text-muted"
+        >
+          <Search size={18} />
+        </span>
+        <h2 className="text-sm font-semibold tracking-tight">Search across every surface</h2>
+        <p className="text-xs leading-relaxed text-text-muted">
+          One query fans out to {sourceNames.join(', ')} at once, each with its own
+          progress in the rail.{' '}
+          <span className="text-text-secondary">Results land here as each source answers.</span>
+        </p>
+      </div>
+    </div>
   );
 }
