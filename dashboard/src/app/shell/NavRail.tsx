@@ -14,6 +14,9 @@ import {
   Workflow,
 } from 'lucide-react';
 import { NavLink } from 'react-router';
+import { useQuery } from '@tanstack/react-query';
+import { StorageFindingsPayloadSchema } from '../../contracts/wire.ts';
+import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { cn } from '../../ui/cn';
 
 const ICONS: Record<string, LucideIcon> = {
@@ -45,7 +48,15 @@ const MAIN = [
   { path: 'costs', label: 'Costs' },
 ];
 
-function RailLink({ path, label }: { path: string; label: string }) {
+function RailLink({
+  path,
+  label,
+  attention,
+}: {
+  path: string;
+  label: string;
+  attention?: boolean;
+}) {
   const Icon = ICONS[path] ?? Boxes;
   return (
     <NavLink
@@ -61,13 +72,38 @@ function RailLink({ path, label }: { path: string; label: string }) {
     >
       <Icon aria-hidden size={16} strokeWidth={1.5} className="shrink-0" />
       <span className="truncate group-data-[collapsed=true]/rail:hidden">{label}</span>
+      {attention ? (
+        <span
+          className="ml-auto size-1.5 shrink-0 rounded-full bg-state-partial"
+          role="status"
+          aria-label="Doctor has findings needing attention"
+        />
+      ) : null}
     </NavLink>
   );
 }
 
+/** The single Doctor attention dot (plan 11a): lit only when the findings
+ * report carries a non-healthy finding; never a count, never another badge. */
+function useDoctorAttention(): boolean {
+  const findings = useQuery({
+    queryKey: ['storage', 'findings'],
+    queryFn: () => fetchEnvelope('/api/storage/findings', StorageFindingsPayloadSchema),
+    refetchInterval: 60_000,
+  });
+  const result = findings.data;
+  if (!result || result.outcome === 'transport') return false;
+  return result.envelope.payload.entries.some(
+    (entry) =>
+      entry.finding.state !== 'healthy_complete_coverage' &&
+      entry.finding.state !== 'unsupported',
+  );
+}
+
 /** Navigation only: no status, no badges except the single Doctor attention
- * dot (wired when the findings endpoint lands). */
+ * dot. */
 export function NavRail() {
+  const attention = useDoctorAttention();
   return (
     <nav
       aria-label="Workspaces"
@@ -79,7 +115,7 @@ export function NavRail() {
         <span className="text-sm font-semibold tracking-tight max-md:hidden">TraceDecay</span>
       </div>
       {MAIN.map((w) => (
-        <RailLink key={w.path} {...w} />
+        <RailLink key={w.path} {...w} attention={w.path === 'observatory' && attention} />
       ))}
       <div className="flex-1" />
       <RailLink path="settings" label="Settings" />
