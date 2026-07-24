@@ -2047,13 +2047,17 @@ mod tests {
                     .then(|| value.trim().parse::<usize>().ok())
                     .flatten()
             })
-            .unwrap();
+            .unwrap_or(0);
         while bytes.len() < header_end + content_length {
             let read = stream.read(&mut buffer).unwrap();
             assert!(read > 0, "fixture client closed before request body");
             bytes.extend_from_slice(&buffer[..read]);
         }
-        serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap()
+        if content_length == 0 {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap()
+        }
     }
 
     fn write_http_json(stream: &mut TcpStream, value: &serde_json::Value) {
