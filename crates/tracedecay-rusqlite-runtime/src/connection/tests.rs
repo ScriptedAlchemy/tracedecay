@@ -157,6 +157,9 @@ fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
             .unwrap(),
         2
     );
+    connection
+        .execute_batch("PRAGMA auto_vacuum = INCREMENTAL")
+        .expect("repeat safe incremental auto-vacuum");
     assert!(
         connection
             .execute_batch("PRAGMA auto_vacuum = NONE")

@@ -1361,12 +1361,22 @@ fn authorize_migration_writer(context: rusqlite::hooks::AuthContext<'_>) -> Auth
             pragma_name,
             pragma_value,
         }
-        if !is_migration_read_pragma(pragma_name, pragma_value)
+        if !is_allowed_migration_pragma(pragma_name, pragma_value)
     ) {
         Authorization::Deny
     } else {
         Authorization::Allow
     }
+}
+
+fn is_allowed_migration_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
+    is_migration_read_pragma(pragma_name, pragma_value)
+        || matches!(
+            pragma_value,
+            Some(value)
+                if pragma_name.eq_ignore_ascii_case("auto_vacuum")
+                    && (value.eq_ignore_ascii_case("incremental") || value == "2")
+        )
 }
 
 fn is_migration_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
@@ -1743,6 +1753,21 @@ mod tests {
         };
 
         assert!(matches!(error, MigrationSqlError::AuthorityDenied(_)));
+    }
+
+    #[test]
+    fn writer_actor_allows_only_incremental_auto_vacuum_configuration() {
+        let fixture = fixture('a', 'a');
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+
+        channel
+            .execute_batch("PRAGMA auto_vacuum = INCREMENTAL".to_owned())
+            .expect("repeat safe incremental auto-vacuum");
+        let error = channel
+            .execute_batch("PRAGMA auto_vacuum = NONE".to_owned())
+            .unwrap_err();
+
+        assert!(matches!(error, MigrationSqlError::Sqlite { .. }));
     }
 
     #[test]
