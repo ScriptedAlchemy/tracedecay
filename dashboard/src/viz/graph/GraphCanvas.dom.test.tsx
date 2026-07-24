@@ -1,12 +1,15 @@
 import { render, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphCanvas } from './GraphCanvas.tsx';
+import { ActivationField } from './activation.ts';
 
 type NodeAttributes = Record<string, unknown>;
 type NodeReducer = (node: string, data: NodeAttributes) => NodeAttributes;
 
 const sigmaState = vi.hoisted(() => ({
   nodeReducer: undefined as NodeReducer | undefined,
+  refreshCount: 0,
+  strikeListeners: new Set<() => void>(),
 }));
 
 vi.mock('./activation.ts', () => ({
@@ -15,12 +18,21 @@ vi.mock('./activation.ts', () => ({
       return 0;
     }
 
-    subscribe() {
-      return () => {};
-    }
-
     get warm() {
       return false;
+    }
+
+    tick() {
+      return false;
+    }
+
+    subscribe(listener: () => void) {
+      sigmaState.strikeListeners.add(listener);
+      return () => sigmaState.strikeListeners.delete(listener);
+    }
+
+    strike() {
+      for (const listener of sigmaState.strikeListeners) listener();
     }
   },
   cssColorToRgb: () => [128, 128, 128],
@@ -49,7 +61,9 @@ vi.mock('sigma', () => ({
 
     setCustomBBox() {}
     on() {}
-    refresh() {}
+    refresh() {
+      sigmaState.refreshCount += 1;
+    }
     setSetting() {}
     kill() {}
   },
@@ -69,6 +83,8 @@ function stubWebGl(available: boolean) {
 describe('GraphCanvas', () => {
   beforeEach(() => {
     sigmaState.nodeReducer = undefined;
+    sigmaState.refreshCount = 0;
+    sigmaState.strikeListeners.clear();
     stubWebGl(true);
     Object.defineProperties(HTMLElement.prototype, {
       clientWidth: { configurable: true, get: () => 640 },
@@ -106,6 +122,28 @@ describe('GraphCanvas', () => {
     ]) {
       expect(sigmaState.nodeReducer?.(managed, companion)).toEqual(companion);
     }
+  });
+
+  it('wakes the sleeping render loop when a caller-owned field strikes from outside', async () => {
+    const field = new ActivationField();
+    render(
+      <GraphCanvas
+        nodes={[
+          { id: 'hub', label: 'Hub', kind: 'repository', degree: 2 },
+          { id: 'leaf', label: 'Leaf', kind: 'project', degree: 1 },
+        ]}
+        edges={[{ source: 'hub', target: 'leaf' }]}
+        activation={field}
+      />,
+    );
+    await waitFor(() => expect(sigmaState.nodeReducer).toBeDefined());
+    // The canvas subscribed to the field it was handed — this is the seam a
+    // live SSE strike (struck entirely outside this component) uses to wake
+    // the loop instead of leaving heat on the field that nothing draws.
+    expect(sigmaState.strikeListeners.size).toBeGreaterThan(0);
+    const before = sigmaState.refreshCount;
+    field.strike(['leaf'], 0.8);
+    await waitFor(() => expect(sigmaState.refreshCount).toBeGreaterThan(before));
   });
 
   it('states the missing WebGL context instead of constructing a renderer that throws', () => {

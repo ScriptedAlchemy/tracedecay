@@ -5,11 +5,13 @@
 
 mod admin_test;
 mod context_test;
+#[cfg(feature = "test-transport")]
 mod edit_test;
 mod graph_analysis_test;
 mod graph_query_test;
 mod lcm_test;
 mod memory_facts_test;
+#[cfg(feature = "test-transport")]
 mod move_symbol_test;
 mod retrieve_truncation_test;
 mod schema_test;

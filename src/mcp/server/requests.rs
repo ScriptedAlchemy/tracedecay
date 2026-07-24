@@ -88,7 +88,10 @@ pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || is_mcp_git_read(tool_name)
         || is_source_edit_tool(tool_name)
-        || tool_name == "tracedecay_search"
+        || matches!(
+            tool_name,
+            "tracedecay_search" | "tracedecay_run_affected_tests"
+        )
 }
 
 fn dispatch_deadline_horizon_micros(
@@ -1541,6 +1544,9 @@ mod git_read_control_tests {
     #[test]
     fn controlled_operations_receive_live_registration_and_bounded_deadlines() {
         assert!(tool_supports_live_cancellation("tracedecay_search"));
+        assert!(tool_supports_live_cancellation(
+            "tracedecay_run_affected_tests"
+        ));
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
             "tracedecay_git_status",

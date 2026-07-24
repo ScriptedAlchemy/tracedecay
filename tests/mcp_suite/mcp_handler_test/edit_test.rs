@@ -11,6 +11,100 @@ use std::os::unix::fs as unix_fs;
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let initial = b"fn old_name() {}\r\n// exact \xE2\x98\x83\n";
+    let applied = b"fn new_name() {}\r\n// exact \xE2\x98\x83\n";
+    fs::write(project.join("src/main.rs"), initial).unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let preview = handle_tool_call(
+        &cg,
+        "tracedecay_str_replace",
+        json!({
+            "path": "src/main.rs",
+            "old_str": "old_name",
+            "new_str": "new_name",
+            "dry_run": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preview: Value = serde_json::from_str(extract_text(&preview.value)).unwrap();
+    let expected_state = preview["expected_state"].as_str().unwrap();
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), initial);
+
+    let apply_args = json!({
+        "path": "src/main.rs",
+        "old_str": "old_name",
+        "new_str": "new_name",
+        "idempotency_key": "mcp-test.source-edit.exact-retry",
+        "expected_state": expected_state
+    });
+    let first = handle_tool_call(
+        &cg,
+        "tracedecay_str_replace",
+        apply_args.clone(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
+    assert_eq!(first["success"], true);
+    assert_eq!(first["replayed"], false);
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
+
+    let retry = handle_tool_call(&cg, "tracedecay_str_replace", apply_args, None, None)
+        .await
+        .unwrap();
+    let retry: Value = serde_json::from_str(extract_text(&retry.value)).unwrap();
+    assert_eq!(retry["success"], true);
+    assert_eq!(retry["replayed"], true);
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
+
+    let stale_preview = handle_tool_call(
+        &cg,
+        "tracedecay_str_replace",
+        json!({
+            "path": "src/main.rs",
+            "old_str": "new_name",
+            "new_str": "final_name",
+            "dry_run": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let stale_preview: Value = serde_json::from_str(extract_text(&stale_preview.value)).unwrap();
+    let stale_expected_state = stale_preview["expected_state"].as_str().unwrap();
+    let concurrent = b"fn new_name() {}\r\n// concurrent bytes\n";
+    fs::write(project.join("src/main.rs"), concurrent).unwrap();
+    let stale_apply = handle_tool_call(
+        &cg,
+        "tracedecay_str_replace",
+        json!({
+            "path": "src/main.rs",
+            "old_str": "new_name",
+            "new_str": "final_name",
+            "idempotency_key": "mcp-test.source-edit.stale-cas",
+            "expected_state": stale_expected_state
+        }),
+        None,
+        None,
+    )
+    .await;
+    assert!(stale_apply.is_err());
+    assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), concurrent);
+}
+
+#[tokio::test]
 async fn test_str_replace_success() {
     let dir = test_temp_dir();
     let project = dir.path();

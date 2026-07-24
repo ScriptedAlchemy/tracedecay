@@ -27,6 +27,10 @@ mod queries;
 mod scan;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
+pub(crate) use edits::{
+    PlannedSourceEditFile, apply_source_edit_plan, capture_source_edit_plan,
+    read_source_edit_candidate, validate_source_edit_candidate_parent,
+};
 pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 
 #[doc(hidden)]
@@ -57,6 +61,19 @@ pub struct TraceDecay {
     read_only: bool,
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
+    context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
+}
+
+const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
+
+#[derive(Clone)]
+struct MountedContextScoutClaimAuthorityV1 {
+    registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
+    pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+    context: tracedecay_application::RequestContext,
+    lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+    address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    input_watermark: [u8; 32],
 }
 
 impl TraceDecay {
@@ -92,6 +109,112 @@ impl TraceDecay {
         &self,
     ) -> Option<&Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>> {
         self.context_scout_owner.as_ref()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn mount_current_context_scout_claim_authority(
+        &self,
+        registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
+        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
+        pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+        context: tracedecay_application::RequestContext,
+        lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+        input_watermark: [u8; 32],
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> bool {
+        if input_watermark == [0; 32]
+            || !self.context_scout_configuration_is_current(&pin).await
+            || registry
+                .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
+                .await
+                != crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                    address,
+                )
+        {
+            return false;
+        }
+        let mounted = MountedContextScoutClaimAuthorityV1 {
+            registry,
+            pin,
+            context,
+            lifecycle,
+            address,
+            input_watermark,
+        };
+        let mut authorities = self.context_scout_claim_authorities.write().await;
+        if let Some(existing) = authorities
+            .iter_mut()
+            .find(|existing| existing.lifecycle == mounted.lifecycle)
+        {
+            *existing = mounted;
+            return true;
+        }
+        if authorities.len() == MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES {
+            authorities.remove(0);
+        }
+        authorities.push(mounted);
+        true
+    }
+
+    pub(crate) async fn resolve_current_context_scout_claim_authority(
+        &self,
+        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
+        lifecycle: &crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Option<(
+        crate::agents::context_scout_v2::ContextScoutAddressV1,
+        [u8; 32],
+    )> {
+        let mounted = self
+            .context_scout_claim_authorities
+            .read()
+            .await
+            .iter()
+            .find(|mounted| mounted.lifecycle == *lifecycle)
+            .cloned()?;
+        if !self
+            .context_scout_configuration_is_current(&mounted.pin)
+            .await
+        {
+            return None;
+        }
+        let resolved = mounted
+            .registry
+            .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
+            .await;
+        let resolved = (resolved
+            == crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                mounted.address,
+            ))
+        .then_some((mounted.address, mounted.input_watermark));
+        if resolved.is_some()
+            && self
+                .context_scout_configuration_is_current(&mounted.pin)
+                .await
+        {
+            resolved
+        } else {
+            None
+        }
+    }
+
+    async fn context_scout_configuration_is_current(
+        &self,
+        pin: &crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+    ) -> bool {
+        self.configuration_runtime
+            .client()
+            .current()
+            .await
+            .ok()
+            .map(
+                |pinned| crate::application::configuration::ConfigurationCurrentStateV1 {
+                    revision_id: pinned.revision_id,
+                    snapshot: pinned.snapshot,
+                },
+            )
+            .is_some_and(|current| pin.configuration().matches_current(&current))
     }
 
     #[allow(dead_code)] // Plan 22 context-scout model config — staged

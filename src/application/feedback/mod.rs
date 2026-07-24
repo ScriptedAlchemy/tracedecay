@@ -15,6 +15,7 @@ pub mod production;
 pub mod runtime;
 
 pub use cycle_production::{
+    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
     ProductionFeedbackCycleOpenV1, ProductionFeedbackCyclePartsV1,
     ProductionFeedbackCycleProximityPortV1, resolve_production_feedback_cycle_parts,
 };

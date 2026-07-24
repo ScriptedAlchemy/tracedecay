@@ -29,14 +29,14 @@ use tracedecay_application::retrieval::{
     TestPrimitivePortOutcome, TypeHierarchyRequest,
 };
 use tracedecay_application::{
-    ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationProblem,
-    ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt, CancellationContext,
-    CancellationObservation, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
-    CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass, EvidenceCoverage,
-    EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor, OperationBudgetUsage,
-    OperationReceipt, OperationTermination, PageState, PolicyDecisionRef, RequestAdmission,
-    RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic,
-    TemporalState,
+    ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationOutcome,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
+    CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
+    CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageState, PolicyDecisionRef,
+    RequestAdmission, RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
+    SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
@@ -497,6 +497,25 @@ pub struct Pr12PrimitiveProjectRuntime {
     dispatch: Arc<dyn Pr12PrimitiveDispatch>,
 }
 
+/// Replace the mount-time authority carried by an owned primitive result with
+/// the authority revalidated immediately before publication.
+pub(crate) fn reauthorize_primitive_evidence(
+    result: &mut ApplicationResult<Value>,
+    authority: AuthorityReceipt,
+) -> bool {
+    let Ok(envelope) = result else {
+        return true;
+    };
+    if authority.validate_for(&envelope.scope).is_err() {
+        return false;
+    }
+    let ApplicationOutcome::Evidence(evidence) = &mut envelope.outcome else {
+        return false;
+    };
+    evidence.authority = authority;
+    true
+}
+
 impl Pr12PrimitiveProjectRuntime {
     pub fn dispatch(&self) -> Arc<dyn Pr12PrimitiveDispatch> {
         Arc::clone(&self.dispatch)
@@ -804,6 +823,9 @@ async fn dispatch_admitted(
     observed_at: UtcMicros,
 ) -> ApplicationResult<Value> {
     let operation = invocation.operation;
+    if !valid_owned_symbol_graph_request(&invocation.request) {
+        return invalid_request(&context, &operation);
+    }
     match invocation.request {
         Pr12PrimitiveRequest::SymbolSearch(request) => {
             let outcome = runtime
@@ -1131,6 +1153,21 @@ async fn dispatch_admitted(
         Pr12PrimitiveRequest::RecentTestResults => {
             recent_test_results(runtime, &context, &operation, observed_at).await
         }
+    }
+}
+
+fn valid_owned_symbol_graph_request(request: &Pr12PrimitiveRequest) -> bool {
+    match request {
+        Pr12PrimitiveRequest::SymbolSearch(request) => request.validate().is_ok(),
+        Pr12PrimitiveRequest::ExactSymbol(request) => request.validate().is_ok(),
+        Pr12PrimitiveRequest::SignatureSearch(request) => request.validate().is_ok(),
+        Pr12PrimitiveRequest::Implementations(request) => request.validate().is_ok(),
+        Pr12PrimitiveRequest::TypeHierarchy(request) => request.validate().is_ok(),
+        Pr12PrimitiveRequest::Callers(request) | Pr12PrimitiveRequest::Callees(request) => {
+            request.validate().is_ok()
+        }
+        Pr12PrimitiveRequest::Impact(request) => request.validate().is_ok(),
+        _ => true,
     }
 }
 
@@ -1947,12 +1984,20 @@ mod tests {
     use super::{
         Pr12ExtendedPrimitivePort, Pr12OperationalPrimitiveRequest, Pr12PrimitiveCapacity,
         Pr12PrimitiveDispatch, Pr12PrimitiveRequest, StorageStatusPrimitiveRequest,
-        open_pr12_primitive_project_runtime, pre_admission_problem, validate_admitted_root_uri,
+        open_pr12_primitive_project_runtime, pre_admission_problem,
+        valid_owned_symbol_graph_request, validate_admitted_root_uri,
+    };
+    use tracedecay_application::retrieval::{
+        GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
+        RetrievalOrder, RetrievalRequestMeta, SignatureSearchRequest, SymbolGraphScope,
+        SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
     };
     use tracedecay_application::{
-        ApplicationProblemKind, CancellationContext, Deadline, RequestId,
+        ApplicationProblemKind, CancellationContext, Deadline, PageRequest, RequestId,
     };
-    use tracedecay_domain::UtcMicros;
+    use tracedecay_domain::{
+        EphemeralSanitizedQueryViewV1, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
+    };
 
     fn assert_object_safe(_: &dyn Pr12PrimitiveDispatch) {}
     fn assert_extended_object_safe(_: &dyn Pr12ExtendedPrimitivePort) {}
@@ -2056,5 +2101,65 @@ mod tests {
             serde_json::from_value(encoded).expect("decode typed request"),
             Pr12PrimitiveRequest::StorageStatus(_)
         ));
+    }
+
+    #[test]
+    fn invalid_owned_symbol_request_is_rejected_before_port_dispatch() {
+        let meta = || {
+            RetrievalRequestMeta::current(
+                PageRequest::first(10).expect("page"),
+                ResultProjection::Evidence,
+                RetrievalOrder::StableIdentity,
+            )
+        };
+        let query = EphemeralSanitizedQueryViewV1::sanitize(
+            "query".to_owned(),
+            SanitizerRevision::new("sanitizer.test").expect("sanitizer"),
+            QueryNormalizationRevision::new("normalization.test").expect("normalization"),
+        )
+        .expect("query");
+        let requests = [
+            Pr12PrimitiveRequest::SymbolSearch(SymbolSearchPrimitiveRequest {
+                query,
+                scope: SymbolGraphScope {
+                    path_prefix: Some("../other".to_owned()),
+                },
+                lazy_index_ignored_dependencies: false,
+                meta: meta(),
+            }),
+            Pr12PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
+                returns: None,
+                params: Vec::new(),
+                is_async: None,
+                scope: SymbolGraphScope::default(),
+                meta: meta(),
+            }),
+            Pr12PrimitiveRequest::Implementations(ImplementationsRequest {
+                selector: ImplementationSelector::Method {
+                    name: String::new(),
+                },
+                scope: SymbolGraphScope::default(),
+                meta: meta(),
+            }),
+            Pr12PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
+                node_id: "node".to_owned(),
+                maximum_depth: 0,
+                scope: SymbolGraphScope::default(),
+                meta: meta(),
+            }),
+            Pr12PrimitiveRequest::Callers(GraphRelationRequest {
+                node_id: "node".to_owned(),
+                maximum_depth: 0,
+                resolve_trait_dispatch: false,
+                scope: SymbolGraphScope::default(),
+                meta: meta(),
+            }),
+        ];
+
+        assert!(
+            requests
+                .iter()
+                .all(|request| !valid_owned_symbol_graph_request(request))
+        );
     }
 }

@@ -265,6 +265,19 @@ pub async fn discover_production_ci_failure_request_v1(
     discover_production_ci_failure_request_with_v1(context, config, scope, &client).await
 }
 
+#[allow(dead_code)]
+fn assert_production_ci_discovery_future_is_send(
+    context: &RequestContext,
+    config: &ProductionCiProviderConfigV1,
+    scope: &FeedbackScopeV1,
+) {
+    fn assert_send<T: Send>(_: T) {}
+
+    assert_send(discover_production_ci_failure_request_v1(
+        context, config, scope,
+    ));
+}
+
 async fn discover_production_ci_failure_request_with_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,

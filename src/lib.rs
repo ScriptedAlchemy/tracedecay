@@ -48,6 +48,7 @@ pub mod agents;
 mod analytics;
 pub mod analytics_bridge;
 pub mod application;
+pub mod application_output;
 pub mod application_surface;
 pub mod ast_grep_search;
 pub mod automation;

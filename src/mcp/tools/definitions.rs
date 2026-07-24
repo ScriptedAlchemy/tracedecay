@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 139;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 152;
 
 mod admin;
 mod analysis;
@@ -376,9 +376,21 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_feedback_get(),
         def_feedback_expand(),
         def_feedback_list(),
+        def_context_scout_recent(),
+        def_context_scout_explain(),
+        def_context_scout_capability(),
+        def_context_scout_budget(),
         def_feedback_impact(),
         def_affected_tests(),
         def_test_results(),
+        def_code_exact_occurrence(),
+        def_code_phrase_search(),
+        def_code_symbol_search(),
+        def_code_signature_search(),
+        def_code_implementations(),
+        def_code_type_hierarchy(),
+        def_code_callers(),
+        def_code_callees(),
         def_session_lookup(),
         def_qualified_name_read(),
         def_call_chain_read(),
@@ -476,6 +488,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_replace_symbol(),
         def_insert_at_symbol(),
         def_move_symbol(),
+        def_source_edit_reconcile(),
         def_find_exact_symbol(),
     ];
     definitions.extend(configuration_definitions());
@@ -592,6 +605,14 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_feedback_impact",
     "tracedecay_affected_tests",
     "tracedecay_test_results",
+    "tracedecay_code_exact_occurrence",
+    "tracedecay_code_phrase_search",
+    "tracedecay_code_symbol_search",
+    "tracedecay_code_signature_search",
+    "tracedecay_code_implementations",
+    "tracedecay_code_type_hierarchy",
+    "tracedecay_code_callers",
+    "tracedecay_code_callees",
     "tracedecay_session_lookup",
     "tracedecay_qualified_name",
     "tracedecay_call_chain",
@@ -755,6 +776,30 @@ mod tests {
             desc.contains("5000 nodes"),
             "description should contain node count: {desc}"
         );
+    }
+
+    #[test]
+    fn context_scout_read_surfaces_are_registered_read_only() {
+        let definitions = get_tool_definitions();
+        for name in [
+            "tracedecay_context_scout_recent",
+            "tracedecay_context_scout_explain",
+            "tracedecay_context_scout_capability",
+            "tracedecay_context_scout_budget",
+        ] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .expect("Context Scout read surface is registered");
+            assert_eq!(
+                definition
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get("readOnlyHint"))
+                    .and_then(Value::as_bool),
+                Some(true)
+            );
+        }
     }
 
     #[test]

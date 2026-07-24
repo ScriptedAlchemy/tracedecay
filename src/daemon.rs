@@ -767,6 +767,7 @@ fn git_read_executor(
 mod authority;
 mod branch_add;
 mod branch_admin;
+mod callable_code_authorization;
 pub(crate) mod code_index_scheduler;
 pub(crate) mod context_scout_lifecycle;
 mod core_admission;
@@ -780,6 +781,7 @@ mod core_proxy;
 pub(crate) mod doctor_kernel;
 pub(crate) mod pr9_authority_provider;
 pub(crate) mod project_open_owners;
+mod semantic_evaluation;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
@@ -1273,14 +1275,16 @@ struct DaemonInvocationState {
 
 impl Default for DaemonInvocationState {
     fn default() -> Self {
+        let code_index_schedulers =
+            code_index_scheduler::CodeIndexSchedulerRegistryV1::new(MAX_CACHED_PROJECT_SERVERS);
+        let service =
+            DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
         Self {
             lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
                 lsp_gateway::LspSessionRegistry::default(),
             )),
-            service: DaemonInvocationService::default(),
-            code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
-                MAX_CACHED_PROJECT_SERVERS,
-            ),
+            service,
+            code_index_schedulers,
             pr9_authority_provider:
                 pr9_authority_provider::DaemonPr9AuthorityProviderV1::default(),
             semantic_projection_scheduler:
@@ -2574,12 +2578,16 @@ impl DaemonEngine {
         cg.register_project_store_in_global_registry().await?;
         let key = ProjectServerKey::from_open_project(&cg, handshake)?;
         let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
-        let semantic_resources = cg
+        let runtime_configuration = cg
             .configuration_runtime()
-            .configuration()
-            .config
-            .semantic
-            .resources;
+            .client()
+            .current()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("authoritative runtime configuration unavailable: {error}"),
+            })?;
+        let semantic_config = &runtime_configuration.config.semantic;
+        let semantic_resources = &semantic_config.resources;
         let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
             semantic_resources.max_concurrent_sessions as usize,
             usize::try_from(semantic_resources.max_resident_bytes / 4096)
@@ -2592,7 +2600,6 @@ impl DaemonEngine {
         })?;
         // Install/config stays offline-safe: queue bounded background FastEmbed
         // acquisition for the selected catalog model unless disabled/overridden.
-        let semantic_config = &cg.configuration_runtime().configuration().config.semantic;
         let _ = crate::semantic_code::apply_config_and_queue_startup(
             semantic_config.selected_model.as_deref(),
             semantic_config.auto_download,
@@ -2790,7 +2797,7 @@ impl DaemonEngine {
                     Some(&semantic_runtime),
                     Some(semantic_database),
                     semantic_lifecycle,
-                    Some(semantic_resources),
+                    Some(*semantic_resources),
                 )
                 .await?;
             match self
@@ -3605,12 +3612,16 @@ async fn portable_project_server(
     cg.register_project_store_in_global_registry().await?;
     let key = ProjectServerKey::from_open_project(&cg, handshake)?;
     let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
-    let semantic_resources = cg
+    let runtime_configuration = cg
         .configuration_runtime()
-        .configuration()
-        .config
-        .semantic
-        .resources;
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("authoritative runtime configuration unavailable: {error}"),
+        })?;
+    let semantic_config = &runtime_configuration.config.semantic;
+    let semantic_resources = &semantic_config.resources;
     let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
         semantic_resources.max_concurrent_sessions as usize,
         usize::try_from(semantic_resources.max_resident_bytes / 4096)
@@ -3621,7 +3632,6 @@ async fn portable_project_server(
     .map_err(|_| TraceDecayError::Config {
         message: "semantic runtime resource ceilings are invalid".to_owned(),
     })?;
-    let semantic_config = &cg.configuration_runtime().configuration().config.semantic;
     let _ = crate::semantic_code::apply_config_and_queue_startup(
         semantic_config.selected_model.as_deref(),
         semantic_config.auto_download,
@@ -3802,7 +3812,7 @@ async fn portable_project_server(
                 Some(&semantic_runtime),
                 Some(semantic_database),
                 semantic_lifecycle,
-                Some(semantic_resources),
+                Some(*semantic_resources),
             )
             .await?;
         match invocation

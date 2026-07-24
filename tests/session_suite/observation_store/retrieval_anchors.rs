@@ -2,13 +2,14 @@
 use std::process::Command;
 
 use tempfile::TempDir;
+use tracedecay::application::anchor_resolution::EvidenceAnchorReportResolver;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::application::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay_domain::{
-    AnchorLineageRefV2, AnchorProvenanceRelationV2, ClaudeSourceCursorV1, FactOwnerV1,
-    ObservationScopeV1, ProjectId, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts,
+    AnchorLineageRefV2, AnchorProvenanceRelationV2, AnchorSourceGenerationV2, ClaudeSourceCursorV1,
+    FactOwnerV1, ObservationScopeV1, ObservationSourceGenerationV1, ProjectId, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
@@ -38,6 +39,31 @@ fn anchor_with_sources(
         coverage: anchor.coverage().clone(),
         source_observations: anchor.source_observations().to_vec(),
         source_anchors,
+        authorization: anchor.authorization().clone(),
+        payload_access: anchor.payload_access(),
+        retention_class: anchor.retention_class().clone(),
+        durability: anchor.durability().clone(),
+    })
+    .unwrap()
+}
+
+fn anchor_with_source_generation(
+    anchor: &RetrievalAnchorRecordV2,
+    source_generation: AnchorSourceGenerationV2,
+) -> RetrievalAnchorRecordV2 {
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: anchor.target().clone(),
+        owner: anchor.owner().clone(),
+        aliases: anchor.aliases().to_vec(),
+        occurred_at: anchor.occurred_at(),
+        ingested_at: anchor.ingested_at(),
+        evidence_class: anchor.evidence_class(),
+        source_generation,
+        projection_generation: anchor.projection_generation().clone(),
+        projection_watermark: anchor.projection_watermark().clone(),
+        coverage: anchor.coverage().clone(),
+        source_observations: anchor.source_observations().to_vec(),
+        source_anchors: anchor.source_anchors().to_vec(),
         authorization: anchor.authorization().clone(),
         payload_access: anchor.payload_access(),
         retention_class: anchor.retention_class().clone(),
@@ -289,6 +315,73 @@ async fn daemon_resolves_only_canonical_owner_bound_observation_anchors() {
         error,
         EvidenceAnchorResolutionError::Unavailable { .. }
     ));
+}
+
+#[tokio::test]
+async fn daemon_denies_observation_anchor_with_corrupt_source_generation() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let receipt = match store
+        .persist_observation(write(
+            observation(
+                0,
+                100,
+                "receipt.resolver-corrupt",
+                "stable sanitized payload",
+            ),
+            None,
+        ))
+        .await
+        .unwrap()
+    {
+        ObservationPersistOutcome::Committed(receipt) => receipt,
+        other => panic!("first persistence must commit, got {other:?}"),
+    };
+    let corrupted = anchor_with_source_generation(
+        receipt.retrieval_anchor(),
+        AnchorSourceGenerationV2::Observation(
+            ObservationSourceGenerationV1::new(GENERATION + 1).unwrap(),
+        ),
+    );
+    let raw_conn =
+        rusqlite::Connection::open(runtime.database_path(HostAdmissionScope::Profile).unwrap())
+            .unwrap();
+    raw_conn
+        .execute_batch("DROP TRIGGER retrieval_anchors_immutable_update;")
+        .unwrap();
+    raw_conn
+        .execute(
+            "UPDATE retrieval_anchors SET anchor_json = ?1 WHERE anchor_id = ?2",
+            rusqlite::params![
+                serde_json::to_string(&corrupted).unwrap(),
+                corrupted.anchor_id().as_str()
+            ],
+        )
+        .unwrap();
+    drop(raw_conn);
+
+    let facade = runtime.facade();
+    for error in [
+        facade
+            .resolve_evidence_anchor(FactOwnerV1::Profile, corrupted.anchor_id().clone())
+            .await
+            .expect_err("record resolution must deny corrupt source generation"),
+        facade
+            .resolve_evidence_anchor_report(FactOwnerV1::Profile, corrupted.anchor_id().clone())
+            .await
+            .expect_err("report resolution must deny corrupt source generation"),
+    ] {
+        let EvidenceAnchorResolutionError::Authority { source, .. } = error else {
+            panic!("corrupt source generation must fail closed");
+        };
+        assert_eq!(
+            source.to_string(),
+            ObservationStoreError::RetrievalAnchorSourceGenerationMismatch.to_string()
+        );
+    }
 }
 
 #[tokio::test]

@@ -68,3 +68,26 @@ fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
         assert_eq!(profile["optional_stages"]["rerank"], "pending");
     }
 }
+
+#[test]
+fn invalid_fixture_is_reported_as_fail_not_pending() {
+    let output = run(&[
+        "validate",
+        "--workload",
+        "tests/fixtures/search_quality/missing-workload.json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = stdout_json(&output);
+    assert_eq!(payload["command"], "validate");
+    assert_eq!(payload["status"], "fail");
+    assert!(
+        payload["rationale"]
+            .as_str()
+            .is_some_and(|rationale| rationale.contains("missing-workload.json"))
+    );
+}

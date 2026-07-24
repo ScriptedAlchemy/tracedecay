@@ -12,7 +12,7 @@ Read-only recall subagent. Retrieve what past sessions said, did, and decided fo
 ## Method
 
 1. Start with `tracedecay_message_search` (fast FTS over ingested transcripts; note the session ids on hits).
-2. Narrow with `tracedecay_lcm_grep` (scope/role/time filters), then replay with `tracedecay_lcm_load_session` (paginate via `after_store_id`, never dump whole sessions).
+2. Narrow with `tracedecay_lcm_grep` (scope/role/time filters), then replay with `tracedecay_lcm_load_session` (continue only with the returned opaque `next_cursor`, never dump whole sessions).
 3. Drill into summaries with `tracedecay_lcm_describe` / `tracedecay_lcm_expand` / `tracedecay_lcm_expand_query`; inspect the store with `tracedecay_lcm_status`.
 4. `tracedecay_fact_store` mixes read and write actions, so it is intentionally unavailable here. Ask the parent to run a bounded read action when durable facts are required.
 5. If the `tracedecay:managing-session-context` skill is available, follow its full ladder.

@@ -1,12 +1,19 @@
 //! File editing tool handlers: `str_replace`, `multi_str_replace`, `insert_at`,
 //! `ast_grep_rewrite`.
 
-use serde::Serialize;
 use serde_json::{Value, json};
+use tracedecay_application::{
+    CancellationSignal, Deadline, EffectId, IdempotencyKey, RequestId, SourceEditKind,
+    SourceEditReconciliationDispositionV1, SourceEditRequest,
+};
+use tracedecay_domain::ManifestDigest;
 
 use crate::errors::{Result, TraceDecayError};
+use crate::mcp::server::{
+    SourceEditExecutor, SourceEditInvocationV1, SourceEditReconciliationExecutor,
+    SourceEditReconciliationInvocationV1,
+};
 use crate::tracedecay::TraceDecay;
-use crate::types::{AstGrepResult, EditResult, InsertResult, MultiEditResult};
 
 use super::super::ToolResult;
 use super::super::render;
@@ -30,66 +37,6 @@ fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
         .ok_or_else(|| missing_required_param(name))
 }
 
-/// Common shape shared by every edit-tool result payload: a handler-known
-/// `success` flag plus a human-readable `message` describing the outcome
-/// (e.g. "`old_str` not found in file" / "`old_str` matches 3 times"). Lets
-/// [`text_tool_result`] attach a structural semantic-error marker (and its
-/// reason) to the [`ToolResult`] instead of the dispatcher having to guess
-/// outcome from rendered — possibly markdown, not JSON — response text.
-trait EditOutcome {
-    fn success(&self) -> bool;
-    fn message(&self) -> &str;
-    fn file_path(&self) -> &str;
-}
-
-impl EditOutcome for EditResult {
-    fn success(&self) -> bool {
-        self.success
-    }
-    fn message(&self) -> &str {
-        &self.message
-    }
-    fn file_path(&self) -> &str {
-        &self.file_path
-    }
-}
-
-impl EditOutcome for MultiEditResult {
-    fn success(&self) -> bool {
-        self.success
-    }
-    fn message(&self) -> &str {
-        &self.message
-    }
-    fn file_path(&self) -> &str {
-        &self.file_path
-    }
-}
-
-impl EditOutcome for InsertResult {
-    fn success(&self) -> bool {
-        self.success
-    }
-    fn message(&self) -> &str {
-        &self.message
-    }
-    fn file_path(&self) -> &str {
-        &self.file_path
-    }
-}
-
-impl EditOutcome for AstGrepResult {
-    fn success(&self) -> bool {
-        self.success
-    }
-    fn message(&self) -> &str {
-        &self.message
-    }
-    fn file_path(&self) -> &str {
-        &self.file_path
-    }
-}
-
 /// Reads the shared `dry_run` edit flag (default `false`): when set, an edit
 /// primitive validates and computes the resulting content but writes nothing,
 /// returning a preview diff instead.
@@ -107,84 +54,52 @@ fn verify_arg(args: &Value) -> bool {
     args.get("verify").and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// Files considered "touched" for downstream bookkeeping. A dry run writes
-/// nothing and a failure changes nothing, so only a real successful edit
-/// reports its file.
-fn edit_touched_files(result: &impl EditOutcome, dry_run: bool) -> Vec<String> {
-    if result.success() && !dry_run {
-        vec![result.file_path().to_string()]
-    } else {
-        vec![]
-    }
-}
-
-/// Post-edit verification loop. Runs file-scoped diagnostics over the edited
-/// file and returns a compact verdict (`clean` / `errors` with the first few
-/// error messages). Returns `None` if diagnostics could not run — verification
-/// is best-effort and never fails an edit that already applied.
-async fn run_edit_verification(cg: &TraceDecay, file_path: &str) -> Option<Value> {
-    let scope = crate::diagnostics::Scope::File {
-        path: file_path.to_string(),
-    };
-    let diagnostics = crate::diagnostics::run_all(cg.project_root(), &scope)
-        .await
-        .ok()?;
-
-    let mut error_count = 0usize;
-    let mut warning_count = 0usize;
-    let mut first_errors: Vec<Value> = Vec::new();
-    for diag in &diagnostics {
-        if diag.file != file_path {
-            continue;
-        }
-        match diag.level.as_str() {
-            "error" => {
-                error_count += 1;
-                if first_errors.len() < 3 {
-                    first_errors.push(json!({
-                        "line": diag.line_start,
-                        "code": diag.code,
-                        "message": diag.message,
-                    }));
-                }
-            }
-            "warning" => warning_count += 1,
-            _ => {}
-        }
-    }
-
-    Some(json!({
-        "verdict": if error_count == 0 { "clean" } else { "errors" },
-        "error_count": error_count,
-        "warning_count": warning_count,
-        "first_errors": first_errors,
-    }))
-}
-
-async fn text_tool_result<T: Serialize + EditOutcome>(
+async fn source_edit_tool_result(
     cg: &TraceDecay,
     args: &Value,
-    result: &T,
-    touched_files: Vec<String>,
-    dry_run: bool,
-    verify: bool,
-) -> ToolResult {
-    let success = result.success();
-    let mut value = serde_json::to_value(result).unwrap_or_default();
-
-    // Verification only makes sense for a real (written) successful edit: a dry
-    // run changed nothing on disk, and a failure left the file as-is.
-    if verify
-        && !dry_run
-        && success
-        && let Some(verdict) = run_edit_verification(cg, result.file_path()).await
-        && let Some(obj) = value.as_object_mut()
-    {
-        obj.insert("verification".to_string(), verdict);
+    request: SourceEditRequest,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
+    let idempotency_key = optional_idempotency_key(args)?;
+    let expected_state = optional_expected_state(args)?;
+    if !request.dry_run() && (idempotency_key.is_none() || expected_state.is_none()) {
+        return Err(TraceDecayError::Config {
+            message: "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
+                .to_owned(),
+        });
     }
-
+    let SourceEditInvocationContext {
+        executor,
+        request_id,
+        deadline,
+        cancellation,
+        ..
+    } = invocation;
+    let (Some(executor), Some(request_id), Some(deadline), Some(cancellation)) =
+        (executor, request_id, deadline, cancellation)
+    else {
+        return Err(TraceDecayError::Config {
+            message: "daemon-owned source edit authority is unavailable".to_owned(),
+        });
+    };
+    let result = executor(SourceEditInvocationV1 {
+        edit: request,
+        idempotency_key,
+        expected_state,
+        request_id,
+        deadline,
+        cancellation,
+    })
+    .await?;
+    let value = result.value();
+    let touched_files = result.outcome.touched_files(result.dry_run);
+    let success = result.outcome.success();
     let text = render::finalize(Some(cg.project_root()), args, &value, || {
-        render::generic_md(&value)
+        result
+            .outcome
+            .as_move()
+            .map(move_result_md)
+            .unwrap_or_else(|| render::generic_md(&value))
     });
     let tool_result = ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
@@ -192,31 +107,188 @@ async fn text_tool_result<T: Serialize + EditOutcome>(
     )
     .with_semantic_error(!success);
     if success {
-        tool_result
+        Ok(tool_result)
     } else {
-        tool_result.with_failure_message(result.message())
+        Ok(tool_result.with_failure_message(result.outcome.message()))
     }
 }
 
-pub(super) async fn handle_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+#[derive(Clone)]
+pub(super) struct SourceEditInvocationContext {
+    pub(super) executor: Option<SourceEditExecutor>,
+    pub(super) reconciliation_executor: Option<SourceEditReconciliationExecutor>,
+    pub(super) request_id: Option<RequestId>,
+    pub(super) deadline: Option<Deadline>,
+    pub(super) cancellation: Option<CancellationSignal>,
+}
+
+pub(super) async fn handle_source_edit_reconcile(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
+    if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Err(TraceDecayError::Config {
+            message: "source edit reconciliation requires confirm=true".to_owned(),
+        });
+    }
+    let kind = serde_json::from_value::<SourceEditKind>(json!(required_str(&args, "kind")?))
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid source edit kind: {error}"),
+        })?;
+    let effect_id =
+        EffectId::new(required_str(&args, "effect_id")?).map_err(source_edit_identity_error)?;
+    let idempotency_key = IdempotencyKey::new(required_str(&args, "idempotency_key")?)
+        .map_err(source_edit_identity_error)?;
+    let attempt_idempotency_key =
+        IdempotencyKey::new(required_str(&args, "attempt_idempotency_key")?)
+            .map_err(source_edit_identity_error)?;
+    if attempt_idempotency_key == idempotency_key {
+        return Err(TraceDecayError::Config {
+            message:
+                "reconciliation attempt idempotency key must differ from the original edit key"
+                    .to_owned(),
+        });
+    }
+    let input_digest = ManifestDigest::new(required_str(&args, "input_digest")?)
+        .map_err(source_edit_identity_error)?;
+    let disposition = match required_str(&args, "disposition")? {
+        "confirm_committed" => {
+            let committed_state = ManifestDigest::new(required_str(&args, "committed_state")?)
+                .map_err(source_edit_identity_error)?;
+            SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state }
+        }
+        "confirm_rolled_back" => {
+            if args.get("committed_state").is_some() {
+                return Err(TraceDecayError::Config {
+                    message: "committed_state is only valid when disposition is confirm_committed"
+                        .to_owned(),
+                });
+            }
+            SourceEditReconciliationDispositionV1::ConfirmRolledBack
+        }
+        value => {
+            return Err(TraceDecayError::Config {
+                message: format!("invalid source edit reconciliation disposition: {value}"),
+            });
+        }
+    };
+    let SourceEditInvocationContext {
+        reconciliation_executor,
+        request_id,
+        deadline,
+        cancellation,
+        ..
+    } = invocation;
+    let (Some(executor), Some(request_id), Some(deadline), Some(cancellation)) =
+        (reconciliation_executor, request_id, deadline, cancellation)
+    else {
+        return Err(TraceDecayError::Config {
+            message: "daemon-owned source edit reconciliation authority is unavailable".to_owned(),
+        });
+    };
+    let result = executor(SourceEditReconciliationInvocationV1 {
+        kind,
+        effect_id,
+        idempotency_key,
+        attempt_idempotency_key,
+        input_digest,
+        disposition,
+        request_id,
+        deadline,
+        cancellation,
+    })
+    .await?;
+    let value = result.value();
+    let success = result.outcome.success();
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        render::generic_md(&value)
+    });
+    let tool_result = ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        Vec::new(),
+    )
+    .with_semantic_error(!success);
+    if success {
+        Ok(tool_result)
+    } else {
+        Ok(tool_result.with_failure_message(result.outcome.message()))
+    }
+}
+
+fn source_edit_identity_error(error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("invalid source edit reconciliation identity: {error}"),
+    }
+}
+
+fn optional_idempotency_key(args: &Value) -> Result<Option<IdempotencyKey>> {
+    args.get("idempotency_key")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| missing_required_param("idempotency_key"))
+                .and_then(|value| {
+                    IdempotencyKey::new(value).map_err(|error| TraceDecayError::Config {
+                        message: format!("invalid idempotency_key: {error}"),
+                    })
+                })
+        })
+        .transpose()
+}
+
+fn optional_expected_state(args: &Value) -> Result<Option<ManifestDigest>> {
+    args.get("expected_state")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| missing_required_param("expected_state"))
+                .and_then(|value| {
+                    ManifestDigest::new(value).map_err(|error| TraceDecayError::Config {
+                        message: format!("invalid expected_state: {error}"),
+                    })
+                })
+        })
+        .transpose()
+}
+
+pub(super) async fn handle_str_replace(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let old_str = required_str(&args, "old_str")?;
     let new_str = required_str(&args, "new_str")?;
     let dry_run = dry_run_arg(&args);
     let verify = verify_arg(&args);
 
-    let result = cg.str_replace(path, old_str, new_str, dry_run).await?;
-    let touched_files = edit_touched_files(&result, dry_run);
-    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::StrReplace {
+            path: path.to_owned(),
+            old_str: old_str.to_owned(),
+            new_str: new_str.to_owned(),
+            dry_run,
+            verify,
+        },
+        invocation,
+    )
+    .await
 }
 
-pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_multi_str_replace(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let replacements = required_array(&args, "replacements")?;
     let dry_run = dry_run_arg(&args);
     let verify = verify_arg(&args);
 
-    let parsed_replacements: Vec<(&str, &str)> = replacements
+    let parsed_replacements: Vec<(String, String)> = replacements
         .iter()
         .filter_map(|pair| {
             let arr = pair.as_array()?;
@@ -225,7 +297,7 @@ pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Re
             }
             let old = arr[0].as_str()?;
             let new = arr[1].as_str()?;
-            Some((old, new))
+            Some((old.to_owned(), new.to_owned()))
         })
         .collect();
 
@@ -235,14 +307,25 @@ pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Re
         });
     }
 
-    let result = cg
-        .multi_str_replace(path, &parsed_replacements, dry_run)
-        .await?;
-    let touched_files = edit_touched_files(&result, dry_run);
-    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::MultiStrReplace {
+            path: path.to_owned(),
+            replacements: parsed_replacements,
+            dry_run,
+            verify,
+        },
+        invocation,
+    )
+    .await
 }
 
-pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_insert_at(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let anchor = required_str(&args, "anchor")?;
     let content = required_str(&args, "content")?;
@@ -251,23 +334,51 @@ pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<Too
 
     let before = args.get("before").and_then(Value::as_bool).unwrap_or(false);
 
-    let result = cg.insert_at(path, anchor, content, before, dry_run).await?;
-    let touched_files = edit_touched_files(&result, dry_run);
-    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::InsertAt {
+            path: path.to_owned(),
+            anchor: anchor.to_owned(),
+            content: content.to_owned(),
+            before,
+            dry_run,
+            verify,
+        },
+        invocation,
+    )
+    .await
 }
 
-pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_replace_symbol(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let new_source = required_str(&args, "new_source")?;
     let dry_run = dry_run_arg(&args);
     let verify = verify_arg(&args);
 
-    let result = cg.replace_symbol(symbol, new_source, dry_run).await?;
-    let touched_files = edit_touched_files(&result, dry_run);
-    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::ReplaceSymbol {
+            symbol: symbol.to_owned(),
+            new_source: new_source.to_owned(),
+            dry_run,
+            verify,
+        },
+        invocation,
+    )
+    .await
 }
 
-pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_insert_at_symbol(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let content = required_str(&args, "content")?;
     let dry_run = dry_run_arg(&args);
@@ -277,14 +388,26 @@ pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Res
         .and_then(|v| v.as_str())
         .unwrap_or("after");
 
-    let result = cg
-        .insert_at_symbol(symbol, content, position, dry_run)
-        .await?;
-    let touched_files = edit_touched_files(&result, dry_run);
-    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::InsertAtSymbol {
+            symbol: symbol.to_owned(),
+            content: content.to_owned(),
+            position: position.to_owned(),
+            dry_run,
+            verify,
+        },
+        invocation,
+    )
+    .await
 }
 
-pub(super) async fn handle_move_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_move_symbol(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
     let symbol = required_str(&args, "symbol")?;
     let dest_file = required_str(&args, "dest_file")?;
     // The impact report is the product; applying is opt-in.
@@ -294,30 +417,18 @@ pub(super) async fn handle_move_symbol(cg: &TraceDecay, args: Value) -> Result<T
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let result = cg
-        .move_symbol(symbol, dest_file, dry_run, update_references)
-        .await?;
-
-    let success = result.success;
-    let touched_files = if success && !dry_run {
-        vec![result.source_file.clone(), result.dest_file.clone()]
-    } else {
-        vec![]
-    };
-    let value = serde_json::to_value(&result).unwrap_or_default();
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        move_result_md(&result)
-    });
-    let tool_result = ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files,
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::MoveSymbol {
+            symbol: symbol.to_owned(),
+            dest_file: dest_file.to_owned(),
+            dry_run,
+            update_references,
+        },
+        invocation,
     )
-    .with_semantic_error(!success);
-    Ok(if success {
-        tool_result
-    } else {
-        tool_result.with_failure_message(&result.message)
-    })
+    .await
 }
 
 /// Human-readable markdown for a move result: the outcome line, applied
@@ -361,14 +472,411 @@ fn move_result_md(result: &crate::types::MoveResult) -> String {
     out
 }
 
-pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_ast_grep_rewrite(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let pattern = required_str(&args, "pattern")?;
     let rewrite = required_str(&args, "rewrite")?;
     let dry_run = dry_run_arg(&args);
     let verify = verify_arg(&args);
 
-    let result = cg.ast_grep_rewrite(path, pattern, rewrite, dry_run).await?;
-    let touched_files = edit_touched_files(&result, dry_run);
-    Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::AstGrepRewrite {
+            path: path.to_owned(),
+            pattern: pattern.to_owned(),
+            rewrite: rewrite.to_owned(),
+            dry_run,
+            verify,
+        },
+        invocation,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use tempfile::tempdir;
+    use tracedecay_domain::UtcMicros;
+    use tracedecay_store::ProjectId;
+
+    use super::*;
+    use crate::application::edit::{SourceEditApplicationResult, SourceEditOutcome};
+    use crate::tracedecay::TraceDecayOpenOptions;
+    use crate::types::EditResult;
+
+    const EXPECTED_STATE: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PREDICTED_STATE: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SeenInvocation {
+        dry_run: bool,
+        idempotency_key: Option<String>,
+        expected_state: Option<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RoutedInvocation {
+        edit: SourceEditRequest,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: tracedecay_application::CancellationContext,
+    }
+
+    fn digest(value: &str) -> ManifestDigest {
+        ManifestDigest::new(value).unwrap()
+    }
+
+    async fn fixture_graph(
+        project_root: &Path,
+    ) -> (TraceDecay, crate::db::DaemonDatabaseScope) {
+        let profile_root = project_root.join(".tracedecay-test-profile");
+        let open_options = TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        };
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+        let database_scope = crate::db::enter_daemon_database_scope(
+            identity.profile_root(),
+            1,
+            "mcp-source-edit-test-runtime",
+        )
+        .unwrap();
+        let runtime_registry = Arc::new(
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .unwrap(),
+        );
+        let profile_database = runtime_registry.profile_database().await.unwrap();
+        let store_layout = TraceDecay::resolve_first_touch_configuration_layout(
+            project_root,
+            &open_options,
+            profile_database.as_ref(),
+            true,
+        )
+        .await
+        .unwrap();
+        let project_id = ProjectId::new(
+            store_layout
+                .identity
+                .project_id
+                .clone()
+                .expect("fixture layout has a project identity"),
+        )
+        .unwrap();
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let configuration_database = runtime_registry
+            .project_sessions(
+                project_id,
+                [
+                    project_root.to_path_buf(),
+                    store_layout.project_root.clone(),
+                ],
+            )
+            .await
+            .unwrap();
+        let graph = TraceDecay::init_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+        )
+        .await
+        .unwrap();
+        (graph, database_scope)
+    }
+
+    fn invocation_context(executor: Option<SourceEditExecutor>) -> SourceEditInvocationContext {
+        SourceEditInvocationContext {
+            executor,
+            reconciliation_executor: None,
+            request_id: Some(RequestId::new("request.mcp.source-edit.fixture").unwrap()),
+            deadline: Some(Deadline::new(UtcMicros(i64::MAX)).unwrap()),
+            cancellation: Some(
+                CancellationSignal::active("cancel.mcp.source-edit.fixture").unwrap(),
+            ),
+        }
+    }
+
+    fn recording_executor(seen: Arc<Mutex<Vec<SeenInvocation>>>) -> SourceEditExecutor {
+        Arc::new(move |invocation| {
+            seen.lock().unwrap().push(SeenInvocation {
+                dry_run: invocation.edit.dry_run(),
+                idempotency_key: invocation
+                    .idempotency_key
+                    .as_ref()
+                    .map(|key| key.as_str().to_owned()),
+                expected_state: invocation
+                    .expected_state
+                    .as_ref()
+                    .map(|state| state.as_str().to_owned()),
+            });
+            let dry_run = invocation.edit.dry_run();
+            Box::pin(async move {
+                Ok(SourceEditApplicationResult {
+                    outcome: SourceEditOutcome::Edit(EditResult {
+                        success: true,
+                        file_path: "src/lib.rs".to_owned(),
+                        matched_str: "old".to_owned(),
+                        new_str: "new".to_owned(),
+                        dry_run,
+                        message: "source edit fixture completed".to_owned(),
+                        ..EditResult::default()
+                    }),
+                    dry_run,
+                    expected_state: digest(EXPECTED_STATE),
+                    predicted_state: Some(digest(PREDICTED_STATE)),
+                    verification: None,
+                    effect: None,
+                    replayed: false,
+                })
+            })
+        })
+    }
+
+    fn route_recording_executor(seen: Arc<Mutex<Vec<RoutedInvocation>>>) -> SourceEditExecutor {
+        Arc::new(move |invocation| {
+            let dry_run = invocation.edit.dry_run();
+            seen.lock().unwrap().push(RoutedInvocation {
+                edit: invocation.edit,
+                request_id: invocation.request_id,
+                deadline: invocation.deadline,
+                cancellation: invocation.cancellation.context(),
+            });
+            Box::pin(async move {
+                Ok(SourceEditApplicationResult {
+                    outcome: SourceEditOutcome::Edit(EditResult {
+                        success: true,
+                        file_path: "src/lib.rs".to_owned(),
+                        dry_run,
+                        message: "source edit route fixture completed".to_owned(),
+                        ..EditResult::default()
+                    }),
+                    dry_run,
+                    expected_state: digest(EXPECTED_STATE),
+                    predicted_state: Some(digest(PREDICTED_STATE)),
+                    verification: None,
+                    effect: None,
+                    replayed: false,
+                })
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn seven_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
+        let project = tempdir().unwrap();
+        let (graph, _database_scope) = fixture_graph(project.path()).await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let executor = route_recording_executor(Arc::clone(&seen));
+
+        handle_str_replace(
+            &graph,
+            json!({"path":"src/lib.rs","old_str":"old","new_str":"new","dry_run":true}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        handle_multi_str_replace(
+            &graph,
+            json!({"path":"src/lib.rs","replacements":[["old","new"]],"dry_run":true}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        handle_insert_at(
+            &graph,
+            json!({"path":"src/lib.rs","anchor":"1","content":"new","dry_run":true}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        handle_ast_grep_rewrite(
+            &graph,
+            json!({"path":"src/lib.rs","pattern":"old","rewrite":"new","dry_run":true}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        handle_replace_symbol(
+            &graph,
+            json!({"symbol":"old","new_source":"fn new() {}","dry_run":true}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        handle_insert_at_symbol(
+            &graph,
+            json!({"symbol":"old","content":"fn new() {}","dry_run":true}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        handle_move_symbol(
+            &graph,
+            json!({"symbol":"old","dest_file":"src/new.rs"}),
+            invocation_context(Some(executor)),
+        )
+        .await
+        .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter()
+                .map(|invocation| invocation.edit.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                SourceEditKind::StrReplace,
+                SourceEditKind::MultiStrReplace,
+                SourceEditKind::InsertAt,
+                SourceEditKind::AstGrepRewrite,
+                SourceEditKind::ReplaceSymbol,
+                SourceEditKind::InsertAtSymbol,
+                SourceEditKind::MoveSymbol,
+            ]
+        );
+        assert!(seen.iter().all(|invocation| invocation.edit.dry_run()));
+        assert!(matches!(
+            &seen[2].edit,
+            SourceEditRequest::InsertAt {
+                before: false,
+                verify: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &seen[5].edit,
+            SourceEditRequest::InsertAtSymbol {
+                position,
+                verify: false,
+                ..
+            } if position == "after"
+        ));
+        assert!(matches!(
+            &seen[6].edit,
+            SourceEditRequest::MoveSymbol {
+                update_references: false,
+                ..
+            }
+        ));
+        for invocation in seen.iter() {
+            assert_eq!(
+                invocation.request_id.as_str(),
+                "request.mcp.source-edit.fixture"
+            );
+            assert_eq!(invocation.deadline.expires_at, UtcMicros(i64::MAX));
+            assert_eq!(
+                invocation.cancellation.token_id.as_str(),
+                "cancel.mcp.source-edit.fixture"
+            );
+            assert!(!invocation.cancellation.is_cancelled());
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_accepts_no_effect_identity_and_returns_expected_state() {
+        let project = tempdir().unwrap();
+        let (graph, _database_scope) = fixture_graph(project.path()).await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let result = handle_str_replace(
+            &graph,
+            json!({
+                "path": "src/lib.rs",
+                "old_str": "old",
+                "new_str": "new",
+                "dry_run": true,
+                "format": "json"
+            }),
+            invocation_context(Some(recording_executor(Arc::clone(&seen)))),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![SeenInvocation {
+                dry_run: true,
+                idempotency_key: None,
+                expected_state: None,
+            }]
+        );
+        assert!(result.value.to_string().contains(EXPECTED_STATE));
+    }
+
+    #[tokio::test]
+    async fn apply_requires_preview_idempotency_and_expected_state() {
+        let project = tempdir().unwrap();
+        let (graph, _database_scope) = fixture_graph(project.path()).await;
+        for args in [
+            json!({
+                "path": "src/lib.rs",
+                "old_str": "old",
+                "new_str": "new",
+                "idempotency_key": "edit.missing-expected"
+            }),
+            json!({
+                "path": "src/lib.rs",
+                "old_str": "old",
+                "new_str": "new",
+                "expected_state": EXPECTED_STATE
+            }),
+        ] {
+            let error = handle_str_replace(&graph, args, invocation_context(None))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(
+                "requires a fresh idempotency_key and the expected_state returned by a preview"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_forwards_exact_idempotency_key_and_expected_state() {
+        let project = tempdir().unwrap();
+        let (graph, _database_scope) = fixture_graph(project.path()).await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        handle_str_replace(
+            &graph,
+            json!({
+                "path": "src/lib.rs",
+                "old_str": "old",
+                "new_str": "new",
+                "idempotency_key": "edit.mcp-exact",
+                "expected_state": EXPECTED_STATE,
+                "format": "json"
+            }),
+            invocation_context(Some(recording_executor(Arc::clone(&seen)))),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![SeenInvocation {
+                dry_run: false,
+                idempotency_key: Some("edit.mcp-exact".to_owned()),
+                expected_state: Some(EXPECTED_STATE.to_owned()),
+            }]
+        );
+    }
 }

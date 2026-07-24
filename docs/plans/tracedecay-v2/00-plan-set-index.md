@@ -679,8 +679,12 @@ landed on this branch (2026-07-23) — branch lifecycle, registry orphan
 detection/collection, session retention with raw/projected dedup and
 disposition-scoped evidence release, one-content-copy, the debris contract,
 compaction policy types, and telemetry read models with typed Doctor storage
-findings; daemon wiring/cadence for the GC passes and the telemetry-port
-runtime implementation remain deliberate seams.
+findings. Daemon-owned GC/retention/compaction cadence, per-transaction
+retention reauthorization, exact registry relink/retirement, durable incident
+debris quarantine/collection, real stale-branch and retention-backlog Doctor
+sources, and the rusqlite reserved-health size/table-growth primitive plus
+scoped daemon application adapter landed on 2026-07-23. Store soft budgets are
+owner-configured and inert by default.
 
 PR #421 stays open through PR20. It merges only after PR20, direct product
 tests, and normal cross-platform CI are stable.
