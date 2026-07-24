@@ -1159,6 +1159,7 @@ mod tests;
 
 mod classification;
 mod identity;
+pub(in crate::daemon) mod pr9_runtime;
 mod queries;
 mod registry;
 
