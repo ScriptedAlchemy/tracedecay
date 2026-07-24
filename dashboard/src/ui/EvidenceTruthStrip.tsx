@@ -1,4 +1,5 @@
 import { cn } from './cn';
+import { EvidencePattern, type EvidenceQuality } from './EvidencePattern.tsx';
 
 export interface EvidenceCoverage {
   completeness?: string;
@@ -47,7 +48,13 @@ export function EvidenceTruthStrip({
           {omissions} omitted
         </span>
       ) : null}
-      {scoreKind ? <span className="uppercase tracking-wide">{scoreKind}</span> : null}
+      {scoreKind ? (
+        isEvidenceQuality(scoreKind) ? (
+          <EvidencePattern quality={scoreKind} />
+        ) : (
+          <span className="uppercase tracking-wide">{scoreKind}</span>
+        )
+      ) : null}
     </div>
   );
 }
@@ -63,4 +70,13 @@ function coverageLabel(coverage?: EvidenceCoverage): string {
     return `coverage ${examined}/? (denominator unknown)${qualifier}`;
   }
   return completeness ? `coverage ${completeness}` : 'coverage unknown';
+}
+
+function isEvidenceQuality(value: string): value is EvidenceQuality {
+  return (
+    value === 'measured' ||
+    value === 'associated' ||
+    value === 'predicted' ||
+    value === 'unknown'
+  );
 }

@@ -46,9 +46,23 @@
   --raw-sev-high: oklch(0.64 0.16 35);
   --raw-sev-critical: oklch(0.58 0.19 25);
 
-  /* Evidence quality is a PATTERN axis (solid/hatched/dotted/dashed),
-   * not a color axis — see ui pattern utilities. One neutral ink: */
+  /* Evidence quality is a PATTERN axis (four ordered steps rendered as fill
+   * patterns, never colors, so the axis survives monochrome and
+   * forced-colors): measured=solid, associated=hatched, predicted=dotted,
+   * unknown=dashed. One neutral ink: */
   --raw-ev-ink: currentColor;
+  --ev-measured: linear-gradient(var(--raw-ev-ink), var(--raw-ev-ink));
+  --ev-associated: repeating-linear-gradient(
+    45deg,
+    var(--raw-ev-ink) 0 2px,
+    transparent 2px 5px
+  );
+  --ev-predicted: radial-gradient(var(--raw-ev-ink) 1px, transparent 1.5px);
+  --ev-unknown: repeating-linear-gradient(
+    90deg,
+    var(--raw-ev-ink) 0 4px,
+    transparent 4px 8px
+  );
 
   /* ---- rhythm ---- */
   --row-height-data: 36px;
