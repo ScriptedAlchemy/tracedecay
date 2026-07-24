@@ -34,6 +34,7 @@ use super::startup::{
     ingest_user_global_sources_for_startup_with_db_without_registered_authority,
 };
 use super::user::{
+    ingest_user_global_sources_for_provider_with_roots_bounded,
     ingest_user_global_sources_for_provider_with_roots_without_registered_authority,
     provider_selected, registered_project_roots_from,
 };
@@ -135,6 +136,47 @@ async fn unregistered_project_authority_fails_before_ingest_writes() {
 }
 
 #[tokio::test]
+async fn mismatched_project_id_fails_before_scheduler_reads_or_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mounted_project_id = scheduler_test_project_id();
+    let requested_project_id = scheduler_test_project_id();
+    let runtime = project_test_runtime(&temp, &project, mounted_project_id.clone()).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+
+    let outcome = ingest_sources_bounded(
+        db,
+        &project,
+        &requested_project_id,
+        &[],
+        TEST_INGEST_BOUNDS,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(
+        outcome.failures[0].reason_code,
+        "project_sessions_authority_mismatch"
+    );
+    assert_eq!(
+        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        db.binding().shard_id.scope,
+        tracedecay_store::StoreShardScopeV1::ProjectSessions {
+            project_id: mounted_project_id
+        }
+    );
+}
+
+#[tokio::test]
 async fn unregistered_profile_authority_fails_before_ingest_writes() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = profile_test_runtime(&temp).await;
@@ -161,6 +203,43 @@ async fn unregistered_profile_authority_fails_before_ingest_writes() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_user_pass_reports_partial_coverage() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = profile_test_runtime(&temp).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+
+    let outcome = ingest_user_global_sources_for_provider_with_roots_bounded(
+        (
+            &db.binding().shard_id.brain_id,
+            &db.binding().shard_id.profile_id,
+            db,
+        ),
+        temp.path(),
+        None,
+        Vec::new(),
+        TEST_INGEST_BOUNDS,
+        &cancellation,
+    )
+    .await;
+
+    assert_eq!(outcome.units_admitted, 0);
+    assert_eq!(
+        outcome.coverage,
+        IngestPassCoverage::Partial { deferred_units: 9 }
+    );
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
     );
 }
 
@@ -742,13 +821,14 @@ fn provider_internal_deferral_is_typed_backpressure() {
 fn project_provider_deferral_preserves_existing_deferred_work() {
     let coverage = merge_project_provider_backpressure(
         IngestPassCoverage::Partial { deferred_units: 2 },
+        2,
         3,
         1,
     );
     assert_eq!(
         coverage,
         IngestPassCoverage::Backpressured {
-            admitted_units: 3,
+            admitted_units: 5,
             rejected_units: 3,
         }
     );
@@ -912,6 +992,21 @@ struct NoOpSource {
     provider: &'static str,
     path: PathBuf,
     attempts: Arc<Mutex<usize>>,
+}
+
+fn no_op_source_pair(first_attempts: Arc<Mutex<usize>>) -> Vec<Box<dyn TranscriptSource>> {
+    vec![
+        Box::new(NoOpSource {
+            provider: "first",
+            path: PathBuf::from("first"),
+            attempts: first_attempts,
+        }),
+        Box::new(NoOpSource {
+            provider: "second",
+            path: PathBuf::from("second"),
+            attempts: Arc::new(Mutex::new(0)),
+        }),
+    ]
 }
 
 impl TranscriptSource for NoOpSource {
@@ -1240,6 +1335,10 @@ async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() 
 
     assert_eq!(outcome.units_completed, 1);
     assert!(cancellation.is_cancelled());
+    assert_eq!(
+        outcome.coverage,
+        IngestPassCoverage::Partial { deferred_units: 1 }
+    );
     assert!(
         outcome
             .failures
@@ -1518,6 +1617,59 @@ async fn attempted_no_op_does_not_write_partial_scheduling_state() {
         read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(0)
     );
+}
+
+#[tokio::test]
+async fn transient_frontier_isolated_by_profile_authority() {
+    let first_temp = tempfile::tempdir().unwrap();
+    let second_temp = tempfile::tempdir().unwrap();
+    let first_project = first_temp.path().join("project");
+    let second_project = second_temp.path().join("project");
+    std::fs::create_dir_all(&first_project).unwrap();
+    std::fs::create_dir_all(&second_project).unwrap();
+    let project_id = scheduler_test_project_id();
+    let first_runtime = project_test_runtime(&first_temp, &first_project, project_id.clone()).await;
+    let second_runtime =
+        project_test_runtime(&second_temp, &second_project, project_id.clone()).await;
+    let first_db = first_runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let second_db = second_runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let first_attempts = Arc::new(Mutex::new(0usize));
+    let second_attempts = Arc::new(Mutex::new(0usize));
+    let first_sources = no_op_source_pair(Arc::clone(&first_attempts));
+    let second_sources = no_op_source_pair(Arc::clone(&second_attempts));
+    let bounds = IngestPassBounds {
+        discovered_units: 2,
+        units_per_pass: 1,
+        units_per_source: 1,
+        queue_depth: 1,
+        ..TEST_INGEST_BOUNDS
+    };
+
+    ingest_sources_bounded(
+        first_db,
+        &first_project,
+        &project_id,
+        &first_sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+    ingest_sources_bounded(
+        second_db,
+        &second_project,
+        &project_id,
+        &second_sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(*first_attempts.lock().unwrap(), 1);
+    assert_eq!(*second_attempts.lock().unwrap(), 1);
 }
 
 #[test]

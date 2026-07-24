@@ -410,7 +410,24 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
             }
         }
     }
-    if !cancelled {
+    if cancelled {
+        let deferred = u64::try_from(selected.len().saturating_sub(attempted))
+            .unwrap_or(u64::MAX)
+            .max(1);
+        coverage = match coverage {
+            IngestPassCoverage::Backpressured { rejected_units, .. } => {
+                IngestPassCoverage::Backpressured {
+                    admitted_units: u64::try_from(attempted).unwrap_or(u64::MAX),
+                    rejected_units: rejected_units.max(deferred),
+                }
+            }
+            IngestPassCoverage::Complete | IngestPassCoverage::Partial { .. } => {
+                IngestPassCoverage::Partial {
+                    deferred_units: deferred,
+                }
+            }
+        };
+    } else {
         coverage = finish_user_provider_coverage(
             coverage,
             selected.len(),

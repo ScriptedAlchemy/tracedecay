@@ -15,7 +15,7 @@ use tracedecay_store::StoreShardScopeV1;
 use super::failure::{ProviderRunFold, TranscriptCatchUpFailure, claude_catch_up_failure};
 use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
 use super::scheduler::{
-    default_ingest_pass_bounds, ingest_sources, merge_project_provider_backpressure,
+    default_ingest_pass_bounds, ingest_sources_bounded, merge_project_provider_backpressure,
 };
 use super::startup::TranscriptIngestOutcome;
 use super::user::provider_selected;
@@ -166,11 +166,13 @@ async fn ingest_project_sources_for_provider_inner(
         }
         Some(provider) => push_file_source(&mut sources, provider),
     }
-    let mut source_outcome = Box::pin(ingest_sources(
+    let mut source_outcome = Box::pin(ingest_sources_bounded(
         registered,
         project_root,
         &canonical_project_id,
         &sources,
+        default_ingest_pass_bounds(),
+        &ObservationCancellation::default(),
     ))
     .await;
     let scope = ObservationScopeV1::Project {
@@ -242,6 +244,7 @@ async fn ingest_project_sources_for_provider_inner(
     }
     source_outcome.coverage = merge_project_provider_backpressure(
         source_outcome.coverage,
+        source_outcome.units_admitted,
         provider_runs.units_admitted,
         provider_runs.deferred_units,
     );
@@ -258,7 +261,7 @@ async fn ingest_project_sources_for_provider_inner(
     finalize_project_ingest(registered, &canonical_project_id, project_root).await;
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
-    source_outcome
+    source_outcome.into_transcript_outcome()
 }
 
 pub(crate) async fn finalize_project_ingest(

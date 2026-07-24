@@ -2,7 +2,8 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
+use tracedecay_store::StoreShardScopeV1;
 
 use crate::application::host_admission::DEFAULT_MAX_RECORDS;
 use crate::application::observation::ObservationCancellation;
@@ -35,13 +36,21 @@ const MAX_TRANSIENT_INGEST_FRONTIERS: usize = 256;
 
 #[derive(Clone, PartialEq, Eq)]
 struct TransientIngestAuthority {
+    brain_id: BrainId,
+    profile_id: UserProfileId,
     project_id: ProjectId,
     providers: Vec<&'static str>,
 }
 
 impl TransientIngestAuthority {
-    fn new(project_id: &ProjectId, sources: &[Box<dyn TranscriptSource>]) -> Self {
+    fn new(
+        db: &RegisteredGlobalDb,
+        project_id: &ProjectId,
+        sources: &[Box<dyn TranscriptSource>],
+    ) -> Self {
         Self {
+            brain_id: db.binding().shard_id.brain_id.clone(),
+            profile_id: db.binding().shard_id.profile_id.clone(),
             project_id: project_id.clone(),
             providers: sources.iter().map(|source| source.provider()).collect(),
         }
@@ -101,6 +110,7 @@ pub(crate) fn default_ingest_pass_bounds() -> IngestPassBounds {
 
 pub(super) fn merge_project_provider_backpressure(
     coverage: IngestPassCoverage,
+    source_units: u64,
     provider_units: u64,
     provider_deferred: u64,
 ) -> IngestPassCoverage {
@@ -108,9 +118,12 @@ pub(super) fn merge_project_provider_backpressure(
         return coverage;
     }
     let (admitted_units, rejected_units) = match coverage {
-        IngestPassCoverage::Complete => (provider_units, provider_deferred),
+        IngestPassCoverage::Complete => (
+            source_units.saturating_add(provider_units),
+            provider_deferred,
+        ),
         IngestPassCoverage::Partial { deferred_units } => (
-            provider_units,
+            source_units.saturating_add(provider_units),
             deferred_units.saturating_add(provider_deferred),
         ),
         IngestPassCoverage::Backpressured {
@@ -489,13 +502,25 @@ pub(crate) async fn ingest_sources_bounded(
     bounds: IngestPassBounds,
     cancellation: &ObservationCancellation,
 ) -> IngestPassOutcome {
+    if db.binding().shard_id.scope
+        != (StoreShardScopeV1::ProjectSessions {
+            project_id: project_id.clone(),
+        })
+    {
+        return IngestPassOutcome::failed(TranscriptCatchUpFailure::new(
+            "all",
+            "project_sessions_authority",
+            "project_sessions_authority_mismatch",
+            false,
+        ));
+    }
     let store = GlobalDbTranscriptStore::new(db);
     let Some(durable_frontier) =
         read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await
     else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
-    let transient_authority = TransientIngestAuthority::new(project_id, sources);
+    let transient_authority = TransientIngestAuthority::new(db, project_id, sources);
     let frontier = durable_frontier.saturating_add(transient_ingest_frontier(&transient_authority));
     let discovery = discover_ingest_page(sources, project_root, bounds, frontier);
     let units = discovery.units;
@@ -576,7 +601,29 @@ pub(crate) async fn ingest_sources_bounded(
         }
     }
 
-    if !cancelled && attempted < units.len() {
+    if cancelled {
+        let deferred = u64::try_from(
+            units
+                .len()
+                .saturating_sub(attempted)
+                .saturating_add(deferred_discovery_units),
+        )
+        .unwrap_or(u64::MAX)
+        .max(1);
+        coverage = match coverage {
+            IngestPassCoverage::Backpressured { rejected_units, .. } => {
+                IngestPassCoverage::Backpressured {
+                    admitted_units: u64::try_from(attempted).unwrap_or(u64::MAX),
+                    rejected_units: rejected_units.max(deferred),
+                }
+            }
+            IngestPassCoverage::Complete | IngestPassCoverage::Partial { .. } => {
+                IngestPassCoverage::Partial {
+                    deferred_units: deferred,
+                }
+            }
+        };
+    } else if attempted < units.len() {
         let known_deferred = units.len().saturating_sub(attempted);
         let deferred = u64::try_from(known_deferred.saturating_add(deferred_discovery_units))
             .unwrap_or(u64::MAX);
