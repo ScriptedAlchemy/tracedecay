@@ -18,7 +18,7 @@ use tracedecay_store::{
 use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
     PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
-    connection::OpenedDatabaseFile,
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     migration_sql::{MigrationSqlError, MigrationSqlHandle},
     reader::{
         ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderQueryExecutor,
@@ -42,12 +42,31 @@ impl RepositoryPhysicalAttachmentFactory {
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
+        self.attach_with_start_hook(binding, locator, path, admission, &mut |_| {})
+    }
+
+    fn attach_with_start_hook(
+        &self,
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+        path: PathBuf,
+        admission: AdmissionConfigV1,
+        start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
+    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
         if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
             return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
         }
         let opened_database =
             OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
-        self.attach_opened(binding, locator, path, admission, opened_database, false)
+        self.attach_opened(
+            binding,
+            locator,
+            path,
+            admission,
+            opened_database,
+            false,
+            start_hook,
+        )
     }
 
     pub fn initialize(
@@ -62,7 +81,15 @@ impl RepositoryPhysicalAttachmentFactory {
         }
         let opened_database = OpenedDatabaseFile::create_new(&path)
             .map_err(RepositoryAttachmentStartError::Identity)?;
-        self.attach_opened(binding, locator, path, admission, opened_database, true)
+        self.attach_opened(
+            binding,
+            locator,
+            path,
+            admission,
+            opened_database,
+            true,
+            &mut |_| {},
+        )
     }
 
     fn attach_opened(
@@ -73,10 +100,24 @@ impl RepositoryPhysicalAttachmentFactory {
         admission: AdmissionConfigV1,
         opened_database: OpenedDatabaseFile,
         created: bool,
+        start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
         let writer_locator =
             match ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()) {
-                Ok(locator) => locator,
+                Ok(locator) => {
+                    let opened = match opened_database.try_clone() {
+                        Ok(opened) => opened,
+                        Err(error) => {
+                            return Err(repository_start_failure(
+                                opened_database,
+                                &path,
+                                created,
+                                RepositoryAttachmentStartError::Identity(error),
+                            ));
+                        }
+                    };
+                    locator.with_opened_database(opened)
+                }
                 Err(error) => {
                     return Err(repository_start_failure(
                         opened_database,
@@ -88,7 +129,20 @@ impl RepositoryPhysicalAttachmentFactory {
             };
         let reader_locator =
             match ExistingReaderLocator::new(binding.clone(), locator, path.clone()) {
-                Ok(locator) => locator,
+                Ok(locator) => {
+                    let opened = match opened_database.try_clone() {
+                        Ok(opened) => opened,
+                        Err(error) => {
+                            return Err(repository_start_failure(
+                                opened_database,
+                                &path,
+                                created,
+                                RepositoryAttachmentStartError::Identity(error),
+                            ));
+                        }
+                    };
+                    locator.with_opened_database(opened)
+                }
                 Err(error) => {
                     return Err(repository_start_failure(
                         opened_database,
@@ -98,11 +152,14 @@ impl RepositoryPhysicalAttachmentFactory {
                     ));
                 }
             };
-        let writer = match PersistentWriter::start(
+        start_hook(AttachmentWorkerStartStage::BeforeWriter);
+        let writer_result = PersistentWriter::start(
             writer_locator,
             admission.clone(),
             ConcreteRepositoryWriteExecutor::default(),
-        ) {
+        );
+        start_hook(AttachmentWorkerStartStage::AfterWriter);
+        let writer = match writer_result {
             Ok(writer) => writer,
             Err(error) => {
                 return Err(repository_start_failure(
@@ -113,11 +170,14 @@ impl RepositoryPhysicalAttachmentFactory {
                 ));
             }
         };
-        let readers = match ReaderPool::start(
+        start_hook(AttachmentWorkerStartStage::BeforeReaders);
+        let readers_result = ReaderPool::start(
             reader_locator,
             admission.readers,
             RepositoryRuntimeReadExecutor::default(),
-        ) {
+        );
+        start_hook(AttachmentWorkerStartStage::AfterReaders);
+        let readers = match readers_result {
             Ok(readers) => readers,
             Err(error) => {
                 let _ = writer.shutdown_and_join();
@@ -129,6 +189,19 @@ impl RepositoryPhysicalAttachmentFactory {
                 ));
             }
         };
+        let expected_identity = opened_database.identity();
+        if writer.opened_file_identity() != Some(expected_identity)
+            || readers.opened_file_identity() != Some(expected_identity)
+        {
+            drop(readers);
+            let _ = writer.shutdown_and_join();
+            return Err(repository_start_failure(
+                opened_database,
+                &path,
+                created,
+                RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Replaced),
+            ));
+        }
         if let Err(error) = opened_database.verify_current_path(&path) {
             drop(readers);
             let _ = writer.shutdown_and_join();
@@ -156,6 +229,14 @@ impl RepositoryPhysicalAttachmentFactory {
             }),
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachmentWorkerStartStage {
+    BeforeWriter,
+    AfterWriter,
+    BeforeReaders,
+    AfterReaders,
 }
 
 fn repository_start_failure(
@@ -615,7 +696,7 @@ fn wal_bytes(database_path: &std::path::Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{fs, time::Duration};
 
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
@@ -651,6 +732,61 @@ mod tests {
 
     fn statement(sql: &str, params: Vec<MigrationSqlValue>) -> MigrationSqlStatement {
         MigrationSqlStatement::new(sql.to_owned(), params).unwrap()
+    }
+
+    fn create_identity_database(path: &std::path::Path, value: &str) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE identity_probe (value TEXT NOT NULL)")
+            .unwrap();
+        connection
+            .execute("INSERT INTO identity_probe (value) VALUES (?)", [value])
+            .unwrap();
+    }
+
+    #[test]
+    fn writer_binds_pinned_file_across_a_b_a_path_swap() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("repository.sqlite3");
+        let displaced = directory.path().join("repository-a.sqlite3");
+        let replacement = directory.path().join("repository-b.sqlite3");
+        create_identity_database(&path, "A");
+        create_identity_database(&replacement, "B");
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let result = RepositoryPhysicalAttachmentFactory.attach_with_start_hook(
+            binding.clone(),
+            locator(&binding),
+            path.clone(),
+            AdmissionConfigV1::default(),
+            &mut |stage| match stage {
+                AttachmentWorkerStartStage::BeforeWriter => {
+                    fs::rename(&path, &displaced).unwrap();
+                    fs::rename(&replacement, &path).unwrap();
+                }
+                AttachmentWorkerStartStage::AfterWriter => {
+                    fs::rename(&path, &replacement).unwrap();
+                    fs::rename(&displaced, &path).unwrap();
+                }
+                _ => {}
+            },
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("attachment unexpectedly started across path replacement"),
+        };
+        assert!(matches!(error, RepositoryAttachmentStartError::Writer(_)));
+
+        let canonical_value: String = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT value FROM identity_probe", [], |row| row.get(0))
+            .unwrap();
+        let replacement_value: String = rusqlite::Connection::open(&replacement)
+            .unwrap()
+            .query_row("SELECT value FROM identity_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(canonical_value, "A");
+        assert_eq!(replacement_value, "B");
     }
 
     #[test]

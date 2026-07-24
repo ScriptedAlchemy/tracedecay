@@ -29,7 +29,7 @@ pub(crate) struct OpenedDatabaseFile {
 
 impl OpenedDatabaseFile {
     pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
-        let file = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+        let file = open_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Open)?;
         let metadata = file
             .metadata()
             .map_err(|_| OpenedDatabaseFileError::Inspect)?;
@@ -41,12 +41,7 @@ impl OpenedDatabaseFile {
     }
 
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|_| OpenedDatabaseFileError::Create)?;
+        let file = create_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Create)?;
         let metadata = file
             .metadata()
             .map_err(|_| OpenedDatabaseFileError::Inspect)?;
@@ -59,6 +54,47 @@ impl OpenedDatabaseFile {
 
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
+    }
+
+    pub(crate) fn try_clone(&self) -> Result<Self, OpenedDatabaseFileError> {
+        Ok(Self {
+            file: self
+                .file
+                .try_clone()
+                .map_err(|_| OpenedDatabaseFileError::Open)?,
+            identity: self.identity,
+        })
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn worker_open_path(
+        &self,
+        canonical_path: &Path,
+    ) -> Result<PathBuf, OpenedDatabaseFileError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+
+            let descriptor = self.file.as_raw_fd();
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let path = PathBuf::from(format!("/proc/self/fd/{descriptor}"));
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let path = PathBuf::from(format!("/dev/fd/{descriptor}"));
+            let _ = canonical_path;
+            Ok(path)
+        }
+        #[cfg(windows)]
+        {
+            Ok(canonical_path.to_path_buf())
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn worker_open_path(
+        &self,
+        _canonical_path: &Path,
+    ) -> Result<PathBuf, OpenedDatabaseFileError> {
+        Err(OpenedDatabaseFileError::Unsupported)
     }
 
     pub(crate) fn clone_file(&self) -> Result<File, OpenedDatabaseFileError> {
@@ -135,6 +171,47 @@ impl fmt::Display for OpenedDatabaseFileError {
 }
 
 impl std::error::Error for OpenedDatabaseFileError {}
+
+#[cfg(not(windows))]
+fn open_pinned_database(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(windows)]
+fn open_pinned_database(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn create_pinned_database(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn create_pinned_database(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+}
+
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 
 fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();

@@ -32,7 +32,7 @@ use crate::{
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
-    connection::{self, ConnectionMode},
+    connection::{self, ConnectionMode, OpenedDatabaseFile},
     migration_sql::{
         WriterCommand as MigrationSqlWriterCommand, reject_writer_command, run_writer_command,
     },
@@ -55,6 +55,9 @@ const HARD_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(super) struct Worker {
     pub(super) path: PathBuf,
+    pub(super) canonical_path: PathBuf,
+    pub(super) expected_file_identity: Option<u64>,
+    pub(super) _opened_database: Option<Arc<OpenedDatabaseFile>>,
     pub(super) binding: StoreRuntimeBindingV1,
     pub(super) config: AdmissionConfigV1,
     pub(super) receiver: mpsc::Receiver<AcceptedRequest>,
@@ -71,7 +74,7 @@ pub(super) struct Worker {
     pub(super) watermark_publisher: CommittedWatermarkPublisher,
     pub(super) checkpoint_status: watch::Sender<CheckpointStatus>,
     pub(super) checkpoint_pressure: watch::Sender<CheckpointPressure>,
-    pub(super) started: SyncSender<Result<(), WriterStartError>>,
+    pub(super) started: SyncSender<Result<Option<u64>, WriterStartError>>,
 }
 
 impl Worker {
@@ -82,6 +85,34 @@ impl Worker {
                 return self.fail_start(WriterStartError::OpenFailed);
             }
             Err(_) => return self.fail_start(WriterStartError::BusyTimeoutSetupFailed),
+        };
+        #[cfg(unix)]
+        if self.expected_file_identity.is_some()
+            && connection
+                .path()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .as_deref()
+                != Some(self.canonical_path.as_path())
+        {
+            return self.fail_start(WriterStartError::OpenedDatabasePathMismatch);
+        }
+        let opened_file_identity = match self.expected_file_identity {
+            Some(expected) => {
+                let actual = match OpenedDatabaseFile::pin(&self.path) {
+                    Ok(opened) => opened.identity(),
+                    Err(error) => {
+                        return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
+                    }
+                };
+                if actual != expected {
+                    return self.fail_start(WriterStartError::OpenedDatabaseIdentityMismatch {
+                        expected,
+                        actual,
+                    });
+                }
+                Some(actual)
+            }
+            None => None,
         };
         let checkpoint = match WriterCheckpointController::new(
             RusqliteCheckpointDriver::new(connection),
@@ -99,7 +130,7 @@ impl Worker {
         };
         self.state
             .store(WriterState::Ready as u8, Ordering::Release);
-        if self.started.send(Ok(())).is_err() {
+        if self.started.send(Ok(opened_file_identity)).is_err() {
             self.state
                 .store(WriterState::Draining as u8, Ordering::Release);
             return;

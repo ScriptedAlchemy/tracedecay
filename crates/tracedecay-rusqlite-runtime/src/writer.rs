@@ -40,6 +40,7 @@ use crate::{
         CheckpointBlockers, CheckpointError, CheckpointOutcome, CheckpointPressure,
         CheckpointResult, CheckpointStatus, MaintenanceCheckpointMode, RusqliteCheckpointError,
     },
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     maintenance::ExclusiveMaintenancePermit,
     migration_sql::WriterCommand as MigrationSqlWriterCommand,
     persistence::RuntimeWriterPersistence,
@@ -279,6 +280,7 @@ pub struct ExistingWriterLocator {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
     path: PathBuf,
+    opened_database: Option<Arc<OpenedDatabaseFile>>,
 }
 
 impl ExistingWriterLocator {
@@ -298,6 +300,7 @@ impl ExistingWriterLocator {
                 binding,
                 locator,
                 path,
+                opened_database: None,
             }),
             Ok(_) => Err(WriterStartError::LocatorPathIsNotFile),
             Err(_) => Err(WriterStartError::LocatorPathMissing),
@@ -309,6 +312,25 @@ impl ExistingWriterLocator {
     }
     pub fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
         &self.locator
+    }
+    pub(crate) fn with_opened_database(mut self, opened_database: OpenedDatabaseFile) -> Self {
+        self.opened_database = Some(Arc::new(opened_database));
+        self
+    }
+    pub(crate) fn expected_file_identity(&self) -> Option<u64> {
+        self.opened_database
+            .as_ref()
+            .map(|opened| opened.identity())
+    }
+    fn worker_open_path(&self) -> Result<PathBuf, WriterStartError> {
+        self.opened_database.as_ref().map_or_else(
+            || Ok(self.path.clone()),
+            |opened| {
+                opened
+                    .worker_open_path(&self.path)
+                    .map_err(WriterStartError::OpenedDatabaseIdentity)
+            },
+        )
     }
     fn path(&self) -> &Path {
         &self.path
@@ -329,6 +351,9 @@ pub enum WriterStartError {
     BusyTimeoutSetupFailed,
     CheckpointSetupFailed,
     CheckpointSchedulerSetupFailed,
+    OpenedDatabaseIdentity(OpenedDatabaseFileError),
+    OpenedDatabaseIdentityMismatch { expected: u64, actual: u64 },
+    OpenedDatabasePathMismatch,
 }
 
 impl fmt::Display for WriterStartError {
@@ -358,6 +383,19 @@ impl fmt::Display for WriterStartError {
             Self::CheckpointSchedulerSetupFailed => {
                 f.write_str("failed to initialize SQLite writer checkpoint scheduler")
             }
+            Self::OpenedDatabaseIdentity(error) => {
+                write!(
+                    f,
+                    "failed to identify opened SQLite writer database: {error}"
+                )
+            }
+            Self::OpenedDatabaseIdentityMismatch { expected, actual } => write!(
+                f,
+                "SQLite writer opened file identity {actual}, expected {expected}"
+            ),
+            Self::OpenedDatabasePathMismatch => {
+                f.write_str("SQLite writer opened a displaced pinned database path")
+            }
         }
     }
 }
@@ -367,6 +405,7 @@ impl Error for WriterStartError {
         match self {
             Self::InvalidAdmission(error) => Some(error),
             Self::ThreadSpawn(error) => Some(error),
+            Self::OpenedDatabaseIdentity(error) => Some(error),
             _ => None,
         }
     }
@@ -483,6 +522,7 @@ pub struct PersistentWriter {
     watermark_source: CommitWatermarkSubscription,
     checkpoint_status: watch::Receiver<CheckpointStatus>,
     checkpoint_pressure: watch::Receiver<CheckpointPressure>,
+    opened_file_identity: Option<u64>,
 }
 
 impl PersistentWriter {
@@ -521,6 +561,9 @@ impl PersistentWriter {
         let binding = locator.binding().clone();
         let verified_locator = locator.verified_locator().clone();
         let path = locator.path().to_owned();
+        let worker_open_path = locator.worker_open_path()?;
+        let expected_file_identity = locator.expected_file_identity();
+        let opened_database = locator.opened_database;
         let watermark_publisher = CommittedWatermarkPublisher::new(binding.clone());
         let watermark_source = watermark_publisher.subscribe();
         let (sender, receiver) = mpsc::channel(capacity);
@@ -534,7 +577,10 @@ impl PersistentWriter {
             watch::channel(CheckpointPressure::Open);
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
         let worker = Worker {
-            path: path.clone(),
+            path: worker_open_path,
+            canonical_path: path.clone(),
+            expected_file_identity,
+            _opened_database: opened_database,
             binding: binding.clone(),
             config,
             receiver,
@@ -557,7 +603,7 @@ impl PersistentWriter {
             .spawn(move || worker.run())
             .map_err(WriterStartError::ThreadSpawn)?;
         match started_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(opened_file_identity)) => Ok(Self {
                 binding,
                 verified_locator,
                 path,
@@ -575,6 +621,7 @@ impl PersistentWriter {
                 watermark_source,
                 checkpoint_status,
                 checkpoint_pressure,
+                opened_file_identity,
             }),
             Ok(Err(error)) => {
                 let _ = join.join();
@@ -604,6 +651,9 @@ impl PersistentWriter {
     }
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+    pub fn opened_file_identity(&self) -> Option<u64> {
+        self.opened_file_identity
     }
     pub fn state(&self) -> WriterState {
         WriterState::load(&self.state)

@@ -17,7 +17,7 @@ use tracedecay_store::{
 use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
     PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
-    connection::OpenedDatabaseFile,
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     migration_sql::{MigrationSqlError, MigrationSqlHandle},
     reader::{ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderStartError},
     writer::WriterPersistence,
@@ -125,10 +125,19 @@ impl GraphPhysicalAttachmentFactory {
         physical: &CodeShardPhysicalLocator,
         admission: AdmissionConfigV1,
     ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
+        self.attach_with_start_hook(physical, admission, &mut |_| {})
+    }
+
+    fn attach_with_start_hook(
+        &self,
+        physical: &CodeShardPhysicalLocator,
+        admission: AdmissionConfigV1,
+        start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
+    ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
         let database_path = physical.path().to_path_buf();
         let opened_database = OpenedDatabaseFile::pin(&database_path)
             .map_err(GraphPhysicalAttachmentStartError::Identity)?;
-        self.attach_opened(physical, admission, opened_database, false)
+        self.attach_opened(physical, admission, opened_database, false, start_hook)
     }
 
     pub fn initialize(
@@ -163,7 +172,7 @@ impl GraphPhysicalAttachmentFactory {
                 ));
             }
         };
-        self.attach_opened(&physical, admission, opened_database, true)
+        self.attach_opened(&physical, admission, opened_database, true, &mut |_| {})
     }
 
     fn attach_opened(
@@ -172,6 +181,7 @@ impl GraphPhysicalAttachmentFactory {
         admission: AdmissionConfigV1,
         opened_database: OpenedDatabaseFile,
         created: bool,
+        start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
         let database_path = physical.path().to_path_buf();
         let parts = match self.prepare(physical) {
@@ -187,13 +197,43 @@ impl GraphPhysicalAttachmentFactory {
         };
         let GraphPhysicalAttachmentParts {
             binding,
-            reader_locator,
+            mut reader_locator,
             writer_locator,
             reader_executor,
             ..
         } = parts;
+        reader_locator = reader_locator.with_opened_database(match opened_database.try_clone() {
+            Ok(opened) => opened,
+            Err(error) => {
+                return Err(graph_start_failure(
+                    opened_database,
+                    &database_path,
+                    created,
+                    GraphPhysicalAttachmentStartError::Identity(error),
+                ));
+            }
+        });
+        let writer_locator = match writer_locator
+            .map(|locator| {
+                opened_database
+                    .try_clone()
+                    .map(|opened| locator.with_opened_database(opened))
+            })
+            .transpose()
+        {
+            Ok(locator) => locator,
+            Err(error) => {
+                return Err(graph_start_failure(
+                    opened_database,
+                    &database_path,
+                    created,
+                    GraphPhysicalAttachmentStartError::Identity(error),
+                ));
+            }
+        };
         let reader_budget = admission.readers.clone();
-        let writer = match writer_locator
+        start_hook(AttachmentWorkerStartStage::BeforeWriter);
+        let writer_result = writer_locator
             .map(|locator| {
                 PersistentWriter::start_with_persistence(
                     locator,
@@ -202,8 +242,9 @@ impl GraphPhysicalAttachmentFactory {
                 )
                 .map(Arc::new)
             })
-            .transpose()
-        {
+            .transpose();
+        start_hook(AttachmentWorkerStartStage::AfterWriter);
+        let writer = match writer_result {
             Ok(writer) => writer,
             Err(error) => {
                 return Err(graph_start_failure(
@@ -214,7 +255,10 @@ impl GraphPhysicalAttachmentFactory {
                 ));
             }
         };
-        let readers = match ReaderPool::start(reader_locator, reader_budget, reader_executor) {
+        start_hook(AttachmentWorkerStartStage::BeforeReaders);
+        let readers_result = ReaderPool::start(reader_locator, reader_budget, reader_executor);
+        start_hook(AttachmentWorkerStartStage::AfterReaders);
+        let readers = match readers_result {
             Ok(readers) => readers,
             Err(error) => {
                 if let Some(writer) = writer.and_then(|writer| Arc::try_unwrap(writer).ok()) {
@@ -228,6 +272,23 @@ impl GraphPhysicalAttachmentFactory {
                 ));
             }
         };
+        let expected_identity = opened_database.identity();
+        if writer
+            .as_ref()
+            .is_some_and(|writer| writer.opened_file_identity() != Some(expected_identity))
+            || readers.opened_file_identity() != Some(expected_identity)
+        {
+            if let Some(writer) = writer.and_then(|writer| Arc::try_unwrap(writer).ok()) {
+                let _ = writer.shutdown_and_join();
+            }
+            drop(readers);
+            return Err(graph_start_failure(
+                opened_database,
+                &database_path,
+                created,
+                GraphPhysicalAttachmentStartError::Identity(OpenedDatabaseFileError::Replaced),
+            ));
+        }
         if let Err(error) = opened_database.verify_current_path(&database_path) {
             if let Some(writer) = writer.and_then(|writer| Arc::try_unwrap(writer).ok()) {
                 let _ = writer.shutdown_and_join();
@@ -257,6 +318,14 @@ impl GraphPhysicalAttachmentFactory {
             }),
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachmentWorkerStartStage {
+    BeforeWriter,
+    AfterWriter,
+    BeforeReaders,
+    AfterReaders,
 }
 
 fn graph_start_failure(
@@ -705,5 +774,102 @@ impl Error for GraphPhysicalAttachmentStartError {
             Self::Writer(error) => Some(error),
             Self::ImmutableInitialization => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod attachment_identity_tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+    use tracedecay_domain::LocatorDigest;
+    use tracedecay_store::{StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
+
+    use super::*;
+
+    fn snapshot_binding() -> StoreRuntimeBindingV1 {
+        serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.graph-identity",
+                "profile_id": "profile.graph-identity",
+                "scope": {
+                    "kind": "code",
+                    "project_id": "project.graph-identity",
+                    "repository_id": "repository.graph-identity",
+                    "scope": {
+                        "kind": "snapshot",
+                        "worktree_id": "worktree.graph-identity",
+                        "snapshot_id": "snapshot.graph-identity"
+                    }
+                }
+            },
+            "incarnation": 2,
+            "authority_epoch": 9
+        }))
+        .unwrap()
+    }
+
+    fn create_identity_database(path: &std::path::Path, value: &str) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE identity_probe (value TEXT NOT NULL)")
+            .unwrap();
+        connection
+            .execute("INSERT INTO identity_probe (value) VALUES (?)", [value])
+            .unwrap();
+    }
+
+    #[test]
+    fn readers_bind_pinned_file_across_a_b_a_path_swap() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("graph.sqlite3");
+        let displaced = directory.path().join("graph-a.sqlite3");
+        let replacement = directory.path().join("graph-b.sqlite3");
+        create_identity_database(&path, "A");
+        create_identity_database(&replacement, "B");
+        let path = path.canonicalize().unwrap();
+        let binding = snapshot_binding();
+        let locator = VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            StoreIncarnationV1::new(2).unwrap(),
+            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        );
+        let physical =
+            CodeShardPhysicalLocator::from_verified_existing(binding, locator, path.clone())
+                .unwrap();
+
+        let result = GraphPhysicalAttachmentFactory.attach_with_start_hook(
+            &physical,
+            AdmissionConfigV1::default(),
+            &mut |stage| match stage {
+                AttachmentWorkerStartStage::BeforeReaders => {
+                    fs::rename(&path, &displaced).unwrap();
+                    fs::rename(&replacement, &path).unwrap();
+                }
+                AttachmentWorkerStartStage::AfterReaders => {
+                    fs::rename(&path, &replacement).unwrap();
+                    fs::rename(&displaced, &path).unwrap();
+                }
+                _ => {}
+            },
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("attachment unexpectedly started across path replacement"),
+        };
+        assert!(matches!(
+            error,
+            GraphPhysicalAttachmentStartError::Reader(_)
+        ));
+        let canonical_value: String = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT value FROM identity_probe", [], |row| row.get(0))
+            .unwrap();
+        let replacement_value: String = rusqlite::Connection::open(&replacement)
+            .unwrap()
+            .query_row("SELECT value FROM identity_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(canonical_value, "A");
+        assert_eq!(replacement_value, "B");
     }
 }

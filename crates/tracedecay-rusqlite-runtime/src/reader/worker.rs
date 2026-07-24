@@ -15,7 +15,7 @@ use tracedecay_store::{
     StorageRuntimeErrorV1, UnavailableReasonV1,
 };
 
-use crate::connection::{self, ConnectionMode};
+use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, execute_query,
 };
@@ -121,6 +121,7 @@ pub(crate) struct WorkerClient {
 pub(crate) struct SpawnedWorker {
     pub client: WorkerClient,
     pub join: JoinHandle<()>,
+    pub opened_file_identity: u64,
 }
 
 impl WorkerClient {
@@ -288,6 +289,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     locator: ExistingReaderLocator,
     mut executor: E,
 ) -> Result<SpawnedWorker, ReaderStartError> {
+    let worker_open_path = locator.worker_open_path()?;
     let (sender, receiver) = mpsc::channel();
     let snapshot_sender = Arc::new(Mutex::new(None));
     let worker_snapshot_sender = Arc::clone(&snapshot_sender);
@@ -295,7 +297,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     let join = thread::Builder::new()
         .name("tracedecay-rusqlite-reader".to_owned())
         .spawn(move || {
-            let connection = match connection::open(locator.path(), ConnectionMode::Reader) {
+            let connection = match connection::open(&worker_open_path, ConnectionMode::Reader) {
                 Ok(connection) => connection,
                 Err(error) if error.is_open_failure() => {
                     let _ = started.send(Err(ReaderStartError::OpenFailed));
@@ -306,14 +308,36 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                     return;
                 }
             };
+            #[cfg(unix)]
+            if locator.expected_file_identity().is_some()
+                && connection
+                    .path()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .as_deref()
+                    != Some(locator.path())
+            {
+                let _ = started.send(Err(ReaderStartError::OpenedDatabasePathMismatch));
+                return;
+            }
+            let opened_file_identity = match OpenedDatabaseFile::pin(&worker_open_path) {
+                Ok(opened) => opened.identity(),
+                Err(error) => {
+                    let _ = started.send(Err(ReaderStartError::OpenedDatabaseIdentity(error)));
+                    return;
+                }
+            };
+            let _keep_pinned_database_alive = locator;
             let interrupt = Arc::new(connection.get_interrupt_handle());
-            if started.send(Ok(Arc::clone(&interrupt))).is_err() {
+            if started
+                .send(Ok((Arc::clone(&interrupt), opened_file_identity)))
+                .is_err()
+            {
                 return;
             }
             run(connection, receiver, worker_snapshot_sender, &mut executor);
         })
         .map_err(ReaderStartError::ThreadSpawn)?;
-    let interrupt = startup
+    let (interrupt, opened_file_identity) = startup
         .recv()
         .map_err(|_| ReaderStartError::StartupChannelClosed)??;
     Ok(SpawnedWorker {
@@ -323,6 +347,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             interrupt,
         },
         join,
+        opened_file_identity,
     })
 }
 

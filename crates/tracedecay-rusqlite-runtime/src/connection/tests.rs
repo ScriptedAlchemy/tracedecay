@@ -206,11 +206,9 @@ fn create_new_refuses_to_replace_an_existing_database() {
     ));
 }
 
-#[cfg(windows)]
+#[cfg(unix)]
 #[test]
-fn windows_pinned_file_either_blocks_replacement_or_detects_the_new_file() {
-    use std::io::{Read, Seek, SeekFrom};
-
+fn worker_open_path_stays_on_the_pinned_file_across_an_a_b_a_swap() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("identity.db");
     let retired = directory.path().join("identity.retired.db");
@@ -218,30 +216,40 @@ fn windows_pinned_file_either_blocks_replacement_or_detects_the_new_file() {
     std::fs::write(&path, b"original").unwrap();
     std::fs::write(&replacement, b"replacement").unwrap();
     let pinned = OpenedDatabaseFile::pin(&path).unwrap();
-    let mut retained = pinned.clone_file().unwrap();
+    let retained = pinned.try_clone().unwrap();
+    let worker_path = retained.worker_open_path(&path).unwrap();
 
-    match std::fs::rename(&path, &retired) {
-        Ok(()) => {
-            std::fs::rename(&replacement, &path).unwrap();
-            assert_eq!(
-                pinned.verify_current_path(&path),
-                Err(OpenedDatabaseFileError::Replaced)
-            );
-            retained.seek(SeekFrom::Start(0)).unwrap();
-            let mut contents = Vec::new();
-            retained.read_to_end(&mut contents).unwrap();
-            assert_eq!(contents, b"original");
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            pinned.verify_current_path(&path).unwrap();
-            drop(retained);
-            drop(pinned);
-            std::fs::rename(&path, &retired)
-                .expect("replacement must become possible after retained handles close");
-            std::fs::rename(&replacement, &path).unwrap();
-        }
-        Err(error) => panic!("unexpected Windows replacement error: {error}"),
-    }
+    std::fs::rename(&path, &retired).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    assert_eq!(std::fs::read(&worker_path).unwrap(), b"original");
+
+    std::fs::rename(&path, &replacement).unwrap();
+    std::fs::rename(&retired, &path).unwrap();
+    assert_eq!(std::fs::read(&worker_path).unwrap(), b"original");
+    pinned.verify_current_path(&path).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_pinned_file_blocks_replacement_until_authority_closes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.db");
+    let retired = directory.path().join("identity.retired.db");
+    std::fs::write(&path, b"original").unwrap();
+    let pinned = OpenedDatabaseFile::pin(&path).unwrap();
+    let retained = pinned.try_clone().unwrap();
+
+    assert_eq!(retained.worker_open_path(&path).unwrap(), path);
+    assert_eq!(
+        std::fs::rename(&path, &retired).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    pinned.verify_current_path(&path).unwrap();
+
+    drop(retained);
+    drop(pinned);
+    std::fs::rename(&path, &retired)
+        .expect("replacement must become possible after retained handles close");
 }
 
 #[cfg(windows)]
