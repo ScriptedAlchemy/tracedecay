@@ -111,10 +111,8 @@ function useDoctorAttention(): boolean {
   });
   const result = findings.data;
   if (!result || result.outcome === 'transport') return false;
-  return result.envelope.payload.entries.some(
-    (entry) =>
-      entry.finding.state !== 'healthy_complete_coverage' &&
-      entry.finding.state !== 'unsupported',
+  return result.envelope.payload.kinds.some(
+    (kind) => kind.state !== 'healthy_complete_coverage' && kind.state !== 'unsupported',
   );
 }
 

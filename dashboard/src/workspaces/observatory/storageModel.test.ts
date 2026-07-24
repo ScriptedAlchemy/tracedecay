@@ -66,49 +66,35 @@ describe('Observatory storage read models', () => {
     expect(EnvelopeSchema(StorageTelemetryPayloadSchema).safeParse(envelope).success).toBe(false);
   });
 
-  it('decodes doctor report entries and maps storage kinds to labels', () => {
-    const entry = (
-      storageKind: string,
-      state: string,
-      statement: string,
-    ) => ({
-      finding: {
-        family: 'storage',
-        state,
-        evidence: [{ family: 'storage', reference: `evidence.${storageKind}` }],
-        coverage: { completeness: 'partial', statement },
-        remediation: null,
-      },
-      storage_kind: storageKind,
+  it('decodes storage finding kind statuses and maps storage kinds to labels', () => {
+    // Mirrors StorageFindingsPayloadV1 in src/dashboard/storage_findings_api.rs:
+    // a per-kind producer support report, not a Doctor report projection.
+    const kind = (storageKind: string, state: string, reason: string) => ({
+      kind: storageKind,
+      state,
+      required_source: `${storageKind}_source`,
+      reason,
     });
     const payload = StorageFindingsPayloadSchema.parse({
-      family_filter: 'storage',
-      entries: [
-        entry('over_budget_store', 'unsupported', 'budget source unavailable'),
-        entry('orphan_store', 'absent', 'no orphan stores observed'),
-        entry('stale_branch_dbs', 'stale', 'inventory watermark is stale'),
-        entry('incident_debris_present', 'degraded', 'quarantined debris is present'),
-        entry('retention_backlog', 'partial', 'backlog scan was partial'),
+      kinds: [
+        kind('over_budget_store', 'unsupported', 'budget source unavailable'),
+        kind('orphan_store', 'absent', 'no orphan stores observed'),
+        kind('stale_branch_dbs', 'stale', 'inventory watermark is stale'),
+        kind('incident_debris_present', 'degraded', 'quarantined debris is present'),
+        kind('retention_backlog', 'partial', 'backlog scan was partial'),
       ],
-      report_coverage: null,
-      remediations: [],
-      known_families: ['storage'],
       note: 'storage evidence',
     });
 
-    expect(
-      payload.entries.map((row) =>
-        row.storage_kind ? storageFindingLabel(row.storage_kind) : row.finding.family,
-      ),
-    ).toEqual([
+    expect(payload.kinds.map((row) => storageFindingLabel(row.kind))).toEqual([
       'Over-budget stores',
       'Orphan stores',
       'Stale branch databases',
       'Incident debris',
       'Retention backlog',
     ]);
-    expect(payload.entries[0]?.finding.coverage.statement).toBe('budget source unavailable');
-    expect(doctorEvidencePresentation(payload.entries[3]!.finding.state)).toEqual({
+    expect(payload.kinds[0]?.reason).toBe('budget source unavailable');
+    expect(doctorEvidencePresentation(payload.kinds[3]!.state)).toEqual({
       label: 'Degraded',
       tokenClass: 'text-state-error',
       dotClass: 'bg-state-error',

@@ -282,7 +282,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
 
   it('GET /api/storage/findings — observatory envelope', () => {
     const env = parse(EnvelopeSchema(StorageFindingsPayloadSchema), '/api/storage/findings');
-    expect(env.payload.entries.length).toBeGreaterThan(0);
+    expect(env.payload.kinds.length).toBeGreaterThan(0);
   });
 
   it('GET /api/doctor/findings — observatory doctor envelope (wire-true unsupported)', () => {

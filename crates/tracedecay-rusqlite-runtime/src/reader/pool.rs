@@ -115,6 +115,7 @@ struct PoolState {
     health_admission_open: bool,
     next_id: u64,
     opening_general: u16,
+    opening_health: u16,
     records: BTreeMap<u64, WorkerRecord>,
     general: VecDeque<AvailableWorker>,
     health: VecDeque<AvailableWorker>,
@@ -134,6 +135,27 @@ impl PoolState {
         match lane {
             ReaderLane::General => &mut self.general,
             ReaderLane::ReservedHealth => &mut self.health,
+        }
+    }
+
+    fn opening(&self, lane: ReaderLane) -> u16 {
+        match lane {
+            ReaderLane::General => self.opening_general,
+            ReaderLane::ReservedHealth => self.opening_health,
+        }
+    }
+
+    fn opening_mut(&mut self, lane: ReaderLane) -> &mut u16 {
+        match lane {
+            ReaderLane::General => &mut self.opening_general,
+            ReaderLane::ReservedHealth => &mut self.opening_health,
+        }
+    }
+
+    fn leased_mut(&mut self, lane: ReaderLane) -> &mut u16 {
+        match lane {
+            ReaderLane::General => &mut self.leased_general,
+            ReaderLane::ReservedHealth => &mut self.leased_health,
         }
     }
 }
@@ -221,6 +243,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 health_admission_open: true,
                 next_id: 1,
                 opening_general: 0,
+                opening_health: 0,
                 records: BTreeMap::new(),
                 general: VecDeque::new(),
                 health: VecDeque::new(),
@@ -365,6 +388,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.opening_general == 0
+            && state.opening_health == 0
             && state.leased_general == 0
             && state.leased_health == 0
             && Arc::strong_count(&self.inner) == 1
@@ -435,11 +459,17 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     snapshot_active: false,
                 });
             }
-            if lane == ReaderLane::General
-                && state.workers(lane).saturating_add(state.opening_general)
-                    < self.inner.budget.max_per_hot_shard
-            {
-                state.opening_general += 1;
+            // The reserved-health lane must be able to grow too. Its single
+            // worker is otherwise only ever spawned in `start`, and a transient
+            // snapshot-end failure retires it permanently: from then on every
+            // health acquisition spins to `max_wait` and reports Saturated for
+            // the life of the attachment, while `snapshot()` still says Ready.
+            let lane_capacity = match lane {
+                ReaderLane::General => self.inner.budget.max_per_hot_shard,
+                ReaderLane::ReservedHealth => 1,
+            };
+            if state.workers(lane).saturating_add(state.opening(lane)) < lane_capacity {
+                *state.opening_mut(lane) += 1;
                 drop(state);
                 let spawned =
                     worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())
@@ -449,7 +479,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.opening_general -= 1;
+                *state.opening_mut(lane) -= 1;
                 let spawned = spawned.map_err(ReaderAcquireError::WorkerStart)?;
                 let id = state.next_id;
                 state.next_id += 1;
@@ -463,7 +493,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     },
                 );
                 if state.lifecycle == ReaderPoolState::Draining {
-                    state.general.push_back(AvailableWorker {
+                    state.available(lane).push_back(AvailableWorker {
                         id,
                         client,
                         idle_since: Instant::now(),
@@ -474,7 +504,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         reason: UnavailableReasonV1::Draining,
                     });
                 }
-                state.leased_general += 1;
+                *state.leased_mut(lane) += 1;
                 drop(state);
                 return Ok(ReaderLease {
                     checkout: Checkout {

@@ -24,18 +24,19 @@ use tracedecay_application::feedback::{
 use tracedecay_application::{
     AffectedTestsRetrievalPort, AnalyzerAdmittedDiagnosticProviderV1, ApplicationContractError,
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    ApplicationResult, AuthorityReceipt, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId,
-    EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
-    EvidenceDomain, EvidencePacket, EvidenceScore, GitIndexApplyPortResultV1,
-    GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
-    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
-    GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
-    GitIndexTransactionService, IdempotencyKey, Omission, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PageState, PolicyConsumerV1, PolicyDecisionRef,
-    PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId,
-    PreviewResult, ReconciliationState, RequestContext, RequestId, ResolvedScope,
-    RetrieverContribution, RetryDirective, SafeDiagnostic, TemporalState,
+    ApplicationResult, AuthorityReceipt, CallableCodeAuthorizationPort, CallableCodeOperationKind,
+    CallableCodeQueryService, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
+    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidencePacket,
+    EvidenceScore, GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
+    GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
+    GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
+    GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey, Omission,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
+    PolicyConsumerV1, PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
+    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestContext,
+    RequestId, ResolvedScope, RetrieverContribution, RetryDirective, SafeDiagnostic, TemporalState,
+    callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
@@ -52,8 +53,8 @@ use tracedecay_policy::configuration::{
     ConfigurationMutationPermissionV1,
 };
 use tracedecay_policy::{
-    AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, TruthFreshnessRequirementV1,
-    TruthSourceStateV1,
+    AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1,
+    TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
 use tracedecay_tool_catalog::{EffectClass, SortContractId, UseCaseId};
 
@@ -91,8 +92,8 @@ use crate::application::feedback::observations::{
     Plan26FeedbackSourceEventV1, Plan26RejectedArgumentV1,
 };
 use crate::application::feedback::owner::{
-    DaemonFeedbackReadOwnerV1, FeedbackReadInvocationResultV1, FeedbackReadOperationV1,
-    FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
+    DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
+    FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
 };
 use crate::application::feedback::{
     Pr12FeedbackCycleLspInput, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
@@ -114,15 +115,16 @@ use crate::application::semantic_runtime::{
 use crate::application_surface::{
     ConfigurationSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
 };
+use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
 };
 use crate::daemon::lsp_gateway::{
     AdmittedRoot, AuthorizedLspSession, DaemonLspRuntimeSession, DaemonLspSessionEndpoint,
-    FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError,
-    LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential, LspSessionId,
-    LspSessionOpenRequest, LspSessionRegistry, Pr12LspSessionFactory, SessionLifecycle,
-    UpstreamCapabilities,
+    FeedbackCycleRequest, FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS,
+    LspEndpointError, LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential,
+    LspSessionId, LspSessionOpenRequest, LspSessionRegistry, Pr12LspSessionFactory,
+    SessionLifecycle, UpstreamCapabilities,
 };
 use crate::db::Database;
 use crate::diagnostics::lsp::broker::DiagnosticBroker;
@@ -164,12 +166,18 @@ pub(crate) enum DaemonInvocationOperation {
     FeedbackGet,
     FeedbackExpand,
     FeedbackList,
+    FeedbackImpact,
+    AffectedTests,
     FeedbackObserve,
     PrimitiveImpact,
     PrimitiveAffectedTests,
     PrimitiveTestResults,
     PrimitiveRead,
+    CodeExactOccurrence,
+    CodePhraseSearch,
+    CodeCallees,
     Configuration,
+    SemanticEvaluateAndPublish,
     LspOpen,
     LspFrame,
     LspPoll,
@@ -186,12 +194,18 @@ impl DaemonInvocationOperation {
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
             Self::FeedbackList => "feedback_list",
+            Self::FeedbackImpact => "feedback_impact",
+            Self::AffectedTests => "affected_tests",
             Self::FeedbackObserve => "feedback_observe",
             Self::PrimitiveImpact => "feedback_impact",
             Self::PrimitiveAffectedTests => "affected_tests",
             Self::PrimitiveTestResults => "test_results",
             Self::PrimitiveRead => "primitive_read",
+            Self::CodeExactOccurrence => "code_exact_occurrence",
+            Self::CodePhraseSearch => "code_phrase_search",
+            Self::CodeCallees => "code_callees",
             Self::Configuration => "configuration",
+            Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
             Self::LspOpen => "lsp_open",
             Self::LspFrame => "lsp_frame",
             Self::LspPoll => "lsp_poll",
@@ -290,6 +304,18 @@ pub(crate) enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    FeedbackImpact {
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    AffectedTests {
+        request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     FeedbackObserve {
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
@@ -319,12 +345,31 @@ pub(crate) enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    PrimitiveCode {
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: crate::application_surface::PrimitiveCodeSurfaceRequest,
+        page: PageRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    CallableCode {
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: crate::application_surface::CallableCodeSurfaceRequest,
+        page: PageRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     Configuration {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: ConfigurationSurfaceRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
+    },
+    SemanticEvaluateAndPublish {
+        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
     },
     LspOpen {
         client_revision: String,
@@ -430,9 +475,23 @@ impl DaemonInvocationRequest {
                     cancellation,
                 }
             }
-            crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact
-            | crate::application_surface::ApplicationSurfaceOperation::AffectedTests
-            | crate::application_surface::ApplicationSurfaceOperation::TestResults
+            crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact => {
+                DaemonInvocationPayload::FeedbackImpact {
+                    request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            crate::application_surface::ApplicationSurfaceOperation::AffectedTests => {
+                DaemonInvocationPayload::AffectedTests {
+                    request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            crate::application_surface::ApplicationSurfaceOperation::TestResults
             | crate::application_surface::ApplicationSurfaceOperation::SessionLookup
             | crate::application_surface::ApplicationSurfaceOperation::QualifiedName
             | crate::application_surface::ApplicationSurfaceOperation::CallChain
@@ -444,8 +503,18 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::FileMetadata
             | crate::application_surface::ApplicationSurfaceOperation::HealthRead
             | crate::application_surface::ApplicationSurfaceOperation::StorageStatus
-            | crate::application_surface::ApplicationSurfaceOperation::DiagnosticsRead => {
+            | crate::application_surface::ApplicationSurfaceOperation::DiagnosticsRead
+            | crate::application_surface::ApplicationSurfaceOperation::CodeSymbolSearch
+            | crate::application_surface::ApplicationSurfaceOperation::CodeSignatureSearch
+            | crate::application_surface::ApplicationSurfaceOperation::CodeImplementations
+            | crate::application_surface::ApplicationSurfaceOperation::CodeTypeHierarchy
+            | crate::application_surface::ApplicationSurfaceOperation::CodeCallers => {
                 unreachable!("primitive operations use their typed constructor")
+            }
+            crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence
+            | crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch
+            | crate::application_surface::ApplicationSurfaceOperation::CodeCallees => {
+                unreachable!("callable code operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::GitPreview
             | crate::application_surface::ApplicationSurfaceOperation::GitApply => {
@@ -620,6 +689,82 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn semantic_evaluate_and_publish(
+        request_id: impl Into<String>,
+        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate },
+        }
+    }
+
+    pub(crate) fn callable_code(
+        request_id: impl Into<String>,
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: crate::application_surface::CallableCodeSurfaceRequest,
+        page: PageRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        debug_assert!(matches!(
+            (&request, surface_operation),
+            (
+                crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+            )
+        ));
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::CallableCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub(crate) fn primitive_code(
+        request_id: impl Into<String>,
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: crate::application_surface::PrimitiveCodeSurfaceRequest,
+        page: PageRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::PrimitiveCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn lsp_open(
         request_id: impl Into<String>,
         client_revision: impl Into<String>,
@@ -709,6 +854,12 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::FeedbackExpand
             }
             DaemonInvocationPayload::FeedbackList { .. } => DaemonInvocationOperation::FeedbackList,
+            DaemonInvocationPayload::FeedbackImpact { .. } => {
+                DaemonInvocationOperation::FeedbackImpact
+            }
+            DaemonInvocationPayload::AffectedTests { .. } => {
+                DaemonInvocationOperation::AffectedTests
+            }
             DaemonInvocationPayload::FeedbackObserve { .. } => {
                 DaemonInvocationOperation::FeedbackObserve
             }
@@ -724,8 +875,26 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::PrimitiveRead { .. } => {
                 DaemonInvocationOperation::PrimitiveRead
             }
+            DaemonInvocationPayload::PrimitiveCode { .. } => {
+                DaemonInvocationOperation::PrimitiveRead
+            }
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                ..
+            } => DaemonInvocationOperation::CodeExactOccurrence,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
+                ..
+            } => DaemonInvocationOperation::CodePhraseSearch,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
+                ..
+            } => DaemonInvocationOperation::CodeCallees,
             DaemonInvocationPayload::Configuration { .. } => {
                 DaemonInvocationOperation::Configuration
+            }
+            DaemonInvocationPayload::SemanticEvaluateAndPublish { .. } => {
+                DaemonInvocationOperation::SemanticEvaluateAndPublish
             }
             DaemonInvocationPayload::LspOpen { .. } => DaemonInvocationOperation::LspOpen,
             DaemonInvocationPayload::LspFrame { .. } => DaemonInvocationOperation::LspFrame,
@@ -746,12 +915,18 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::FeedbackGet
                 | DaemonInvocationOperation::FeedbackExpand
                 | DaemonInvocationOperation::FeedbackList
+                | DaemonInvocationOperation::FeedbackImpact
+                | DaemonInvocationOperation::AffectedTests
                 | DaemonInvocationOperation::FeedbackObserve
                 | DaemonInvocationOperation::PrimitiveImpact
                 | DaemonInvocationOperation::PrimitiveAffectedTests
                 | DaemonInvocationOperation::PrimitiveTestResults
                 | DaemonInvocationOperation::PrimitiveRead
+                | DaemonInvocationOperation::CodeExactOccurrence
+                | DaemonInvocationOperation::CodePhraseSearch
+                | DaemonInvocationOperation::CodeCallees
                 | DaemonInvocationOperation::Configuration
+                | DaemonInvocationOperation::SemanticEvaluateAndPublish
                 | DaemonInvocationOperation::LspOpen
         )
     }
@@ -815,6 +990,89 @@ impl DaemonInvocationRequest {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
+            DaemonInvocationPayload::PrimitiveCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || PageRequest::new(page.page_size, page.cursor.clone()).is_err()
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let matches = matches!(
+                    (surface_operation, request),
+                    (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeSymbolSearch,
+                        crate::application_surface::PrimitiveCodeSurfaceRequest::SymbolSearch(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeSignatureSearch,
+                        crate::application_surface::PrimitiveCodeSurfaceRequest::SignatureSearch(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeImplementations,
+                        crate::application_surface::PrimitiveCodeSurfaceRequest::Implementations(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeTypeHierarchy,
+                        crate::application_surface::PrimitiveCodeSurfaceRequest::TypeHierarchy(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeCallers,
+                        crate::application_surface::PrimitiveCodeSurfaceRequest::Callers(_),
+                    )
+                );
+                if !matches {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
+                if candidate.evaluated_profile_id.trim() != candidate.evaluated_profile_id
+                    || candidate.evaluated_profile_id.is_empty()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::CallableCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || PageRequest::new(page.page_size, page.cursor.clone()).is_err()
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+                let matches = matches!(
+                    (surface_operation, request),
+                    (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+                        crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                    )
+                ) || matches!(
+                    (surface_operation, request),
+                    (
+                        crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+                        crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
+                    )
+                ) || matches!(
+                    (surface_operation, request),
+                    (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+                        crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
+                    )
+                );
+                if !matches {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
             DaemonInvocationPayload::FeedbackDiagnostics {
                 request_handle,
                 observed_at,
@@ -834,6 +1092,18 @@ impl DaemonInvocationRequest {
                 cancellation,
             }
             | DaemonInvocationPayload::FeedbackList {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::FeedbackImpact {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            }
+            | DaemonInvocationPayload::AffectedTests {
                 request_handle,
                 observed_at,
                 deadline,
@@ -1179,13 +1449,54 @@ where
         request: DaemonFeedbackInvocationRequest,
     ) -> DaemonFeedbackInvocationFuture<'_> {
         Box::pin(async move {
-            let operation = match request.operation {
-                DaemonInvocationOperation::FeedbackDiagnostics => {
-                    FeedbackReadOperationV1::Diagnostics
+            let result = match request.operation {
+                DaemonInvocationOperation::FeedbackImpact => {
+                    DaemonFeedbackReadOwnerV1::invoke_projection_with_controls(
+                        self,
+                        FeedbackCanonicalProjectionKindV1::Impact,
+                        &request.request_handle,
+                        request.observed_at,
+                        request.deadline,
+                        request.cancellation,
+                    )
+                    .await
                 }
-                DaemonInvocationOperation::FeedbackGet => FeedbackReadOperationV1::Get,
-                DaemonInvocationOperation::FeedbackExpand => FeedbackReadOperationV1::Expand,
-                DaemonInvocationOperation::FeedbackList => FeedbackReadOperationV1::List,
+                DaemonInvocationOperation::AffectedTests => {
+                    DaemonFeedbackReadOwnerV1::invoke_projection_with_controls(
+                        self,
+                        FeedbackCanonicalProjectionKindV1::AffectedTests,
+                        &request.request_handle,
+                        request.observed_at,
+                        request.deadline,
+                        request.cancellation,
+                    )
+                    .await
+                }
+                operation @ (DaemonInvocationOperation::FeedbackDiagnostics
+                | DaemonInvocationOperation::FeedbackGet
+                | DaemonInvocationOperation::FeedbackExpand
+                | DaemonInvocationOperation::FeedbackList) => {
+                    let operation = match operation {
+                        DaemonInvocationOperation::FeedbackDiagnostics => {
+                            FeedbackReadOperationV1::Diagnostics
+                        }
+                        DaemonInvocationOperation::FeedbackGet => FeedbackReadOperationV1::Get,
+                        DaemonInvocationOperation::FeedbackExpand => {
+                            FeedbackReadOperationV1::Expand
+                        }
+                        DaemonInvocationOperation::FeedbackList => FeedbackReadOperationV1::List,
+                        _ => unreachable!("feedback operation was exhaustively matched"),
+                    };
+                    DaemonFeedbackReadOwnerV1::invoke_with_controls(
+                        self,
+                        operation,
+                        &request.request_handle,
+                        request.observed_at,
+                        request.deadline,
+                        request.cancellation,
+                    )
+                    .await
+                }
                 _ => {
                     return Err(ApplicationProblem::InvalidRequest {
                         diagnostic: SafeDiagnostic {
@@ -1196,16 +1507,7 @@ where
                         legal_actions: Vec::new(),
                     });
                 }
-            };
-            let result = DaemonFeedbackReadOwnerV1::invoke_with_controls(
-                self,
-                operation,
-                &request.request_handle,
-                request.observed_at,
-                request.deadline,
-                request.cancellation,
-            )
-            .await
+            }
             .map_err(feedback_owner_problem)?;
             match result {
                 FeedbackReadInvocationResultV1::Diagnostics(result) => {
@@ -1216,6 +1518,12 @@ where
                     feedback_invocation_result(result)
                 }
                 FeedbackReadInvocationResultV1::List(result) => feedback_invocation_result(result),
+                FeedbackReadInvocationResultV1::Impact(result) => {
+                    feedback_invocation_result(result)
+                }
+                FeedbackReadInvocationResultV1::AffectedTests(result) => {
+                    feedback_invocation_result(result)
+                }
             }
         })
     }
@@ -1245,6 +1553,13 @@ fn feedback_invocation_result<T>(
 where
     T: Serialize,
 {
+    feedback_invocation_result_with(result, serde_json::to_value)
+}
+
+fn feedback_invocation_result_with<T>(
+    result: ApplicationResult<T>,
+    encode: impl FnOnce(T) -> Result<serde_json::Value, serde_json::Error>,
+) -> Result<DaemonFeedbackInvocationResult, ApplicationProblem> {
     let application = result.map_err(|problem| problem.problem.into_source())?;
     let evidence = match application.outcome {
         ApplicationOutcome::Evidence(packet) => packet,
@@ -1255,16 +1570,12 @@ where
             }));
         }
     };
-    let payload = evidence
-        .payload
-        .map(serde_json::to_value)
-        .transpose()
-        .map_err(|_| {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "feedback.result_encoding_failed".to_owned(),
-                message: "The feedback read result could not be encoded".to_owned(),
-            })
-        })?;
+    let payload = evidence.payload.map(encode).transpose().map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "feedback.result_encoding_failed".to_owned(),
+            message: "The feedback read result could not be encoded".to_owned(),
+        })
+    })?;
     Ok(DaemonFeedbackInvocationResult {
         scope: application.scope,
         evidence: EvidencePacket {
@@ -1403,11 +1714,18 @@ async fn execute_primitive(
     let Some(dispatch) = dispatch else {
         return concealed_application_problem(wire_request_id);
     };
-    let Ok(request_id) = RequestId::new(wire_request_id.clone()) else {
-        return DaemonInvocationResponse::problem(
-            wire_request_id,
-            DaemonInvocationProblem::InvalidRequest,
-        );
+    let registered = service
+        .callable_code_runtimes
+        .lock()
+        .await
+        .get(project_root)
+        .cloned();
+    let Some(registered) = registered else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let access = match registered.authorization.current(observed_at).await {
+        Ok(access) if access.scope == registered.scope => access,
+        Ok(_) | Err(_) => return concealed_application_problem(wire_request_id),
     };
     let Ok(Some(operation)) =
         tracedecay_application::feedback::feedback_surface_operation(surface_operation.as_str())
@@ -1427,21 +1745,51 @@ async fn execute_primitive(
             DaemonInvocationProblem::InvalidRequest,
         );
     };
-    let Ok(result) = dispatch
-        .dispatch_transport(
-            request_id,
-            operation,
-            request,
+    let context = match callable_code_request_context(
+        &registered.scope,
+        &access,
+        &wire_request_id,
+        &operation,
+        observed_at,
+        deadline,
+        cancellation,
+    ) {
+        Ok(context) => context,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let authorization = registered.authorization.authorize(access);
+    let admission = match authorization.admit(&context, &operation, observed_at).await {
+        Ok(admission) => admission,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let mut result = dispatch
+        .dispatch(
+            Pr12PrimitiveInvocation {
+                operation: operation.clone(),
+                request,
+            },
+            context.clone(),
             observed_at,
-            deadline,
-            cancellation,
         )
-        .await
-    else {
-        return DaemonInvocationResponse::problem(
-            wire_request_id,
-            DaemonInvocationProblem::InvalidRequest,
-        );
+        .await;
+    if result.is_ok() {
+        let finished_at = current_micros();
+        let publication_authority = match authorization
+            .recheck_publication(&context, &operation, &admission, finished_at)
+            .await
+        {
+            Ok(authority) => authority,
+            Err(problem) => return application_problem(wire_request_id, problem),
+        };
+        if !crate::application::primitives::runtime::reauthorize_primitive_evidence(
+            &mut result,
+            publication_authority,
+        ) {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
     };
     match feedback_invocation_result(result) {
         Ok(result) => DaemonInvocationResponse::with_outcome(
@@ -1451,6 +1799,248 @@ async fn execute_primitive(
                 result: DaemonFeedbackResult::from_application(result.evidence),
             },
         ),
+        Err(problem) => application_problem(wire_request_id, problem),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_callable_code(
+    service: &DaemonInvocationService,
+    project_root: Option<&Path>,
+    wire_request_id: String,
+    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    request: crate::application_surface::CallableCodeSurfaceRequest,
+    page: PageRequest,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(project_root) = project_root else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let registered = service
+        .callable_code_runtimes
+        .lock()
+        .await
+        .get(project_root)
+        .cloned();
+    let Some(registered) = registered else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let access = match registered.authorization.current(observed_at).await {
+        Ok(access) => access,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let kind = match (&request, surface_operation) {
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+        ) => CallableCodeOperationKind::ExactOccurrence,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+        ) => CallableCodeOperationKind::PhraseSearch,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+        ) => CallableCodeOperationKind::Callees,
+        _ => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
+    };
+    let Ok(operations) = callable_code_operations() else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "callable_code.operation_unavailable".to_owned(),
+                message: "The callable code operation is unavailable".to_owned(),
+            }),
+        );
+    };
+    let context = match callable_code_request_context(
+        &registered.scope,
+        &access,
+        &wire_request_id,
+        operations.get(kind),
+        observed_at,
+        deadline,
+        cancellation,
+    ) {
+        Ok(context) => context,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let query = CallableCodeQueryService::new(
+        service.code_index_schedulers.clone(),
+        registered.authorization.authorize(access),
+        operations,
+    );
+    match request {
+        crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(request) => {
+            let Ok(request) = request.into_application_request(page) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.exact_occurrence(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(request) => {
+            let Ok(request) = request.into_application_request(
+                crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(),
+                crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
+                ),
+                page,
+            ) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.phrase_search(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Callees(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.callees(&context, request, observed_at).await,
+            )
+        }
+    }
+}
+
+fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationResponse {
+    application_problem(
+        wire_request_id,
+        ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "callable_code.invalid_query".to_owned(),
+                message: "The callable code query is invalid".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
+    )
+}
+
+fn callable_code_request_context(
+    scope: &ResolvedScope,
+    access: &ProjectSourceAccessSnapshot,
+    wire_request_id: &str,
+    operation: &ApplicationOperation,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<RequestContext, ApplicationProblem> {
+    if scope != &access.scope {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(ApplicationProblem::cancelled_before_admission());
+    }
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+        return Err(ApplicationProblem::timed_out_before_admission());
+    }
+    let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
+    if expires_at.0 <= observed_at.0 {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    let request_id =
+        RequestId::new(wire_request_id).map_err(|_| ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "callable_code.invalid_request_id".to_owned(),
+                message: "The callable code request identifier is invalid".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        })?;
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.daemon.callable-code-grant.v1",
+        scope,
+        &access.requester,
+        &access.configuration_digest,
+        operation.capability_id(),
+        operation.use_case_id(),
+        request_id.as_str(),
+    ))
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.grant_unavailable".to_owned(),
+            message: "The callable code route grant is unavailable".to_owned(),
+        })
+    })?;
+    let grant_id = CapabilityGrantId::new(format!(
+        "grant.daemon.callable-code.{}",
+        grant_digest.as_str().trim_start_matches("sha256:")
+    ))
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.grant_unavailable".to_owned(),
+            message: "The callable code route grant is unavailable".to_owned(),
+        })
+    })?;
+    let grant = CapabilityGrantSnapshot::new(
+        grant_id,
+        1,
+        grant_digest,
+        access.requester.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        std::collections::BTreeSet::from([operation.capability_id().clone()]),
+        std::collections::BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Evidence,
+    )
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.grant_unavailable".to_owned(),
+            message: "The callable code route grant is unavailable".to_owned(),
+        })
+    })?;
+    RequestContext::new(
+        access.requester.clone(),
+        scope.clone(),
+        grant,
+        request_id,
+        Deadline::new(expires_at).map_err(|_| {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "callable_code.deadline_unavailable".to_owned(),
+                message: "The callable code request deadline is unavailable".to_owned(),
+            })
+        })?,
+        cancellation,
+    )
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.context_unavailable".to_owned(),
+            message: "The callable code request context is unavailable".to_owned(),
+        })
+    })
+}
+
+fn callable_code_response<T: Serialize>(
+    wire_request_id: String,
+    registered_scope: &ResolvedScope,
+    result: ApplicationResult<T>,
+) -> DaemonInvocationResponse {
+    match feedback_invocation_result(result) {
+        Ok(result) if &result.scope == registered_scope => DaemonInvocationResponse::with_outcome(
+            wire_request_id,
+            DaemonInvocationOutcome::CallableCode {
+                scope: result.scope,
+                result: DaemonFeedbackResult::from_application(result.evidence),
+            },
+        ),
+        Ok(_) => concealed_application_problem(wire_request_id),
         Err(problem) => application_problem(wire_request_id, problem),
     }
 }
@@ -2294,9 +2884,20 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         result: DaemonFeedbackResult,
     },
+    CallableCode {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
     Configuration {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    SemanticEvaluatedProfilePublished {
+        scope: ResolvedScope,
+        profile_digest: ManifestDigest,
+        report_digest: ManifestDigest,
+        source_generation: tracedecay_domain::CodeGenerationId,
+        snapshot_digest: ManifestDigest,
     },
     ObservationAccepted,
     ApplicationProblem {
@@ -2512,15 +3113,57 @@ pub(crate) fn admit_registered_pr13_hook_orchestration(
     runtime.admit(request)
 }
 
+struct SwitchableFeedbackCycleRuntimeV1 {
+    current: RwLock<Arc<dyn FeedbackCycleRuntimePort>>,
+}
+
+impl SwitchableFeedbackCycleRuntimeV1 {
+    fn new(current: Arc<dyn FeedbackCycleRuntimePort>) -> Self {
+        Self {
+            current: RwLock::new(current),
+        }
+    }
+
+    fn replace(
+        &self,
+        current: Arc<dyn FeedbackCycleRuntimePort>,
+    ) -> Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure> {
+        *self.current.write().map_err(|_| {
+            crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-router")
+        })? = current;
+        Ok(())
+    }
+}
+
+impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
+    fn execute(
+        &self,
+        request: FeedbackCycleRequest,
+    ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
+        Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure>,
+    > {
+        let current = self
+            .current
+            .read()
+            .map(|current| Arc::clone(&current))
+            .map_err(|_| {
+                crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-router")
+            });
+        Box::pin(async move { current?.execute(request).await })
+    }
+}
+
 /// Retained daemon state for the typed LSP invocation operations.
 #[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
+    code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    callable_code_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredCallableCodeRuntime>>>,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
     context_scout_registries:
         Arc<Mutex<BTreeMap<ProjectId, Arc<ProjectContextScoutAddressRegistryV1>>>>,
     feedback_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredFeedbackRuntime>>>,
     feedback_cycles: Arc<Mutex<BTreeMap<PathBuf, Arc<Pr12FeedbackCycleRuntime>>>>,
-    feedback_cycle_inputs: Arc<Mutex<BTreeMap<PathBuf, Arc<dyn FeedbackCycleRuntimePort>>>>,
+    feedback_cycle_inputs: Arc<Mutex<BTreeMap<PathBuf, Arc<SwitchableFeedbackCycleRuntimeV1>>>>,
     primitive_runtimes: Arc<Mutex<BTreeMap<PathBuf, Pr12PrimitiveProjectRuntime>>>,
     configuration_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredConfigurationRuntime>>>,
     lsp_owners: Arc<Mutex<BTreeMap<PathBuf, DaemonLspInvocationOwner>>>,
@@ -2534,7 +3177,19 @@ pub(crate) struct DaemonInvocationService {
 
 impl Default for DaemonInvocationService {
     fn default() -> Self {
+        Self::with_code_index_schedulers(
+            crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+        )
+    }
+}
+
+impl DaemonInvocationService {
+    pub(crate) fn with_code_index_schedulers(
+        code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    ) -> Self {
         Self {
+            code_index_schedulers,
+            callable_code_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             feedback_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2609,6 +3264,12 @@ struct RegisteredFeedbackRuntime {
 }
 
 #[derive(Clone)]
+struct RegisteredCallableCodeRuntime {
+    scope: ResolvedScope,
+    authorization: DaemonCallableCodeAuthorizationSource,
+}
+
+#[derive(Clone)]
 struct DaemonConfigurationGrantAuthority {
     actor: ActorId,
     policy_epoch: u64,
@@ -2654,10 +3315,26 @@ impl DaemonConfigurationGrantAuthority {
             self.expires_at,
         ))
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+        let receipt = ConfigurationMutationGrantReceiptV1::issue(
+            receipt_id,
+            grant_id.clone(),
+            self.actor.clone(),
+            operation,
+            scope_digest.clone(),
+            expected_revision.clone(),
+            self.policy_epoch,
+            self.policy_digest.clone(),
+            sink,
+            effect,
+            issued_at,
+            self.expires_at,
+        )
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         let snapshot = ConfigurationMutationGrantSnapshotV1 {
             grant_id: grant_id.clone(),
             grant_revision: 1,
             grant_digest,
+            authorized_receipt_digest: receipt.receipt_digest.clone(),
             actor_id: self.actor.clone(),
             scope_digest: scope_digest.clone(),
             expected_configuration_revision: expected_revision.clone(),
@@ -2671,21 +3348,6 @@ impl DaemonConfigurationGrantAuthority {
         if !snapshot.is_valid() {
             return Err(DaemonInvocationProblem::Unavailable);
         }
-        let receipt = ConfigurationMutationGrantReceiptV1::issue(
-            receipt_id,
-            grant_id.clone(),
-            self.actor.clone(),
-            operation,
-            scope_digest,
-            expected_revision,
-            self.policy_epoch,
-            self.policy_digest.clone(),
-            sink,
-            effect,
-            issued_at,
-            self.expires_at,
-        )
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         self.grants
             .write()
             .map_err(|_| DaemonInvocationProblem::Unavailable)?
@@ -2797,6 +3459,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         project_root: PathBuf,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
+        configuration: Arc<ProjectConfigurationRuntime>,
     ) -> Result<ProjectFeedbackStore, DaemonFeedbackRuntimeRegistrationError> {
         let mut runtimes = self.service.feedback_runtimes.lock().await;
         if runtimes.contains_key(&project_root) {
@@ -2806,9 +3469,20 @@ impl DaemonFeedbackRuntimeRegistrar {
         let runtime = Arc::new(open_pr12_feedback_runtime(
             database,
             project_root.clone(),
-            scope,
-            access,
+            scope.clone(),
+            access.clone(),
         )?);
+        self.service.callable_code_runtimes.lock().await.insert(
+            project_root.clone(),
+            RegisteredCallableCodeRuntime {
+                authorization: DaemonCallableCodeAuthorizationSource::production(
+                    project_root.clone(),
+                    scope.clone(),
+                    configuration,
+                ),
+                scope,
+            },
+        );
         let publications = runtime.publication_store();
         runtimes.insert(
             project_root.clone(),
@@ -2848,12 +3522,18 @@ impl DaemonFeedbackRuntimeRegistrar {
             TruthSourceStateV1::Unavailable => CapabilityAvailabilityV1::Unavailable,
             TruthSourceStateV1::Unknown => CapabilityAvailabilityV1::Unknown,
         };
+        // The request context is validated against its grant's scope before it
+        // reaches here (`RequestContext::validate` rejects a scope that differs
+        // from the grant's), so this route really is scope-matched. Live
+        // correlation only reads, so it requires the Read effect class.
         let correlation_policy = operation.evaluate_policy_route(
             &policy,
             PolicyConsumerV1::LocalLiveCorrelation,
             &policy_context,
             correlation_availability,
+            ScopeMatchV1::Match,
             correlation_state,
+            CapabilityEffectClassV1::Read,
             TruthFreshnessRequirementV1::FreshOrPartial,
             Some(evidence_horizon),
             evaluated_at,
@@ -2890,11 +3570,13 @@ impl DaemonFeedbackRuntimeRegistrar {
             tests_operation,
             lsp_input,
         )?;
-        let cycle_input = production_proximity_feedback_cycle_input(
-            runtime.clone(),
-            production_lsp_input,
-            proximity,
-        );
+        let cycle_input = Arc::new(SwitchableFeedbackCycleRuntimeV1::new(
+            production_proximity_feedback_cycle_input(
+                runtime.clone(),
+                production_lsp_input,
+                proximity,
+            ),
+        ));
         self.service
             .feedback_cycle_inputs
             .lock()
@@ -2906,6 +3588,24 @@ impl DaemonFeedbackRuntimeRegistrar {
             .await
             .insert(project_root, runtime.clone());
         Ok(runtime)
+    }
+
+    pub(crate) async fn install_advisory_cycle_input(
+        &self,
+        project_root: &Path,
+        input: Arc<dyn FeedbackCycleRuntimePort>,
+    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
+        let router = self
+            .service
+            .feedback_cycle_inputs
+            .lock()
+            .await
+            .get(project_root)
+            .cloned()
+            .ok_or(DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
+        router
+            .replace(input)
+            .map_err(|_| DaemonFeedbackRuntimeRegistrationError::MissingRuntime)
     }
 }
 
@@ -3995,6 +4695,7 @@ impl DaemonInvocationService {
             .await
             .get(project_root)
             .cloned()
+            .map(|input| -> Arc<dyn FeedbackCycleRuntimePort> { input })
     }
 
     pub(crate) async fn feedback_publication_store(
@@ -4019,6 +4720,82 @@ impl DaemonInvocationService {
     ) -> Option<DaemonLspInvocationOwner> {
         let project_root = project_root?;
         self.lsp_owners.lock().await.get(project_root).cloned()
+    }
+
+    async fn execute_semantic_evaluation(
+        &self,
+        project_root: Option<&Path>,
+        request_id: String,
+        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+    ) -> DaemonInvocationResponse {
+        let Some(project_root) = project_root else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        };
+        let Some(registered) = self.configuration_runtime(Some(project_root)).await else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        };
+        let Some(operation) = registered.semantic_operation.get().cloned() else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        };
+        let canonical_root = match project_root.canonicalize() {
+            Ok(root) => root,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            }
+        };
+        let authority =
+            crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
+                canonical_root.clone(),
+                registered.scope.clone(),
+                self.code_index_schedulers.clone(),
+                candidate.clone(),
+            );
+        match operation
+            .evaluate_and_publish_profile(&authority, &canonical_root, candidate)
+            .await
+        {
+            Ok(publication) => DaemonInvocationResponse::with_outcome(
+                request_id,
+                DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
+                    scope: publication.snapshot.scope,
+                    profile_digest: publication.accepted_profile.profile_digest().clone(),
+                    report_digest: publication
+                        .accepted_profile
+                        .evaluation()
+                        .report_digest()
+                        .clone(),
+                    source_generation: publication.snapshot.code_generation,
+                    snapshot_digest: publication.snapshot.code_snapshot_digest,
+                },
+            ),
+            Err(SemanticActivationCoordinationErrorV1::Rejected) => {
+                DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                )
+            }
+            Err(SemanticActivationCoordinationErrorV1::Conflict) => {
+                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+            }
+            Err(SemanticActivationCoordinationErrorV1::Runtime(_)) => {
+                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+            }
+            Err(SemanticActivationCoordinationErrorV1::Unavailable) => {
+                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+            }
+        }
     }
 
     /// Executes a closed request after daemon socket authentication. `root` is
@@ -4184,6 +4961,40 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::FeedbackImpact {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback(
+                    request_id,
+                    feedback_service,
+                    DaemonInvocationOperation::FeedbackImpact,
+                    request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::AffectedTests {
+                request_handle,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback(
+                    request_id,
+                    feedback_service,
+                    DaemonInvocationOperation::AffectedTests,
+                    request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::FeedbackObserve {
                 subject_digest,
                 observed_at,
@@ -4278,6 +5089,62 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::PrimitiveCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let request = match request.into_primitive(
+                    crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(
+                    ),
+                    crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
+                    ),
+                    page,
+                ) {
+                    Ok(request) => request,
+                    Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            DaemonInvocationProblem::InvalidRequest,
+                        );
+                    }
+                };
+                execute_primitive(
+                    self,
+                    project_root,
+                    request_id,
+                    surface_operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::CallableCode {
+                surface_operation,
+                request,
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_callable_code(
+                    self,
+                    project_root,
+                    request_id,
+                    surface_operation,
+                    request,
+                    page,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::Configuration {
                 surface_operation,
                 request,
@@ -4295,6 +5162,10 @@ impl DaemonInvocationService {
                     cancellation,
                 )
                 .await
+            }
+            DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
+                self.execute_semantic_evaluation(project_root, request_id, candidate)
+                    .await
             }
             DaemonInvocationPayload::LspOpen {
                 client_revision,
@@ -4344,6 +5215,7 @@ impl DaemonInvocationService {
     }
 
     pub(crate) async fn expire_all(&self) {
+        self.callable_code_runtimes.lock().await.clear();
         self.lsp_sessions.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         self.feedback_runtimes.lock().await.clear();
@@ -4602,6 +5474,8 @@ fn plan26_observable_operation(operation: DaemonInvocationOperation) -> bool {
             | DaemonInvocationOperation::FeedbackGet
             | DaemonInvocationOperation::FeedbackExpand
             | DaemonInvocationOperation::FeedbackList
+            | DaemonInvocationOperation::FeedbackImpact
+            | DaemonInvocationOperation::AffectedTests
             | DaemonInvocationOperation::PrimitiveImpact
             | DaemonInvocationOperation::PrimitiveAffectedTests
             | DaemonInvocationOperation::PrimitiveTestResults
@@ -4617,6 +5491,10 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         DaemonInvocationOperation::FeedbackGet => Plan26FeedbackOperationV1::FeedbackGet,
         DaemonInvocationOperation::FeedbackExpand => Plan26FeedbackOperationV1::FeedbackExpand,
         DaemonInvocationOperation::FeedbackList => Plan26FeedbackOperationV1::FeedbackList,
+        DaemonInvocationOperation::FeedbackImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
+        DaemonInvocationOperation::AffectedTests => {
+            Plan26FeedbackOperationV1::PrimitiveAffectedTests
+        }
         DaemonInvocationOperation::PrimitiveImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::PrimitiveAffectedTests => {
             Plan26FeedbackOperationV1::PrimitiveAffectedTests
@@ -4631,7 +5509,11 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::LspDetach => Plan26FeedbackOperationV1::LspSession,
         DaemonInvocationOperation::FeedbackObserve
         | DaemonInvocationOperation::PrimitiveRead
+        | DaemonInvocationOperation::CodeExactOccurrence
+        | DaemonInvocationOperation::CodePhraseSearch
+        | DaemonInvocationOperation::CodeCallees
         | DaemonInvocationOperation::Configuration
+        | DaemonInvocationOperation::SemanticEvaluateAndPublish
         | DaemonInvocationOperation::GitPreview
         | DaemonInvocationOperation::GitApply => Plan26FeedbackOperationV1::FeedbackCycle,
     }
@@ -4653,20 +5535,24 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
         DaemonInvocationOutcome::GitPreview { .. }
         | DaemonInvocationOutcome::GitApply { .. }
         | DaemonInvocationOutcome::Configuration { .. }
+        | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }
         | DaemonInvocationOutcome::LspDetached => Plan26FeedbackOutcomeV1::Completed,
         DaemonInvocationOutcome::Feedback { result, .. }
-        | DaemonInvocationOutcome::Primitive { result, .. } => match result.execution.termination {
-            OperationTermination::Completed => Plan26FeedbackOutcomeV1::Completed,
-            OperationTermination::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
-            OperationTermination::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
-            OperationTermination::Failed | OperationTermination::EffectUnknown => {
-                Plan26FeedbackOutcomeV1::Failed
+        | DaemonInvocationOutcome::Primitive { result, .. }
+        | DaemonInvocationOutcome::CallableCode { result, .. } => {
+            match result.execution.termination {
+                OperationTermination::Completed => Plan26FeedbackOutcomeV1::Completed,
+                OperationTermination::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
+                OperationTermination::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
+                OperationTermination::Failed | OperationTermination::EffectUnknown => {
+                    Plan26FeedbackOutcomeV1::Failed
+                }
+                OperationTermination::Partial => Plan26FeedbackOutcomeV1::Partial,
             }
-            OperationTermination::Partial => Plan26FeedbackOutcomeV1::Partial,
-        },
+        }
         DaemonInvocationOutcome::LspFrameAccepted { backpressured, .. } => {
             if *backpressured {
                 Plan26FeedbackOutcomeV1::AtCapacity
@@ -4762,7 +5648,8 @@ fn observe_plan26_invocation_response(
                 outcome,
                 item_count: match &response.outcome {
                     DaemonInvocationOutcome::Feedback { result, .. }
-                    | DaemonInvocationOutcome::Primitive { result, .. } => {
+                    | DaemonInvocationOutcome::Primitive { result, .. }
+                    | DaemonInvocationOutcome::CallableCode { result, .. } => {
                         result.page.returned.try_into().unwrap_or(u32::MAX)
                     }
                     _ => 0,
@@ -4801,7 +5688,8 @@ fn observe_plan26_invocation_response(
         );
     }
     if let DaemonInvocationOutcome::Feedback { result, .. }
-    | DaemonInvocationOutcome::Primitive { result, .. } = &response.outcome
+    | DaemonInvocationOutcome::Primitive { result, .. }
+    | DaemonInvocationOutcome::CallableCode { result, .. } = &response.outcome
     {
         let omitted = result.page.total.map_or_else(
             || u64::from(result.page.cursor.is_some()),
@@ -4875,6 +5763,46 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CountingFeedbackCycle(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl FeedbackCycleRuntimePort for CountingFeedbackCycle {
+        fn execute(
+            &self,
+            _request: FeedbackCycleRequest,
+        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
+            Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure>,
+        > {
+            let calls = Arc::clone(&self.0);
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn feedback_cycle_router_upgrades_existing_lsp_sessions_to_advisory_runtime() {
+        let proximity_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let advisory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(CountingFeedbackCycle(
+            Arc::clone(&proximity_calls),
+        )));
+        let request = FeedbackCycleRequest {
+            root_uri: "file:///project".to_owned(),
+            document_uri: "file:///project/src/lib.rs".to_owned(),
+            trigger: crate::daemon::lsp_gateway::DiagnosticTrigger::DocumentSave,
+        };
+
+        router.execute(request.clone()).await.unwrap();
+        router
+            .replace(Arc::new(CountingFeedbackCycle(Arc::clone(&advisory_calls))))
+            .unwrap();
+        router.execute(request).await.unwrap();
+
+        assert_eq!(proximity_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(advisory_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     fn hook_envelope(event: HookEventV2) -> HookEventEnvelopeV2 {
         HookEventEnvelopeV2 {
@@ -5202,6 +6130,206 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
+        let deadline = Deadline::new(UtcMicros(90)).expect("deadline");
+        let cancellation =
+            CancellationContext::cancelled("cancel.callable-code.transport", UtcMicros(40))
+                .expect("cancellation");
+        let phrase = crate::application_surface::CodePhraseSearchSurfaceRequest {
+            query: "daemon invocation".to_owned(),
+            phrases: vec!["daemon invocation".to_owned()],
+            scope: tracedecay_application::CodeQueryScope::new(
+                tracedecay_domain::CodeGenerationId::new("generation.callable-code")
+                    .expect("generation"),
+                Some("src/daemon".to_owned()),
+            )
+            .expect("scope"),
+            meta: crate::application_surface::CallableCodeSurfaceMeta {
+                projection: tracedecay_application::ResultProjection::Evidence,
+                order: tracedecay_application::RetrievalOrder::Relevance,
+            },
+        };
+        let page = tracedecay_application::PageRequest::first(16).expect("page");
+        let canonical = phrase
+            .clone()
+            .into_application_request(
+                crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(),
+                crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
+                ),
+                page.clone(),
+            )
+            .expect("canonical phrase request");
+        assert_eq!(
+            canonical.query.sanitizer_revision().as_str(),
+            "query-sanitizer.daemon.v1"
+        );
+        assert_eq!(
+            canonical.query.normalization_revision().as_str(),
+            "query-normalization.daemon.v1"
+        );
+        let request = crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(phrase);
+        let invocation = DaemonInvocationRequest::callable_code(
+            "request.callable-code.transport",
+            crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+            request,
+            page.clone(),
+            UtcMicros(30),
+            deadline.clone(),
+            cancellation.clone(),
+        );
+
+        assert_eq!(
+            invocation.operation(),
+            DaemonInvocationOperation::CodePhraseSearch
+        );
+        assert!(matches!(
+            invocation.payload,
+            DaemonInvocationPayload::CallableCode {
+                surface_operation:
+                    crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+                request:
+                    crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(
+                        crate::application_surface::CodePhraseSearchSurfaceRequest {
+                            query,
+                            phrases,
+                            ..
+                        }
+                    ),
+                page: carried_page,
+                observed_at: UtcMicros(30),
+                deadline: carried_deadline,
+                cancellation: carried_cancellation,
+            } if query == "daemon invocation"
+                && phrases == ["daemon invocation"]
+                && carried_page == page
+                && carried_deadline == deadline
+                && carried_cancellation == cancellation
+        ));
+    }
+
+    #[test]
+    fn callable_code_outcome_is_distinct_and_context_grant_is_exact() {
+        let observed_at = current_micros();
+        let completed_at = UtcMicros(
+            observed_at
+                .0
+                .checked_add(1)
+                .expect("fixture completion timestamp"),
+        );
+        let deadline = Deadline::new(UtcMicros(
+            observed_at
+                .0
+                .checked_add(60_000_000)
+                .expect("fixture deadline"),
+        ))
+        .expect("deadline");
+        let operation = callable_code_operations()
+            .expect("operations")
+            .get(CallableCodeOperationKind::ExactOccurrence)
+            .clone();
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.callable-code").expect("project"),
+            tracedecay_domain::RepositoryId::new("repository.callable-code").expect("repository"),
+            tracedecay_domain::WorktreeId::new("worktree.callable-code").expect("worktree"),
+            None,
+        )
+        .expect("scope");
+        let access = ProjectSourceAccessSnapshot {
+            scope: scope.clone(),
+            requester: ActorId::new("actor.callable-code").expect("actor"),
+            binding: tracedecay_domain::configuration::ScopeSourceBinding::new(
+                tracedecay_domain::SourceBindingId::new("binding.callable-code").expect("binding"),
+                tracedecay_domain::configuration::SourceKindV1::Cursor,
+                tracedecay_domain::LocatorDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .expect("locator"),
+                tracedecay_domain::configuration::AuthorityRef::Project(scope.project_id.clone()),
+            )
+            .expect("source binding"),
+            configuration_revision: ConfigurationRevisionId::new("revision.callable-code")
+                .expect("configuration revision"),
+            configuration_digest: canonical_sha256(&"callable-code-configuration")
+                .expect("configuration digest"),
+            configuration_provenance_digest: canonical_sha256(
+                &"callable-code-configuration-provenance",
+            )
+            .expect("configuration provenance"),
+            effective_capabilities: [operation.capability_id().clone()].into_iter().collect(),
+            grant_expires_at: deadline.expires_at,
+        };
+        let expired = callable_code_request_context(
+            &scope,
+            &access,
+            "request.callable-code.expired",
+            &operation,
+            UtcMicros(1),
+            Deadline::new(UtcMicros(observed_at.0.saturating_sub(1))).expect("expired deadline"),
+            CancellationContext::active("cancel.callable-code.expired").expect("cancellation"),
+        )
+        .expect_err("wall-clock-expired deadline must fail despite a stale caller timestamp");
+        assert_eq!(expired.kind(), ApplicationProblemKind::TimedOut);
+        let context = callable_code_request_context(
+            &scope,
+            &access,
+            "request.callable-code",
+            &operation,
+            observed_at,
+            deadline.clone(),
+            CancellationContext::active("cancel.callable-code").expect("cancellation"),
+        )
+        .expect("context");
+        assert_eq!(context.scope(), &scope);
+        assert_eq!(
+            context.grant().allowed_capabilities,
+            [operation.capability_id().clone()].into_iter().collect()
+        );
+
+        let authority = AuthorityReceipt::from_context(
+            &context,
+            PolicyDecisionRef::new(
+                "policy.callable-code.fixture",
+                1,
+                canonical_sha256(&"callable-code-policy").expect("policy digest"),
+                ComponentVersion::new("callable-code-policy.v1").expect("policy component"),
+            )
+            .expect("policy"),
+            completed_at,
+        )
+        .expect("authority");
+        let result = DaemonFeedbackResult {
+            temporal: TemporalState::current(completed_at),
+            authority,
+            evidence_authorities: Vec::new(),
+            coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Symbol], 0, 0, 0)
+                .expect("coverage"),
+            omissions: Vec::new(),
+            scores: Vec::new(),
+            contributions: Vec::new(),
+            page: PageState::first_page(
+                SortContractId::new("sort.callable-code.fixture").expect("sort"),
+                1,
+                Some(0),
+                0,
+            )
+            .expect("page"),
+            execution: OperationReceipt::completed(
+                observed_at,
+                completed_at,
+                deadline,
+                OperationBudgetUsage::default(),
+            )
+            .expect("execution"),
+            payload: Some(serde_json::json!({"generation": "generation.callable-code"})),
+        };
+        let outcome = DaemonInvocationOutcome::CallableCode { scope, result };
+        let encoded = serde_json::to_value(&outcome).expect("encode outcome");
+        assert_eq!(encoded["status"], "callable_code");
+        assert!(matches!(
+            serde_json::from_value(encoded).expect("decode outcome"),
+            DaemonInvocationOutcome::CallableCode { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root() {
         let service = DaemonInvocationService::default();
@@ -5368,6 +6496,38 @@ mod tests {
         let encoded = serde_json::to_value(&request).expect("serialize request");
         assert_eq!(encoded["delivery_route"], "mcp");
         assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn feedback_cycle_projections_use_distinct_handle_payloads() {
+        for (surface_operation, daemon_operation, wire_operation) in [
+            (
+                crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
+                DaemonInvocationOperation::FeedbackImpact,
+                "feedback_impact",
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
+                DaemonInvocationOperation::AffectedTests,
+                "affected_tests",
+            ),
+        ] {
+            let request = DaemonInvocationRequest::feedback(
+                format!("request.{}", surface_operation.as_str()),
+                surface_operation,
+                "rh_feedback-cycle.fixture".to_owned(),
+                UtcMicros(1),
+                Deadline::new(UtcMicros(2)).expect("deadline"),
+                CancellationContext::active(format!("cancel.{}", surface_operation.as_str()))
+                    .expect("cancellation"),
+            );
+
+            assert_eq!(request.operation(), daemon_operation);
+            assert!(request.validate().is_ok());
+            let encoded = serde_json::to_value(&request).expect("serialize request");
+            assert_eq!(encoded["operation"], wire_operation);
+            assert_eq!(encoded["request_handle"], "rh_feedback-cycle.fixture");
+        }
     }
 
     #[test]

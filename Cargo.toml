@@ -47,8 +47,11 @@ categories = ["development-tools", "command-line-utilities"]
 # Explicit whitelist so `cargo package`/`cargo publish` ship everything the
 # build needs — including the dashboard dist bundles. The dashboard frontend is
 # being rewritten; until it lands these ship committed placeholder bundles
-# (dashboard/*/dist/**, a minimal "rebuild in progress" shell). build.rs no
-# longer runs npm; it verifies the committed placeholders exist and hashes them.
+# (dashboard/*/dist/**, a minimal "rebuild in progress" shell). The frontend
+# sources are deliberately NOT packaged: build.rs detects their absence and
+# embeds the committed dist as-is rather than shelling out to npm, so a
+# registry install never needs Node. Keep that check in build.rs in sync if the
+# dashboard entries below change.
 include = [
     "/CHANGELOG.md",
     "/LICENSE",

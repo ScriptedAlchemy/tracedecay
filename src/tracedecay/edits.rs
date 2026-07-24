@@ -52,12 +52,18 @@
 //! ```
 
 use std::collections::{BTreeSet, HashSet};
+use std::ffi::OsString;
 use std::future::Future;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tracedecay_application::{DirectorySyncPolicy, with_owned_temp_publish};
+#[cfg(not(windows))]
+use cap_fs_ext::OpenOptionsMaybeDirExt;
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
+use same_file::Handle;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sync;
@@ -65,6 +71,343 @@ use crate::types::*;
 
 use super::indexing::{accumulate_symbol_scope, safe_extract};
 use super::{TraceDecay, current_timestamp};
+
+static SOURCE_EDIT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+struct SourceEditFileAuthority {
+    root: Dir,
+    parent: Dir,
+    parent_relative: PathBuf,
+    name: OsString,
+}
+
+impl SourceEditFileAuthority {
+    fn open(project_root: &Path, relative: &Path) -> Result<Self> {
+        let relative = normalize_source_edit_relative_path(relative)?;
+        let root = Dir::open_ambient_dir(project_root, ambient_authority())
+            .map_err(|error| source_edit_path_error("open authorized source edit root", error))?;
+        let components = relative.components().collect::<Vec<_>>();
+        let Some(Component::Normal(name)) = components.last() else {
+            return Err(source_edit_unsafe_path());
+        };
+        let mut parent = root
+            .open_dir_nofollow(".")
+            .map_err(|error| source_edit_path_error("open source edit root", error))?;
+        let mut parent_relative = PathBuf::new();
+        for component in &components[..components.len().saturating_sub(1)] {
+            let Component::Normal(component) = component else {
+                return Err(source_edit_unsafe_path());
+            };
+            parent = parent.open_dir_nofollow(component).map_err(|error| {
+                source_edit_path_error("open source edit parent without following symlinks", error)
+            })?;
+            parent_relative.push(component);
+        }
+        Ok(Self {
+            root,
+            parent,
+            parent_relative,
+            name: name.to_os_string(),
+        })
+    }
+
+    fn open_optional(&self) -> Result<Option<cap_std::fs::File>> {
+        match self.parent.symlink_metadata(&self.name) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(source_edit_unsafe_path()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(source_edit_path_error(
+                    "inspect source edit candidate",
+                    error,
+                ));
+            }
+        }
+        let mut options = CapOpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut input = self
+            .parent
+            .open_with(&self.name, &options)
+            .map_err(|error| {
+                source_edit_path_error(
+                    "open source edit candidate without following symlinks",
+                    error,
+                )
+            })?;
+        if !input
+            .metadata()
+            .map_err(|error| source_edit_path_error("inspect opened source edit candidate", error))?
+            .is_file()
+        {
+            return Err(source_edit_unsafe_path());
+        }
+        Ok(Some(input))
+    }
+
+    fn read_optional_with_identity(&self) -> Result<(Option<Vec<u8>>, Option<Handle>)> {
+        let Some(mut input) = self.open_optional()? else {
+            return Ok((None, None));
+        };
+        let identity = Handle::from_file(
+            input
+                .try_clone()
+                .map_err(|error| source_edit_path_error("clone source edit candidate", error))?
+                .into_std(),
+        )
+        .map_err(|error| source_edit_path_error("identify source edit candidate", error))?;
+        let mut bytes = Vec::new();
+        input
+            .read_to_end(&mut bytes)
+            .map_err(|error| source_edit_path_error("read source edit candidate", error))?;
+        let current = self
+            .current_identity()?
+            .ok_or_else(source_edit_unsafe_path)?;
+        if current != identity {
+            return Err(TraceDecayError::Config {
+                message: "source edit candidate changed while it was read".to_owned(),
+            });
+        }
+        Ok((Some(bytes), Some(identity)))
+    }
+
+    fn read_optional(&self) -> Result<Option<Vec<u8>>> {
+        self.read_optional_with_identity().map(|(bytes, _)| bytes)
+    }
+
+    fn read_to_string(&self, label: &str) -> Result<(String, Handle)> {
+        let (bytes, identity) = self.read_optional_with_identity()?;
+        let bytes = bytes.ok_or_else(|| TraceDecayError::Config {
+            message: format!("failed to read {label}: file was not found"),
+        })?;
+        let source = String::from_utf8(bytes).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {label}: {error}"),
+        })?;
+        Ok((
+            source,
+            identity.expect("present source edit bytes have an opened file identity"),
+        ))
+    }
+
+    fn current_identity(&self) -> Result<Option<Handle>> {
+        self.open_optional()?
+            .map(|file| {
+                Handle::from_file(file.into_std()).map_err(|error| {
+                    source_edit_path_error("identify current source edit candidate", error)
+                })
+            })
+            .transpose()
+    }
+
+    fn verify_parent_binding(&self) -> Result<()> {
+        let current = if self.parent_relative.as_os_str().is_empty() {
+            self.root.open_dir_nofollow(".")
+        } else {
+            let mut current = self.root.open_dir_nofollow(".");
+            for component in self.parent_relative.components() {
+                let Component::Normal(component) = component else {
+                    return Err(source_edit_unsafe_path());
+                };
+                current = current.and_then(|directory| directory.open_dir_nofollow(component));
+            }
+            current
+        }
+        .map_err(|error| {
+            source_edit_path_error(
+                "revalidate source edit parent without following symlinks",
+                error,
+            )
+        })?;
+        let expected = Handle::from_file(
+            self.parent
+                .try_clone()
+                .map_err(|error| source_edit_path_error("clone source edit parent", error))?
+                .into_std_file(),
+        )
+        .map_err(|error| source_edit_path_error("identify source edit parent", error))?;
+        let observed = Handle::from_file(current.into_std_file()).map_err(|error| {
+            source_edit_path_error("identify rebound source edit parent", error)
+        })?;
+        if expected != observed {
+            return Err(TraceDecayError::Config {
+                message: "source edit parent changed before atomic publication".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn publish(
+        &self,
+        relative_path: &str,
+        expected: Option<&str>,
+        expected_identity: Option<&Handle>,
+        intended: &str,
+        before_compare: impl FnOnce(),
+    ) -> Result<()> {
+        self.verify_parent_binding()?;
+        // Capture the candidate's current permission bits so the atomic replace
+        // does not silently downgrade them. The temporary is still created
+        // 0o600 so it is never briefly more permissive than the final file; the
+        // original mode is restored on the open handle below.
+        #[cfg(unix)]
+        let published_mode = {
+            use cap_std::fs::PermissionsExt;
+            self.metadata()
+                .ok()
+                .map(|metadata| metadata.permissions().mode())
+        };
+        let mut before_compare = Some(before_compare);
+        for _ in 0..64 {
+            let temporary = OsString::from(format!(
+                ".tracedecay-source-edit.{}.{}.tmp",
+                std::process::id(),
+                SOURCE_EDIT_TEMP_NONCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut options = CapOpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut output = match self.parent.open_with(&temporary, &options) {
+                Ok(output) => output,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(source_edit_path_error(
+                        "create source edit temporary file",
+                        error,
+                    ));
+                }
+            };
+            let result = (|| {
+                output.write_all(intended.as_bytes()).map_err(|error| {
+                    source_edit_path_error("write source edit temporary file", error)
+                })?;
+                // fchmod on the open handle rather than the path: it is immune
+                // to umask (unlike the create mode) and cannot race a swap of
+                // the temporary name.
+                #[cfg(unix)]
+                if let Some(mode) = published_mode {
+                    use cap_std::fs::{Permissions, PermissionsExt};
+                    output
+                        .set_permissions(Permissions::from_mode(mode))
+                        .map_err(|error| {
+                            source_edit_path_error("preserve source edit permissions", error)
+                        })?;
+                }
+                output.sync_all().map_err(|error| {
+                    source_edit_path_error("sync source edit temporary file", error)
+                })?;
+                drop(output);
+                before_compare
+                    .take()
+                    .expect("source edit comparison hook runs once")();
+                self.verify_parent_binding()?;
+                let (current, current_identity) = self.read_optional_with_identity()?;
+                if current.as_deref() != expected.map(str::as_bytes) {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "source edit candidate {relative_path} changed before atomic publication"
+                        ),
+                    });
+                }
+                if current_identity.as_ref() != expected_identity {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "source edit candidate {relative_path} was replaced before atomic publication"
+                        ),
+                    });
+                }
+                self.parent
+                    .rename(&temporary, &self.parent, &self.name)
+                    .map_err(|error| {
+                        source_edit_path_error("atomically publish source edit candidate", error)
+                    })?;
+                sync_source_edit_directory(&self.parent)
+            })();
+            if result.is_err() {
+                let _ = self.parent.remove_file(&temporary);
+            }
+            return result;
+        }
+        Err(TraceDecayError::Config {
+            message: "could not allocate source edit temporary file".to_owned(),
+        })
+    }
+
+    fn metadata(&self) -> Result<cap_std::fs::Metadata> {
+        self.parent
+            .symlink_metadata(&self.name)
+            .map_err(|error| source_edit_path_error("inspect source edit candidate", error))
+    }
+}
+
+pub(crate) fn read_source_edit_candidate(
+    project_root: &Path,
+    relative: &Path,
+) -> Result<Option<Vec<u8>>> {
+    SourceEditFileAuthority::open(project_root, relative)?.read_optional()
+}
+
+pub(crate) fn validate_source_edit_candidate_parent(
+    project_root: &Path,
+    relative: &Path,
+) -> Result<()> {
+    SourceEditFileAuthority::open(project_root, relative).map(|_| ())
+}
+
+fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(source_edit_unsafe_path());
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            _ => return Err(source_edit_unsafe_path()),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(source_edit_unsafe_path());
+    }
+    Ok(normalized)
+}
+
+fn source_edit_unsafe_path() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "source edit path is not a regular file beneath the authorized worktree"
+            .to_owned(),
+    }
+}
+
+fn source_edit_path_error(operation: &'static str, error: io::Error) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("{operation}: {error}"),
+    }
+}
+
+fn sync_source_edit_directory(directory: &Dir) -> Result<()> {
+    #[cfg(windows)]
+    {
+        directory
+            .dir_metadata()
+            .map(|_| ())
+            .map_err(|error| source_edit_path_error("sync source edit parent directory", error))
+    }
+    #[cfg(not(windows))]
+    {
+        let mut options = CapOpenOptions::new();
+        options.read(true).maybe_dir(true);
+        directory
+            .open_with(".", &options)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| source_edit_path_error("sync source edit parent directory", error))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PlannedSourceEditFile {
@@ -161,42 +504,21 @@ pub(super) fn validate_planned_source_edit(
 }
 
 pub(super) fn publish_planned_source_edit(
-    path: &Path,
+    project_root: &Path,
     relative_path: &str,
     expected: Option<&str>,
     intended: &str,
 ) -> Result<()> {
     validate_planned_source_edit(relative_path, expected, Some(intended))?;
-    with_owned_temp_publish(
-        path,
-        "source-edit",
-        |temporary, destination| {
-            let current = match std::fs::read_to_string(destination) {
-                Ok(current) => Some(current),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error),
-            };
-            if current.as_deref() != expected {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    format!(
-                        "source edit candidate {relative_path} changed before atomic publication"
-                    ),
-                ));
-            }
-            crate::db::DatabaseAuthority::replace_file_atomically(
-                temporary,
-                destination,
-                "source edit candidate",
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))
-        },
-        |output| output.write_all(intended.as_bytes()),
-        DirectorySyncPolicy::Strict,
+    let file = SourceEditFileAuthority::open(project_root, Path::new(relative_path))?;
+    let expected_identity = file.current_identity()?;
+    file.publish(
+        relative_path,
+        expected,
+        expected_identity.as_ref(),
+        intended,
+        || {},
     )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("failed to publish source edit candidate {relative_path}: {error}"),
-    })
 }
 
 impl TraceDecay {
@@ -204,23 +526,24 @@ impl TraceDecay {
     /// If the path is already relative, validates that it stays in the project.
     /// If absolute, strips the `project_root` prefix.
     fn resolve_path(&self, path: &str) -> Option<String> {
-        crate::storage::ProjectPath::resolve(&self.project_root, Path::new(path))
+        let path = Path::new(path);
+        let relative = if path.is_absolute() {
+            path.strip_prefix(&self.project_root).ok()?
+        } else {
+            path
+        };
+        normalize_source_edit_relative_path(relative)
             .ok()
-            .map(|path| path.relative_path_string())
-    }
-
-    /// Gets the absolute path for a relative path.
-    fn absolute_path(&self, relative_path: &str) -> PathBuf {
-        self.project_root.join(relative_path)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
     }
 
     /// Re-indexes a single file after an edit.
-    pub(super) async fn reindex_file(&self, file_path: &str) -> Result<()> {
-        let abs_path = self.absolute_path(file_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read file {file_path}: {e}"),
-        })?;
-
+    async fn reindex_file(
+        &self,
+        file_path: &str,
+        source: &str,
+        file: &SourceEditFileAuthority,
+    ) -> Result<()> {
         let Some(extractor) = self.registry.extractor_for_file(file_path) else {
             return Ok(());
         };
@@ -233,7 +556,18 @@ impl TraceDecay {
 
         let hash = sync::content_hash(&source);
         let size = source.len() as u64;
-        let mtime = sync::file_stat(&abs_path).map_or_else(current_timestamp, |(m, _)| m);
+        let mtime = file
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| {
+                modified
+                    .into_std()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_secs() as i64)
+            })
+            .unwrap_or_else(current_timestamp);
 
         let transaction = self.db.begin_write_transaction("reindex file").await?;
         self.db
@@ -282,7 +616,8 @@ impl TraceDecay {
     async fn commit_or_preview_edit(
         &self,
         rel_path: &str,
-        abs_path: &Path,
+        file: &SourceEditFileAuthority,
+        expected_identity: &Handle,
         original: &str,
         modified: &str,
         dry_run: bool,
@@ -296,8 +631,15 @@ impl TraceDecay {
                 MAX_PREVIEW_DIFF_LINES,
             )));
         }
-        publish_planned_source_edit(abs_path, rel_path, Some(original), modified)?;
-        self.reindex_file(rel_path).await?;
+        validate_planned_source_edit(rel_path, Some(original), Some(modified))?;
+        file.publish(
+            rel_path,
+            Some(original),
+            Some(expected_identity),
+            modified,
+            || {},
+        )?;
+        self.reindex_file(rel_path, modified, file).await?;
         Ok(None)
     }
 
@@ -316,10 +658,8 @@ impl TraceDecay {
                 message: "path is not within the project".to_string(),
             })?;
 
-        let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {path}: {e}"),
-        })?;
+        let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
+        let (source, source_identity) = file.read_to_string(path)?;
 
         let matches: Vec<_> = source.match_indices(old_str).collect();
         match matches.len() {
@@ -353,7 +693,14 @@ impl TraceDecay {
         let modified = source.replacen(old_str, new_str, 1);
 
         let diff = self
-            .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+            .commit_or_preview_edit(
+                &rel_path,
+                &file,
+                &source_identity,
+                &source,
+                &modified,
+                dry_run,
+            )
             .await?;
 
         Ok(EditResult {
@@ -382,10 +729,8 @@ impl TraceDecay {
                 message: "path is not within the project".to_string(),
             })?;
 
-        let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {path}: {e}"),
-        })?;
+        let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
+        let (source, source_identity) = file.read_to_string(path)?;
 
         // Resolve every replacement against the ORIGINAL source. Each `old`
         // must match exactly once, and no two matched ranges may overlap.
@@ -460,7 +805,14 @@ impl TraceDecay {
         modified.push_str(&source[cursor..]);
 
         let diff = self
-            .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+            .commit_or_preview_edit(
+                &rel_path,
+                &file,
+                &source_identity,
+                &source,
+                &modified,
+                dry_run,
+            )
             .await?;
 
         Ok(MultiEditResult {
@@ -492,10 +844,8 @@ impl TraceDecay {
                 message: "path is not within the project".to_string(),
             })?;
 
-        let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {path}: {e}"),
-        })?;
+        let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
+        let (source, source_identity) = file.read_to_string(path)?;
 
         let lines: Vec<&str> = source.lines().collect();
 
@@ -568,7 +918,14 @@ impl TraceDecay {
         }
 
         let diff = self
-            .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+            .commit_or_preview_edit(
+                &rel_path,
+                &file,
+                &source_identity,
+                &source,
+                &modified,
+                dry_run,
+            )
             .await?;
 
         Ok(InsertResult {
@@ -598,13 +955,9 @@ impl TraceDecay {
         dry_run: bool,
     ) -> Result<EditResult> {
         let target = resolve_symbol_for_edit(self, symbol).await?;
-        let project_path =
-            crate::storage::ProjectPath::resolve(&self.project_root, Path::new(&target.file_path))?;
         let rel_path = target.file_path.clone();
-        let abs_path = project_path.absolute_path();
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {rel_path}: {e}"),
-        })?;
+        let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
+        let (source, source_identity) = file.read_to_string(&rel_path)?;
         let lines: Vec<&str> = source.lines().collect();
         // Honor the leading doc-comment / attribute block adaptively. The
         // extractor only sets `attrs_start_line` below `start_line` for an
@@ -649,7 +1002,14 @@ impl TraceDecay {
             modified.push('\n');
         }
         let diff = self
-            .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+            .commit_or_preview_edit(
+                &rel_path,
+                &file,
+                &source_identity,
+                &source,
+                &modified,
+                dry_run,
+            )
             .await?;
         // If the old span carried leading docs/attrs but the replacement text
         // does not appear to, surface a note so the caller can recover them
@@ -700,13 +1060,9 @@ impl TraceDecay {
             }
         };
         let target = resolve_symbol_for_edit(self, symbol).await?;
-        let project_path =
-            crate::storage::ProjectPath::resolve(&self.project_root, Path::new(&target.file_path))?;
         let rel_path = target.file_path.clone();
-        let abs_path = project_path.absolute_path();
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {rel_path}: {e}"),
-        })?;
+        let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
+        let (source, source_identity) = file.read_to_string(&rel_path)?;
         let lines: Vec<&str> = source.lines().collect();
         // `before` inserts above the item's leading doc-comment / attribute
         // block (when the extractor recorded one) so new content lands above the
@@ -742,7 +1098,14 @@ impl TraceDecay {
             modified.push('\n');
         }
         let diff = self
-            .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+            .commit_or_preview_edit(
+                &rel_path,
+                &file,
+                &source_identity,
+                &source,
+                &modified,
+                dry_run,
+            )
             .await?;
         Ok(InsertResult {
             success: true,
@@ -778,8 +1141,8 @@ impl TraceDecay {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "path is not within the project".to_string(),
             })?;
-
-        let abs_path = self.absolute_path(&rel_path);
+        let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
+        let (source, source_identity) = file.read_to_string(path)?;
 
         let check_output = crate::external_tools::ast_grep_command()
             .args(["--version"])
@@ -787,7 +1150,6 @@ impl TraceDecay {
 
         if check_output.is_err() {
             if can_use_literal_rewrite_fallback(pattern) {
-                let source = std::fs::read_to_string(&abs_path).map_err(TraceDecayError::Io)?;
                 if !source.contains(pattern) {
                     return Ok(AstGrepResult {
                         success: false,
@@ -801,7 +1163,14 @@ impl TraceDecay {
                 }
                 let modified = source.replace(pattern, rewrite);
                 let diff = self
-                    .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+                    .commit_or_preview_edit(
+                        &rel_path,
+                        &file,
+                        &source_identity,
+                        &source,
+                        &modified,
+                        dry_run,
+                    )
                     .await?;
                 return Ok(AstGrepResult {
                     success: true,
@@ -827,15 +1196,30 @@ impl TraceDecay {
             });
         }
 
-        let source = std::fs::read_to_string(&abs_path).map_err(TraceDecayError::Io)?;
-
         // Always ask ast-grep for its read-only structured replacement plan.
         // Reconstructing the exact post-edit bytes here keeps dry-run capture
         // and real application behind the same write authority.
-        let abs_path_arg = abs_path.to_string_lossy();
+        let suffix = Path::new(&rel_path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map_or_else(String::new, |extension| format!(".{extension}"));
+        let mut snapshot = tempfile::Builder::new()
+            .prefix("tracedecay-source-edit-")
+            .suffix(&suffix)
+            .tempfile()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to stage source edit analysis snapshot: {error}"),
+            })?;
+        snapshot
+            .write_all(source.as_bytes())
+            .and_then(|()| snapshot.flush())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to write source edit analysis snapshot: {error}"),
+            })?;
+        let snapshot_path_arg = snapshot.path().to_string_lossy();
         let mut ast_grep_args: Vec<&str> =
             vec!["run", "-p", pattern, "-r", rewrite, "--json=compact"];
-        ast_grep_args.push(abs_path_arg.as_ref());
+        ast_grep_args.push(snapshot_path_arg.as_ref());
         let output = crate::external_tools::ast_grep_command()
             .args(&ast_grep_args)
             .output()
@@ -877,7 +1261,14 @@ impl TraceDecay {
 
         let modified = reconstruct_ast_grep_rewrite(&source, &output.stdout)?;
         let diff = self
-            .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+            .commit_or_preview_edit(
+                &rel_path,
+                &file,
+                &source_identity,
+                &source,
+                &modified,
+                dry_run,
+            )
             .await?;
 
         Ok(AstGrepResult {
@@ -1142,9 +1533,12 @@ fn is_callable_edit_kind(kind: &NodeKind) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
-        capture_planned_source_edit, capture_source_edit_plan, leading_doc_or_attr,
-        narrow_symbol_for_edit, publish_planned_source_edit, reconstruct_ast_grep_rewrite,
+        SourceEditFileAuthority, capture_planned_source_edit, capture_source_edit_plan,
+        leading_doc_or_attr, narrow_symbol_for_edit, publish_planned_source_edit,
+        read_source_edit_candidate, reconstruct_ast_grep_rewrite,
     };
     use crate::types::{Node, NodeKind, Visibility};
     use tempfile::tempdir;
@@ -1214,10 +1608,90 @@ mod tests {
         std::fs::write(&path, "changed\n").unwrap();
 
         assert!(
-            publish_planned_source_edit(&path, "lib.rs", Some("previewed\n"), "intended\n")
-                .is_err()
+            publish_planned_source_edit(
+                directory.path(),
+                "lib.rs",
+                Some("previewed\n"),
+                "intended\n"
+            )
+            .is_err()
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "changed\n");
+    }
+
+    #[test]
+    fn atomic_publication_rejects_same_content_inode_swap() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("lib.rs");
+        let replacement = directory.path().join("replacement.rs");
+        std::fs::write(&path, "previewed\n").unwrap();
+        std::fs::write(&replacement, "previewed\n").unwrap();
+        let file = SourceEditFileAuthority::open(directory.path(), Path::new("lib.rs")).unwrap();
+        let (_, identity) = file.read_to_string("lib.rs").unwrap();
+
+        assert!(
+            file.publish(
+                "lib.rs",
+                Some("previewed\n"),
+                Some(&identity),
+                "intended\n",
+                || std::fs::rename(&replacement, &path).unwrap(),
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "previewed\n");
+    }
+
+    #[test]
+    fn atomic_publication_rejects_parent_directory_rebinding() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("src");
+        let moved = directory.path().join("moved");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("lib.rs"), "previewed\n").unwrap();
+        let file =
+            SourceEditFileAuthority::open(directory.path(), Path::new("src/lib.rs")).unwrap();
+        let (_, identity) = file.read_to_string("src/lib.rs").unwrap();
+
+        assert!(
+            file.publish(
+                "src/lib.rs",
+                Some("previewed\n"),
+                Some(&identity),
+                "intended\n",
+                || {
+                    std::fs::rename(&source, &moved).unwrap();
+                    std::fs::create_dir(&source).unwrap();
+                    std::fs::write(source.join("lib.rs"), "replacement\n").unwrap();
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(moved.join("lib.rs")).unwrap(),
+            "previewed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("lib.rs")).unwrap(),
+            "replacement\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_read_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("lib.rs"), "outside\n").unwrap();
+        symlink(outside.path(), directory.path().join("src")).unwrap();
+
+        assert!(read_source_edit_candidate(directory.path(), Path::new("src/lib.rs")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("lib.rs")).unwrap(),
+            "outside\n"
+        );
     }
 
     #[test]
