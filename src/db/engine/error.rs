@@ -3,7 +3,7 @@ use std::fmt;
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     InvalidColumn(i32),
     TypeMismatch {
         column: i32,
@@ -26,7 +26,6 @@ pub(crate) enum Error {
     InvalidOperation(String),
     TransactionClosed,
     TransactionExpired,
-    UnregisteredRuntime,
 }
 
 impl fmt::Display for Error {
@@ -57,9 +56,6 @@ impl fmt::Display for Error {
             Self::InvalidOperation(message) => formatter.write_str(message),
             Self::TransactionClosed => formatter.write_str("SQLite transaction is closed"),
             Self::TransactionExpired => formatter.write_str("SQLite transaction lease expired"),
-            Self::UnregisteredRuntime => {
-                formatter.write_str("no verified SQLite runtime is registered")
-            }
         }
     }
 }

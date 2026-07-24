@@ -142,14 +142,12 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
     let winner = entity_id(&db, "tracedecay").await;
     let loser = entity_id(&db, "memorygraph").await;
     drop(writer);
-    db.execute_write(
-        "corrupt fact vector fixture",
+    execute_sql(
+        &db,
         "UPDATE memory_facts SET hrr_vector = X'00', hrr_algebra = 'wrong', hrr_dim = 1,
                     hrr_precision = 'f64' WHERE fact_id = ?1",
-        libsql::params![first.fact_id],
-    )
-    .await
-    .unwrap();
+        rusqlite::params![first.fact_id],
+    );
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
 
@@ -198,7 +196,7 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
         .await,
         0
     );
-    let retriever = FactRetriever::new(db.conn());
+    let retriever = writer.retriever();
     let alias_hits = retriever.probe("TD", None, Some(0.0), 10).await.unwrap();
     assert!(
         alias_hits
@@ -210,29 +208,23 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
             .iter()
             .any(|hit| hit.fact.fact_id == second.fact_id)
     );
-    let mut rows = db
-        .conn()
-        .query(
+    let (algebra, dimension, precision, bytes): (String, i64, String, i64) =
+        rusqlite::Connection::open_with_flags(
+            db.database_path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
             "SELECT hrr_algebra, hrr_dim, hrr_precision, length(hrr_vector)
              FROM memory_facts WHERE fact_id = ?1",
-            libsql::params![first.fact_id],
+            rusqlite::params![first.fact_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .await
         .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "amari_fhrr");
-    assert_eq!(
-        row.get::<i64>(1).unwrap(),
-        HolographicEncoder::DIMENSIONS as i64
-    );
-    assert_eq!(
-        row.get::<String>(2).unwrap(),
-        HolographicEncoder::HRR_PRECISION
-    );
-    assert_eq!(
-        row.get::<i64>(3).unwrap(),
-        HolographicEncoder::SERIALIZED_F32_BYTES as i64
-    );
+    assert_eq!(algebra, "amari_fhrr");
+    assert_eq!(dimension, HolographicEncoder::DIMENSIONS as i64);
+    assert_eq!(precision, HolographicEncoder::HRR_PRECISION);
+    assert_eq!(bytes, HolographicEncoder::SERIALIZED_F32_BYTES as i64);
     assert!(dirty_bank_names(&db).await.is_empty());
 }
 
@@ -813,18 +805,19 @@ async fn memory_store_rejects_secret_like_fact_updates_without_mutating() {
     assert_eq!(unchanged.content, fact.content);
     assert!(!unchanged.content.contains("sk-test-742913"));
 
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT op, fact_id, detail_json FROM memory_oplog ORDER BY id DESC LIMIT 1",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().expect("reject oplog row");
-    assert_eq!(row.get::<String>(0).unwrap(), "reject_secret_like");
-    assert_eq!(row.get::<i64>(1).unwrap(), fact.fact_id);
-    let detail = row.get::<String>(2).unwrap();
+    let (op, row_fact_id, detail): (String, i64, String) = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT op, fact_id, detail_json FROM memory_oplog ORDER BY id DESC LIMIT 1",
+        (),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .unwrap();
+    assert_eq!(op, "reject_secret_like");
+    assert_eq!(row_fact_id, fact.fact_id);
     assert!(detail.contains("content_hash"), "{detail}");
     assert!(detail.contains("reason"), "{detail}");
     assert!(
@@ -866,44 +859,42 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
         .fact
         .unwrap();
 
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT length(hrr_vector) FROM memory_facts WHERE fact_id = ?1",
-            libsql::params![fact.fact_id],
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    let vector_len: i64 = row.get(0).unwrap();
+    let vector_len: i64 = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT length(hrr_vector) FROM memory_facts WHERE fact_id = ?1",
+        rusqlite::params![fact.fact_id],
+        |row| row.get(0),
+    )
+    .unwrap();
     assert_eq!(vector_len, 8200);
-    drop(row);
-    drop(rows);
 
     drop(writer);
-    db.execute_write(
-        "clear compact vector fixture",
+    execute_sql(
+        &db,
         "UPDATE memory_facts SET hrr_vector = NULL, hrr_dim = 8 WHERE fact_id = ?1",
-        libsql::params![fact.fact_id],
-    )
-    .await
-    .unwrap();
+        rusqlite::params![fact.fact_id],
+    );
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
 
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 1);
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 0);
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT hrr_dim FROM memory_facts WHERE fact_id = ?1",
-            libsql::params![fact.fact_id],
-        )
-        .await
-        .unwrap();
-    let hrr_dim: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    let hrr_dim: i64 = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT hrr_dim FROM memory_facts WHERE fact_id = ?1",
+        rusqlite::params![fact.fact_id],
+        |row| row.get(0),
+    )
+    .unwrap();
     assert_eq!(hrr_dim, HolographicEncoder::DIMENSIONS as i64);
-    drop(rows);
     assert_eq!(
         scalar_i64(
             &db,
@@ -915,13 +906,11 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
     );
 
     drop(writer);
-    db.execute_write(
-        "clear vector before bank rebuild fixture",
+    execute_sql(
+        &db,
         "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
-        libsql::params![fact_without_vector.fact_id],
-    )
-    .await
-    .unwrap();
+        rusqlite::params![fact_without_vector.fact_id],
+    );
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
     assert_eq!(
@@ -969,15 +958,13 @@ async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
     assert_eq!(legacy_bytes.len(), 16_392);
 
     drop(writer);
-    db.execute_write(
-        "install legacy vector fixture",
+    execute_sql(
+        &db,
         "UPDATE memory_facts
              SET hrr_vector = ?1, hrr_precision = 'f64'
              WHERE fact_id = ?2",
-        libsql::params![legacy_bytes, fact.fact_id],
-    )
-    .await
-    .unwrap();
+        rusqlite::params![legacy_bytes, fact.fact_id],
+    );
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
 
@@ -1006,7 +993,7 @@ async fn compact_vectors_keep_recall_ordering_after_bank_rebuild() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
-    let retriever = FactRetriever::new(db.conn());
+    let retriever = writer.retriever();
     for (content, trust) in [
         (
             "Alpha recall fixture prefers compact Rust FHRR vectors",
@@ -1073,14 +1060,14 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
 
     for idx in 0..48 {
         let fact_id = 50_000 + idx;
-        db.execute_write(
-            "seed vacuum reclamation fixture",
+        execute_sql(
+            &db,
             "INSERT INTO memory_facts (
                     fact_id, content, category, tags, trust_score, created_at,
                     updated_at, source, metadata, hrr_vector, hrr_algebra, hrr_dim, hrr_precision
                  )
                  VALUES (?1, ?2, ?3, '[]', ?4, ?5, ?5, ?6, '{}', ?7, ?8, ?9, ?10)",
-            libsql::params![
+            rusqlite::params![
                 fact_id,
                 format!("incremental vacuum blob reclamation fixture {idx}"),
                 MemoryCategory::Project.as_str(),
@@ -1092,9 +1079,7 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
                 HolographicEncoder::DIMENSIONS as i64,
                 HolographicEncoder::HRR_PRECISION,
             ],
-        )
-        .await
-        .unwrap();
+        );
         fact_ids.push(fact_id);
     }
     db.checkpoint().await.unwrap();
@@ -1470,7 +1455,7 @@ async fn fact_retriever_search_sanitizes_fts_chars_and_trust_weights_ordering() 
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
-    let retriever = FactRetriever::new(db.conn());
+    let retriever = writer.retriever();
 
     store
         .add_fact(
@@ -1524,7 +1509,6 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
-    let retriever = FactRetriever::new(db.conn());
 
     let mut matching = fact_request(
         "Older durable fact without the query words",
@@ -1538,6 +1522,7 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
         .unwrap()
         .fact
         .unwrap();
+    drop(store);
     drop(writer);
 
     seed_newer_unrelated_memory_facts(
@@ -1549,6 +1534,8 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
     )
     .await;
 
+    let writer = db.memory_writer().await.unwrap();
+    let retriever = writer.retriever();
     let results = retriever
         .search("EntityNeedle", Some(MemoryCategory::Project), Some(0.3), 5)
         .await
@@ -1567,7 +1554,7 @@ async fn fact_retriever_probe_related_reason_and_contradiction() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
-    let retriever = FactRetriever::new(db.conn());
+    let retriever = writer.retriever();
 
     let mut first = fact_request(
         "Project Phoenix uses SQLite memory",
@@ -1645,7 +1632,6 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
-    let retriever = FactRetriever::new(db.conn());
 
     let mut matching = fact_request(
         "Older fact links Project Phoenix and SQLite",
@@ -1659,6 +1645,7 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
         .unwrap()
         .fact
         .unwrap();
+    drop(store);
     drop(writer);
 
     seed_newer_unrelated_memory_facts(
@@ -1670,6 +1657,8 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
     )
     .await;
 
+    let writer = db.memory_writer().await.unwrap();
+    let retriever = writer.retriever();
     let results = retriever
         .reason(
             &["Project Phoenix".to_string(), "SQLite".to_string()],
@@ -1692,7 +1681,7 @@ async fn fact_retriever_reason_deduplicates_entity_predicates() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
-    let retriever = FactRetriever::new(db.conn());
+    let retriever = writer.retriever();
 
     let mut request = fact_request(
         "Project Phoenix uses SQLite for memory search",
@@ -1760,12 +1749,13 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
     store.rebuild_dirty_banks().await.unwrap();
 
     async fn count(db: &Database, sql: &str, fact_id: i64) -> i64 {
-        let mut rows = db
-            .conn()
-            .query(sql, libsql::params![fact_id])
-            .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+        rusqlite::Connection::open_with_flags(
+            db.database_path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(sql, rusqlite::params![fact_id], |row| row.get(0))
+        .unwrap()
     }
 
     let fts_sql = "SELECT COUNT(*) FROM memory_facts_fts WHERE rowid = ?1";
@@ -1800,8 +1790,7 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
 }
 
 async fn scalar_count(db: &Database, sql: &str) -> i64 {
-    let mut rows = db.conn().query(sql, ()).await.unwrap();
-    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    scalar_i64(db, sql).await
 }
 
 #[tokio::test]
@@ -1881,7 +1870,7 @@ async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
     let store = writer.store();
 
     let encoder = HolographicEncoder;
-    let retriever = FactRetriever::new(db.conn());
+    let retriever = writer.retriever();
     let mut original_request = fact_request(
         "Use pnpm for installs in this repository",
         MemoryCategory::Tool,
@@ -2078,17 +2067,18 @@ async fn add_fact_rejects_secret_like_content_without_storing() {
     );
 
     // The rejection is auditable via a content-hash-only oplog row.
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT op, detail_json FROM memory_oplog ORDER BY id DESC LIMIT 1",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().expect("oplog row expected");
-    assert_eq!(row.get::<String>(0).unwrap(), "reject_secret_like");
-    let detail = row.get::<String>(1).unwrap();
+    let (op, detail): (String, String) = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT op, detail_json FROM memory_oplog ORDER BY id DESC LIMIT 1",
+        (),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap();
+    assert_eq!(op, "reject_secret_like");
     assert!(detail.contains("content_hash"));
     assert!(
         !detail.contains("Zx9mQ4tR7wLp2NvK8sBd1FgH"),
@@ -2139,21 +2129,30 @@ async fn memory_oplog_records_mutations_with_hashes_not_content() {
         .unwrap();
     assert!(store.remove_fact(fact.fact_id).await.unwrap());
 
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT op, fact_id, detail_json FROM memory_oplog ORDER BY id",
-            (),
-        )
-        .await
+    let conn = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut statement = conn
+        .prepare("SELECT op, fact_id, detail_json FROM memory_oplog ORDER BY id")
         .unwrap();
     let mut ops = Vec::new();
     let mut remove_detail = String::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        let op = row.get::<String>(0).unwrap();
-        assert_eq!(row.get::<Option<i64>>(1).unwrap(), Some(fact.fact_id));
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap();
+    for row in rows {
+        let (op, row_fact_id, detail) = row.unwrap();
+        assert_eq!(row_fact_id, Some(fact.fact_id));
         if op == "remove" {
-            remove_detail = row.get::<String>(2).unwrap();
+            remove_detail = detail;
         }
         ops.push(op);
     }
