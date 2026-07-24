@@ -178,6 +178,27 @@ export function InspectorPanel({
   );
 }
 
+/** Filesystem paths and URLs carry no spaces, so the browser's only line-break
+ * fallback (`overflow-wrap: break-word`) had nowhere to break but mid-word —
+ * every character landed on its own line in a narrow column (worst at
+ * 320px). A `<wbr>` after each path separator gives it a real break point
+ * instead, so long paths wrap at segment boundaries like `.tracedecay/` \
+ * `config.toml` rather than one letter per line. Plain values are unaffected
+ * — this only ever inserts, never rewrites, the text. */
+function withPathBreaks(text: string): ReactNode {
+  if (!text.includes('/')) return text;
+  const segments = text.split('/');
+  const nodes: ReactNode[] = [];
+  segments.forEach((segment, i) => {
+    if (i > 0) {
+      nodes.push('/');
+      nodes.push(<wbr key={`wbr-${i}`} />);
+    }
+    nodes.push(segment);
+  });
+  return nodes;
+}
+
 /** Generic key/value renderer for legacy payload inspection: honest raw data
  * presentation until a typed view lands per family. */
 export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: number }) {
@@ -185,9 +206,38 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
     return <span className="text-text-muted">—</span>;
   }
   if (typeof value !== 'object') {
-    return <span className="td-value break-all text-2xs text-text-secondary">{String(value)}</span>;
+    const text = String(value);
+    return (
+      <span className="td-value break-words text-2xs text-text-secondary">
+        {withPathBreaks(text)}
+      </span>
+    );
   }
-  const entries = Array.isArray(value)
+  const isArray = Array.isArray(value);
+  // A flat array of primitives (glob lists, tags, provider names — the common
+  // case for config-shaped payloads) reads far better as a wrapped chip row
+  // than as N index-labelled dt/dd pairs: no meaningless "0", "1", "2" legends
+  // eating the label column, and no extra nesting depth for the width
+  // collapse below to compound against.
+  if (isArray && value.every((v) => v === null || typeof v !== 'object')) {
+    if (value.length === 0) return <span className="text-text-muted">empty</span>;
+    return (
+      <div className="flex flex-wrap gap-1">
+        {value.slice(0, 60).map((v, i) => (
+          <span
+            key={i}
+            className="td-value break-words rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-text-secondary"
+          >
+            {v === null || v === undefined ? '—' : withPathBreaks(String(v))}
+          </span>
+        ))}
+        {value.length > 60 ? (
+          <span className="text-2xs text-text-muted">… {value.length - 60} more</span>
+        ) : null}
+      </div>
+    );
+  }
+  const entries = isArray
     ? value.map((v, i) => [String(i), v] as const)
     : Object.entries(value as Record<string, unknown>);
   if (entries.length === 0) return <span className="text-text-muted">empty</span>;
@@ -196,7 +246,28 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
       {entries.slice(0, 60).map(([k, v]) => (
         <div
           key={k}
-          className="grid grid-cols-[8rem_1fr] gap-2 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0"
+          // Side-by-side columns compound: each nesting level reserves its
+          // own label track, so three or four levels deep — ordinary for a
+          // settings payload — the reservations alone exceed a 320px
+          // viewport, or even a 768px one once depth stacks up (the
+          // reservation is up to 9rem *per level*). CSS Grid sizes
+          // non-flexible tracks (the label's minmax) before flexible ones,
+          // so the value's `1fr` track was measuring 0px and every value
+          // wrapped one character per line — reproduced with a Playwright
+          // probe at depth 3 even inside a full-width card.
+          //
+          // Only the outermost level reserves a label column; every level
+          // below it stacks label above value unconditionally. That caps the
+          // total reservation at one track no matter how deep the payload
+          // nests or how narrow the surrounding container is (this also
+          // renders inside 352px-wide inspector rails at desktop widths, not
+          // just the full page).
+          className={cn(
+            'grid gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0',
+            depth === 0
+              ? 'grid-cols-1 sm:grid-cols-[minmax(5rem,9rem)_1fr] sm:gap-y-0'
+              : 'grid-cols-1',
+          )}
         >
           <dt className="td-legend truncate pt-px" title={k}>
             {k}
