@@ -246,8 +246,29 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        let managed_dir = kimi_plugin_managed_dir(&kimi_code_home(&ctx.home));
-        run_kimi_plugin_manager(["plugin", "install", managed_dir.to_string_lossy().as_ref()])
+        // Same contract as `install_kimi_plugin_with_manager_fallback`:
+        // activation must not hard-depend on the optional external `kimi`
+        // binary. Without this fallback, a kimi CLI lacking the `plugin`
+        // subcommand (exit 1: "unknown command 'plugin'") failed the v2
+        // lifecycle between apply and commit on every run, leaving the shared
+        // component-set journal wedged — which then blocked EVERY host's
+        // bundle lifecycle until the journal was manually cleared, and the
+        // receiptless artifacts re-failed the next run as ownership conflicts.
+        let code_home = kimi_code_home(&ctx.home);
+        let managed_dir = kimi_plugin_managed_dir(&code_home);
+        match run_kimi_plugin_manager(["plugin", "install", managed_dir.to_string_lossy().as_ref()])
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                eprintln!(
+                    "  Official Kimi plugin manager unavailable ({error}); \
+                     registering the managed plugin directly."
+                );
+                // The v2 artifact writer has already deployed the managed dir;
+                // only the registry entry is missing.
+                upsert_kimi_installed_entry(&code_home)
+            }
+        }
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
