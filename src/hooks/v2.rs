@@ -99,17 +99,136 @@ pub(crate) fn publish_daemon_bindings(
 
 #[derive(Default, Deserialize)]
 struct NativeIdentityFields {
+    id: Option<String>,
+    #[serde(alias = "sessionID")]
     session_id: Option<String>,
     conversation_id: Option<String>,
     generation_id: Option<String>,
     prompt_id: Option<String>,
     turn_id: Option<String>,
+    #[serde(alias = "toolUseID")]
     tool_use_id: Option<String>,
+    #[serde(alias = "toolCallID")]
     tool_call_id: Option<String>,
+    #[serde(alias = "callID")]
     call_id: Option<String>,
+    #[serde(alias = "filePath")]
     file_path: Option<String>,
+    #[serde(alias = "toolName")]
     tool_name: Option<String>,
     edits: Option<Vec<serde_json::Value>>,
+    properties: Option<NativeIdentityProperties>,
+    input: Option<NativeIdentityInput>,
+    output: Option<NativeIdentityOutput>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityProperties {
+    #[serde(alias = "sessionID")]
+    session_id: Option<String>,
+    file: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityInput {
+    #[serde(alias = "sessionID")]
+    session_id: Option<String>,
+    #[serde(alias = "callID")]
+    call_id: Option<String>,
+    tool: Option<String>,
+    #[serde(alias = "filePath")]
+    file_path: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityOutput {
+    metadata: Option<NativeIdentityOutputMetadata>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityOutputMetadata {
+    #[serde(default)]
+    files: Vec<NativeIdentityFile>,
+}
+
+#[derive(Deserialize)]
+struct NativeIdentityFile {
+    #[serde(alias = "filePath")]
+    file_path: String,
+}
+
+impl NativeIdentityFields {
+    fn session_id(&self) -> Option<&str> {
+        self.session_id
+            .as_deref()
+            .or(self.conversation_id.as_deref())
+            .or_else(|| {
+                self.properties
+                    .as_ref()
+                    .and_then(|properties| properties.session_id.as_deref())
+            })
+            .or_else(|| {
+                self.input
+                    .as_ref()
+                    .and_then(|input| input.session_id.as_deref())
+            })
+    }
+
+    fn event_key(&self) -> Option<&str> {
+        self.tool_use_id
+            .as_deref()
+            .or(self.tool_call_id.as_deref())
+            .or(self.call_id.as_deref())
+            .or_else(|| {
+                self.input
+                    .as_ref()
+                    .and_then(|input| input.call_id.as_deref())
+            })
+            .or(self.generation_id.as_deref())
+            .or(self.prompt_id.as_deref())
+            .or(self.turn_id.as_deref())
+            .or(self.id.as_deref())
+    }
+
+    fn call_id(&self) -> Option<&str> {
+        self.tool_use_id
+            .as_deref()
+            .or(self.tool_call_id.as_deref())
+            .or(self.call_id.as_deref())
+            .or_else(|| {
+                self.input
+                    .as_ref()
+                    .and_then(|input| input.call_id.as_deref())
+            })
+    }
+
+    fn file_path(&self) -> Option<&str> {
+        self.file_path
+            .as_deref()
+            .or_else(|| {
+                self.properties
+                    .as_ref()
+                    .and_then(|properties| properties.file.as_deref())
+            })
+            .or_else(|| {
+                self.input
+                    .as_ref()
+                    .and_then(|input| input.file_path.as_deref())
+            })
+            .or_else(|| {
+                self.output
+                    .as_ref()
+                    .and_then(|output| output.metadata.as_ref())
+                    .and_then(|metadata| metadata.files.first())
+                    .map(|file| file.file_path.as_str())
+            })
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        self.tool_name
+            .as_deref()
+            .or_else(|| self.input.as_ref().and_then(|input| input.tool.as_deref()))
+    }
 }
 
 struct DaemonAdmissionPort<'a> {
@@ -296,37 +415,23 @@ fn native_material(
     observed_at: UtcMicros,
 ) -> NativeEnvelopeMaterialV1 {
     let fields = serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
-    let session = fields
-        .session_id
-        .as_deref()
-        .or(fields.conversation_id.as_deref())
-        .unwrap_or("unknown-session");
-    let event_key = fields
-        .tool_use_id
-        .as_deref()
-        .or(fields.tool_call_id.as_deref())
-        .or(fields.call_id.as_deref())
-        .or(fields.generation_id.as_deref())
-        .or(fields.prompt_id.as_deref())
-        .or(fields.turn_id.as_deref())
-        .unwrap_or(event_json);
-    let file = fields.file_path.as_deref().unwrap_or(event_key);
-    let tool = fields.tool_name.as_deref().unwrap_or(event_key);
+    let session = fields.session_id().unwrap_or("unknown-session");
+    let event_key = fields.event_key().unwrap_or(event_json);
+    let file = fields.file_path().unwrap_or(event_key);
+    let tool = fields.tool_name().unwrap_or(event_key);
     NativeEnvelopeMaterialV1 {
         event_id: hash16(event_key.as_bytes()),
         protected_session_id: hash32(session.as_bytes()),
         observed_at,
         tool_id: (family == tracedecay_hooks::HookEventFamily::ToolLifecycle)
             .then(|| hash16(tool.as_bytes())),
-        effect_receipt_id: fields
-            .tool_use_id
-            .as_deref()
-            .or(fields.tool_call_id.as_deref())
-            .or(fields.call_id.as_deref())
-            .map(|value| hash16(value.as_bytes())),
+        effect_receipt_id: fields.call_id().map(|value| hash16(value.as_bytes())),
         file_id: (family == tracedecay_hooks::HookEventFamily::SavedEdit)
             .then(|| hash16(file.as_bytes())),
-        changed_range_count: fields.edits.map_or(1, |edits| edits.len().min(64) as u8),
+        changed_range_count: fields
+            .edits
+            .as_ref()
+            .map_or(1, |edits| edits.len().min(64) as u8),
     }
 }
 
@@ -362,5 +467,54 @@ fn unavailable() -> HookV2Dispatch {
     HookV2Dispatch::Handled {
         guidance: None,
         disposition: HookTransportDispositionV1::CatchupRequired,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_event_uses_nested_properties_identity() {
+        let material = native_material(
+            r#"{
+                "id": "event-17",
+                "properties": {
+                    "sessionID": "session-23",
+                    "file": "/project/src/lib.rs"
+                }
+            }"#,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+            UtcMicros(41),
+        );
+
+        assert_eq!(material.event_id, hash16(b"event-17"));
+        assert_eq!(material.protected_session_id, hash32(b"session-23"));
+        assert_eq!(material.file_id, Some(hash16(b"/project/src/lib.rs")));
+    }
+
+    #[test]
+    fn opencode_tool_event_uses_nested_input_and_output_identity() {
+        let material = native_material(
+            r#"{
+                "input": {
+                    "tool": "apply_patch",
+                    "sessionID": "session-29",
+                    "callID": "call-31"
+                },
+                "output": {
+                    "metadata": {
+                        "files": [{"filePath": "/project/src/main.rs"}]
+                    }
+                }
+            }"#,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+            UtcMicros(43),
+        );
+
+        assert_eq!(material.event_id, hash16(b"call-31"));
+        assert_eq!(material.protected_session_id, hash32(b"session-29"));
+        assert_eq!(material.effect_receipt_id, Some(hash16(b"call-31")));
+        assert_eq!(material.file_id, Some(hash16(b"/project/src/main.rs")));
     }
 }
