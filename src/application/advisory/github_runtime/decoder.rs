@@ -200,6 +200,7 @@ where
     fn decode_pull_request(&self, request: &GitHubReviewReadRequestV1, body: &[u8]) -> Option<()> {
         let response = serde_json::from_slice::<RestPullRequestV1>(body).ok()?;
         (response.id.to_string() == request.pull_request_id.as_str()
+            && response.number == self.identity.pull_request_number
             && response.base.sha == self.identity.base_commit_id.as_str()
             && response.head.sha == self.identity.head_commit_id.as_str())
         .then_some(())

@@ -52,8 +52,14 @@ pub use dto::{
 pub(crate) use dto::{GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1, RestReviewV1};
 pub use network::{
     GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
-    GitHubRepositoryTargetV1,
+    GitHubReadOnlyClientV1, GitHubReadOnlyCredentialAuthorityOutcomeV1,
+    GitHubReadOnlyCredentialAuthorityV1, GitHubReadOnlyCredentialSecretV1,
+    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
+    register_github_read_only_credential_authority_v1,
+    unregister_github_read_only_credential_authority_v1,
+};
+pub(crate) use network::{
+    RegisteredGitHubReadOnlyCredentialV1, resolve_registered_github_read_only_credential_v1,
 };
 pub use owner::{
     GitHubReviewRuntimeOwnerBuildErrorV1, GitHubReviewRuntimeOwnerConfigV1,
@@ -64,6 +70,9 @@ pub use store::ProjectGitHubReviewStoreV1;
 /// Raw GitHub response bytes are transient parser input only. They are never
 /// put into a checkpoint, an ingress result, or this transport's receipt.
 pub const MAX_GITHUB_READ_RESPONSE_BYTES_V1: usize = 1024 * 1024;
+const MAX_GITHUB_REFRESH_SCAN_PAGES_V1: usize = 20;
+const GITHUB_REVIEW_SCAN_TOKEN_DOMAIN_V1: &str = "tracedecay.pr13.github.scan-token.v1";
+const MAX_GITHUB_REFRESH_ATTEMPT_RECEIPTS_V1: usize = 64;
 
 /// Cache, pagination, and rate-limit state loaded from the injected durable
 /// read checkpoint. It has no write precondition or mutation capability.
@@ -242,6 +251,12 @@ pub struct GitHubReadOnlyRuntimeTransportV1<C, N, D> {
     decoder: D,
 }
 
+#[derive(Clone, Copy)]
+enum GitHubFullScanRouteV1 {
+    Rest(GitHubRestDescriptorV1),
+    GraphQl,
+}
+
 impl<C, N, D> GitHubReadOnlyRuntimeTransportV1<C, N, D> {
     pub fn new(checkpoints: C, network: N, decoder: D) -> Self {
         Self {
@@ -321,6 +336,108 @@ where
             GitHubReadCheckpointLoadOutcomeV1::Unavailable => None,
         }
     }
+
+    async fn full_scan(
+        &self,
+        context: &RequestContext,
+        request: &GitHubReviewReadRequestV1,
+        mut resume: GitHubReadResumeV1,
+        route: GitHubFullScanRouteV1,
+    ) -> GitHubReviewReadPortOutcomeV1 {
+        if resume.cursor.take().is_some() {
+            resume.etag = None;
+        }
+        let mut items = BTreeMap::new();
+        let mut visited_cursors = std::collections::BTreeSet::new();
+        for _ in 0..MAX_GITHUB_REFRESH_SCAN_PAGES_V1 {
+            if !context_allows_feedback_operation(
+                context,
+                &request.scope,
+                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+            ) {
+                return GitHubReviewReadPortOutcomeV1::Denied;
+            }
+            let outcome = match route {
+                GitHubFullScanRouteV1::Rest(descriptor) => {
+                    self.network
+                        .get(
+                            context,
+                            &GitHubRestReadRequestV1 {
+                                descriptor,
+                                scope: request.scope.clone(),
+                                pull_request_id: request.pull_request_id.clone(),
+                                resume: resume.clone(),
+                            },
+                        )
+                        .await
+                }
+                GitHubFullScanRouteV1::GraphQl => {
+                    self.network
+                        .query(
+                            context,
+                            &GitHubGraphQlReadRequestV1 {
+                                scope: request.scope.clone(),
+                                pull_request_id: request.pull_request_id.clone(),
+                                resume: resume.clone(),
+                            },
+                        )
+                        .await
+                }
+            };
+            if !context_allows_feedback_operation(
+                context,
+                &request.scope,
+                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+            ) {
+                return GitHubReviewReadPortOutcomeV1::Denied;
+            }
+            let decoded = self.decode_outcome(request, resume.clone(), outcome).await;
+            let GitHubReviewReadPortOutcomeV1::Read(response) = decoded else {
+                return decoded;
+            };
+            let mut response = *response;
+            let next_cursor = response.checkpoint.next_cursor.clone();
+            for item in response.ingress.items.drain(..) {
+                if items
+                    .insert(item.comment_id.as_str().to_owned(), item)
+                    .is_some()
+                {
+                    return GitHubReviewReadPortOutcomeV1::Unavailable;
+                }
+            }
+            if let Some(cursor) = next_cursor {
+                if response.ingress.outcome != GitHubReviewIngressProviderOutcomeV1::Partial
+                    || !visited_cursors.insert(cursor.as_str().to_owned())
+                {
+                    return GitHubReviewReadPortOutcomeV1::Unavailable;
+                }
+                resume = GitHubReadResumeV1 {
+                    etag: None,
+                    cursor: Some(cursor),
+                    rate_limit: response.checkpoint.rate_limit,
+                };
+                continue;
+            }
+            if !items.is_empty()
+                && response.ingress.outcome != GitHubReviewIngressProviderOutcomeV1::Complete
+            {
+                return GitHubReviewReadPortOutcomeV1::Unavailable;
+            }
+            response.ingress.items = items.into_values().collect();
+            for item in &mut response.ingress.items {
+                item.provider_outcome = response.ingress.outcome;
+            }
+            response.checkpoint.next_cursor = None;
+            return if response.validate_for(request).is_ok() {
+                GitHubReviewReadPortOutcomeV1::Read(Box::new(response))
+            } else {
+                GitHubReviewReadPortOutcomeV1::Unavailable
+            };
+        }
+        GitHubReviewReadPortOutcomeV1::Unavailable
+    }
 }
 
 impl<C, N, D> GitHubReadOnlyTransport for GitHubReadOnlyRuntimeTransportV1<C, N, D>
@@ -361,22 +478,13 @@ where
                 }
                 return GitHubReviewReadPortOutcomeV1::Unavailable;
             };
-            let outbound = GitHubRestReadRequestV1 {
-                descriptor,
-                scope: request.scope.clone(),
-                pull_request_id: request.pull_request_id.clone(),
-                resume: resume.clone(),
-            };
-            let outcome = self.network.get(context, &outbound).await;
-            if !context_allows_feedback_operation(
+            self.full_scan(
                 context,
-                &request.scope,
-                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-            ) {
-                return GitHubReviewReadPortOutcomeV1::Denied;
-            }
-            self.decode_outcome(request, resume, outcome).await
+                request,
+                resume,
+                GitHubFullScanRouteV1::Rest(descriptor),
+            )
+            .await
         })
     }
 
@@ -408,21 +516,8 @@ where
                 }
                 return GitHubReviewReadPortOutcomeV1::Unavailable;
             };
-            let outbound = GitHubGraphQlReadRequestV1 {
-                scope: request.scope.clone(),
-                pull_request_id: request.pull_request_id.clone(),
-                resume: resume.clone(),
-            };
-            let outcome = self.network.query(context, &outbound).await;
-            if !context_allows_feedback_operation(
-                context,
-                &request.scope,
-                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-            ) {
-                return GitHubReviewReadPortOutcomeV1::Denied;
-            }
-            self.decode_outcome(request, resume, outcome).await
+            self.full_scan(context, request, resume, GitHubFullScanRouteV1::GraphQl)
+                .await
         })
     }
 }
@@ -448,6 +543,77 @@ fn network_status_matches(
 }
 
 const GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1: &str = "tracedecay.pr13.github.refresh-state.v1";
+
+fn github_review_refresh_revision(
+    last_complete: Option<&GitHubReviewReadResponseV1>,
+    latest_attempt: &GitHubReviewReadResponseV1,
+    attempt_receipts: &[GitHubReviewRefreshAttemptReceiptV1],
+) -> Option<ManifestDigest> {
+    if attempt_receipts.is_empty() {
+        canonical_sha256(&(
+            GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1,
+            last_complete,
+            latest_attempt,
+        ))
+        .ok()
+    } else {
+        canonical_sha256(&(
+            GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1,
+            last_complete,
+            latest_attempt,
+            attempt_receipts,
+        ))
+        .ok()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubReviewRefreshAttemptDispositionV1 {
+    Terminal,
+    Agreed,
+    RetryAgreed,
+    Quarantined,
+}
+
+/// Durable evidence for one bounded refresh acquisition attempt. Scan digests
+/// are content-equivalence tokens, never provider or publication identity.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewRefreshAttemptReceiptV1 {
+    pub disposition: GitHubReviewRefreshAttemptDispositionV1,
+    pub scan_digests: Vec<ManifestDigest>,
+    pub observed_at: tracedecay_domain::UtcMicros,
+}
+
+impl GitHubReviewRefreshAttemptReceiptV1 {
+    fn validate(&self) -> bool {
+        if self
+            .scan_digests
+            .iter()
+            .any(|digest| digest.validate().is_err())
+        {
+            return false;
+        }
+        match self.disposition {
+            GitHubReviewRefreshAttemptDispositionV1::Terminal => self.scan_digests.len() == 1,
+            GitHubReviewRefreshAttemptDispositionV1::Agreed => {
+                self.scan_digests.len() == 2
+                    && self.scan_digests.first() == self.scan_digests.get(1)
+            }
+            GitHubReviewRefreshAttemptDispositionV1::RetryAgreed => {
+                self.scan_digests.len() == 3
+                    && self.scan_digests.first() != self.scan_digests.get(1)
+                    && self.scan_digests.get(1) == self.scan_digests.get(2)
+            }
+            GitHubReviewRefreshAttemptDispositionV1::Quarantined => {
+                self.scan_digests.len() == 3
+                    && self.scan_digests.first() != self.scan_digests.get(1)
+                    && self.scan_digests.get(1) != self.scan_digests.get(2)
+            }
+        }
+    }
+}
 
 /// A complete canonical item set and its cursor/checkpoint are one durable
 /// generation. No partial, stale, denied, or unavailable attempt can be
@@ -485,6 +651,8 @@ pub struct GitHubReviewRefreshStateV1 {
     pub revision: ManifestDigest,
     pub last_complete: Option<GitHubReviewCompleteGenerationV1>,
     pub latest_attempt: GitHubReviewReadResponseV1,
+    #[serde(default)]
+    pub attempt_receipts: Vec<GitHubReviewRefreshAttemptReceiptV1>,
 }
 
 impl GitHubReviewRefreshStateV1 {
@@ -493,8 +661,18 @@ impl GitHubReviewRefreshStateV1 {
         previous: Option<&Self>,
         latest_attempt: GitHubReviewReadResponseV1,
     ) -> Option<Self> {
+        Self::transition_with_receipt(request, previous, latest_attempt, None)
+    }
+
+    fn transition_with_receipt(
+        request: &GitHubReviewReadRequestV1,
+        previous: Option<&Self>,
+        latest_attempt: GitHubReviewReadResponseV1,
+        receipt: Option<GitHubReviewRefreshAttemptReceiptV1>,
+    ) -> Option<Self> {
         if latest_attempt.validate_for(request).is_err()
             || previous.is_some_and(|state| !state.validate_for(request))
+            || receipt.as_ref().is_some_and(|receipt| !receipt.validate())
         {
             return None;
         }
@@ -508,24 +686,39 @@ impl GitHubReviewRefreshStateV1 {
             } else {
                 previous.and_then(|state| state.last_complete.clone())
             };
-        let revision = canonical_sha256(&(
-            GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1,
+        let mut attempt_receipts = previous
+            .map(|state| state.attempt_receipts.clone())
+            .unwrap_or_default();
+        if let Some(receipt) = receipt {
+            attempt_receipts.push(receipt);
+            if attempt_receipts.len() > MAX_GITHUB_REFRESH_ATTEMPT_RECEIPTS_V1 {
+                attempt_receipts
+                    .drain(..attempt_receipts.len() - MAX_GITHUB_REFRESH_ATTEMPT_RECEIPTS_V1);
+            }
+        }
+        let revision = github_review_refresh_revision(
             last_complete
                 .as_ref()
                 .map(|generation| &generation.response),
             &latest_attempt,
-        ))
-        .ok()?;
+            &attempt_receipts,
+        )?;
         let state = Self {
             revision,
             last_complete,
             latest_attempt,
+            attempt_receipts,
         };
         state.validate_for(request).then_some(state)
     }
 
     pub fn validate_for(&self, request: &GitHubReviewReadRequestV1) -> bool {
         if self.latest_attempt.validate_for(request).is_err()
+            || self.attempt_receipts.len() > MAX_GITHUB_REFRESH_ATTEMPT_RECEIPTS_V1
+            || self
+                .attempt_receipts
+                .iter()
+                .any(|receipt| !receipt.validate())
             || self
                 .last_complete
                 .as_ref()
@@ -541,14 +734,14 @@ impl GitHubReviewRefreshStateV1 {
         {
             return false;
         }
-        canonical_sha256(&(
-            GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1,
+        github_review_refresh_revision(
             self.last_complete
                 .as_ref()
                 .map(|generation| &generation.response),
             &self.latest_attempt,
-        ))
-        .is_ok_and(|expected| expected == self.revision)
+            &self.attempt_receipts,
+        )
+        .is_some_and(|expected| expected == self.revision)
     }
 }
 
@@ -621,6 +814,53 @@ fn normalize_refresh_attempt(
         latest.checkpoint.etag = None;
     }
     latest.validate_for(request).is_ok().then_some(latest)
+}
+
+fn github_review_scan_digest(
+    request: &GitHubReviewReadRequestV1,
+    response: &GitHubReviewReadResponseV1,
+) -> Option<ManifestDigest> {
+    response.validate_for(request).ok()?;
+    let mut stable = response.clone();
+    stable.ingress.fetched_at = tracedecay_domain::UtcMicros(0);
+    stable.checkpoint.etag = None;
+    stable.checkpoint.rate_limit = None;
+    stable.ingress.items.sort_by(|left, right| {
+        left.comment_id
+            .as_str()
+            .cmp(right.comment_id.as_str())
+            .then_with(|| {
+                left.version_digest
+                    .as_str()
+                    .cmp(right.version_digest.as_str())
+            })
+    });
+    for item in &mut stable.ingress.items {
+        item.observed_at = tracedecay_domain::UtcMicros(0);
+    }
+    canonical_sha256(&(GITHUB_REVIEW_SCAN_TOKEN_DOMAIN_V1, stable)).ok()
+}
+
+fn quarantined_refresh_attempt(
+    request: &GitHubReviewReadRequestV1,
+    mut response: GitHubReviewReadResponseV1,
+) -> Option<GitHubReviewReadResponseV1> {
+    response.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+    response.ingress.coverage = tracedecay_domain::feedback::GitHubReviewCoverageV1::Partial;
+    for item in &mut response.ingress.items {
+        item.provider_outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+    }
+    response.checkpoint.etag = None;
+    response.checkpoint.next_cursor = None;
+    response.validate_for(request).ok().map(|()| response)
+}
+
+fn requires_refresh_scan_consensus(response: &GitHubReviewReadResponseV1) -> bool {
+    matches!(
+        response.ingress.outcome,
+        GitHubReviewIngressProviderOutcomeV1::Complete
+            | GitHubReviewIngressProviderOutcomeV1::Stale
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -765,7 +1005,7 @@ where
                     return GitHubReviewRefreshOutcomeV1::Unavailable;
                 }
             };
-            let read = self.port.read(context, request).await;
+            let first_read = self.port.read(context, request).await;
             if !context_allows_feedback_operation(
                 context,
                 &request.scope,
@@ -779,8 +1019,8 @@ where
             {
                 return outcome;
             }
-            let GitHubReviewReadPortOutcomeV1::Read(response) = read else {
-                return match read {
+            let GitHubReviewReadPortOutcomeV1::Read(first_response) = first_read else {
+                return match first_read {
                     GitHubReviewReadPortOutcomeV1::Denied => GitHubReviewRefreshOutcomeV1::Denied,
                     GitHubReviewReadPortOutcomeV1::Unavailable => {
                         GitHubReviewRefreshOutcomeV1::Unavailable
@@ -788,9 +1028,135 @@ where
                     GitHubReviewReadPortOutcomeV1::Read(_) => unreachable!(),
                 };
             };
-            let Some(next) =
-                GitHubReviewRefreshStateV1::transition(request, previous.as_deref(), *response)
-            else {
+            let first_response = *first_response;
+            let Some(first_digest) = github_review_scan_digest(request, &first_response) else {
+                return GitHubReviewRefreshOutcomeV1::Unavailable;
+            };
+            let (latest_attempt, receipt, quarantined) =
+                if requires_refresh_scan_consensus(&first_response) {
+                    let second_read = self.port.read(context, request).await;
+                    if !context_allows_feedback_operation(
+                        context,
+                        &request.scope,
+                        GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+                        GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+                    ) {
+                        return GitHubReviewRefreshOutcomeV1::Denied;
+                    }
+                    if let Some(outcome) = blocked_refresh_outcome(
+                        self.source_access.authorize(context, request).await,
+                    ) {
+                        return outcome;
+                    }
+                    let GitHubReviewReadPortOutcomeV1::Read(second_response) = second_read else {
+                        return match second_read {
+                            GitHubReviewReadPortOutcomeV1::Denied => {
+                                GitHubReviewRefreshOutcomeV1::Denied
+                            }
+                            GitHubReviewReadPortOutcomeV1::Unavailable => {
+                                GitHubReviewRefreshOutcomeV1::Unavailable
+                            }
+                            GitHubReviewReadPortOutcomeV1::Read(_) => unreachable!(),
+                        };
+                    };
+                    let second_response = *second_response;
+                    let Some(second_digest) = github_review_scan_digest(request, &second_response)
+                    else {
+                        return GitHubReviewRefreshOutcomeV1::Unavailable;
+                    };
+                    if first_digest == second_digest {
+                        let observed_at = first_response
+                            .ingress
+                            .fetched_at
+                            .max(second_response.ingress.fetched_at);
+                        (
+                            second_response,
+                            GitHubReviewRefreshAttemptReceiptV1 {
+                                disposition: GitHubReviewRefreshAttemptDispositionV1::Agreed,
+                                scan_digests: vec![first_digest, second_digest],
+                                observed_at,
+                            },
+                            false,
+                        )
+                    } else {
+                        let third_read = self.port.read(context, request).await;
+                        if !context_allows_feedback_operation(
+                            context,
+                            &request.scope,
+                            GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+                            GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+                        ) {
+                            return GitHubReviewRefreshOutcomeV1::Denied;
+                        }
+                        if let Some(outcome) = blocked_refresh_outcome(
+                            self.source_access.authorize(context, request).await,
+                        ) {
+                            return outcome;
+                        }
+                        let GitHubReviewReadPortOutcomeV1::Read(third_response) = third_read else {
+                            return match third_read {
+                                GitHubReviewReadPortOutcomeV1::Denied => {
+                                    GitHubReviewRefreshOutcomeV1::Denied
+                                }
+                                GitHubReviewReadPortOutcomeV1::Unavailable => {
+                                    GitHubReviewRefreshOutcomeV1::Unavailable
+                                }
+                                GitHubReviewReadPortOutcomeV1::Read(_) => unreachable!(),
+                            };
+                        };
+                        let third_response = *third_response;
+                        let Some(third_digest) =
+                            github_review_scan_digest(request, &third_response)
+                        else {
+                            return GitHubReviewRefreshOutcomeV1::Unavailable;
+                        };
+                        if second_digest == third_digest {
+                            let observed_at = third_response.ingress.fetched_at;
+                            (
+                                third_response,
+                                GitHubReviewRefreshAttemptReceiptV1 {
+                                    disposition:
+                                        GitHubReviewRefreshAttemptDispositionV1::RetryAgreed,
+                                    scan_digests: vec![first_digest, second_digest, third_digest],
+                                    observed_at,
+                                },
+                                false,
+                            )
+                        } else {
+                            let Some(quarantined_response) =
+                                quarantined_refresh_attempt(request, third_response.clone())
+                            else {
+                                return GitHubReviewRefreshOutcomeV1::Unavailable;
+                            };
+                            (
+                                quarantined_response,
+                                GitHubReviewRefreshAttemptReceiptV1 {
+                                    disposition:
+                                        GitHubReviewRefreshAttemptDispositionV1::Quarantined,
+                                    scan_digests: vec![first_digest, second_digest, third_digest],
+                                    observed_at: third_response.ingress.fetched_at,
+                                },
+                                true,
+                            )
+                        }
+                    }
+                } else {
+                    (
+                        first_response.clone(),
+                        GitHubReviewRefreshAttemptReceiptV1 {
+                            disposition: GitHubReviewRefreshAttemptDispositionV1::Terminal,
+                            scan_digests: vec![first_digest],
+                            observed_at: first_response.ingress.fetched_at,
+                        },
+                        false,
+                    )
+                };
+            let Some(next) = GitHubReviewRefreshStateV1::transition_with_receipt(
+                request,
+                previous.as_deref(),
+                latest_attempt,
+                Some(receipt),
+            ) else {
                 return GitHubReviewRefreshOutcomeV1::Unavailable;
             };
             let expected = previous.as_ref().map(|state| &state.revision);
@@ -811,9 +1177,17 @@ where
             ) {
                 return GitHubReviewRefreshOutcomeV1::Denied;
             }
+            if let Some(outcome) =
+                blocked_refresh_outcome(self.source_access.authorize(context, request).await)
+            {
+                return outcome;
+            }
             match outcome {
                 GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
                 | GitHubReviewRefreshStoreCommitOutcomeV1::Duplicate => {
+                    if quarantined {
+                        return GitHubReviewRefreshOutcomeV1::Stale;
+                    }
                     let deleted_items = next.last_complete.as_ref().map_or(0, |generation| {
                         generation
                             .response
@@ -858,6 +1232,7 @@ fn blocked_refresh_outcome(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -935,6 +1310,44 @@ mod tests {
         }
     }
 
+    struct PageNetwork {
+        outcomes: Mutex<VecDeque<GitHubReadNetworkOutcomeV1>>,
+        cursors: Mutex<Vec<Option<String>>>,
+        calls: AtomicUsize,
+    }
+
+    impl GitHubReadOnlyNetworkAuthorityV1 for PageNetwork {
+        fn get<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            request: &'a GitHubRestReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.cursors.lock().unwrap().push(
+                request
+                    .resume
+                    .cursor
+                    .as_ref()
+                    .map(|cursor| cursor.as_str().to_owned()),
+            );
+            let outcome = self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(GitHubReadNetworkOutcomeV1::Unavailable);
+            Box::pin(async move { outcome })
+        }
+
+        fn query<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubGraphQlReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
+            Box::pin(async { GitHubReadNetworkOutcomeV1::Unavailable })
+        }
+    }
+
     struct Decoder;
 
     impl GitHubReadResponseDecoderV1 for Decoder {
@@ -946,6 +1359,10 @@ mod tests {
         ) -> FeedbackPortFuture<'a, Option<GitHubReviewIngressResultV1>> {
             Box::pin(async move {
                 let (outcome, coverage) = match metadata.status {
+                    GitHubReadNetworkStatusV1::Ok if metadata.next_cursor.is_some() => (
+                        GitHubReviewIngressProviderOutcomeV1::Partial,
+                        GitHubReviewCoverageV1::Partial,
+                    ),
                     GitHubReadNetworkStatusV1::Ok => (
                         GitHubReviewIngressProviderOutcomeV1::Complete,
                         GitHubReviewCoverageV1::Complete,
@@ -973,6 +1390,126 @@ mod tests {
                     fetched_at: UtcMicros(10),
                 })
             })
+        }
+    }
+
+    struct Reads {
+        outcomes: Mutex<VecDeque<GitHubReviewReadPortOutcomeV1>>,
+        calls: AtomicUsize,
+    }
+
+    impl Reads {
+        fn new(outcomes: Vec<GitHubReviewReadPortOutcomeV1>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl GitHubReviewReadPort for Reads {
+        fn read<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReviewReadPortOutcomeV1> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(GitHubReviewReadPortOutcomeV1::Unavailable);
+            Box::pin(async move { outcome })
+        }
+    }
+
+    impl GitHubReviewReadPort for &Reads {
+        fn read<'a>(
+            &'a self,
+            context: &'a RequestContext,
+            request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReviewReadPortOutcomeV1> {
+            <Reads as GitHubReviewReadPort>::read(*self, context, request)
+        }
+    }
+
+    #[derive(Default)]
+    struct RefreshStore {
+        state: Mutex<Option<GitHubReviewRefreshStateV1>>,
+        commits: AtomicUsize,
+    }
+
+    impl GitHubReviewAtomicRefreshStoreV1 for RefreshStore {
+        fn load<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReviewRefreshStoreReadOutcomeV1> {
+            let state = self.state.lock().unwrap().clone();
+            Box::pin(async move {
+                state.map_or(GitHubReviewRefreshStoreReadOutcomeV1::Empty, |state| {
+                    GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(state))
+                })
+            })
+        }
+
+        fn compare_and_record<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+            expected_revision: Option<&'a ManifestDigest>,
+            next: &'a GitHubReviewRefreshStateV1,
+        ) -> FeedbackPortFuture<'a, GitHubReviewRefreshStoreCommitOutcomeV1> {
+            let expected_revision = expected_revision.cloned();
+            let next = next.clone();
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                if state.as_ref().map(|state| &state.revision) != expected_revision.as_ref() {
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Conflict;
+                }
+                *state = Some(next);
+                self.commits.fetch_add(1, Ordering::SeqCst);
+                GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
+            })
+        }
+    }
+
+    impl GitHubReviewAtomicRefreshStoreV1 for &RefreshStore {
+        fn load<'a>(
+            &'a self,
+            context: &'a RequestContext,
+            request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReviewRefreshStoreReadOutcomeV1> {
+            <RefreshStore as GitHubReviewAtomicRefreshStoreV1>::load(*self, context, request)
+        }
+
+        fn compare_and_record<'a>(
+            &'a self,
+            context: &'a RequestContext,
+            request: &'a GitHubReviewReadRequestV1,
+            expected_revision: Option<&'a ManifestDigest>,
+            next: &'a GitHubReviewRefreshStateV1,
+        ) -> FeedbackPortFuture<'a, GitHubReviewRefreshStoreCommitOutcomeV1> {
+            <RefreshStore as GitHubReviewAtomicRefreshStoreV1>::compare_and_record(
+                *self,
+                context,
+                request,
+                expected_revision,
+                next,
+            )
+        }
+    }
+
+    struct Ready;
+
+    impl GitHubSourceAccessAuthorityV1 for Ready {
+        fn authorize<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+            Box::pin(async { GitHubProviderLifecycleV1::Ready })
         }
     }
 
@@ -1072,6 +1609,90 @@ mod tests {
         }
     }
 
+    fn read(response: GitHubReviewReadResponseV1) -> GitHubReviewReadPortOutcomeV1 {
+        GitHubReviewReadPortOutcomeV1::Read(Box::new(response))
+    }
+
+    #[tokio::test]
+    async fn refresh_requires_two_stable_equivalent_full_scans() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let first = complete_response(&request);
+        let mut second = first.clone();
+        second.ingress.fetched_at = UtcMicros(first.ingress.fetched_at.0 + 1);
+        let reads = Reads::new(vec![read(first), read(second)]);
+        let store = RefreshStore::default();
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+
+        let outcome = coordinator.refresh(&context, &request).await;
+        assert!(matches!(outcome, GitHubReviewRefreshOutcomeV1::Stored(_)));
+        assert_eq!(reads.calls.load(Ordering::SeqCst), 2);
+        let state = store.state.lock().unwrap().clone().expect("stored state");
+        assert_eq!(state.attempt_receipts.len(), 1);
+        assert_eq!(
+            state.attempt_receipts[0].disposition,
+            GitHubReviewRefreshAttemptDispositionV1::Agreed
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_page_change_retries_once_then_quarantines_without_publication() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let first = complete_response(&request);
+        let mut second = first.clone();
+        second.ingress.merge_base_commit_id = CommitId::new("commit.github.merge-second").unwrap();
+        let mut third = first.clone();
+        third.ingress.merge_base_commit_id = CommitId::new("commit.github.merge-third").unwrap();
+        let reads = Reads::new(vec![read(first), read(second), read(third)]);
+        let store = RefreshStore::default();
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+
+        assert_eq!(
+            coordinator.refresh(&context, &request).await,
+            GitHubReviewRefreshOutcomeV1::Stale
+        );
+        assert_eq!(reads.calls.load(Ordering::SeqCst), 3);
+        let state = store
+            .state
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("attempt receipt");
+        assert!(state.last_complete.is_none());
+        assert_eq!(
+            state.latest_attempt.ingress.outcome,
+            GitHubReviewIngressProviderOutcomeV1::Partial
+        );
+        assert_eq!(
+            state.attempt_receipts[0].disposition,
+            GitHubReviewRefreshAttemptDispositionV1::Quarantined
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_page_retry_publishes_only_when_the_last_two_scans_agree() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let first = complete_response(&request);
+        let mut stable = first.clone();
+        stable.ingress.merge_base_commit_id = CommitId::new("commit.github.merge-stable").unwrap();
+        let reads = Reads::new(vec![read(first), read(stable.clone()), read(stable)]);
+        let store = RefreshStore::default();
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+
+        assert!(matches!(
+            coordinator.refresh(&context, &request).await,
+            GitHubReviewRefreshOutcomeV1::Stored(_)
+        ));
+        assert_eq!(reads.calls.load(Ordering::SeqCst), 3);
+        let state = store.state.lock().unwrap().clone().expect("stored state");
+        assert_eq!(
+            state.attempt_receipts[0].disposition,
+            GitHubReviewRefreshAttemptDispositionV1::RetryAgreed
+        );
+    }
+
     #[test]
     fn not_modified_revalidates_the_last_complete_generation() {
         let (_, request) =
@@ -1102,7 +1723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_get_forwards_resume_and_rate_limit_without_any_write_operation() {
+    async fn rest_get_restarts_at_page_one_and_forwards_rate_limit_without_any_write_operation() {
         let (context, request) =
             context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviews);
         let calls = Arc::new(NetworkCalls::default());
@@ -1142,8 +1763,56 @@ mod tests {
         assert_eq!(calls.get.load(Ordering::SeqCst), 1);
         assert_eq!(calls.query.load(Ordering::SeqCst), 0);
         let outbound = calls.last_rest.lock().unwrap().clone().unwrap();
-        assert_eq!(outbound.resume.cursor.unwrap().as_str(), "cursor.cached");
-        assert_eq!(outbound.resume.etag.unwrap().as_str(), "W/\"cached\"");
+        assert!(outbound.resume.cursor.is_none());
+        assert!(outbound.resume.etag.is_none());
+    }
+
+    #[tokio::test]
+    async fn rest_refresh_scan_follows_bounded_pages_from_page_one() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let page = |next_cursor: Option<&str>| {
+            GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
+                metadata: GitHubReadNetworkMetadataV1 {
+                    status: GitHubReadNetworkStatusV1::Ok,
+                    etag: None,
+                    next_cursor: next_cursor
+                        .map(|cursor| GitHubReviewCursorV1::new(cursor.to_owned()))
+                        .transpose()
+                        .unwrap(),
+                    rate_limit: None,
+                },
+                body: Vec::new(),
+            })
+        };
+        let network = PageNetwork {
+            outcomes: Mutex::new(VecDeque::from([page(Some("rest-page:2")), page(None)])),
+            cursors: Mutex::new(Vec::new()),
+            calls: AtomicUsize::new(0),
+        };
+        let transport = GitHubReadOnlyRuntimeTransportV1::new(Checkpoints(None), network, Decoder);
+
+        let outcome = transport
+            .rest_get(
+                &context,
+                GitHubRestDescriptorV1 {
+                    operation: request.operation,
+                },
+                &request,
+            )
+            .await;
+        let GitHubReviewReadPortOutcomeV1::Read(response) = outcome else {
+            panic!("full scan should complete");
+        };
+        assert_eq!(
+            response.ingress.outcome,
+            GitHubReviewIngressProviderOutcomeV1::Complete
+        );
+        assert_eq!(transport.network.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *transport.network.cursors.lock().unwrap(),
+            vec![None, Some("rest-page:2".to_owned())]
+        );
     }
 
     #[tokio::test]
@@ -1214,9 +1883,19 @@ mod tests {
     async fn project_store_restarts_and_replays_the_github_refresh() {
         let (context, request) =
             context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
-        let next =
-            GitHubReviewRefreshStateV1::transition(&request, None, complete_response(&request))
-                .expect("complete GitHub response creates a refresh state");
+        let response = complete_response(&request);
+        let digest = github_review_scan_digest(&request, &response).unwrap();
+        let next = GitHubReviewRefreshStateV1::transition_with_receipt(
+            &request,
+            None,
+            response.clone(),
+            Some(GitHubReviewRefreshAttemptReceiptV1 {
+                disposition: GitHubReviewRefreshAttemptDispositionV1::Agreed,
+                scan_digests: vec![digest.clone(), digest],
+                observed_at: response.ingress.fetched_at,
+            }),
+        )
+        .expect("complete GitHub response creates a refresh state");
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("github-review.db");
         let authority = DatabaseAuthority::acquire_test(&path, "github-source-restart").unwrap();
@@ -1241,6 +1920,11 @@ mod tests {
                 .await
                 .unwrap();
         let store = ProjectGitHubReviewStoreV1::new(database, request.scope.clone()).unwrap();
+        assert_eq!(
+            store.load(&context, &request).await,
+            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(next.clone()))
+        );
+        assert_eq!(next.attempt_receipts.len(), 1);
         assert_eq!(
             store
                 .compare_and_record(&context, &request, Some(&next.revision), &next)

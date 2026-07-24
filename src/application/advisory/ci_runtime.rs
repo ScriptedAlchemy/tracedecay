@@ -12,8 +12,9 @@ use std::sync::Arc;
 pub use production::{
     CiCodeAnchorStoreV1, CiExactCodeEvidenceV1, CiRetainedProviderObservationAuthorityV1,
     CiRetainedProviderObservationV1, CiRetainedProviderRecordV1, ProductionCiArchiveHandleV1,
-    ProductionCiExactEvidenceHandleV1, ProductionCiProviderAuthoritiesV1,
-    ProductionCiProviderConfigV1, ProductionCiProviderOpenErrorV1,
+    ProductionCiExactEvidenceHandleV1, ProductionCiFailureDiscoveryOutcomeV1,
+    ProductionCiProviderAuthoritiesV1, ProductionCiProviderConfigV1,
+    ProductionCiProviderOpenErrorV1, discover_production_ci_failure_request_v1,
     open_production_ci_provider_authorities_v1, unavailable_production_ci_provider_authorities_v1,
 };
 pub use stores::{ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1};

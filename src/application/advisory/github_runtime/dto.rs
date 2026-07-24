@@ -8,8 +8,7 @@ pub(crate) struct RestCommitRefV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RestPullRequestV1 {
     pub(crate) id: u64,
-    #[serde(default)]
-    pub(crate) number: Option<u64>,
+    pub(crate) number: u64,
     pub(crate) base: RestCommitRefV1,
     pub(crate) head: RestCommitRefV1,
 }
@@ -53,7 +52,24 @@ pub(crate) struct RestReviewCommentV1 {
 pub(crate) struct GraphQlResponseV1 {
     pub(crate) data: Option<GraphQlDataV1>,
     #[serde(default)]
-    pub(crate) errors: Vec<serde_json::Value>,
+    pub(crate) errors: Vec<GraphQlErrorV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlErrorV1 {
+    pub(crate) message: String,
+    #[serde(default)]
+    pub(crate) path: Vec<GraphQlErrorPathSegmentV1>,
+    #[serde(rename = "type")]
+    pub(crate) kind: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum GraphQlErrorPathSegmentV1 {
+    Field(String),
+    Index(u64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,10 +97,6 @@ pub(crate) struct GraphQlPullRequestV1 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlReviewThreadConnectionV1 {
     pub(crate) nodes: Vec<GraphQlReviewThreadV1>,
-    // `default` tolerates a wholly absent pageInfo, but the rename above is
-    // load-bearing: without it the wire's `pageInfo` key silently misses and
-    // nested pagination truncates with no error.
-    #[serde(default)]
     pub(crate) page_info: GraphQlPageInfoV1,
 }
 
@@ -106,14 +118,12 @@ pub(crate) struct GraphQlReviewThreadV1 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlReviewCommentConnectionV1 {
     pub(crate) nodes: Vec<GraphQlReviewCommentV1>,
-    #[serde(default)]
     pub(crate) page_info: GraphQlPageInfoV1,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlPageInfoV1 {
-    #[serde(default)]
     pub(crate) has_next_page: bool,
     pub(crate) end_cursor: Option<String>,
 }
@@ -228,6 +238,7 @@ pub struct GitHubActionsWorkflowJobV1 {
     pub id: u64,
     pub run_id: u64,
     pub run_attempt: u32,
+    pub check_run_url: String,
     pub head_sha: String,
     pub head_branch: String,
     pub status: GitHubActionsStatusV1,

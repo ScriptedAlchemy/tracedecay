@@ -6,7 +6,10 @@ use tracedecay_domain::feedback::{GitHubPullRequestIdV1, GitHubReviewRateLimitCh
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
 
-use super::{GitHubHttpReadConfigV1, GitHubRepositoryTargetV1};
+use super::{
+    GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
+    GitHubRepositoryTargetV1,
+};
 
 const GITHUB_DISCOVERY_PAGE_SIZE_V1: usize = 100;
 const MAX_GITHUB_DISCOVERY_PAGES_V1: u32 = 20;
@@ -58,14 +61,66 @@ struct AssociatedRepositoryV1 {
 
 /// Discovers the unique pull request whose head equals `head_commit`.
 ///
-/// Acquisition is anonymous and structurally limited to bounded `GET`
-/// requests against GitHub's commit-associated pull-request endpoint. Every
-/// continuation is reconstructed locally from a validated page number.
+/// Acquisition is structurally limited to bounded `GET` requests against
+/// GitHub's commit-associated pull-request endpoint. Anonymous acquisition is
+/// used only for repositories this request proves publicly readable; private
+/// acquisition requires a registered verified read credential.
 pub(crate) fn discover_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,
     head_commit: &CommitId,
     config: &GitHubHttpReadConfigV1,
+    credential: &GitHubReadOnlyCredentialV1,
+) -> GitHubExactCommitDiscoveryOutcomeV1 {
+    let first =
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+    if !discovery_outcome_requires_consensus(&first) {
+        return first;
+    }
+    let second =
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+    if !discovery_outcome_requires_consensus(&second) {
+        return second;
+    }
+    if let Some(agreed) = discovery_consensus(&first, &second, None) {
+        return agreed;
+    }
+    let third =
+        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+    if !discovery_outcome_requires_consensus(&third) {
+        return third;
+    }
+    discovery_consensus(&first, &second, Some(&third))
+        .unwrap_or(GitHubExactCommitDiscoveryOutcomeV1::Ambiguous)
+}
+
+fn discovery_outcome_requires_consensus(outcome: &GitHubExactCommitDiscoveryOutcomeV1) -> bool {
+    matches!(
+        outcome,
+        GitHubExactCommitDiscoveryOutcomeV1::Found(_)
+            | GitHubExactCommitDiscoveryOutcomeV1::NotFound
+            | GitHubExactCommitDiscoveryOutcomeV1::Ambiguous
+    )
+}
+
+fn discovery_consensus(
+    first: &GitHubExactCommitDiscoveryOutcomeV1,
+    second: &GitHubExactCommitDiscoveryOutcomeV1,
+    retry: Option<&GitHubExactCommitDiscoveryOutcomeV1>,
+) -> Option<GitHubExactCommitDiscoveryOutcomeV1> {
+    if first == second {
+        Some(second.clone())
+    } else {
+        retry.filter(|retry| *retry == second).cloned()
+    }
+}
+
+fn scan_exact_commit_pull_request_v1(
+    owner: &str,
+    repository: &str,
+    head_commit: &CommitId,
+    config: &GitHubHttpReadConfigV1,
+    credential: &GitHubReadOnlyCredentialV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
     if !valid_path_segment(owner)
         || !valid_path_segment(repository)
@@ -102,17 +157,31 @@ pub(crate) fn discover_exact_commit_pull_request_v1(
         if page > MAX_GITHUB_DISCOVERY_PAGES_V1 || !visited_pages.insert(page) {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         }
-        let response = agent
+        let authorization =
+            match credential.authorization_header_for(GitHubReadPermissionV1::PullRequests) {
+                Ok(authorization) => authorization,
+                Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Denied,
+            };
+        let mut request = agent
             .get(format!(
                 "{endpoint}?per_page={GITHUB_DISCOVERY_PAGE_SIZE_V1}&page={page}"
             ))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "tracedecay-github-read")
-            .call();
+            .header("User-Agent", "tracedecay-github-read");
+        if let Some(authorization) = authorization.as_ref() {
+            request = request.header("Authorization", authorization.as_str());
+        }
+        let response = request.call();
         let Ok(mut response) = response else {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         };
+        if credential
+            .authorization_header_for(GitHubReadPermissionV1::PullRequests)
+            .is_err()
+        {
+            return GitHubExactCommitDiscoveryOutcomeV1::Denied;
+        }
         let checkpoint = rate_limit_checkpoint(response.headers());
         match response.status().as_u16() {
             200 => {}
@@ -141,11 +210,11 @@ pub(crate) fn discover_exact_commit_pull_request_v1(
             _ => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
         }
 
-        let next_page = match next_page(response.headers(), &config.rest_base_uri, &endpoint, page)
-        {
-            Ok(next_page) => next_page,
-            Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
-        };
+        let mut next_page =
+            match next_page(response.headers(), &config.rest_base_uri, &endpoint, page) {
+                Ok(next_page) => next_page,
+                Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
+            };
         let Ok(body) = response
             .body_mut()
             .with_config()
@@ -159,6 +228,12 @@ pub(crate) fn discover_exact_commit_pull_request_v1(
         };
         if pulls.len() > GITHUB_DISCOVERY_PAGE_SIZE_V1 {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        }
+        if pulls.len() == GITHUB_DISCOVERY_PAGE_SIZE_V1 && next_page.is_none() {
+            next_page = page.checked_add(1);
+            if next_page.is_none_or(|next| next > MAX_GITHUB_DISCOVERY_PAGES_V1) {
+                return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+            }
         }
         for pull in pulls {
             if pull.head.sha != head_commit.as_str() {
@@ -331,4 +406,46 @@ fn now_micros() -> UtcMicros {
         .map(|duration| duration.as_micros())
         .unwrap_or_default();
     UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn found(number: u64, base: &str) -> GitHubExactCommitDiscoveryOutcomeV1 {
+        GitHubExactCommitDiscoveryOutcomeV1::Found(GitHubExactCommitPullRequestV1 {
+            target: GitHubRepositoryTargetV1 {
+                owner: "owner".to_owned(),
+                repository: "repository".to_owned(),
+                pull_request_number: number,
+                pull_request_id: GitHubPullRequestIdV1::new(number.to_string()).unwrap(),
+            },
+            base_commit_id: CommitId::new(base).unwrap(),
+            head_commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        })
+    }
+
+    #[test]
+    fn exact_discovery_requires_two_agreeing_full_scans() {
+        let scan = found(7, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(discovery_consensus(&scan, &scan, None), Some(scan));
+    }
+
+    #[test]
+    fn exact_discovery_accepts_one_bounded_retry_only_when_last_scans_agree() {
+        let first = found(7, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let stable = found(8, "cccccccccccccccccccccccccccccccccccccccc");
+        assert_eq!(
+            discovery_consensus(&first, &stable, Some(&stable)),
+            Some(stable)
+        );
+    }
+
+    #[test]
+    fn exact_discovery_quarantines_three_disagreeing_scans() {
+        let first = found(7, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let second = found(8, "cccccccccccccccccccccccccccccccccccccccc");
+        let third = found(9, "dddddddddddddddddddddddddddddddddddddddd");
+        assert_eq!(discovery_consensus(&first, &second, Some(&third)), None);
+    }
 }
