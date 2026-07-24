@@ -3,7 +3,9 @@
 use serde_json::{Map, Value, json};
 
 use super::diagnostics::{
-    DiagnosticSeverity, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition, LspRange,
+    DiagnosticSeverity, DocumentDiagnosticReport, GatewayDiagnostic, GatewayDiagnosticCoverage,
+    GatewayDiagnosticData, GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspPosition,
+    LspRange, TRACEDECAY_DIAGNOSTIC_DATA_REVISION,
 };
 use super::gateway::{
     CallHierarchyItem, DocumentSymbol, GatewayDocumentDiagnostics, GatewayResponse, Hover,
@@ -121,7 +123,7 @@ pub(super) fn document_diagnostic_report_value(report: DocumentDiagnosticReport)
 }
 
 pub(super) fn diagnostic_value(diagnostic: GatewayDiagnostic) -> Value {
-    json!({
+    let mut value = json!({
         "range": range_value(diagnostic.range),
         "severity": diagnostic.severity.map(severity_value),
         "code": diagnostic.code,
@@ -130,7 +132,67 @@ pub(super) fn diagnostic_value(diagnostic: GatewayDiagnostic) -> Value {
             super::diagnostics::DiagnosticSource::TraceDecay => "tracedecay",
         },
         "message": diagnostic.message,
+    });
+    if let Some(data) = diagnostic.data {
+        value["data"] = diagnostic_data_value(data);
+    }
+    value
+}
+
+fn diagnostic_data_value(data: GatewayDiagnosticData) -> Value {
+    json!({
+        "tracedecay": {
+            "revision": TRACEDECAY_DIAGNOSTIC_DATA_REVISION,
+            "identity": {
+                "findingId": data.identity.finding_id,
+                "anchorId": data.identity.anchor_id,
+                "generation": data.identity.generation,
+                "headCommitId": data.identity.head_commit_id,
+                "codeGenerationId": data.identity.code_generation_id,
+                "snapshotDigest": data.identity.snapshot_digest,
+                "invalidationDigest": data.identity.invalidation_digest,
+                "snapshotContentDigest": data.identity.snapshot_content_digest,
+                "documentContentDigest": data.identity.document_content_digest,
+            },
+            "lifecycle": diagnostic_lifecycle_value(data.lifecycle),
+            "providerState": diagnostic_provider_state_value(data.provider_state),
+            "coverage": diagnostic_coverage_value(data.coverage),
+            "expansionHandle": data.expansion_handle,
+        },
     })
+}
+
+fn diagnostic_lifecycle_value(lifecycle: GatewayDiagnosticLifecycle) -> &'static str {
+    match lifecycle {
+        GatewayDiagnosticLifecycle::Active => "active",
+        GatewayDiagnosticLifecycle::Superseded => "superseded",
+        GatewayDiagnosticLifecycle::Resolved => "resolved",
+        GatewayDiagnosticLifecycle::Cleared => "cleared",
+    }
+}
+
+fn diagnostic_provider_state_value(state: GatewayDiagnosticProviderState) -> &'static str {
+    match state {
+        GatewayDiagnosticProviderState::SupportedCompletedComplete => "supportedCompletedComplete",
+        GatewayDiagnosticProviderState::Unsupported => "unsupported",
+        GatewayDiagnosticProviderState::Absent => "absent",
+        GatewayDiagnosticProviderState::Indexing => "indexing",
+        GatewayDiagnosticProviderState::Stale => "stale",
+        GatewayDiagnosticProviderState::Cancelled => "cancelled",
+        GatewayDiagnosticProviderState::TimedOut => "timedOut",
+        GatewayDiagnosticProviderState::Failed => "failed",
+        GatewayDiagnosticProviderState::Partial => "partial",
+        GatewayDiagnosticProviderState::Unavailable => "unavailable",
+    }
+}
+
+fn diagnostic_coverage_value(coverage: GatewayDiagnosticCoverage) -> &'static str {
+    match coverage {
+        GatewayDiagnosticCoverage::Complete => "complete",
+        GatewayDiagnosticCoverage::Partial => "partial",
+        GatewayDiagnosticCoverage::Unavailable => "unavailable",
+        GatewayDiagnosticCoverage::Failed => "failed",
+    }
 }
 
 fn severity_value(severity: DiagnosticSeverity) -> u8 {
@@ -531,4 +593,117 @@ pub(super) fn overlay_failure(error: OverlayError) -> RpcFailure {
 
 pub(super) fn diagnostic_result_id(generation: u64, version: i64) -> String {
     format!("generation:{generation}:version:{version}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::lsp_gateway::diagnostics::{
+        GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
+        GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
+    };
+
+    #[test]
+    fn tracedecay_diagnostic_data_projects_exact_identity_and_expansion_handle() {
+        let value = diagnostic_value(GatewayDiagnostic {
+            uri: "file:///root/a.rs".to_owned(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 2,
+                    character: 3,
+                },
+                end: LspPosition {
+                    line: 2,
+                    character: 8,
+                },
+            },
+            severity: Some(DiagnosticSeverity::Warning),
+            code: Some("clippy::needless_borrow".to_owned()),
+            message: "needless borrow".to_owned(),
+            source: super::super::diagnostics::DiagnosticSource::TraceDecay,
+            data: Some(GatewayDiagnosticData {
+                identity: GatewayDiagnosticIdentity {
+                    finding_id: "feedback.finding.v1.abc".to_owned(),
+                    anchor_id: "anchor.v1.abc".to_owned(),
+                    generation: 17,
+                    head_commit_id: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    code_generation_id: "codegen.v1.abc".to_owned(),
+                    snapshot_digest:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_owned(),
+                    invalidation_digest:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned(),
+                    snapshot_content_digest:
+                        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                            .to_owned(),
+                    document_content_digest:
+                        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                            .to_owned(),
+                },
+                lifecycle: GatewayDiagnosticLifecycle::Active,
+                provider_state: GatewayDiagnosticProviderState::SupportedCompletedComplete,
+                coverage: GatewayDiagnosticCoverage::Complete,
+                expansion_handle: "rh_0123456789abcdef01234567".to_owned(),
+            }),
+        });
+
+        assert_eq!(
+            value,
+            json!({
+                "range": {
+                    "start": { "line": 2, "character": 3 },
+                    "end": { "line": 2, "character": 8 },
+                },
+                "severity": 2,
+                "code": "clippy::needless_borrow",
+                "source": "tracedecay",
+                "message": "needless borrow",
+                "data": {
+                    "tracedecay": {
+                        "revision": 1,
+                        "identity": {
+                            "findingId": "feedback.finding.v1.abc",
+                            "anchorId": "anchor.v1.abc",
+                            "generation": 17,
+                            "headCommitId": "0123456789abcdef0123456789abcdef01234567",
+                            "codeGenerationId": "codegen.v1.abc",
+                            "snapshotDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "invalidationDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "snapshotContentDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                            "documentContentDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                        },
+                        "lifecycle": "active",
+                        "providerState": "supportedCompletedComplete",
+                        "coverage": "complete",
+                        "expansionHandle": "rh_0123456789abcdef01234567",
+                    },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn diagnostic_data_is_omitted_when_canonical_identity_is_unavailable() {
+        let value = diagnostic_value(GatewayDiagnostic {
+            uri: "file:///root/a.rs".to_owned(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: None,
+            code: None,
+            message: "upstream".to_owned(),
+            source: super::super::diagnostics::DiagnosticSource::Upstream,
+            data: None,
+        });
+
+        assert!(value.get("data").is_none());
+    }
 }

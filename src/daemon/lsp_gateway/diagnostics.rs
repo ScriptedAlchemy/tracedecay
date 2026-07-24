@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 pub const MAX_DOCUMENT_DIAGNOSTICS: usize = 200;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
+pub const TRACEDECAY_DIAGNOSTIC_DATA_REVISION: u32 = 1;
 
 /// A zero-based LSP position using the negotiated UTF-16 encoding.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -39,6 +40,65 @@ pub enum DiagnosticSource {
     TraceDecay,
 }
 
+/// Immutable identity needed to clear or reauthorize expansion of one
+/// TraceDecay diagnostic. It intentionally contains no source text, evidence,
+/// credentials, or mutable path identity.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GatewayDiagnosticIdentity {
+    pub finding_id: String,
+    pub anchor_id: String,
+    pub generation: u64,
+    pub head_commit_id: String,
+    pub code_generation_id: String,
+    pub snapshot_digest: String,
+    pub invalidation_digest: String,
+    pub snapshot_content_digest: String,
+    pub document_content_digest: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GatewayDiagnosticLifecycle {
+    Active,
+    Superseded,
+    Resolved,
+    Cleared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GatewayDiagnosticProviderState {
+    SupportedCompletedComplete,
+    Unsupported,
+    Absent,
+    Indexing,
+    Stale,
+    Cancelled,
+    TimedOut,
+    Failed,
+    Partial,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GatewayDiagnosticCoverage {
+    Complete,
+    Partial,
+    Unavailable,
+    Failed,
+}
+
+/// Bounded allowlist for standard LSP `Diagnostic.data`.
+///
+/// The opaque handle is transport-only and is reauthorized by the existing
+/// context expansion path; possession does not grant evidence access.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GatewayDiagnosticData {
+    pub identity: GatewayDiagnosticIdentity,
+    pub lifecycle: GatewayDiagnosticLifecycle,
+    pub provider_state: GatewayDiagnosticProviderState,
+    pub coverage: GatewayDiagnosticCoverage,
+    pub expansion_handle: String,
+}
+
 /// A protocol-facing diagnostic projection.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct GatewayDiagnostic {
@@ -48,13 +108,18 @@ pub struct GatewayDiagnostic {
     pub code: Option<String>,
     pub message: String,
     pub source: DiagnosticSource,
+    pub data: Option<GatewayDiagnosticData>,
 }
 
 impl GatewayDiagnostic {
     fn normalize(mut self, source: DiagnosticSource) -> Self {
         self.source = source;
-        if source == DiagnosticSource::TraceDecay && self.severity.is_none() {
-            self.severity = Some(DiagnosticSeverity::Information);
+        match source {
+            DiagnosticSource::TraceDecay if self.severity.is_none() => {
+                self.severity = Some(DiagnosticSeverity::Information);
+            }
+            DiagnosticSource::Upstream => self.data = None,
+            DiagnosticSource::TraceDecay => {}
         }
         truncate_utf8(&mut self.message, MAX_DIAGNOSTIC_MESSAGE_BYTES);
         self
@@ -300,6 +365,7 @@ mod tests {
             code: Some("test".into()),
             message: message.into(),
             source,
+            data: None,
         }
     }
 
