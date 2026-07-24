@@ -224,7 +224,7 @@ async fn eviction_drains_verifies_closes_once_and_drops_database_proxy() {
 }
 
 #[tokio::test]
-async fn drain_failure_faults_and_quarantines_without_closing() {
+async fn drain_failure_is_terminal_and_retains_evicting_attachment() {
     let (registry, publisher) = attachment_registry();
     let pin = profile_pin(&registry).await;
     let first = open_published(&registry, project_request("project.attachment-fault", &pin)).await;
@@ -241,13 +241,10 @@ async fn drain_failure_faults_and_quarantines_without_closing() {
         })
     ));
     assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 0);
-    match registry.lookup(&binding) {
-        StoreRuntimeLookup::Ready(handle) => assert_eq!(
-            handle.runtime().maintenance_state(),
-            RuntimeMaintenanceStateV1::Faulted
-        ),
-        other => panic!("faulted attachment was not quarantined: {other:?}"),
-    }
+    assert!(matches!(
+        registry.lookup(&binding),
+        StoreRuntimeLookup::Evicting { .. }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -396,11 +393,8 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
     ));
     assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 0);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
-    match registry.lookup(&binding) {
-        StoreRuntimeLookup::Ready(handle) => assert_eq!(
-            handle.runtime().maintenance_state(),
-            RuntimeMaintenanceStateV1::Faulted
-        ),
-        other => panic!("faulted attachment was not restored: {other:?}"),
-    }
+    assert!(matches!(
+        registry.lookup(&binding),
+        StoreRuntimeLookup::Evicting { .. }
+    ));
 }

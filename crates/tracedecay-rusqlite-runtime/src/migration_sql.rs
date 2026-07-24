@@ -375,23 +375,49 @@ impl MigrationSqlHandle {
         writer: Option<tokio_mpsc::Sender<WriterCommand>>,
         readers: &ReaderPool<E>,
     ) -> Self {
-        let query_readers = readers.clone();
-        let snapshot_readers = readers.clone();
-        let store_size_readers = readers.clone();
-        let table_size_readers = readers.clone();
+        let query_readers = readers.downgrade();
+        let snapshot_readers = readers.downgrade();
+        let store_size_readers = readers.downgrade();
+        let table_size_readers = readers.downgrade();
         Self {
             binding,
             locator,
             writer,
             query: Arc::new(move |statement, max_wait| {
-                query_readers.execute_migration_query(statement, max_wait)
+                query_readers
+                    .upgrade()
+                    .ok_or_else(|| {
+                        MigrationSqlError::ReaderUnavailable(
+                            "migration SQL reader pool is closed".to_owned(),
+                        )
+                    })?
+                    .execute_migration_query(statement, max_wait)
             }),
-            snapshot: Arc::new(move |max_wait| snapshot_readers.begin_migration_snapshot(max_wait)),
+            snapshot: Arc::new(move |max_wait| {
+                snapshot_readers
+                    .upgrade()
+                    .ok_or_else(|| {
+                        MigrationSqlError::ReaderUnavailable(
+                            "migration SQL reader pool is closed".to_owned(),
+                        )
+                    })?
+                    .begin_migration_snapshot(max_wait)
+            }),
             store_size_telemetry: Arc::new(move |max_wait, interrupted| {
-                store_size_readers.read_store_size(max_wait, interrupted)
+                store_size_readers
+                    .upgrade()
+                    .ok_or(ReaderAcquireError::Interrupted {
+                        reason: UnavailableReasonV1::Draining,
+                    })?
+                    .read_store_size(max_wait, interrupted)
             }),
             table_size_telemetry: Arc::new(move |max_wait, interrupted| {
-                table_size_readers.read_table_sizes(max_wait, interrupted)
+                table_size_readers
+                    .upgrade()
+                    .ok_or(ReaderAcquireError::Interrupted {
+                        reason: UnavailableReasonV1::Draining,
+                    })?
+                    .read_table_sizes(max_wait, interrupted)
             }),
             last_insert_rowid: Arc::new(AtomicI64::new(0)),
             write_authority: None,
