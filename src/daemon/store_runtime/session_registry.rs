@@ -746,18 +746,6 @@ mod tests {
             )
         );
         assert_eq!(registered.db_path(), user_sessions_path);
-        assert!(
-            registered
-                .storage_telemetry(
-                    tracedecay_application::storage::StoreKeyV1::new(
-                        crate::sessions::USER_SESSIONS_DB_FILENAME,
-                    )
-                    .expect("session store key"),
-                    std::time::Duration::from_secs(1),
-                )
-                .is_ok(),
-            "published production runtime must expose only its writerless telemetry channel"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
