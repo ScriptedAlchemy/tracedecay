@@ -922,6 +922,27 @@ impl ProjectOpenTasks {
             let mut registry = self.registry.lock().await;
             std::mem::take(&mut registry.routes)
         };
+        // Let in-flight warm-ups settle before aborting. Each warm-up task drives
+        // a daemon-owned schema migration inside a detached build; aborting the
+        // task drops only its tracking future, so closing the runtime while the
+        // migration still runs would `sqlite3_interrupt` it mid-statement. The
+        // migration is transactional (an interrupt rolls it back, never corrupts),
+        // but warm-up then fails and the daemon never settles under load. Waiting
+        // for a terminal outcome first means the migration has committed or rolled
+        // back before the runtime closes. Operator drain still wins: the bounded
+        // deadline aborts stragglers below.
+        let settled = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, async {
+            for entry in entries.values() {
+                let mut state = entry.state.clone();
+                while matches!(&*state.borrow_and_update(), ProjectOpenTaskState::Opening) {
+                    if state.changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .is_ok();
         for entry in entries.values() {
             entry.task.abort();
         }
@@ -932,6 +953,12 @@ impl ProjectOpenTasks {
         })
         .await
         .is_ok();
+        if !settled {
+            log_daemon_event(
+                "project_server_warmup",
+                &[("outcome", "shutdown_settle_timeout".to_string())],
+            );
+        }
         if !drained {
             log_daemon_event(
                 "project_server_warmup",
@@ -2274,13 +2301,18 @@ where
                 });
             };
             let _activity = activity;
-            let result = tokio::select! {
-                biased;
-                () = lifecycle.wait_for_draining() => Err(TraceDecayError::Config {
-                    message: "daemon began draining during project warm-up".to_string(),
-                }),
-                result = Box::pin(open_project_server) => result,
-            };
+            // Once warm-up is admitted, the open drives a daemon-owned schema
+            // migration inside a detached build task. Racing it against
+            // `wait_for_draining` and abandoning on drain does not stop that
+            // migration -- it only untracks it, so shutdown would then close the
+            // runtime underneath a live migration and `sqlite3_interrupt` it
+            // mid-statement (`SQLite advance query failed: interrupted`). Run the
+            // open to completion instead: the held `_activity` keeps the daemon's
+            // drain wait pending until the migration settles, and new warm-ups are
+            // already refused above by `accepting()`/`try_enter`. An operator drain
+            // still wins promptly -- `ProjectOpenTasks::shutdown` bounds the wait
+            // and aborts stragglers once the migration has committed or rolled back.
+            let result = Box::pin(open_project_server).await;
             match result {
                 Ok(server) => {
                     if let Some(initialize_request) = initialize_request {
