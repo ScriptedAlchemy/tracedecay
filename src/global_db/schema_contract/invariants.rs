@@ -30,6 +30,24 @@ pub(in crate::global_db) use triggers::{
 };
 
 const OPERATION: &str = "ensure global database authority invariants";
+
+/// Rows an authority row audit may ask the SQL channel for at once.
+///
+/// The channel materializes an entire result set before yielding row one and
+/// rejects anything past `MAX_QUERY_ROWS` (10_000) or 64 MiB. Every audit below
+/// walks a table (or a checkpoint suffix of one) whose length grows with the
+/// store, so each scan pages with a keyset cursor instead of requesting one
+/// unbounded result set. Without paging a store simply became unopenable once a
+/// scanned table crossed the cap — the audit reported a materialization limit
+/// instead of a verdict.
+pub(super) const AUDIT_PAGE_ROWS: i64 = 1_000;
+
+/// Page size for scans that carry a full observation payload.
+///
+/// Canonical observation records may approach the 1 MiB observation contract
+/// ceiling. Sixteen rows leave ample room under the channel's 64 MiB
+/// materialization limit for the joined receipt and cursor columns too.
+pub(super) const OBSERVATION_AUDIT_PAGE_ROWS: i64 = 16;
 const SESSION_TEMPORAL_REPAIR_AUDITS: &[&str] = &[
     "session temporal receipts or cursor keys are mutable",
     "session cursor key rotation state is invalid",
