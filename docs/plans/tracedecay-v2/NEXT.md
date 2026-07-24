@@ -136,9 +136,15 @@ normal CI are stable.
    registry orphan detection/collection, §3 session retention (LCM
    raw/projected dedup plus disposition-scoped evidence-store release), §4
    one-content-copy, §5 debris contract, §6 compaction policy types, and §7
-   telemetry read models with typed Doctor storage findings. Remaining seams:
-   daemon wiring/cadence for the GC passes and the telemetry-port runtime
-   implementation.)*
+   telemetry read models with typed Doctor storage findings. Completed
+   2026-07-23: daemon-owned GC/retention/compaction cadence runs under writer
+   authority, retries failed passes without advancing the cadence, and
+   reauthorizes each retention transaction; exact registry relink/retirement,
+   durable incident-debris quarantine/collection, and real stale-branch and
+   retention-backlog Doctor sources are wired. The rusqlite reserved-health
+   reader supplies primitive size/table-growth telemetry and the daemon maps it
+   into the scoped application port with typed denied/unknown outcomes.
+   Owner-configured soft budgets remain inert when absent.)*
 7. Run focused crate tests, all-feature workspace checks, release builds,
    package/install checks, and normal Linux/macOS/Windows CI. *(Ongoing. The
    SQLite session-store parity harness proves 27 session-store tables across
