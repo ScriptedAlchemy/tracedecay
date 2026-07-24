@@ -14,17 +14,39 @@ export class ActivationField {
   private lastTick = 0;
   private readonly halfLifeMs: number;
   private readonly floor: number;
+  private readonly listeners = new Set<() => void>();
 
   constructor(options: ActivationOptions = {}) {
     this.halfLifeMs = options.halfLifeMs ?? 2600;
     this.floor = options.floor ?? 0.02;
   }
 
-  /** Strike nodes with energy (clamped to 1). Cumulative with existing heat. */
+  /** Strike nodes with energy (clamped to 1). Cumulative with existing heat.
+   *
+   * Notifies subscribers, because a field can be struck from outside whoever
+   * draws it: the Brain's SSE effect calls this from a React effect that knows
+   * nothing about the canvas's render loop. Without the notification that heat
+   * lands on the field while the loop is asleep, so nothing ever draws it —
+   * and nothing ever decays it either, since {@link tick} only runs inside the
+   * loop. The strike is the real event; this is how it reaches the renderer. */
   strike(ids: Iterable<string>, energy = 1): void {
+    let struck = false;
     for (const id of ids) {
       this.heat.set(id, Math.min(1, (this.heat.get(id) ?? 0) + energy));
+      struck = true;
     }
+    if (struck) for (const listener of this.listeners) listener();
+  }
+
+  /** Subscribe to strikes on this field; returns an unsubscribe function. The
+   * field owns no clock of its own — this is purely the seam a renderer uses
+   * to hear about strikes it did not itself cause. Nothing here fires on a
+   * timer, so a subscriber is woken by real events and by nothing else. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   /** Advance decay to `now` (ms clock). Returns true while anything is warm. */
