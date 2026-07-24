@@ -7,7 +7,7 @@ import {
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
-import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
+import { Chart } from '../../viz/chart/Chart.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -74,7 +74,27 @@ export function KnowledgePage() {
                     <figcaption className="text-2xs text-text-muted">
                       trust distribution (0 → 1)
                     </figcaption>
-                    <ActivityColumns buckets={histogram} height={40} />
+                    <Chart
+                      ariaLabel={`Trust distribution across ${histogram.length} buckets; the facts list carries per-fact trust values`}
+                      height={96}
+                      option={{
+                        xAxis: {
+                          type: 'category',
+                          data: histogram.map((bucket) => bucket.label),
+                          axisLabel: { interval: 4, fontSize: 9 },
+                        },
+                        yAxis: { type: 'value', axisLabel: { show: false } },
+                        grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
+                        series: [
+                          {
+                            type: 'bar',
+                            barCategoryGap: '25%',
+                            itemStyle: { borderRadius: [2, 2, 0, 0] },
+                            data: histogram.map((bucket) => bucket.value),
+                          },
+                        ],
+                      }}
+                    />
                   </figure>
                 ) : null}
               </div>

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 import { cn } from '../cn';
 
 /** Archetype 2 (plan 11a): left filter column, center result list, right
@@ -14,6 +14,35 @@ export function ExplorerSplit({
   inspector?: ReactNode;
   className?: string;
 }) {
+  const resultsRef = useRef<HTMLElement | null>(null);
+  // Roving arrows over the result rows (plan 11 keyboard model): rows are
+  // native buttons, so Enter/Space activate for free; arrows, Home, End and
+  // Page keys move focus without forcing a Tab-through of every row.
+  const onResultsKeyDown = (event: React.KeyboardEvent) => {
+    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp'];
+    if (!keys.includes(event.key)) return;
+    const container = resultsRef.current;
+    if (!container) return;
+    const rows = [...container.querySelectorAll<HTMLButtonElement>('button')];
+    if (rows.length === 0) return;
+    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const page = 10;
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? rows.length - 1
+          : event.key === 'PageDown'
+            ? Math.min((current < 0 ? 0 : current) + page, rows.length - 1)
+            : event.key === 'PageUp'
+              ? Math.max((current < 0 ? 0 : current) - page, 0)
+              : event.key === 'ArrowDown'
+                ? Math.min(current + 1, rows.length - 1)
+                : Math.max(current - 1, 0);
+    event.preventDefault();
+    rows[next]?.focus();
+    rows[next]?.scrollIntoView({ block: 'nearest' });
+  };
   return (
     <div className={cn('flex h-full min-h-0', className)}>
       {filters ? (
@@ -24,7 +53,12 @@ export function ExplorerSplit({
           {filters}
         </aside>
       ) : null}
-      <section aria-label="Results" className="min-w-0 flex-1 overflow-auto">
+      <section
+        ref={resultsRef}
+        aria-label="Results"
+        className="min-w-0 flex-1 overflow-auto"
+        onKeyDown={onResultsKeyDown}
+      >
         {list}
       </section>
       {inspector ? (
