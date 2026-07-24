@@ -1,10 +1,67 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { EChartsOption, ECharts } from 'echarts';
+
+/** Resolve the live theme into the chart's own styling. Canvas renderers
+ * cannot consume CSS variables, so the tokens are sampled off the container
+ * every time the option is (re)applied. */
+function themedOption(container: HTMLElement, option: EChartsOption): EChartsOption {
+  const style = getComputedStyle(container);
+  const token = (name: string, fallback: string) =>
+    style.getPropertyValue(name).trim() || fallback;
+  const text = token('--raw-text-secondary', '#aab0bd');
+  const muted = token('--raw-text-muted', '#8a90a0');
+  const edge = token('--raw-edge-subtle', '#333a46');
+  const accent = token('--raw-accent', '#7aa2f7');
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  return {
+    color: [accent],
+    animation: !reducedMotion,
+    textStyle: { color: text, fontFamily: 'Inter Variable, system-ui, sans-serif' },
+    axisPointer: { lineStyle: { color: edge } },
+    xAxis: undefined,
+    yAxis: undefined,
+    grid: { left: 8, right: 8, top: 24, bottom: 8, containLabel: true },
+    tooltip: {
+      backgroundColor: token('--raw-surface-2', '#22252d'),
+      borderColor: edge,
+      textStyle: { color: text, fontSize: 11 },
+    },
+    ...option,
+    // Merge axis styling into caller axes without clobbering their data.
+    ...(option.xAxis
+      ? {
+          xAxis: {
+            axisLine: { lineStyle: { color: edge } },
+            axisLabel: { color: muted, fontSize: 10 },
+            splitLine: { show: false },
+            ...option.xAxis,
+          },
+        }
+      : {}),
+    ...(option.yAxis
+      ? {
+          yAxis: {
+            axisLine: { show: false },
+            axisLabel: { color: muted, fontSize: 10 },
+            splitLine: { lineStyle: { color: edge, opacity: 0.5 } },
+            ...option.yAxis,
+          },
+        }
+      : {}),
+  };
+}
 
 /** ECharts host (plan 11: the single quantitative charting library, loaded
  * lazily per route). Token-driven: colors resolve from the live theme and
  * re-resolve on theme flips; reduced motion disables animation. The
- * surrounding view must keep an accessible textual equivalent. */
+ * surrounding view must keep an accessible textual equivalent.
+ *
+ * Lifecycle: the instance is created ONCE. Callers build `option` inline, so
+ * its identity changes on every render — keying the mount effect to it threw
+ * the canvas away, re-ran the dynamic `import('echarts')`, and re-initialised
+ * the chart on every parent update. Applying the option is now its own effect,
+ * and a theme flip bumps a revision counter rather than being read through a
+ * closure that would otherwise be pinned to the mount-time option. */
 export function Chart({
   option,
   height = 220,
@@ -16,73 +73,26 @@ export function Chart({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<ECharts | null>(null);
+  const [themeRevision, setThemeRevision] = useState(0);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     let disposed = false;
-
-    const themed = (): EChartsOption => {
-      const style = getComputedStyle(container);
-      const token = (name: string, fallback: string) =>
-        style.getPropertyValue(name).trim() || fallback;
-      const text = token('--raw-text-secondary', '#aab0bd');
-      const muted = token('--raw-text-muted', '#8a90a0');
-      const edge = token('--raw-edge-subtle', '#333a46');
-      const accent = token('--raw-accent', '#7aa2f7');
-      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      return {
-        color: [accent],
-        animation: !reducedMotion,
-        textStyle: { color: text, fontFamily: 'Inter Variable, system-ui, sans-serif' },
-        axisPointer: { lineStyle: { color: edge } },
-        xAxis: undefined,
-        yAxis: undefined,
-        grid: { left: 8, right: 8, top: 24, bottom: 8, containLabel: true },
-        tooltip: {
-          backgroundColor: token('--raw-surface-2', '#22252d'),
-          borderColor: edge,
-          textStyle: { color: text, fontSize: 11 },
-        },
-        ...option,
-        // Merge axis styling into caller axes without clobbering their data.
-        ...(option.xAxis
-          ? {
-              xAxis: {
-                axisLine: { lineStyle: { color: edge } },
-                axisLabel: { color: muted, fontSize: 10 },
-                splitLine: { show: false },
-                ...option.xAxis,
-              },
-            }
-          : {}),
-        ...(option.yAxis
-          ? {
-              yAxis: {
-                axisLine: { show: false },
-                axisLabel: { color: muted, fontSize: 10 },
-                splitLine: { lineStyle: { color: edge, opacity: 0.5 } },
-                ...option.yAxis,
-              },
-            }
-          : {}),
-      };
-    };
-
     let chart: ECharts | null = null;
+
     void import('echarts').then((echarts) => {
       if (disposed || !containerRef.current) return;
       chart = echarts.init(containerRef.current);
       chartRef.current = chart;
-      chart.setOption(themed());
+      setReady(true);
     });
 
-    const themeObserver = new MutationObserver(() => {
-      chartRef.current?.setOption(themed(), { notMerge: true });
-    });
+    const themeObserver = new MutationObserver(() => setThemeRevision((n) => n + 1));
     themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['data-theme'],
+      attributeFilter: ['data-theme', 'data-contrast'],
     });
     const resize = new ResizeObserver(() => chartRef.current?.resize());
     resize.observe(container);
@@ -94,7 +104,14 @@ export function Chart({
       chart?.dispose();
       chartRef.current = null;
     };
-  }, [option]);
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    if (!container || !chart) return;
+    chart.setOption(themedOption(container, option), { notMerge: true });
+  }, [option, themeRevision, ready]);
 
   return <div ref={containerRef} style={{ height }} role="img" aria-label={ariaLabel} />;
 }
