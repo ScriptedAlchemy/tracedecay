@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use tracedecay_domain::{CapabilityId as DomainCapabilityId, UtcMicros};
 use tracedecay_policy::routing::{
-    CapabilityAvailabilityV1, CapabilityRoutingRequestV1, ScopeMatchV1,
-    TruthFreshnessRequirementV1, TruthSourceStateV1,
+    CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1, TruthFreshnessRequirementV1,
+    TruthSourceStateV1,
 };
 use tracedecay_tool_catalog::{
     ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, CapabilityId,
@@ -60,6 +60,12 @@ impl ApplicationOperation {
 
     /// Evaluates this exact callable catalog/application operation through the
     /// retained capability-routing evaluator.
+    ///
+    /// `scope_match` and `required_effect_class` are supplied by the caller on
+    /// purpose. Deriving them here — asserting `ScopeMatchV1::Match` and reading
+    /// the effect class off the candidate being tested — makes the evaluator's
+    /// scope-mismatch and effect-class gates compare a value against itself, so
+    /// they can never reject anything.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_policy_route(
         &self,
@@ -67,7 +73,9 @@ impl ApplicationOperation {
         consumer: PolicyConsumerV1,
         context: &PolicyEvaluationContextV1,
         runtime_availability: CapabilityAvailabilityV1,
+        scope_match: ScopeMatchV1,
         truth_source_state: TruthSourceStateV1,
+        required_effect_class: CapabilityEffectClassV1,
         required_freshness: TruthFreshnessRequirementV1,
         evidence_horizon: Option<PolicyEvidenceHorizonV1>,
         evaluated_at: UtcMicros,
@@ -78,28 +86,19 @@ impl ApplicationOperation {
         let candidate = composition.candidate(
             self.capability_id.as_str(),
             runtime_availability,
-            ScopeMatchV1::Match,
+            scope_match,
             truth_source_state,
-            0,
         )?;
         let capability_id = DomainCapabilityId::new(self.capability_id.as_str().to_owned())?;
-        let authorized_capabilities = context
-            .request()
-            .allows(&self.capability_id, &self.use_case_id)
-            .then_some(capability_id.clone())
-            .into_iter()
-            .collect();
-        let request = CapabilityRoutingRequestV1 {
-            declared_capability_order: vec![capability_id.clone()],
-            candidates: vec![candidate.clone()],
-            authorized_capabilities,
-            required_effect_class: candidate.effect_class,
+        let request = composition.routing_request(
+            context,
+            &self.use_case_id,
+            vec![capability_id],
+            vec![candidate],
+            required_effect_class,
             required_freshness,
-            policy_revision: context.policy_revision(),
-            policy_digest: context.policy_digest().clone(),
-            configuration_digest: context.configuration().effective_behavior_digest.clone(),
             evaluated_at,
-        };
+        )?;
         composition.route(consumer, context, &request, evidence_horizon)
     }
 }
@@ -198,6 +197,7 @@ impl ApplicationHandlerDescriptor {
 
     pub fn catalog_descriptor(&self) -> Result<CatalogHandlerDescriptor, ApplicationContractError> {
         Ok(CatalogHandlerDescriptor::new(
+            self.operation.capability_id().clone(),
             self.operation.use_case_id().clone(),
             self.request_schema.clone(),
             self.result_schema.clone(),
@@ -297,7 +297,9 @@ fn validate_descriptor_mapping(
     capability: &tracedecay_tool_catalog::CapabilityManifestV1,
 ) -> Result<(), ApplicationContractError> {
     let operation = descriptor.operation();
-    if operation.use_case_id() != capability.use_case_id() {
+    if operation.capability_id() != capability.capability_id()
+        || operation.use_case_id() != capability.use_case_id()
+    {
         return Err(ApplicationContractError::Inconsistent {
             field: "application capability/use-case mapping",
         });
@@ -325,5 +327,6 @@ pub fn application_handler_descriptors()
     descriptors.extend(crate::git::git_surface_handler_descriptors()?);
     descriptors.extend(crate::configuration::configuration_surface_handler_descriptors()?);
     descriptors.extend(crate::feedback::feedback_surface_handler_descriptors()?);
+    descriptors.extend(crate::source_edit::source_edit_handler_descriptors()?);
     ApplicationHandlerDescriptors::new(descriptors)
 }

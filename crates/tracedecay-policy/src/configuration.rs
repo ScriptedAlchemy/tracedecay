@@ -37,6 +37,7 @@ pub struct ConfigurationMutationGrantSnapshotV1 {
     pub grant_id: ConfigurationGrantId,
     pub grant_revision: u64,
     pub grant_digest: ManifestDigest,
+    pub authorized_receipt_digest: ManifestDigest,
     pub actor_id: ActorId,
     pub scope_digest: ManifestDigest,
     pub expected_configuration_revision: ConfigurationRevisionId,
@@ -53,6 +54,7 @@ impl ConfigurationMutationGrantSnapshotV1 {
         self.grant_id.validate().is_ok()
             && self.grant_revision > 0
             && self.grant_digest.validate().is_ok()
+            && self.authorized_receipt_digest.validate().is_ok()
             && self.actor_id.validate().is_ok()
             && self.scope_digest.validate().is_ok()
             && self.expected_configuration_revision.validate().is_ok()
@@ -113,6 +115,9 @@ impl ConfigurationMutationPolicyEvaluator for ConfigurationMutationPolicyEvaluat
         if input.evaluated_at < current.issued_at
             || input.evaluated_at >= current.expires_at
             || input.receipt.grant_id != current.grant_id
+            || input.receipt.receipt_digest != current.authorized_receipt_digest
+            || input.receipt.issued_at != current.issued_at
+            || input.receipt.expires_at != current.expires_at
             || input.receipt.policy_epoch != current.policy_epoch
             || input.receipt.policy_digest != current.policy_digest
             || input.expected_revision != &current.expected_configuration_revision
@@ -174,10 +179,11 @@ mod tests {
         let sink = ConfigurationMutationSinkV1::ConfigurationStore;
         let effect = ConfigurationMutationEffectV1::CommitConfigurationRevision;
         let revision = id::<ConfigurationRevisionId>("configuration.revision.fixture");
-        let snapshot = ConfigurationMutationGrantSnapshotV1 {
+        let mut snapshot = ConfigurationMutationGrantSnapshotV1 {
             grant_id: id("configuration.grant.fixture"),
             grant_revision: 1,
             grant_digest: digest('a'),
+            authorized_receipt_digest: digest('d'),
             actor_id: id("actor.fixture"),
             scope_digest: digest('b'),
             expected_configuration_revision: revision.clone(),
@@ -207,6 +213,7 @@ mod tests {
             snapshot.expires_at,
         )
         .unwrap();
+        snapshot.authorized_receipt_digest = receipt.receipt_digest.clone();
         (snapshot, receipt)
     }
 
@@ -256,6 +263,20 @@ mod tests {
                     ..input
                 },
             ),
+            ConfigurationMutationRecheckDispositionV1::Deny
+        );
+
+        snapshot.authorized_receipt_digest = digest('e');
+        assert_eq!(
+            ConfigurationMutationPolicyEvaluatorV1.evaluate(&snapshot, input),
+            ConfigurationMutationRecheckDispositionV1::Deny
+        );
+        snapshot.authorized_receipt_digest = receipt.receipt_digest.clone();
+        snapshot.grant_revision += 1;
+        snapshot.grant_digest = digest('d');
+        snapshot.issued_at = UtcMicros(11);
+        assert_eq!(
+            ConfigurationMutationPolicyEvaluatorV1.evaluate(&snapshot, input),
             ConfigurationMutationRecheckDispositionV1::Deny
         );
     }

@@ -80,6 +80,7 @@ pub enum PolicyReasonCodeV1 {
     SinkPolicyDrift,
     AuthorizationInputDrift,
     ReplayInputsMissing,
+    ReplayRecordInvalid,
     ReplayEvaluatorVersionMismatch,
     ReplayDecisionMismatch,
 }
@@ -142,6 +143,11 @@ impl SourceAuthorizationDecisionV1 {
                 evidence_references: &self.evidence_references,
             },
         )
+    }
+
+    pub(crate) fn has_valid_digest(&self) -> bool {
+        self.decision_digest.validate().is_ok()
+            && self.decision_digest == self.compute_decision_digest()
     }
 }
 

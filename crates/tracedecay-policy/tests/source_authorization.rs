@@ -332,6 +332,7 @@ fn exact_replay_refuses_missing_inputs_and_detects_recorded_drift() {
 
     let mut missing_input = row.input.clone();
     missing_input.snapshot_state = AuthorizationSnapshotStateV1::Missing;
+    let missing_decision = evaluator.evaluate(&missing_input);
     let missing = replay_source_authorization(
         &evaluator,
         SourceAuthorizationReplayRequestV1 {
@@ -339,7 +340,7 @@ fn exact_replay_refuses_missing_inputs_and_detects_recorded_drift() {
             recorded: SourceAuthorizationRecordedResultV1::new(
                 evaluator.version().clone(),
                 missing_input,
-                decision.clone(),
+                missing_decision,
             ),
             current_input: None,
         },
@@ -350,14 +351,35 @@ fn exact_replay_refuses_missing_inputs_and_detects_recorded_drift() {
     );
     assert!(missing.decision.is_none());
 
+    struct SubstitutedEvaluator {
+        base: SourceAuthorizationEvaluatorV1,
+        version: tracedecay_policy::authorization::PolicyEvaluatorVersionV1,
+    }
+
+    impl SourceAuthorizationEvaluator for SubstitutedEvaluator {
+        fn evaluator_version(&self) -> &tracedecay_policy::authorization::PolicyEvaluatorVersionV1 {
+            &self.version
+        }
+
+        fn evaluate(
+            &self,
+            input: &tracedecay_policy::authorization::SourceAuthorizationInputV1,
+        ) -> tracedecay_policy::authorization::SourceAuthorizationDecisionV1 {
+            self.base.evaluate(input)
+        }
+    }
+
     let mut substituted_version = evaluator.version().clone();
     substituted_version.evaluator_revision += 1;
     let version_mismatch = replay_source_authorization(
-        &evaluator,
+        &SubstitutedEvaluator {
+            base: SourceAuthorizationEvaluatorV1::default(),
+            version: substituted_version,
+        },
         SourceAuthorizationReplayRequestV1 {
             mode: ReplayModeV1::ExactDeterministic,
             recorded: SourceAuthorizationRecordedResultV1::new(
-                substituted_version,
+                evaluator.version().clone(),
                 row.input.clone(),
                 decision.clone(),
             ),
@@ -370,18 +392,33 @@ fn exact_replay_refuses_missing_inputs_and_detects_recorded_drift() {
     );
     assert!(version_mismatch.decision.is_none());
 
-    let mut drifted_decision = decision;
-    drifted_decision
-        .ordered_reason_codes
-        .push(PolicyReasonCodeV1::InputInvalid);
+    struct DivergentEvaluator(SourceAuthorizationEvaluatorV1);
+
+    impl SourceAuthorizationEvaluator for DivergentEvaluator {
+        fn evaluator_version(&self) -> &tracedecay_policy::authorization::PolicyEvaluatorVersionV1 {
+            self.0.version()
+        }
+
+        fn evaluate(
+            &self,
+            input: &tracedecay_policy::authorization::SourceAuthorizationInputV1,
+        ) -> tracedecay_policy::authorization::SourceAuthorizationDecisionV1 {
+            let mut decision = self.0.evaluate(input);
+            decision
+                .ordered_reason_codes
+                .push(PolicyReasonCodeV1::InputInvalid);
+            decision
+        }
+    }
+
     let drifted = replay_source_authorization(
-        &evaluator,
+        &DivergentEvaluator(SourceAuthorizationEvaluatorV1::default()),
         SourceAuthorizationReplayRequestV1 {
             mode: ReplayModeV1::ExactDeterministic,
             recorded: SourceAuthorizationRecordedResultV1::new(
                 evaluator.version().clone(),
                 row.input,
-                drifted_decision,
+                decision,
             ),
             current_input: None,
         },
@@ -390,5 +427,37 @@ fn exact_replay_refuses_missing_inputs_and_detects_recorded_drift() {
         drifted.ordered_reason_codes,
         vec![PolicyReasonCodeV1::ReplayDecisionMismatch]
     );
-    assert!(drifted.decision.is_some());
+    assert!(drifted.decision.is_none());
+}
+
+#[test]
+fn recorded_replay_refuses_a_tampered_decision_record() {
+    let evaluator = SourceAuthorizationEvaluatorV1::default();
+    let row = truth_tables()
+        .into_iter()
+        .find(|row| row.name == "project_authorized_live")
+        .expect("allow fixture exists");
+    let mut decision = evaluator.evaluate(&row.input);
+    decision
+        .ordered_reason_codes
+        .push(PolicyReasonCodeV1::InputInvalid);
+
+    let replay = replay_source_authorization(
+        &evaluator,
+        SourceAuthorizationReplayRequestV1 {
+            mode: ReplayModeV1::RecordedResult,
+            recorded: SourceAuthorizationRecordedResultV1::new(
+                evaluator.version().clone(),
+                row.input,
+                decision,
+            ),
+            current_input: None,
+        },
+    );
+
+    assert_eq!(
+        replay.ordered_reason_codes,
+        vec![PolicyReasonCodeV1::ReplayRecordInvalid]
+    );
+    assert!(replay.decision.is_none());
 }

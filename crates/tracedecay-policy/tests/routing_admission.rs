@@ -11,6 +11,7 @@ use tracedecay_policy::analyzer::{
     AnalyzerAdmissionInputV1, AnalyzerAdmissionSnapshotV1, AnalyzerAvailabilityV1,
     AnalyzerCandidateV1, AnalyzerExecutionLocationV1,
 };
+use tracedecay_policy::authorization::PolicyIdentifierV1;
 use tracedecay_policy::authorization::PrivacyConstraintV1;
 use tracedecay_policy::git::{
     GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassificationInputV1,
@@ -19,8 +20,10 @@ use tracedecay_policy::git::{
 };
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRouteCandidateV1,
-    CapabilityRoutingDispositionV1, CapabilityRoutingEvaluator, CapabilityRoutingEvaluatorV1,
-    CapabilityRoutingRequestV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
+    CapabilityRoutingCancellationV1, CapabilityRoutingDispositionV1, CapabilityRoutingEvaluator,
+    CapabilityRoutingEvaluatorV1, CapabilityRoutingGrantStateV1, CapabilityRoutingGrantV1,
+    CapabilityRoutingReasonV1, CapabilityRoutingRequestV1, ScopeMatchV1,
+    TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -142,12 +145,29 @@ fn route_candidate(
 ) -> CapabilityRouteCandidateV1 {
     CapabilityRouteCandidateV1 {
         capability_id,
+        use_case_id: PolicyIdentifierV1::new("use-case.routing.fixture").unwrap(),
         availability,
         scope_match: ScopeMatchV1::Match,
         effect_class: CapabilityEffectClassV1::Read,
         truth_source_state: TruthSourceStateV1::Fresh,
+        catalog_revision: 1,
         catalog_digest: digest('d'),
-        priority: 0,
+        capability_digest: digest('1'),
+    }
+}
+
+fn routing_grant(capabilities: BTreeSet<CapabilityId>) -> CapabilityRoutingGrantV1 {
+    CapabilityRoutingGrantV1 {
+        grant_id: PolicyIdentifierV1::new("grant.routing.fixture").unwrap(),
+        revision: 1,
+        digest: digest('a'),
+        allowed_capabilities: capabilities,
+        allowed_use_cases: BTreeSet::from([
+            PolicyIdentifierV1::new("use-case.routing.fixture").unwrap()
+        ]),
+        issued_at: UtcMicros(0),
+        expires_at: UtcMicros(100),
+        state: CapabilityRoutingGrantStateV1::Active,
     }
 }
 
@@ -158,6 +178,7 @@ fn routing_uses_only_explicitly_declared_capability_order() {
     let evaluator = CapabilityRoutingEvaluatorV1::default();
 
     let no_fallback = evaluator.evaluate(&CapabilityRoutingRequestV1 {
+        requested_use_case_id: PolicyIdentifierV1::new("use-case.routing.fixture").unwrap(),
         declared_capability_order: vec![unavailable.clone()],
         candidates: vec![
             route_candidate(unavailable.clone(), CapabilityAvailabilityV1::Unavailable),
@@ -166,12 +187,19 @@ fn routing_uses_only_explicitly_declared_capability_order() {
                 CapabilityAvailabilityV1::Available,
             ),
         ],
-        authorized_capabilities: BTreeSet::from([unavailable.clone(), declared_fallback.clone()]),
+        grant: routing_grant(BTreeSet::from([
+            unavailable.clone(),
+            declared_fallback.clone(),
+        ])),
         required_effect_class: CapabilityEffectClassV1::Read,
         required_freshness: TruthFreshnessRequirementV1::Fresh,
+        catalog_revision: 1,
+        catalog_digest: digest('d'),
         policy_revision: 1,
         policy_digest: digest('e'),
         configuration_digest: digest('f'),
+        deadline: UtcMicros(100),
+        cancellation: CapabilityRoutingCancellationV1::Active,
         evaluated_at: UtcMicros(1),
     });
     assert_eq!(
@@ -181,6 +209,7 @@ fn routing_uses_only_explicitly_declared_capability_order() {
     assert!(no_fallback.selected_capability_id.is_none());
 
     let explicit_fallback = evaluator.evaluate(&CapabilityRoutingRequestV1 {
+        requested_use_case_id: PolicyIdentifierV1::new("use-case.routing.fixture").unwrap(),
         declared_capability_order: vec![unavailable, declared_fallback.clone()],
         candidates: vec![
             route_candidate(
@@ -192,15 +221,19 @@ fn routing_uses_only_explicitly_declared_capability_order() {
                 CapabilityAvailabilityV1::Available,
             ),
         ],
-        authorized_capabilities: BTreeSet::from([
+        grant: routing_grant(BTreeSet::from([
             id::<CapabilityId>("capability.exact"),
             declared_fallback.clone(),
-        ]),
+        ])),
         required_effect_class: CapabilityEffectClassV1::Read,
         required_freshness: TruthFreshnessRequirementV1::Fresh,
+        catalog_revision: 1,
+        catalog_digest: digest('d'),
         policy_revision: 1,
         policy_digest: digest('e'),
         configuration_digest: digest('f'),
+        deadline: UtcMicros(100),
+        cancellation: CapabilityRoutingCancellationV1::Active,
         evaluated_at: UtcMicros(1),
     });
     assert_eq!(
@@ -210,6 +243,110 @@ fn routing_uses_only_explicitly_declared_capability_order() {
     assert_eq!(
         explicit_fallback.selected_capability_id,
         Some(declared_fallback)
+    );
+}
+
+#[test]
+fn routing_fails_closed_on_revocation_cancellation_and_catalog_drift() {
+    let capability = id::<CapabilityId>("capability.exact");
+    let evaluator = CapabilityRoutingEvaluatorV1::default();
+    let request = CapabilityRoutingRequestV1 {
+        requested_use_case_id: PolicyIdentifierV1::new("use-case.routing.fixture").unwrap(),
+        declared_capability_order: vec![capability.clone()],
+        candidates: vec![route_candidate(
+            capability.clone(),
+            CapabilityAvailabilityV1::Available,
+        )],
+        grant: routing_grant(BTreeSet::from([capability])),
+        required_effect_class: CapabilityEffectClassV1::Read,
+        required_freshness: TruthFreshnessRequirementV1::Fresh,
+        catalog_revision: 1,
+        catalog_digest: digest('d'),
+        policy_revision: 1,
+        policy_digest: digest('e'),
+        configuration_digest: digest('f'),
+        deadline: UtcMicros(100),
+        cancellation: CapabilityRoutingCancellationV1::Active,
+        evaluated_at: UtcMicros(1),
+    };
+
+    let mut revoked = request.clone();
+    revoked.grant.state = CapabilityRoutingGrantStateV1::Revoked;
+    assert_eq!(
+        evaluator.evaluate(&revoked).ordered_reason_codes,
+        vec![CapabilityRoutingReasonV1::GrantRevoked]
+    );
+
+    let mut cancelled = request.clone();
+    cancelled.cancellation = CapabilityRoutingCancellationV1::Cancelled {
+        requested_at: UtcMicros(1),
+    };
+    assert_eq!(
+        evaluator.evaluate(&cancelled).ordered_reason_codes,
+        vec![CapabilityRoutingReasonV1::RequestCancelled]
+    );
+
+    let mut drifted = request;
+    drifted.candidates[0].catalog_digest = digest('9');
+    assert_eq!(
+        evaluator.evaluate(&drifted).ordered_reason_codes,
+        vec![CapabilityRoutingReasonV1::CatalogSnapshotMismatch]
+    );
+}
+
+#[test]
+fn routing_pins_use_case_grant_and_deadline_authority() {
+    let capability = id::<CapabilityId>("capability.exact");
+    let evaluator = CapabilityRoutingEvaluatorV1::default();
+    let request = CapabilityRoutingRequestV1 {
+        requested_use_case_id: PolicyIdentifierV1::new("use-case.routing.fixture").unwrap(),
+        declared_capability_order: vec![capability.clone()],
+        candidates: vec![route_candidate(
+            capability.clone(),
+            CapabilityAvailabilityV1::Available,
+        )],
+        grant: routing_grant(BTreeSet::from([capability])),
+        required_effect_class: CapabilityEffectClassV1::Read,
+        required_freshness: TruthFreshnessRequirementV1::Fresh,
+        catalog_revision: 1,
+        catalog_digest: digest('d'),
+        policy_revision: 1,
+        policy_digest: digest('e'),
+        configuration_digest: digest('f'),
+        deadline: UtcMicros(100),
+        cancellation: CapabilityRoutingCancellationV1::Active,
+        evaluated_at: UtcMicros(1),
+    };
+
+    let allowed = evaluator.evaluate(&request);
+    assert_eq!(allowed.disposition, CapabilityRoutingDispositionV1::Allow);
+    assert_eq!(allowed.grant_id, request.grant.grant_id);
+    assert_eq!(allowed.grant_revision, request.grant.revision);
+    assert_eq!(allowed.grant_digest, request.grant.digest);
+    assert_eq!(allowed.catalog_revision, request.catalog_revision);
+    assert_eq!(allowed.catalog_digest, request.catalog_digest);
+
+    let mut wrong_use_case = request.clone();
+    wrong_use_case.requested_use_case_id =
+        PolicyIdentifierV1::new("use-case.routing.other").unwrap();
+    assert_eq!(
+        evaluator.evaluate(&wrong_use_case).ordered_reason_codes,
+        vec![CapabilityRoutingReasonV1::UseCaseNotAuthorized]
+    );
+
+    let mut expired_deadline = request.clone();
+    expired_deadline.evaluated_at = expired_deadline.deadline;
+    assert_eq!(
+        evaluator.evaluate(&expired_deadline).ordered_reason_codes,
+        vec![CapabilityRoutingReasonV1::DeadlineExceeded]
+    );
+
+    let mut expired_grant = request;
+    expired_grant.evaluated_at = expired_grant.grant.expires_at;
+    expired_grant.deadline = UtcMicros(expired_grant.evaluated_at.0 + 1);
+    assert_eq!(
+        evaluator.evaluate(&expired_grant).ordered_reason_codes,
+        vec![CapabilityRoutingReasonV1::GrantExpired]
     );
 }
 

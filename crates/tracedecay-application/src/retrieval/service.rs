@@ -3,6 +3,8 @@
     reason = "the sealed problem envelope is the canonical pre-admission boundary contract"
 )]
 
+use std::future::Future;
+
 use tracedecay_domain::UtcMicros;
 use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
@@ -11,9 +13,9 @@ use crate::context::{RequestAdmission, RequestContext};
 use crate::handlers::ApplicationOperation;
 use crate::result::{
     ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
-    CancellationObservation, CancellationStage, CoverageCompleteness, EvidencePacket,
-    FreshnessState, Omission, OmissionReason, OperationReceipt, OperationTermination,
-    RetrievalEvidence, SafeDiagnostic,
+    AuthorityReceipt, CancellationObservation, CancellationStage, CoverageCompleteness,
+    EvidencePacket, FreshnessState, Omission, OmissionReason, OperationReceipt,
+    OperationTermination, RetrievalEvidence, SafeDiagnostic,
 };
 
 use super::{
@@ -271,6 +273,63 @@ where
     A: AuthorizationPort,
     E: SourceAuthorizationEvaluator,
 {
+    let mut prepared = prepare_evidence_for_publication(context, outcome);
+    let mut authority = admission.receipt().clone();
+    if prepared.requires_recheck {
+        match authorization.recheck_publication(
+            context,
+            operation,
+            admission,
+            prepared.evidence.finished_at,
+        ) {
+            Ok(rechecked) => authority = rechecked,
+            Err(_) => prepared.deny_publication(),
+        }
+    }
+    finish_evidence_envelope(context, operation, authority, prepared, started_at)
+}
+
+pub(super) async fn evidence_envelope_with_async_publication_recheck<T, F, Fut>(
+    context: &RequestContext,
+    operation: &ApplicationOperation,
+    admission_receipt: &AuthorityReceipt,
+    outcome: RetrievalPortOutcome<T>,
+    started_at: UtcMicros,
+    recheck_publication: F,
+) -> ApplicationResult<T>
+where
+    F: FnOnce(UtcMicros) -> Fut,
+    Fut: Future<Output = Result<AuthorityReceipt, ApplicationProblem>>,
+{
+    let mut prepared = prepare_evidence_for_publication(context, outcome);
+    let mut authority = admission_receipt.clone();
+    if prepared.requires_recheck {
+        match recheck_publication(prepared.evidence.finished_at).await {
+            Ok(rechecked) => authority = rechecked,
+            Err(_) => prepared.deny_publication(),
+        }
+    }
+    finish_evidence_envelope(context, operation, authority, prepared, started_at)
+}
+
+struct PreparedEvidence<T> {
+    termination: OperationTermination,
+    evidence: RetrievalEvidence<T>,
+    requires_recheck: bool,
+}
+
+impl<T> PreparedEvidence<T> {
+    fn deny_publication(&mut self) {
+        self.termination = OperationTermination::Failed;
+        suppress_unpublished_evidence(&mut self.evidence, OmissionReason::Redacted, None);
+        self.requires_recheck = false;
+    }
+}
+
+fn prepare_evidence_for_publication<T>(
+    context: &RequestContext,
+    outcome: RetrievalPortOutcome<T>,
+) -> PreparedEvidence<T> {
     let (mut termination, mut evidence) = match outcome {
         RetrievalPortOutcome::Completed(evidence) => (OperationTermination::Completed, evidence),
         RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
@@ -279,7 +338,7 @@ where
         RetrievalPortOutcome::Failed(evidence) => (OperationTermination::Failed, evidence),
         RetrievalPortOutcome::Unavailable(evidence) => (OperationTermination::Failed, evidence),
     };
-    let mut authority = admission.receipt().clone();
+    let mut requires_recheck = false;
     let terminal_override = match termination {
         OperationTermination::Cancelled => Some((
             OperationTermination::Cancelled,
@@ -321,18 +380,8 @@ where
                 }),
             )),
             RequestAdmission::Admitted => {
-                match authorization.recheck_publication(
-                    context,
-                    operation,
-                    admission,
-                    evidence.finished_at,
-                ) {
-                    Ok(rechecked) => {
-                        authority = rechecked;
-                        None
-                    }
-                    Err(_) => Some((OperationTermination::Failed, OmissionReason::Redacted, None)),
-                }
+                requires_recheck = true;
+                None
             }
         },
     };
@@ -340,6 +389,25 @@ where
         termination = override_termination;
         suppress_unpublished_evidence(&mut evidence, reason, cancellation);
     }
+    PreparedEvidence {
+        termination,
+        evidence,
+        requires_recheck,
+    }
+}
+
+fn finish_evidence_envelope<T>(
+    context: &RequestContext,
+    operation: &ApplicationOperation,
+    authority: AuthorityReceipt,
+    prepared: PreparedEvidence<T>,
+    started_at: UtcMicros,
+) -> ApplicationResult<T> {
+    let PreparedEvidence {
+        termination,
+        evidence,
+        ..
+    } = prepared;
     let execution = OperationReceipt {
         started_at,
         ended_at: evidence.finished_at,

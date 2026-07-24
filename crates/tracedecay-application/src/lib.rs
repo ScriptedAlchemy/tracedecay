@@ -19,6 +19,7 @@ pub mod handlers;
 pub mod policy;
 pub mod result;
 pub mod retrieval;
+pub mod source_edit;
 pub mod storage;
 
 mod error;
@@ -112,20 +113,29 @@ pub use retrieval::catalog::{APPLICATION_DEFAULT_PROFILE_ID, application_catalog
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AffectedTestsService, AnchorExpandRequest,
     AnchorExpandResult, AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT,
-    CallableCodeOperationKind, CallableCodeOperations, CallableCodeQueryFuture,
-    CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
-    CodeImplementationsRequest, CodeOccurrenceRecord, CodeQueryPage, CodeQueryScope,
-    CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest, ExactOccurrenceRecord,
-    ExactOccurrenceRequest, GraphCallersRequest, GraphCallersService, GraphImpactRequest,
-    GraphImpactResult, GraphImpactRetrievalPort, GraphRetrievalPort, HealthReadRequest,
-    LexicalOccurrenceRecord, ModuleApiRequest, OperationalRetrievalPort, PageRequest,
-    PhraseSearchRequest, QualifiedNameRequest, ResultProjection, RetrievalOrder,
-    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest,
-    SourceLinesRequest, SourceLinesResult, SourceLinesService, SourceMetadataRecord,
-    SourceMetadataRequest, SourceRetrievalPort, SymbolRetrievalPort, SymbolSearchRequest,
-    SymbolSearchResult, SymbolSearchService, TemporalRetrievalPort, TestRetrievalPort,
-    callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
-    callable_code_operations, callable_code_request_schema, callable_code_result_schema,
+    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
+    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeOperations,
+    CallableCodeQueryFuture, CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest,
+    CodeImpactRequest, CodeImplementationsRequest, CodeOccurrenceRecord, CodeQueryPage,
+    CodeQueryScope, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
+    ExactOccurrenceRecord, ExactOccurrenceRequest, GraphCallersRequest, GraphCallersService,
+    GraphImpactRequest, GraphImpactResult, GraphImpactRetrievalPort, GraphRetrievalPort,
+    HealthReadRequest, LexicalOccurrenceRecord, MAX_APPLICATION_PAGE_SIZE, ModuleApiRequest,
+    OperationalRetrievalPort, PageRequest, PhraseSearchRequest, QualifiedNameRequest,
+    ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
+    RetrievalRequestMeta, SessionLookupRequest, SourceLinesRequest, SourceLinesResult,
+    SourceLinesService, SourceMetadataRecord, SourceMetadataRequest, SourceRetrievalPort,
+    SymbolRetrievalPort, SymbolSearchRequest, SymbolSearchResult, SymbolSearchService,
+    TemporalRetrievalPort, TestRetrievalPort, callable_code_catalog_contribution,
+    callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
+    callable_code_request_schema, callable_code_result_schema,
+};
+pub use source_edit::{
+    SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
+    SourceEditDiagnosticV1, SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
+    SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
+    SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
+    source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
 pub use storage::{
     BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
@@ -133,7 +143,7 @@ pub use storage::{
     OrphanStoreRecordV1, QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1,
     RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
     StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
-    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1,
-    TableNameV1, incident_debris_finding, orphan_store_finding, over_budget_finding,
-    retention_backlog_finding, stale_branch_dbs_finding,
+    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
+    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
+    stale_branch_dbs_finding,
 };
