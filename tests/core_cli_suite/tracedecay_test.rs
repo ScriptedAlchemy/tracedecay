@@ -1005,7 +1005,7 @@ async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
         .execute_write(
             "backdate indexed files fixture",
             "UPDATE files SET indexed_at = ?1",
-            libsql::params![stale],
+            (stale,),
         )
         .await
         .unwrap();
@@ -1038,7 +1038,7 @@ async fn last_sync_timestamp_falls_back_to_indexed_at_without_metadata() {
         .execute_write(
             "remove last sync metadata fixture",
             "DELETE FROM metadata WHERE key = ?1",
-            libsql::params!["last_sync_at"],
+            ("last_sync_at",),
         )
         .await
         .unwrap();

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use std::{path::Path, time::Duration};
 
+use rusqlite::Connection;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use serde_json::Value;
 use serde_json::json;
@@ -150,11 +151,7 @@ async fn wait_for_observation_barrier_arrival(barrier_dir: &Path) {
 }
 
 async fn set_statement_fault(tmp: &tempfile::TempDir, stage: &str, table: &str, enabled: bool) {
-    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
+    let conn = Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let trigger = format!("fail_observation_{stage}");
     let sql = if enabled {
         format!(
@@ -166,7 +163,7 @@ async fn set_statement_fault(tmp: &tempfile::TempDir, stage: &str, table: &str, 
     } else {
         format!("DROP TRIGGER {trigger};")
     };
-    conn.execute_batch(&sql).await.unwrap();
+    conn.execute_batch(&sql).unwrap();
 }
 
 async fn observation_state_counts(tmp: &tempfile::TempDir) -> [i64; 4] {
@@ -174,29 +171,17 @@ async fn observation_state_counts(tmp: &tempfile::TempDir) -> [i64; 4] {
 }
 
 async fn observation_state_counts_at(db_path: impl AsRef<std::path::Path>) -> [i64; 4] {
-    let db = libsql::Builder::new_local(db_path.as_ref())
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT
+    let conn = Connection::open(db_path.as_ref()).unwrap();
+    conn.query_row(
+        "SELECT
                 (SELECT COUNT(*) FROM sanitization_receipts),
                 (SELECT COUNT(*) FROM observations),
                 (SELECT COUNT(*) FROM source_cursors),
                 (SELECT COUNT(*) FROM projection_queue)",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    [
-        row.get(0).unwrap(),
-        row.get(1).unwrap(),
-        row.get(2).unwrap(),
-        row.get(3).unwrap(),
-    ]
+        [],
+        |row| Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?]),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -210,8 +195,10 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
         let tmp = tempdir_or_panic();
         let candidate = observation(stage);
 
-        let db = open_lcm_db(&tmp).await;
+        let initialized = open_lcm_db(&tmp).await;
+        initialized.close();
         set_statement_fault(&tmp, stage, table, true).await;
+        let db = open_lcm_db(&tmp).await;
         let store = GlobalDbObservationStore::new(&db);
         let error = store
             .persist_observation(write(stage, candidate.clone()))
@@ -223,9 +210,9 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
         );
         db.close();
 
+        assert_eq!(observation_state_counts(&tmp).await, [0, 0, 0, 0]);
         let restarted = open_lcm_db(&tmp).await;
         let restarted_store = GlobalDbObservationStore::new(&restarted);
-        assert_eq!(observation_state_counts(&tmp).await, [0, 0, 0, 0]);
         assert!(
             restarted_store
                 .get_observation(candidate.observation_id())
@@ -251,8 +238,12 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             "{stage} fault leaked replay state after restart"
         );
 
+        drop(restarted_store);
+        restarted.close();
         set_statement_fault(&tmp, stage, table, false).await;
-        let committed = match restarted_store
+        let retry = open_lcm_db(&tmp).await;
+        let retry_store = GlobalDbObservationStore::new(&retry);
+        let committed = match retry_store
             .persist_observation(write(stage, candidate.clone()))
             .await
             .unwrap()
@@ -261,7 +252,8 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             other => panic!("{stage} retry must commit once, got {other:?}"),
         };
         assert_eq!(committed.sequence(), 1);
-        restarted.close();
+        drop(retry_store);
+        retry.close();
 
         let replayed = open_lcm_db(&tmp).await;
         let replayed_store = GlobalDbObservationStore::new(&replayed);
@@ -290,6 +282,8 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
                 .unwrap(),
             Some(cursor(stage, 100))
         );
+        drop(replayed_store);
+        replayed.close();
         assert_eq!(
             observation_state_counts(&tmp).await,
             [1, 1, 1, 1],
