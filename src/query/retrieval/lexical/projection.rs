@@ -281,6 +281,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 field_scores_micros: score.field_scores,
                 matched_whole_terms: score.matched_whole_terms,
                 matched_subtokens: score.matched_subtokens,
+                matched_phrases: score.matched_phrases,
                 typo_recovery_applied: score.typo_recovery_applied,
                 echo_penalty_applied: score.echo_penalty_applied,
             };
@@ -359,6 +360,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut field_scores: BTreeMap<LexicalFieldV1, u64> = BTreeMap::new();
         let mut matched_whole_terms = BTreeSet::new();
         let mut matched_subtokens = BTreeSet::new();
+        let mut matched_phrases = BTreeSet::new();
         let mut matched_kinds = BTreeSet::new();
         let mut typo_recovery_applied = false;
         for (field, document_terms) in &row.fields {
@@ -424,6 +426,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 .saturating_mul(PHRASE_SCORE_MILLIS)
                 / 1_000;
             add_score(&mut field_scores, field, score);
+            matched_phrases.insert(phrase.clone());
         }
         let normalized_query = normalize_lexical(request.query_view.as_str().trim_matches('"'));
         let echo_penalty_applied =
@@ -437,6 +440,7 @@ impl CodeLexicalProjectionAdapterV1 {
             field_scores: field_scores.into_iter().collect(),
             matched_whole_terms: matched_whole_terms.into_iter().collect(),
             matched_subtokens: matched_subtokens.into_iter().collect(),
+            matched_phrases: matched_phrases.into_iter().collect(),
             matched_kinds: matched_kinds.into_iter().collect(),
             typo_recovery_applied,
             echo_penalty_applied,
@@ -505,12 +509,15 @@ impl CodeLexicalProjectionAdapterV1 {
     ) -> Result<CompactCandidate, RetrievalPortError> {
         let lane = retriever.as_str();
         let chunk_id = row.chunk.id.as_str();
+        let generation = row.chunk.anchor.generation_id.as_str();
         Ok(CompactCandidate {
             anchor_id: retrieval_anchor(format!("code-chunk:{chunk_id}"))?,
             logical_evidence_id: LogicalEvidenceId::new(format!("code-chunk:{chunk_id}"))
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            source_occurrence_id: SourceOccurrenceId::new(format!("code-chunk:{chunk_id}"))
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            source_occurrence_id: SourceOccurrenceId::new(format!(
+                "code-chunk:{generation}:{chunk_id}"
+            ))
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             source_namespace: self.metadata.freshness.source_namespace.clone(),
             repository_id: self.metadata.repository_id.clone(),
             session_or_thread_id: None,
@@ -658,6 +665,7 @@ struct LexicalRowScoreV1 {
     field_scores: Vec<(LexicalFieldV1, u64)>,
     matched_whole_terms: Vec<String>,
     matched_subtokens: Vec<String>,
+    matched_phrases: Vec<String>,
     matched_kinds: Vec<ExactTechnicalTermKindV1>,
     typo_recovery_applied: bool,
     echo_penalty_applied: bool,

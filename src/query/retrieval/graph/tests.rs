@@ -411,6 +411,102 @@ fn graph_projection_emits_one_canonical_occurrence_when_seeds_converge() {
 }
 
 #[test]
+fn graph_projection_reports_reachable_unbound_targets_as_unknown() {
+    let request = graph_request(8, 1);
+    let edge = CanonicalRelationEdgeV1 {
+        from_occurrence: id("symbol.seed"),
+        to_occurrence: id("symbol.unbound"),
+        kind: RelationEdgeKindV1::Calls,
+        authority: EdgeAuthorityV1::UnknownUnsupported,
+        evidence_span: SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        },
+    };
+
+    let result = projection_batch(&request, &[edge], &["symbol.seed"]);
+
+    assert!(result.candidates.is_empty());
+    assert_eq!(result.coverage.examined, 1);
+    assert_eq!(result.coverage.eligible, 0);
+    assert_eq!(result.coverage.unknown, 1);
+}
+
+#[test]
+fn graph_projection_accounts_for_filtered_edge_kinds() {
+    let mut request = graph_request(8, 1);
+    request.edge_kinds = vec![RelationEdgeKindV1::Uses];
+    let edge = CanonicalRelationEdgeV1 {
+        from_occurrence: id("symbol.seed"),
+        to_occurrence: id("symbol.target"),
+        kind: RelationEdgeKindV1::Calls,
+        authority: EdgeAuthorityV1::SyntaxExact,
+        evidence_span: SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        },
+    };
+
+    let result = projection_batch(&request, &[edge], &["symbol.seed", "symbol.target"]);
+
+    assert!(result.candidates.is_empty());
+    assert_eq!(result.coverage.examined, 1);
+    assert_eq!(result.coverage.eligible, 0);
+    assert_eq!(result.coverage.excluded, 1);
+}
+
+#[test]
+fn graph_projection_selects_symbol_chunk_binding_canonically() {
+    let request = graph_request(8, 1);
+    let edge = CanonicalRelationEdgeV1 {
+        from_occurrence: id("symbol.seed"),
+        to_occurrence: id("symbol.target"),
+        kind: RelationEdgeKindV1::Calls,
+        authority: EdgeAuthorityV1::SyntaxExact,
+        evidence_span: SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        },
+    };
+    let mut chunks = vec![
+        projection_chunk(&request, "chunk.seed", "symbol.seed"),
+        projection_chunk(&request, "chunk.target.z", "symbol.target"),
+        projection_chunk(&request, "chunk.target.a", "symbol.target"),
+    ];
+    let read = |chunks: &[CodeSearchChunkV1]| {
+        let adapter = CodeGraphEvidenceAdapterV1::new(
+            request.generation.clone(),
+            None,
+            freshness(FreshnessCompatibilityV1::Current),
+            std::slice::from_ref(&edge),
+            chunks,
+        )
+        .expect("projection is valid");
+        complete_batch(
+            adapter
+                .read_graph_evidence(&request)
+                .expect("graph read succeeds"),
+        )
+    };
+
+    let first = read(&chunks);
+    chunks.reverse();
+    let reversed = read(&chunks);
+
+    assert_eq!(first, reversed);
+    assert_eq!(
+        first.evidence_by_occurrence[&id("code-graph:symbol.target")]
+            .binding
+            .occurrence
+            .chunk
+            .as_ref()
+            .expect("chunk binding")
+            .as_str(),
+        "chunk.target.a"
+    );
+}
+
+#[test]
 fn graph_projection_breaks_equal_score_ties_by_canonical_full_path() {
     let mut request = graph_request(8, 1);
     request.seed_anchors = vec![

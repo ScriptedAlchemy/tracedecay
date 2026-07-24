@@ -162,6 +162,7 @@ fn lexical_pair(
             .iter()
             .map(|subtoken| (*subtoken).to_owned())
             .collect(),
+        matched_phrases: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
     };

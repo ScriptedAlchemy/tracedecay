@@ -1611,3 +1611,68 @@ fn temporal_kernel_sources_respect_dependency_boundary() {
         violations.into_iter().collect::<Vec<_>>().join("\n")
     );
 }
+
+#[test]
+fn pr8_temporal_kernel_has_one_scope_cursor_and_payload_path() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let sources = query_kernel_sources(&repository).expect("resolve temporal kernel sources");
+    let temporal_sources = sources
+        .iter()
+        .filter(|path| path.starts_with("src/query/temporal"))
+        .collect::<Vec<_>>();
+    assert!(
+        !temporal_sources.is_empty(),
+        "PR8 temporal kernel sources must exist"
+    );
+    assert_eq!(
+        temporal_sources
+            .iter()
+            .filter(|path| path.as_path() == Path::new("src/query/temporal/cursor.rs"))
+            .count(),
+        1,
+        "PR8 must retain exactly one canonical cursor module"
+    );
+
+    let forbidden_identifiers = [
+        ("TaskId", "Plan 24 task authority"),
+        ("all_registered", "project registry fan-out"),
+        ("DaemonSessionRuntimeRegistryV1", "session registry fan-out"),
+        ("current_dir", "CWD-derived scope"),
+        ("set_current_dir", "CWD-derived scope"),
+        ("OpenOptions", "writable read fallback"),
+        ("open_writable", "writable read fallback"),
+        ("compatibility_cursor", "second LCM cursor"),
+        ("AuthorizedSessionExpandCursorBinding", "second LCM cursor"),
+        ("encode_lcm_expand_cursor", "second LCM cursor"),
+        ("decode_lcm_expand_cursor", "second LCM cursor"),
+        ("get_session_message", "second payload lookup"),
+        ("hydrate_authorized_anchor_bytes", "second payload lookup"),
+        ("expand_payload", "second payload lookup"),
+    ];
+    let mut violations = BTreeSet::new();
+    for path in temporal_sources {
+        let source = fs::read_to_string(repository.join(path))
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let identifiers = tokenize(&source)
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Ident(identifier) => Some(identifier),
+                Token::StringLiteral(_) | Token::Punct(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for (identifier, authority) in forbidden_identifiers {
+            if identifiers.contains(identifier) {
+                violations.insert(format!(
+                    "{} references {authority} through {identifier}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "PR8 temporal kernel crossed its task/scope/read/cursor/hydration boundary:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}

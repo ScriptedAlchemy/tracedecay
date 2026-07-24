@@ -107,6 +107,13 @@ impl GenerationSymbolIndexV1 {
         {
             return Err(LineageResolutionErrorV1::DuplicateOccurrence);
         }
+        let mut identities = std::collections::BTreeSet::new();
+        if symbols
+            .iter()
+            .any(|symbol| !identities.insert(symbol.identity.clone()))
+        {
+            return Err(LineageResolutionErrorV1::DuplicateIdentity);
+        }
         Ok(Self {
             generation_id,
             symbols,
@@ -121,6 +128,8 @@ pub enum LineageResolutionErrorV1 {
     SameGeneration,
     #[error("a symbol occurrence appears twice in one generation index")]
     DuplicateOccurrence,
+    #[error("a logical symbol identity appears twice in one generation index")]
+    DuplicateIdentity,
     #[error("contract violation: {0}")]
     Contract(String),
 }
@@ -866,6 +875,21 @@ mod tests {
         assert_eq!(
             duplicate,
             Err(LineageResolutionErrorV1::DuplicateOccurrence)
+        );
+
+        // The same logical identity cannot name two generation-local
+        // occurrences. Accepting it would let map insertion order choose an
+        // ancestor before the resolver can abstain.
+        let duplicate_identity = GenerationSymbolIndexV1::new(
+            generation(3),
+            vec![
+                record("sym.d1", 'a', "crate::alpha", "function", 'f', '0'),
+                record("sym.d2", 'a', "crate::alpha", "function", 'f', '0'),
+            ],
+        );
+        assert_eq!(
+            duplicate_identity,
+            Err(LineageResolutionErrorV1::DuplicateIdentity)
         );
 
         // Consumption is one-to-one: two identical current symbols cannot

@@ -89,6 +89,7 @@ pub struct LexicalLaneEvidence {
     pub field_scores_micros: Vec<(LexicalFieldV1, u64)>,
     pub matched_whole_terms: Vec<String>,
     pub matched_subtokens: Vec<String>,
+    pub matched_phrases: Vec<String>,
     pub typo_recovery_applied: bool,
     pub echo_penalty_applied: bool,
 }
@@ -191,6 +192,13 @@ impl LexicalLaneEvidence {
             if !request.subtokens.contains(subtoken) {
                 return Err(RetrievalPortError::Contract(
                     "lexical lane evidence matches a subtoken outside the request".to_owned(),
+                ));
+            }
+        }
+        for phrase in &self.matched_phrases {
+            if !request.phrases.contains(phrase) {
+                return Err(RetrievalPortError::Contract(
+                    "lexical lane evidence matches a phrase outside the request".to_owned(),
                 ));
             }
         }

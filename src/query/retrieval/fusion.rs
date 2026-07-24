@@ -41,6 +41,8 @@ const MAX_QUERY_MAC_SECRET_BYTES: usize = 256;
 pub enum QueryDigestAuthenticationError {
     #[error("query MAC key material is invalid")]
     InvalidKeyMaterial,
+    #[error("query MAC authentication failed")]
+    AuthenticationFailed,
     #[error("query MAC key is unavailable")]
     KeyUnavailable,
     #[error("query MAC key was revoked")]
@@ -169,6 +171,32 @@ impl RetrievalCursorKeyringV1 {
         self.digest_query_for(&self.active.0, self.active.1, request, query_view)
     }
 
+    pub(crate) fn active_query_key_id(&self) -> RetrievalCursorKeyId {
+        self.active.0.clone()
+    }
+
+    pub(crate) fn verify_query_digest_for(
+        &self,
+        key_id: &RetrievalCursorKeyId,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        digest: &QueryDigest,
+    ) -> Result<(), QueryDigestAuthenticationError> {
+        if request.scope.privacy_domain != self.privacy_domain
+            || digest.privacy_domain != self.privacy_domain
+        {
+            return Err(QueryDigestAuthenticationError::PrivacyDomainMismatch);
+        }
+        let material = self.key_material(key_id, digest.key_epoch)?;
+        let bytes = self.query_mac_input_bytes(digest.key_epoch, query_view)?;
+        let signature = query_mac_bytes(&digest.mac)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
+            .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
+        mac.update(&bytes);
+        mac.verify_slice(&signature)
+            .map_err(|_| QueryDigestAuthenticationError::AuthenticationFailed)
+    }
+
     fn digest_query_for(
         &self,
         key_id: &RetrievalCursorKeyId,
@@ -180,16 +208,7 @@ impl RetrievalCursorKeyringV1 {
             return Err(QueryDigestAuthenticationError::PrivacyDomainMismatch);
         }
         let material = self.key_material(key_id, key_epoch)?;
-        let input = QueryMacInput {
-            domain: QUERY_DIGEST_MAC_DOMAIN,
-            privacy_domain: &self.privacy_domain,
-            key_epoch,
-            query_bytes: query_view.as_bytes(),
-            sanitizer_revision: query_view.sanitizer_revision(),
-            normalization_revision: query_view.normalization_revision(),
-        };
-        let bytes = serde_json::to_vec(&input)
-            .map_err(|error| QueryDigestAuthenticationError::Canonicalization(error.to_string()))?;
+        let bytes = self.query_mac_input_bytes(key_epoch, query_view)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
         mac.update(&bytes);
@@ -202,6 +221,23 @@ impl RetrievalCursorKeyringV1 {
             key_epoch,
             mac,
         ))
+    }
+
+    fn query_mac_input_bytes(
+        &self,
+        key_epoch: u64,
+        query_view: &EphemeralSanitizedQueryViewV1,
+    ) -> Result<Vec<u8>, QueryDigestAuthenticationError> {
+        let input = QueryMacInput {
+            domain: QUERY_DIGEST_MAC_DOMAIN,
+            privacy_domain: &self.privacy_domain,
+            key_epoch,
+            query_bytes: query_view.as_bytes(),
+            sanitizer_revision: query_view.sanitizer_revision(),
+            normalization_revision: query_view.normalization_revision(),
+        };
+        serde_json::to_vec(&input)
+            .map_err(|error| QueryDigestAuthenticationError::Canonicalization(error.to_string()))
     }
 
     fn active_key(&self) -> (&RetrievalCursorKeyId, u64) {
@@ -1140,6 +1176,7 @@ fn map_cursor_key_error(error: QueryDigestAuthenticationError) -> RetrievalError
         QueryDigestAuthenticationError::KeyUnavailable => RetrievalError::CursorKeyUnavailable,
         QueryDigestAuthenticationError::KeyRevoked => RetrievalError::CursorKeyRevoked,
         QueryDigestAuthenticationError::InvalidKeyMaterial
+        | QueryDigestAuthenticationError::AuthenticationFailed
         | QueryDigestAuthenticationError::PrivacyDomainMismatch
         | QueryDigestAuthenticationError::Canonicalization(_)
         | QueryDigestAuthenticationError::Contract(_) => RetrievalError::CursorAuthenticationFailed,

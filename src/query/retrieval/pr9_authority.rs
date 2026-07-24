@@ -10,8 +10,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_domain::{
     ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, FusionProfile,
-    Pr9FallbackSubpayload, QueryDigest, RetrievalContractError, RetrievalCursor, RetrievalError,
-    RetrievalRequest, RetrieverKind,
+    Pr9FallbackSubpayload, QueryDigest, RetrievalContractError, RetrievalCursor,
+    RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverKind,
 };
 
 use super::fusion::{
@@ -126,6 +126,23 @@ impl Pr9QueryAuthorityV1 {
     ) -> Result<QueryDigest, Pr9QueryAuthorityErrorV1> {
         self.validate_request(request)?;
         Ok(self.keyring.digest_active_query(request, query_view)?)
+    }
+
+    pub(crate) fn active_query_key_id(&self) -> RetrievalCursorKeyId {
+        self.keyring.active_query_key_id()
+    }
+
+    pub(crate) fn verify_authenticated_query(
+        &self,
+        key_id: &RetrievalCursorKeyId,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        digest: &QueryDigest,
+    ) -> Result<(), Pr9QueryAuthorityErrorV1> {
+        self.validate_request(request)?;
+        self.keyring
+            .verify_query_digest_for(key_id, request, query_view, digest)?;
+        Ok(())
     }
 
     /// Compose and page the exact PR9 lanes under the accepted immutable

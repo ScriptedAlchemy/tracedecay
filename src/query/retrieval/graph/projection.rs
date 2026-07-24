@@ -78,22 +78,40 @@ impl CodeGraphEvidenceAdapterV1 {
             let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
                 continue;
             };
-            symbols.entry(symbol).or_insert_with(|| SymbolBindingV1 {
+            let candidate = SymbolBindingV1 {
                 file: chunk.anchor.file_occurrence_id.clone(),
                 chunk: Some(chunk.id.clone()),
                 language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-            });
+            };
+            match symbols.entry(symbol) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(candidate);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let current = entry.get_mut();
+                    if current.file != candidate.file
+                        || current.language_descriptor_revision
+                            != candidate.language_descriptor_revision
+                    {
+                        return Err(RetrievalPortError::Contract(
+                            "one symbol occurrence has conflicting graph candidate bindings"
+                                .to_owned(),
+                        ));
+                    }
+                    if candidate.chunk < current.chunk {
+                        current.chunk = candidate.chunk;
+                    }
+                }
+            }
         }
 
         let mut adjacency: BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>> =
             BTreeMap::new();
         for edge in edges {
-            if !symbols.contains_key(&edge.from_occurrence)
-                || !symbols.contains_key(&edge.to_occurrence)
-            {
-                // Edges without chunk-backed occurrence bindings remain
-                // inspectable via generation evidence, but cannot mint
-                // retrieval candidates.
+            if !symbols.contains_key(&edge.from_occurrence) {
+                // An unbound source cannot be reached from an authorized
+                // seed. A bound source with an unbound target is retained so
+                // traversal can report the missing target as unknown.
                 continue;
             }
             adjacency
@@ -153,6 +171,8 @@ impl CodeGraphEvidenceAdapterV1 {
         let edge_kinds: BTreeSet<RelationEdgeKindV1> = request.edge_kinds.iter().copied().collect();
         let mut best_by_occurrence = BTreeMap::new();
         let mut examined = 0u64;
+        let mut excluded = 0u64;
+        let mut unknown = 0u64;
         for seed in &request.seed_anchors {
             let seed_symbol = seed.occurrence.symbol.as_ref().ok_or_else(|| {
                 RetrievalPortError::Contract(
@@ -176,6 +196,7 @@ impl CodeGraphEvidenceAdapterV1 {
                 for edge in neighbors {
                     examined = examined.saturating_add(1);
                     if !edge_kinds.contains(&edge.kind) {
+                        excluded = excluded.saturating_add(1);
                         continue;
                     }
                     let mut next_path = path.clone();
@@ -209,6 +230,7 @@ impl CodeGraphEvidenceAdapterV1 {
                         (score_micros, next_path.clone()),
                     );
                     let Some(binding_meta) = self.symbols.get(&edge.to_occurrence) else {
+                        unknown = unknown.saturating_add(1);
                         continue;
                     };
                     let occurrence = format!("code-graph:{}", edge.to_occurrence.as_str());
@@ -298,9 +320,9 @@ impl CodeGraphEvidenceAdapterV1 {
             coverage: RetrieverCoverage {
                 examined,
                 eligible,
-                excluded: 0,
+                excluded,
                 capped: 0,
-                unknown: 0,
+                unknown,
             },
             continuation: None,
         })

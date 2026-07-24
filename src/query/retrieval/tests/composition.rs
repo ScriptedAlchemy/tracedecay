@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::{cell::Cell, rc::Rc};
 
 use tracedecay_domain::{
     DiversityPolicy, EvidenceRole, ExactClass, HydrationReceipt, PublicRetrieverStatus,
@@ -911,4 +912,77 @@ fn hydration_rejects_receipts_outside_the_issued_work_permit() {
         (source.authorizations, source.preflights, source.reads),
         (1, 1, 1)
     );
+}
+
+struct MutableHydrationExecutionControl {
+    now_micros: i64,
+    cancelled: Rc<Cell<bool>>,
+}
+
+impl HydrationExecutionControlV1 for MutableHydrationExecutionControl {
+    fn now_micros(&self) -> i64 {
+        self.now_micros
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.get()
+    }
+}
+
+struct CancellingHydrationSource {
+    cancelled: Rc<Cell<bool>>,
+}
+
+impl LateHydrationSource<String> for CancellingHydrationSource {
+    fn authorize(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        _candidate: &tracedecay_domain::RankedCandidate,
+    ) -> HydrationAuthorizationV1 {
+        HydrationAuthorizationV1::Authorized
+    }
+
+    fn preflight_authorized(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        _candidate: &tracedecay_domain::RankedCandidate,
+        _permit: &HydrationWorkPermitV1,
+    ) -> HydrationPreflightOutcomeV1 {
+        HydrationPreflightOutcomeV1::Ready { estimated_bytes: 1 }
+    }
+
+    fn hydrate_authorized(
+        &mut self,
+        _request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        _permit: &HydrationWorkPermitV1,
+    ) -> HydrationReadOutcomeV1<String> {
+        self.cancelled.set(true);
+        HydrationReadOutcomeV1::Complete {
+            payload: "must not publish".to_owned(),
+            receipt: receipt(candidate, 1),
+        }
+    }
+}
+
+#[test]
+fn hydration_rechecks_cancellation_after_source_work_before_publishing_payload() {
+    let request = request();
+    let ranked = single_ranked_candidate();
+    let cancelled = Rc::new(Cell::new(false));
+    let control = MutableHydrationExecutionControl {
+        now_micros: request.snapshot.captured_at.0,
+        cancelled: Rc::clone(&cancelled),
+    };
+    let mut source = CancellingHydrationSource { cancelled };
+
+    let page = DeterministicLateHydration::new(&mut source)
+        .hydrate_with_control(&request, &ranked, &budget(), &control)
+        .expect("cancellation is a positional result");
+
+    assert!(matches!(
+        page.results[0].outcome,
+        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
+    ));
+    assert!(page.receipts.is_empty());
 }

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    ComponentRevision, EphemeralSanitizedQueryViewV1, QueryNormalizationRevision,
+    ComponentRevision, EphemeralSanitizedQueryViewV1, QueryMac, QueryNormalizationRevision,
     RetrievalCursorKeyId, RetrieverKind, RetrieverOutcome, SanitizerRevision,
 };
 
 use super::{batch, composition_lanes, id, no_caps, profile, request};
-use crate::query::retrieval::Pr9QueryAuthorityV1;
-use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
+use crate::query::retrieval::fusion::{QueryDigestAuthenticationError, RetrievalCursorKeyringV1};
+use crate::query::retrieval::{Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1};
 
 fn query_view() -> EphemeralSanitizedQueryViewV1 {
     EphemeralSanitizedQueryViewV1::sanitize(
@@ -20,10 +20,7 @@ fn query_view() -> EphemeralSanitizedQueryViewV1 {
 
 fn authority() -> Pr9QueryAuthorityV1 {
     let request = request();
-    Pr9QueryAuthorityV1::new(
-        profile(),
-        no_caps(),
-        id::<ComponentRevision>("ranking.authority.v1"),
+    authority_with_keyring(
         RetrievalCursorKeyringV1::new(
             request.scope.privacy_domain,
             id::<RetrievalCursorKeyId>("retrieval-key.authority.v1"),
@@ -32,6 +29,15 @@ fn authority() -> Pr9QueryAuthorityV1 {
             1_000_000,
         )
         .expect("keyring"),
+    )
+}
+
+fn authority_with_keyring(keyring: RetrievalCursorKeyringV1) -> Pr9QueryAuthorityV1 {
+    Pr9QueryAuthorityV1::new(
+        profile(),
+        no_caps(),
+        id::<ComponentRevision>("ranking.authority.v1"),
+        keyring,
     )
     .expect("authority")
 }
@@ -106,4 +112,95 @@ fn semantic_handoff_reuses_the_authenticated_query_and_fallback() {
         authorized.query_digest
     );
     assert!(Arc::strong_count(&authorized.fallback) >= 1);
+}
+
+#[test]
+fn retained_query_key_verifies_without_fallback_key_guessing() {
+    let request = request();
+    let query = query_view();
+    let old_key = id::<RetrievalCursorKeyId>("retrieval-key.authority.old");
+    let mut keys = RetrievalCursorKeyringV1::new(
+        request.scope.privacy_domain.clone(),
+        old_key.clone(),
+        7,
+        vec![7_u8; 32],
+        1_000_000,
+    )
+    .expect("old key");
+    let old_digest = keys
+        .digest_active_query(&request, &query)
+        .expect("old digest");
+    keys.rotate(
+        id::<RetrievalCursorKeyId>("retrieval-key.authority.active"),
+        8,
+        vec![8_u8; 32],
+    )
+    .expect("rotation");
+    let authority = authority_with_keyring(keys);
+
+    authority
+        .verify_authenticated_query(&old_key, &request, &query, &old_digest)
+        .expect("retained exact key verifies");
+    assert_eq!(
+        authority.verify_authenticated_query(
+            &id::<RetrievalCursorKeyId>("retrieval-key.authority.unknown"),
+            &request,
+            &query,
+            &old_digest,
+        ),
+        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::KeyUnavailable,
+        ))
+    );
+
+    let mut tampered = old_digest.clone();
+    tampered.mac = QueryMac::new(format!("hmac-sha256:{}", "9".repeat(64))).expect("tampered MAC");
+    assert_eq!(
+        authority.verify_authenticated_query(&old_key, &request, &query, &tampered),
+        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::AuthenticationFailed,
+        ))
+    );
+
+    let mut wrong_scope = request.clone();
+    wrong_scope.scope.privacy_domain = id("privacy.authority.other");
+    assert_eq!(
+        authority.verify_authenticated_query(&old_key, &wrong_scope, &query, &old_digest),
+        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::PrivacyDomainMismatch,
+        ))
+    );
+}
+
+#[test]
+fn revoked_retained_query_key_is_rejected() {
+    let request = request();
+    let query = query_view();
+    let old_key = id::<RetrievalCursorKeyId>("retrieval-key.authority.revoked");
+    let mut keys = RetrievalCursorKeyringV1::new(
+        request.scope.privacy_domain.clone(),
+        old_key.clone(),
+        7,
+        vec![7_u8; 32],
+        1_000_000,
+    )
+    .expect("old key");
+    let old_digest = keys
+        .digest_active_query(&request, &query)
+        .expect("old digest");
+    keys.rotate(
+        id::<RetrievalCursorKeyId>("retrieval-key.authority.active"),
+        8,
+        vec![8_u8; 32],
+    )
+    .expect("rotation");
+    keys.revoke(&old_key, 7).expect("revocation");
+    let authority = authority_with_keyring(keys);
+
+    assert_eq!(
+        authority.verify_authenticated_query(&old_key, &request, &query, &old_digest),
+        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::KeyRevoked,
+        ))
+    );
 }

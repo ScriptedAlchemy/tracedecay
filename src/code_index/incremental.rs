@@ -32,6 +32,10 @@ pub enum ChunkIncrementErrorV1 {
     SameGeneration,
     #[error("chunk {0} occurs more than once in a generation manifest")]
     DuplicateChunk(CodeSearchChunkId),
+    #[error("file occurrence {0} occurs more than once in generation evidence")]
+    DuplicateFileOccurrence(FileOccurrenceId),
+    #[error("symbol occurrence {0} occurs more than once in re-extracted evidence")]
+    DuplicateReextractedSymbol(SymbolOccurrenceId),
     #[error("a chunk manifest is not canonical: {0}")]
     NonCanonical(String),
     #[error("the increment plan does not match the supplied prior generation")]
@@ -77,10 +81,16 @@ impl GenerationChunkManifestV1 {
 
         let capacity = files.iter().map(|file| file.chunks.len()).sum();
         let mut chunks = Vec::with_capacity(capacity);
+        let mut file_occurrences = BTreeSet::new();
         for file in files {
             file.validate().map_err(map_chunking_error)?;
             if file.document.generation_id != generation_id {
                 return Err(ChunkIncrementErrorV1::MixedGeneration);
+            }
+            if !file_occurrences.insert(file.document.file_occurrence_id.clone()) {
+                return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
+                    file.document.file_occurrence_id,
+                ));
             }
             chunks.extend(file.chunks);
         }
@@ -138,23 +148,49 @@ pub fn materialize_generation_increment(
         return Err(ChunkIncrementErrorV1::PriorGenerationMismatch);
     }
 
-    let prior_files = prior_files
-        .iter()
-        .map(|file| (file.document.file_occurrence_id.clone(), file))
-        .collect::<BTreeMap<_, _>>();
-    let mut reextracted_files = reextracted_files
-        .into_iter()
-        .map(|file| (file.document.file_occurrence_id.clone(), file))
-        .collect::<BTreeMap<_, _>>();
+    let mut prior_files_by_occurrence = BTreeMap::new();
+    for file in prior_files {
+        if prior_files_by_occurrence
+            .insert(file.document.file_occurrence_id.clone(), file)
+            .is_some()
+        {
+            return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
+                file.document.file_occurrence_id.clone(),
+            ));
+        }
+    }
+    let prior_files = prior_files_by_occurrence;
+    let mut reextracted_files_by_occurrence = BTreeMap::new();
+    for file in reextracted_files {
+        let file_occurrence_id = file.document.file_occurrence_id.clone();
+        if reextracted_files_by_occurrence
+            .insert(file_occurrence_id.clone(), file)
+            .is_some()
+        {
+            return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
+                file_occurrence_id,
+            ));
+        }
+    }
+    let mut reextracted_files = reextracted_files_by_occurrence;
     let prior_symbols = prior_symbols
         .symbols
         .iter()
         .map(|symbol| (symbol.occurrence.clone(), symbol))
         .collect::<BTreeMap<_, _>>();
-    let mut reextracted_symbols = reextracted_symbols
-        .into_iter()
-        .map(|symbol| (symbol.occurrence.clone(), symbol))
-        .collect::<BTreeMap<_, _>>();
+    let mut reextracted_symbols_by_occurrence = BTreeMap::new();
+    for symbol in reextracted_symbols {
+        let occurrence = symbol.occurrence.clone();
+        if reextracted_symbols_by_occurrence
+            .insert(occurrence.clone(), symbol)
+            .is_some()
+        {
+            return Err(ChunkIncrementErrorV1::DuplicateReextractedSymbol(
+                occurrence,
+            ));
+        }
+    }
+    let mut reextracted_symbols = reextracted_symbols_by_occurrence;
 
     let mut files = Vec::new();
     let mut symbols = Vec::new();
