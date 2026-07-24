@@ -409,6 +409,73 @@ fn log_compaction(store_name: &'static str, freelist_before: u64, freelist_after
     );
 }
 
+/// Runs bounded incremental-vacuum compaction over every tracked branch
+/// database other than the one `cg` currently has mounted (that store already
+/// goes through [`run_project_compaction`]). Best-effort and independent per
+/// file: a busy or failing branch database never blocks the rest, and this
+/// pass never fails the overall maintenance tick — see
+/// `src/retention/branch_compaction.rs` for the compaction policy itself.
+pub(super) async fn run_branch_compaction(cg: &TraceDecay, config: &CompactionThresholdConfig) {
+    let layout = cg.store_layout();
+    let Some(meta) = crate::branch_meta::load_branch_meta(&layout.data_root) else {
+        return;
+    };
+    let active_db_path = cg.db_path();
+    let candidates = crate::retention::branch_compaction::select_branch_db_candidates(
+        &layout.data_root,
+        &meta,
+        &active_db_path,
+    );
+    if candidates.is_empty() {
+        return;
+    }
+    let report = crate::retention::branch_compaction::compact_branch_databases(&candidates, config);
+    if report.policy_invalid {
+        // Never silent: an out-of-range threshold disables the pass entirely
+        // and would otherwise be indistinguishable from "nothing to compact".
+        log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "branch_compaction".to_string()),
+                ("failure", "invalid_compaction_policy".to_string()),
+                (
+                    "free_page_ratio_threshold",
+                    config.free_page_ratio_threshold.to_string(),
+                ),
+            ],
+        );
+        return;
+    }
+    if report.compacted.is_empty() && report.skipped.is_empty() {
+        return;
+    }
+    let freed_pages: u64 = report
+        .compacted
+        .iter()
+        .map(|outcome| outcome.freed_pages)
+        .sum();
+    let unreclaimable = report
+        .skipped
+        .iter()
+        .filter(|skip| {
+            skip.reason
+                == crate::retention::branch_compaction::BranchCompactionSkipReason::IncrementalVacuumUnavailable
+        })
+        .count();
+    log_daemon_event(
+        "retention_branch_compaction",
+        &[
+            ("project", cg.project_root().display().to_string()),
+            ("compacted", report.compacted.len().to_string()),
+            ("freed_pages", freed_pages.to_string()),
+            ("skipped", report.skipped.len().to_string()),
+            // Branch databases predating `auto_vacuum = INCREMENTAL`: their
+            // free pages need a full VACUUM this pass deliberately avoids.
+            ("unreclaimable", unreclaimable.to_string()),
+        ],
+    );
+}
+
 pub(super) async fn run_orphan_store_sweep(
     database: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
@@ -532,6 +599,65 @@ pub(super) async fn run_orphan_store_sweep(
         );
     }
 
+    let unregistered_report = crate::retention::orphan_stores::sweep_unregistered_stores(
+        database,
+        profile_root,
+        retention_secs,
+        now,
+        true,
+    )
+    .await;
+    let unregistered_report = match unregistered_report {
+        Ok(report) => report,
+        Err(_) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "unregistered_store_sweep".to_string()),
+                    ("failure", "registry_read_failed".to_string()),
+                ],
+            );
+            return false;
+        }
+    };
+    let unregistered_bytes = unregistered_report
+        .plan
+        .collect
+        .iter()
+        .chain(unregistered_report.plan.retained_immature.iter())
+        .fold(0u64, |total, finding| {
+            total.saturating_add(finding.size_bytes)
+        });
+    let unregistered_count = unregistered_report
+        .plan
+        .collect
+        .len()
+        .saturating_add(unregistered_report.plan.retained_immature.len());
+    if !unregistered_report.outcome.collected.is_empty()
+        || !unregistered_report.outcome.errors.is_empty()
+        || unregistered_count > 0
+    {
+        log_daemon_event(
+            "retention_unregistered_stores",
+            &[
+                (
+                    "collected",
+                    unregistered_report.outcome.collected.len().to_string(),
+                ),
+                ("unregistered", unregistered_count.to_string()),
+                ("unregistered_bytes", unregistered_bytes.to_string()),
+                (
+                    "reclaimed_bytes",
+                    unregistered_report.outcome.reclaimed_bytes.to_string(),
+                ),
+                (
+                    "errors",
+                    unregistered_report.outcome.errors.len().to_string(),
+                ),
+            ],
+        );
+    }
+
     let debris_report =
         match crate::retention::orphan_stores::build_store_census(database, profile_root).await {
             Ok(census) => crate::retention::incident_debris::sweep_incident_debris(
@@ -568,5 +694,6 @@ pub(super) async fn run_orphan_store_sweep(
     }
     report.outcome.errors.is_empty()
         && !registry_retirement_failed
+        && unregistered_report.outcome.errors.is_empty()
         && debris_report.errors.is_empty()
 }
