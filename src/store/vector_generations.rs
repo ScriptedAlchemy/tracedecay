@@ -2779,7 +2779,7 @@ mod tests {
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
                 .expect("database");
-        let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
+        let _store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
             .await
             .expect("migration store");
         let embedding = admitted_embedding();

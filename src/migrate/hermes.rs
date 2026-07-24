@@ -1889,7 +1889,6 @@ mod tests {
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert_eq!(report.unresolved[0].source_db, source_memory);
         assert!(report.unresolved[0].reason.contains("preserved"));
-        let target_path = crate::sessions::user_sessions_db_path(&profile_root);
         let target = registered_profile_target(&profile_root).await;
         let session = target
             .session_for_test(HostAdmissionScope::Profile, "hermes", "session")

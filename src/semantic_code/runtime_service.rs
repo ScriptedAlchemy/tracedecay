@@ -735,7 +735,7 @@ mod tests {
             move |_cancellation| async move {
                 Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
                     panic!("injected publication worker failure");
-                    #[allow(unreachable_code)]
+                    #[allow(unreachable_code, unused_assignments)]
                     Ok(next)
                 }))
             },
