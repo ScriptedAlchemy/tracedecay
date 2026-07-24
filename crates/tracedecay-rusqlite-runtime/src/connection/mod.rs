@@ -332,6 +332,8 @@ impl std::error::Error for ConnectionPolicyError {
 }
 
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
+    let fresh_writer = mode == ConnectionMode::Writer
+        && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
     let flags = match mode {
         ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
         ConnectionMode::Writer | ConnectionMode::Maintenance => OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -340,7 +342,7 @@ pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, Conn
     let connection =
         Connection::open_with_flags(path, flags).map_err(|source| policy("open", source))?;
 
-    apply_pragmas(&connection, mode)?;
+    apply_pragmas(&connection, mode, fresh_writer)?;
     assert_compile_options(&connection)?;
     apply_limits(&connection, mode)?;
     install_authorizer(&connection, mode)?;
@@ -362,7 +364,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
         | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
     let connection =
         Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-    apply_pragmas(&connection, ConnectionMode::Reader)?;
+    apply_pragmas(&connection, ConnectionMode::Reader, false)?;
     assert_compile_options(&connection)?;
     apply_limits(&connection, ConnectionMode::Reader)?;
     install_authorizer(&connection, ConnectionMode::Reader)?;
@@ -396,6 +398,7 @@ fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
 fn apply_pragmas(
     connection: &Connection,
     mode: ConnectionMode,
+    fresh_writer: bool,
 ) -> Result<(), ConnectionPolicyError> {
     // SQLite must never wait past the runtime's own queue/deadline authority.
     connection
@@ -409,6 +412,12 @@ fn apply_pragmas(
         .map_err(|source| policy("trusted schema", source))?;
 
     if mode == ConnectionMode::Writer {
+        if fresh_writer {
+            connection
+                .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+                .map_err(|source| policy("fresh auto-vacuum", source))?;
+            verify_pragma_i64(connection, "auto_vacuum", 2)?;
+        }
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|source| policy("WAL journal", source))?;
@@ -578,6 +587,13 @@ fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
         .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
 }
 
+fn is_safe_writer_pragma(pragma_name: &str, pragma_value: &str) -> bool {
+    pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
+        || pragma_name.eq_ignore_ascii_case("wal_checkpoint")
+        || (pragma_name.eq_ignore_ascii_case("auto_vacuum")
+            && (pragma_value.eq_ignore_ascii_case("incremental") || pragma_value == "2"))
+}
+
 fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
     if mode == ConnectionMode::Maintenance {
         return Authorization::Allow;
@@ -613,12 +629,11 @@ fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
             context.action,
             AuthAction::Pragma {
                 pragma_name,
-                pragma_value: Some(_),
+                pragma_value: Some(pragma_value),
             }
             if !is_read_only_introspection_pragma(pragma_name)
                 && (mode != ConnectionMode::Writer
-                    || (!pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
-                        && !pragma_name.eq_ignore_ascii_case("wal_checkpoint")))
+                    || !is_safe_writer_pragma(pragma_name, pragma_value))
         )
         || (mode == ConnectionMode::Reader
             && matches!(

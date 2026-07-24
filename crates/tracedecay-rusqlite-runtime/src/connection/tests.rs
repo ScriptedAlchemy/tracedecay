@@ -145,6 +145,26 @@ fn limits_and_authorizer_reject_oversized_or_unsafe_sql() {
 }
 
 #[test]
+fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("fresh.sqlite3");
+    std::fs::File::create(&path).expect("create empty database file");
+    let connection = open(&path, ConnectionMode::Writer).expect("writer policy");
+
+    assert_eq!(
+        connection
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert!(
+        connection
+            .execute_batch("PRAGMA auto_vacuum = NONE")
+            .is_err()
+    );
+}
+
+#[test]
 fn progress_cancellation_interrupts_and_is_removed_after_scope() {
     let file = database();
     let mut connection =
