@@ -27,7 +27,7 @@ use super::{
 };
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::{
-    GitRefFilter, SessionGitCorrelationHit, SessionsForQuery, normalize_worktree, sessions_for,
+    GitRefFilter, SessionsForQuery, normalize_worktree, sessions_for,
 };
 use crate::tracedecay::TraceDecay;
 
@@ -72,18 +72,30 @@ pub struct ProductionProximityEvidenceAuthorityV1 {
 pub type SharedCanonicalProximityEvidenceAuthorityV1 =
     Arc<dyn CanonicalProximityEvidenceAuthorityV1 + Send + Sync>;
 
+fn verify_graph_generation(
+    last_synced_commit: Option<&str>,
+    scope: &FeedbackScopeV1,
+) -> Result<(), CanonicalProximityEvidenceBatchV1> {
+    if last_synced_commit == Some(scope.head_commit_id.as_str()) {
+        return Ok(());
+    }
+    Err(CanonicalProximityEvidenceBatchV1 {
+        evidence: Vec::new(),
+        coverage: ProximityCoverageV1::Partial,
+    })
+}
+
 impl ProductionProximityEvidenceAuthorityV1 {
     pub fn new(
         sessions: Arc<RegisteredGlobalDb>,
         graph: Arc<TraceDecay>,
         scope: FeedbackScopeV1,
-        worktree_root: PathBuf,
+        _worktree_root: PathBuf,
     ) -> Option<Self> {
         scope.validate().ok()?;
+        let worktree_root = graph.project_root().to_path_buf();
         let normalized_worktree = normalize_worktree(worktree_root.to_str()?);
-        if normalized_worktree.is_empty()
-            || normalize_worktree(graph.project_root().to_str()?) != normalized_worktree
-        {
+        if normalized_worktree.is_empty() {
             return None;
         }
         if !matches!(
@@ -106,22 +118,18 @@ impl ProductionProximityEvidenceAuthorityV1 {
         &self,
         request: &ProximityEvaluationRequestV1,
     ) -> Option<CanonicalProximityEvidenceBatchV1> {
-        if self.graph.last_synced_commit().await.as_deref()
-            != Some(request.scope.head_commit_id.as_str())
-        {
-            return CanonicalProximityEvidenceBatchV1::new(
-                Vec::new(),
-                ProximityCoverageV1::Partial,
-            );
+        if let Err(partial) = verify_graph_generation(
+            self.graph.last_synced_commit().await.as_deref(),
+            &self.scope,
+        ) {
+            return Some(partial);
         }
         let observed_seconds = request.observed_at.0.div_euclid(1_000_000);
         let since = observed_seconds.saturating_sub(ACTIVITY_HORIZON_SECONDS_V1);
-        let branch = request
-            .scope
-            .branch_ref
-            .strip_prefix("refs/heads/")
-            .unwrap_or(request.scope.branch_ref.as_str());
         let session_snapshot = self.sessions.read_snapshot().await.ok()?;
+        // The legacy path column is only a bounded lookup hint. Exact identity
+        // was already admitted by typed project/repository/worktree scope, and
+        // saved-generation content is rechecked before publication.
         let hits = sessions_for(
             &session_snapshot,
             &SessionsForQuery {
@@ -136,19 +144,6 @@ impl ProductionProximityEvidenceAuthorityV1 {
         let mut partial = hits.len() == MAX_ACTIVE_SESSIONS_V1;
         let mut active = BTreeMap::new();
         for hit in hits {
-            if !hit_matches_scope(&hit, branch, &self.normalized_worktree) {
-                continue;
-            }
-            let Some(project_path) =
-                session_project_path(&session_snapshot, &hit.provider, &hit.session_id).await
-            else {
-                partial = true;
-                continue;
-            };
-            if normalize_worktree(&project_path) != self.normalized_worktree {
-                partial = true;
-                continue;
-            }
             active.insert((hit.provider.clone(), hit.session_id.clone()), hit);
         }
         if active.len() < 2 {
@@ -740,31 +735,6 @@ const fn proximity_warning_rank(warning: ProximityWarningClassV1) -> u8 {
     }
 }
 
-async fn session_project_path(
-    snapshot: &crate::db::engine::ReadSnapshot,
-    provider: &str,
-    session_id: &str,
-) -> Option<String> {
-    let mut rows = snapshot
-        .query(
-            "SELECT project_path
-             FROM sessions
-             WHERE provider = ?1 AND session_id = ?2",
-            crate::db::engine::params![provider, session_id],
-        )
-        .await
-        .ok()?;
-    rows.next().await.ok()??.get(0).ok()
-}
-
-fn hit_matches_scope(hit: &SessionGitCorrelationHit, branch: &str, worktree: &str) -> bool {
-    hit.branch.as_deref() == Some(branch)
-        && hit
-            .worktree
-            .as_deref()
-            .is_some_and(|candidate| normalize_worktree(candidate) == worktree)
-}
-
 fn edited_paths(metadata: Option<&str>, worktree_root: &Path) -> Vec<String> {
     let Some(Value::Object(metadata)) = metadata.and_then(|value| serde_json::from_str(value).ok())
     else {
@@ -808,4 +778,44 @@ fn project_relative_path(worktree_root: &Path, value: &str) -> Option<String> {
         return None;
     }
     Some(relative.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_domain::{CommitId, ProjectId, RepositoryId, WorktreeId};
+
+    fn scope() -> FeedbackScopeV1 {
+        FeedbackScopeV1 {
+            project_id: ProjectId::new("project.proximity.graph-gate").unwrap(),
+            repository_id: RepositoryId::new("repository.proximity.graph-gate").unwrap(),
+            worktree_id: WorktreeId::new("worktree.proximity.graph-gate").unwrap(),
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        }
+    }
+
+    #[test]
+    fn exact_complete_graph_generation_matches_scope_head() {
+        let scope = scope();
+
+        assert!(verify_graph_generation(Some(scope.head_commit_id.as_str()), &scope).is_ok());
+    }
+
+    #[test]
+    fn missing_incomplete_or_mismatched_graph_generation_is_partial_without_evidence() {
+        let scope = scope();
+
+        for last_synced_commit in [
+            None,
+            Some(""),
+            Some("aaaaaaaa"),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        ] {
+            let batch = verify_graph_generation(last_synced_commit, &scope)
+                .expect_err("non-exact graph generation must be rejected");
+            assert!(batch.evidence.is_empty());
+            assert_eq!(batch.coverage, ProximityCoverageV1::Partial);
+        }
+    }
 }

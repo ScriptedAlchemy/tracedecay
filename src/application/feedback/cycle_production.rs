@@ -53,10 +53,11 @@ use tracedecay_tool_catalog::CapabilityId;
 use super::cycle_runtime::Pr12FeedbackCycleRuntime;
 use super::cycle_runtime::{Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput};
 use crate::application::advisory::{
-    ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1,
+    ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1, ProximityThresholdPinV1,
     SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
 };
 use crate::application::configuration::ConfigurationCurrentStateV1;
+use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::lsp_gateway::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
     LspRuntimeFuture,
@@ -75,12 +76,22 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub scope: ResolvedScope,
     pub access_configuration: ConfigurationCurrentStateV1,
     pub requester: ActorId,
-    pub grant_expires_at: UtcMicros,
+    pub authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
     pub graph: Arc<TraceDecay>,
     pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     pub mounted_providers: Vec<MountedLspProvider>,
+}
+
+pub type ProductionFeedbackCycleAuthorizationFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, LspRuntimeFailure>> + Send + 'a>,
+>;
+
+/// Reloads current project-source authority for every feedback/LSP cycle.
+/// Implementations must not reuse an expired project-open grant snapshot.
+pub trait ProductionFeedbackCycleAuthorizationPort: Send + Sync {
+    fn authorize(&self, observed_at: UtcMicros) -> ProductionFeedbackCycleAuthorizationFuture<'_>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,6 +162,7 @@ struct ProductionFeedbackCycleProximityV1 {
     project_root: PathBuf,
     document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     owner: ProductionProximityOwnerV1,
+    threshold_pin: ProximityThresholdPinV1,
 }
 
 impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximityV1 {
@@ -169,7 +181,11 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                 scope: input.request.scope.clone(),
                 observed_at: input.observed_at,
             };
-            match self.owner.evaluate(context, &request).await {
+            match self
+                .owner
+                .evaluate_with_threshold_pin(context, &request, &self.threshold_pin)
+                .await
+            {
                 Pr13ProximityRuntimeOutcomeV1::Completed(contributor) => {
                     let expires_at =
                         UtcMicros(input.observed_at.0.checked_add(1).ok_or_else(|| {
@@ -305,6 +321,12 @@ pub async fn resolve_production_feedback_cycle_parts(
     input: ProductionFeedbackCycleOpenV1,
 ) -> Result<ProductionFeedbackCyclePartsV1, ApplicationContractError> {
     let feedback_scope = feedback_scope_for_project(&input.project_root, &input.scope)?;
+    let proximity_threshold_pin = ProximityThresholdPinV1::from_current_configuration(
+        &input.access_configuration,
+    )
+    .ok_or(ApplicationContractError::Inconsistent {
+        field: "project-open proximity threshold",
+    })?;
     let proximity_evidence =
         crate::application::advisory::proximity_runtime::production_proximity_evidence_authority_v1(
             Arc::clone(&input.project_runtime_db),
@@ -330,12 +352,14 @@ pub async fn resolve_production_feedback_cycle_parts(
             project_root: input.project_root.clone(),
             document_identity: Arc::clone(&input.document_identity),
             owner: proximity_owner,
+            threshold_pin: proximity_threshold_pin.clone(),
         });
     let access_configuration_digest = input
         .access_configuration
         .snapshot
         .effective_behavior_digest
         .clone();
+    let access_configuration_revision = input.access_configuration.revision_id.clone();
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
         &access_configuration_digest,
@@ -345,12 +369,22 @@ pub async fn resolve_production_feedback_cycle_parts(
         field: "project-open policy digest",
     })?;
     let evaluated_at = now_micros();
-    let request_context = daemon_request_context(
-        &input.scope,
-        &input.requester,
-        input.grant_expires_at,
-        evaluated_at,
-    )?;
+    let access = input
+        .authorization
+        .authorize(evaluated_at)
+        .await
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open feedback authorization",
+        })?;
+    if access.configuration_revision != access_configuration_revision
+        || access.configuration_digest != access_configuration_digest
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "project-open feedback configuration",
+        });
+    }
+    let request_context =
+        authorized_daemon_request_context(&input.scope, &input.requester, access, evaluated_at)?;
     let policy_context = project_open_policy_context(
         request_context.clone(),
         input.access_configuration.revision_id,
@@ -396,8 +430,8 @@ pub async fn resolve_production_feedback_cycle_parts(
         feedback_scope.clone(),
         input.scope.clone(),
         input.requester.clone(),
-        input.grant_expires_at,
-        access_configuration_digest,
+        input.authorization,
+        proximity_threshold_pin,
         policy_digest.clone(),
         provider_candidates
             .iter()
@@ -661,8 +695,8 @@ fn production_lsp_input(
     feedback_scope: FeedbackScopeV1,
     scope: ResolvedScope,
     requester: ActorId,
-    grant_expires_at: UtcMicros,
-    configuration_digest: ManifestDigest,
+    authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
+    threshold_pin: ProximityThresholdPinV1,
     policy_digest: ManifestDigest,
     providers: Vec<DiagnosticProviderIdentity>,
     project_root: PathBuf,
@@ -680,7 +714,8 @@ fn production_lsp_input(
         let feedback_scope = feedback_scope.clone();
         let scope = scope.clone();
         let requester = requester.clone();
-        let configuration_digest = configuration_digest.clone();
+        let authorization = Arc::clone(&authorization);
+        let threshold_pin = threshold_pin.clone();
         let policy_digest = policy_digest.clone();
         let providers = providers.clone();
         let project_root = project_root.clone();
@@ -697,8 +732,15 @@ fn production_lsp_input(
                 }
             };
             let observed_at = now_micros();
-            let context = daemon_request_context(&scope, &requester, grant_expires_at, observed_at)
-                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request-context"))?;
+            let access = authorization.authorize(observed_at).await?;
+            if access.configuration_revision != threshold_pin.configuration_revision
+                || access.configuration_digest != threshold_pin.configuration_digest
+            {
+                return Err(LspRuntimeFailure::new("feedback-cycle-configuration-drift"));
+            }
+            let context =
+                authorized_daemon_request_context(&scope, &requester, access, observed_at)
+                    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request-context"))?;
             let document = document_identity
                 .resolve(project_root, Some(request.document_uri))
                 .await?;
@@ -731,7 +773,7 @@ fn production_lsp_input(
                 },
                 trigger,
                 policy_digest,
-                configuration_digest,
+                threshold_pin.configuration_digest,
                 FeedbackBudgetV1::bounded(1_000, 1_000, 10_000, 10_000),
             )
             .map_err(|_| LspRuntimeFailure::new("feedback-cycle-request"))?;
@@ -863,6 +905,14 @@ fn daemon_request_context(
             "use-case.application.feedback.affected-tests",
         ),
         (
+            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+        ),
+        (
+            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+        ),
+        (
             tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1,
             tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1,
         ),
@@ -872,14 +922,25 @@ fn daemon_request_context(
             use_case_id.to_owned(),
         )?);
     }
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.project-open.grant.v2",
+        requester,
+        scope,
+        observed_at,
+        grant_expires_at,
+        &capabilities,
+        &use_cases,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open grant digest",
+    })?;
     let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.tracedecay-daemon.project-open.cycle".to_owned())?,
+        CapabilityGrantId::new(format!(
+            "grant.tracedecay-daemon.project-open.cycle.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))?,
         1,
-        canonical_sha256(&("tracedecay.project-open.grant.v1", requester, scope)).map_err(
-            |_| ApplicationContractError::Inconsistent {
-                field: "project-open grant digest",
-            },
-        )?,
+        grant_digest,
         ActorId::new("actor.tracedecay-daemon.project-open".to_owned())?,
         observed_at,
         grant_expires_at,
@@ -898,6 +959,44 @@ fn daemon_request_context(
     )
 }
 
+fn authorized_daemon_request_context(
+    expected_scope: &ResolvedScope,
+    expected_requester: &ActorId,
+    access: ProjectSourceAccessSnapshot,
+    observed_at: UtcMicros,
+) -> Result<RequestContext, ApplicationContractError> {
+    if access.scope != *expected_scope
+        || access.requester != *expected_requester
+        || observed_at >= access.grant_expires_at
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "feedback-cycle current authorization",
+        });
+    }
+    for capability in [
+        MANAGED_CAPABILITY,
+        "capability.application.feedback.diagnostics",
+        "capability.application.feedback.impact",
+        "capability.application.feedback.affected-tests",
+        tracedecay_application::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+        tracedecay_application::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+        tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1,
+    ] {
+        let capability = CapabilityId::new(capability.to_owned())?;
+        if !access.effective_capabilities.contains(&capability) {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "feedback-cycle current authorization capability",
+            });
+        }
+    }
+    daemon_request_context(
+        expected_scope,
+        expected_requester,
+        access.grant_expires_at,
+        observed_at,
+    )
+}
+
 fn now_micros() -> UtcMicros {
     use std::time::{SystemTime, UNIX_EPOCH};
     UtcMicros(
@@ -912,10 +1011,15 @@ fn now_micros() -> UtcMicros {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use tracedecay_application::diagnostics::AnalyzerAdmittedDiagnosticProviderV1;
     use tracedecay_application::policy::PolicyEvaluatorCompositionV1;
-    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_domain::configuration::{
+        AuthorityRef, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+    };
+    use tracedecay_domain::{LocatorDigest, ProjectId, RepositoryId, WorktreeId};
 
     #[derive(Clone)]
     struct Identity(ProductionFeedbackDocumentIdentityV1);
@@ -928,6 +1032,24 @@ mod tests {
         ) -> ProductionFeedbackDocumentIdentityFuture {
             let identity = self.0.clone();
             Box::pin(async move { Ok(identity) })
+        }
+    }
+
+    struct Authorization {
+        access: ProjectSourceAccessSnapshot,
+        lifetime_micros: i64,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ProductionFeedbackCycleAuthorizationPort for Authorization {
+        fn authorize(
+            &self,
+            observed_at: UtcMicros,
+        ) -> ProductionFeedbackCycleAuthorizationFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut access = self.access.clone();
+            access.grant_expires_at = UtcMicros(observed_at.0.saturating_add(self.lifetime_micros));
+            Box::pin(async move { Ok(access) })
         }
     }
 
@@ -971,6 +1093,67 @@ mod tests {
             language: language.to_owned(),
             command: format!("{language}-language-server"),
         }
+    }
+
+    fn authorization(
+        scope: &ResolvedScope,
+        configuration_revision: &ConfigurationRevisionId,
+        configuration_digest: &ManifestDigest,
+        lifetime_micros: i64,
+    ) -> (
+        Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
+        Arc<AtomicUsize>,
+    ) {
+        let locator = LocatorDigest::new(digest("locator").as_str().to_owned()).expect("locator");
+        let binding = ScopeSourceBinding::new(
+            SourceBindingId::new("binding.cycle-production").expect("binding"),
+            SourceKindV1::Cursor,
+            locator,
+            AuthorityRef::Project(scope.project_id.clone()),
+        )
+        .expect("source binding");
+        let effective_capabilities = [
+            MANAGED_CAPABILITY,
+            "capability.application.feedback.diagnostics",
+            "capability.application.feedback.impact",
+            "capability.application.feedback.affected-tests",
+            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+            tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1,
+        ]
+        .into_iter()
+        .map(|capability| CapabilityId::new(capability.to_owned()).expect("capability"))
+        .collect();
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Arc::new(Authorization {
+                access: ProjectSourceAccessSnapshot {
+                    scope: scope.clone(),
+                    requester: ActorId::new("actor.cycle-production").expect("actor"),
+                    binding,
+                    configuration_revision: configuration_revision.clone(),
+                    configuration_digest: configuration_digest.clone(),
+                    configuration_provenance_digest: digest("configuration-provenance"),
+                    effective_capabilities,
+                    grant_expires_at: UtcMicros(0),
+                },
+                lifetime_micros,
+                calls: Arc::clone(&calls),
+            }),
+            calls,
+        )
+    }
+
+    fn threshold_pin(
+        configuration_revision: &ConfigurationRevisionId,
+        configuration_digest: &ManifestDigest,
+    ) -> ProximityThresholdPinV1 {
+        ProximityThresholdPinV1::new(
+            configuration_revision.clone(),
+            configuration_digest.clone(),
+            5_000,
+        )
+        .expect("threshold pin")
     }
 
     #[test]
@@ -1039,12 +1222,16 @@ mod tests {
             &document,
         )
         .expect("provider");
+        let configuration_revision =
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
+        let (authorization, _) =
+            authorization(&scope, &configuration_revision, &configuration, 1_000_000);
         let input = production_lsp_input(
             feedback_scope(&scope),
             scope,
             ActorId::new("actor.cycle-production").expect("actor"),
-            UtcMicros(i64::MAX),
-            configuration,
+            authorization,
+            threshold_pin(&configuration_revision, &configuration),
             policy,
             vec![provider],
             PathBuf::from("/workspace"),
@@ -1066,6 +1253,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_lsp_input_reauthorizes_each_cycle_and_rejects_expiry() {
+        let scope = scope();
+        let configuration = digest("configuration");
+        let configuration_revision =
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
+        let policy = digest("policy");
+        let document = document_identity();
+        let (provider, _) = managed_lsp_candidate(
+            &mounted_provider("typescript"),
+            AnalyzerAvailabilityV1::Available,
+            &scope,
+            &configuration,
+            &policy,
+            UtcMicros(1),
+            &document,
+        )
+        .expect("provider");
+        let request = || FeedbackCycleRequest {
+            root_uri: "file:///workspace/".to_owned(),
+            trigger: DiagnosticTrigger::DocumentSave,
+            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+        };
+        let (current, calls) = authorization(&scope, &configuration_revision, &configuration, 1);
+        let input = production_lsp_input(
+            feedback_scope(&scope),
+            scope.clone(),
+            ActorId::new("actor.cycle-production").expect("actor"),
+            current,
+            threshold_pin(&configuration_revision, &configuration),
+            policy.clone(),
+            vec![provider.clone()],
+            PathBuf::from("/workspace"),
+            Arc::new(Identity(document.clone())),
+        )
+        .expect("input");
+
+        assert!(input(request()).await.is_ok());
+        assert!(input(request()).await.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let (expired, expired_calls) =
+            authorization(&scope, &configuration_revision, &configuration, 0);
+        let input = production_lsp_input(
+            feedback_scope(&scope),
+            scope,
+            ActorId::new("actor.cycle-production").expect("actor"),
+            expired,
+            threshold_pin(&configuration_revision, &configuration),
+            policy,
+            vec![provider],
+            PathBuf::from("/workspace"),
+            Arc::new(Identity(document)),
+        )
+        .expect("input");
+
+        assert!(input(request()).await.is_err());
+        assert_eq!(expired_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn production_lsp_input_rejects_in_flight_configuration_change() {
+        let scope = scope();
+        let authorized_configuration = digest("configuration.authorized");
+        let drifted_configuration = digest("configuration.drifted");
+        let configuration_revision =
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
+        let policy = digest("policy");
+        let document = document_identity();
+        let (provider, _) = managed_lsp_candidate(
+            &mounted_provider("typescript"),
+            AnalyzerAvailabilityV1::Available,
+            &scope,
+            &authorized_configuration,
+            &policy,
+            UtcMicros(1),
+            &document,
+        )
+        .expect("provider");
+        let (authorization, _) = authorization(
+            &scope,
+            &configuration_revision,
+            &drifted_configuration,
+            1_000_000,
+        );
+        let input = production_lsp_input(
+            feedback_scope(&scope),
+            scope,
+            ActorId::new("actor.cycle-production").expect("actor"),
+            authorization,
+            threshold_pin(&configuration_revision, &authorized_configuration),
+            policy,
+            vec![provider],
+            PathBuf::from("/workspace"),
+            Arc::new(Identity(document)),
+        )
+        .expect("input");
+
+        assert!(
+            input(FeedbackCycleRequest {
+                root_uri: "file:///workspace/".to_owned(),
+                trigger: DiagnosticTrigger::DocumentSave,
+                document_uri: "file:///workspace/src/lib.rs".to_owned(),
+            })
+            .await
+            .is_err(),
+            "a cycle must not publish under a configuration identity that lost authorization"
+        );
+    }
+
+    #[tokio::test]
+    async fn refreshed_authorization_cannot_widen_the_managed_diagnostics_capability() {
+        let scope = scope();
+        let configuration_digest = digest("configuration");
+        let configuration_revision =
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
+        let (authorization, _) = authorization(
+            &scope,
+            &configuration_revision,
+            &configuration_digest,
+            1_000_000,
+        );
+        let observed_at = UtcMicros(1);
+        let mut access = authorization.authorize(observed_at).await.expect("access");
+        access
+            .effective_capabilities
+            .remove(&CapabilityId::new(MANAGED_CAPABILITY.to_owned()).expect("capability"));
+
+        assert!(
+            authorized_daemon_request_context(
+                &scope,
+                &ActorId::new("actor.cycle-production").expect("actor"),
+                access,
+                observed_at,
+            )
+            .is_err(),
+            "a derived request grant must not add capability.diagnostics.current"
+        );
+    }
+
+    #[test]
+    fn renewed_cycle_grants_have_distinct_immutable_identity() {
+        let scope = scope();
+        let requester = ActorId::new("actor.cycle-production").expect("actor");
+        let first = daemon_request_context(&scope, &requester, UtcMicros(10), UtcMicros(1))
+            .expect("first context");
+        let renewed = daemon_request_context(&scope, &requester, UtcMicros(20), UtcMicros(11))
+            .expect("renewed context");
+
+        assert_ne!(first.grant().grant_id, renewed.grant().grant_id);
+        assert_ne!(first.grant().digest, renewed.grant().digest);
+        for capability in [
+            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+        ] {
+            assert!(
+                renewed
+                    .grant()
+                    .allowed_capabilities
+                    .contains(&CapabilityId::new(capability.to_owned()).expect("capability"))
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn proximity_mount_accepts_only_the_exact_current_saved_identity() {
         let scope = scope();
         let configuration = digest("configuration");
@@ -1081,12 +1432,16 @@ mod tests {
             &document,
         )
         .expect("provider");
+        let configuration_revision =
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
+        let (authorization, _) =
+            authorization(&scope, &configuration_revision, &configuration, 1_000_000);
         let input = production_lsp_input(
             feedback_scope(&scope),
             scope,
             ActorId::new("actor.cycle-production").expect("actor"),
-            UtcMicros(i64::MAX),
-            configuration,
+            authorization,
+            threshold_pin(&configuration_revision, &configuration),
             policy,
             vec![provider],
             PathBuf::from("/workspace"),
@@ -1125,12 +1480,16 @@ mod tests {
             &document,
         )
         .expect("provider");
+        let configuration_revision =
+            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
+        let (authorization, _) =
+            authorization(&scope, &configuration_revision, &configuration, 1_000_000);
         let input = production_lsp_input(
             feedback_scope(&scope),
             scope,
             ActorId::new("actor.cycle-production").expect("actor"),
-            UtcMicros(i64::MAX),
-            configuration,
+            authorization,
+            threshold_pin(&configuration_revision, &configuration),
             policy,
             vec![provider],
             PathBuf::from("/workspace"),
@@ -1180,7 +1539,7 @@ mod tests {
             ),
             "the daemon grant must authorize only the already-admitted proximity scope"
         );
-        let mut unauthorized_scope = feedback_scope;
+        let mut unauthorized_scope = feedback_scope.clone();
         unauthorized_scope.worktree_id =
             WorktreeId::new("worktree.cycle-production.other").expect("worktree");
         assert!(
@@ -1191,6 +1550,18 @@ mod tests {
                 tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1,
             ),
             "cross-worktree proximity must fail closed"
+        );
+        let mut unauthorized_repository_scope = feedback_scope;
+        unauthorized_repository_scope.repository_id =
+            RepositoryId::new("repository.cycle-production.other").expect("repository");
+        assert!(
+            !crate::application::advisory::context_allows_feedback_operation(
+                &context,
+                &unauthorized_repository_scope,
+                tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1,
+                tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1,
+            ),
+            "cross-repository proximity must fail closed"
         );
     }
 

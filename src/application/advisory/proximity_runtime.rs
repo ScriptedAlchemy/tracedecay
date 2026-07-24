@@ -25,7 +25,7 @@ use tracedecay_domain::feedback::{
     ProximityTierV1, ProximityWarningClassV1, ProximityWarningIdV1,
 };
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, RetrievalAnchorId, UtcMicros, canonical_sha256,
+    CanonicalObservationEnvelopeV1, ManifestDigest, RetrievalAnchorId, UtcMicros, canonical_sha256,
 };
 
 use crate::application::configuration::{ConfigurationControlStore, ConfigurationCurrentStateV1};
@@ -43,13 +43,13 @@ const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str = "tracedecay.pr13.proximity.con
 const PROXIMITY_CONFIGURATION_REVISION_DOMAIN_V1: &str =
     "tracedecay.pr13.proximity.configuration-revision.v1";
 
-/// Exact Plan 20 threshold input for one evaluation. The canonical
-/// configuration revision is sufficient provenance; this provider retains no
-/// configuration or threshold digest.
+/// Exact Plan 20 threshold input for one evaluation. Revision and effective
+/// behavior digest are pinned together before provider evidence is read.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProximityThresholdPinV1 {
     pub configuration_revision: ConfigurationRevisionId,
+    pub configuration_digest: ManifestDigest,
     pub value_basis_points: u16,
 }
 
@@ -62,22 +62,31 @@ impl ProximityThresholdPinV1 {
         else {
             return None;
         };
-        Self::new(current.revision_id.clone(), u16::try_from(*value).ok()?)
+        Self::new(
+            current.revision_id.clone(),
+            current.snapshot.effective_behavior_digest.clone(),
+            u16::try_from(*value).ok()?,
+        )
     }
 
     pub fn new(
         configuration_revision: ConfigurationRevisionId,
+        configuration_digest: ManifestDigest,
         value_basis_points: u16,
     ) -> Option<Self> {
         configuration_revision.validate().ok()?;
+        configuration_digest.validate().ok()?;
         (value_basis_points <= 10_000).then_some(Self {
             configuration_revision,
+            configuration_digest,
             value_basis_points,
         })
     }
 
     pub fn validate(&self) -> bool {
-        self.configuration_revision.validate().is_ok() && self.value_basis_points <= 10_000
+        self.configuration_revision.validate().is_ok()
+            && self.configuration_digest.validate().is_ok()
+            && self.value_basis_points <= 10_000
     }
 }
 
@@ -320,8 +329,106 @@ impl<A, C> Pr13ProximityRuntimeOwnerV1<A, C> {
 impl<A, C> Pr13ProximityRuntimeOwnerV1<A, C>
 where
     A: CanonicalProximityEvidenceAuthorityV1 + Sync,
+{
+    /// Evaluates against the exact configuration snapshot already authorized
+    /// for the enclosing feedback cycle. The provider never rereads mutable
+    /// configuration while that cycle is in flight.
+    pub async fn evaluate_with_threshold_pin(
+        &self,
+        context: &RequestContext,
+        request: &ProximityEvaluationRequestV1,
+        threshold: &ProximityThresholdPinV1,
+    ) -> Pr13ProximityRuntimeOutcomeV1 {
+        if context.cancellation().is_cancelled() {
+            return Pr13ProximityRuntimeOutcomeV1::Cancelled;
+        }
+        if context.deadline().is_elapsed_at(now_micros()) {
+            return Pr13ProximityRuntimeOutcomeV1::TimedOut;
+        }
+        if request.validate().is_err() || request.scope != self.scope {
+            return Pr13ProximityRuntimeOutcomeV1::Denied;
+        }
+        if !context_allows_feedback_operation(
+            context,
+            &request.scope,
+            PROXIMITY_CAPABILITY_ID_V1,
+            PROXIMITY_USE_CASE_ID_V1,
+        ) {
+            return Pr13ProximityRuntimeOutcomeV1::Denied;
+        }
+        if !threshold.validate() {
+            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+        }
+        let Some(batch) = self.evidence.current_evidence(context, request).await else {
+            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+        };
+        if let Some(interruption) = interrupted(context) {
+            return interruption;
+        }
+        let mut contributions = Vec::with_capacity(batch.evidence.len());
+        for item in batch.evidence {
+            let Some(contribution) = build_proximity_contribution(request, threshold, item) else {
+                return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            };
+            contributions.push(contribution);
+        }
+        let Some(contributor) =
+            Pr13ProximityFindingContributorV1::new(contributions, batch.coverage)
+        else {
+            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+        };
+        Pr13ProximityRuntimeOutcomeV1::Completed(contributor)
+    }
+}
+
+impl<A, C> Pr13ProximityRuntimeOwnerV1<A, C>
+where
+    A: CanonicalProximityEvidenceAuthorityV1 + Sync,
     C: ConfigurationControlStore,
 {
+    /// Compatibility entry for the aggregate advisory runtime. The current
+    /// threshold is accepted only when its behavior digest is the exact
+    /// configuration identity already authorized by the enclosing request.
+    pub async fn evaluate_for_configuration_digest(
+        &self,
+        context: &RequestContext,
+        request: &ProximityEvaluationRequestV1,
+        expected_configuration_digest: &ManifestDigest,
+    ) -> Pr13ProximityRuntimeOutcomeV1 {
+        if context.cancellation().is_cancelled() {
+            return Pr13ProximityRuntimeOutcomeV1::Cancelled;
+        }
+        if context.deadline().is_elapsed_at(now_micros()) {
+            return Pr13ProximityRuntimeOutcomeV1::TimedOut;
+        }
+        if request.validate().is_err() || request.scope != self.scope {
+            return Pr13ProximityRuntimeOutcomeV1::Denied;
+        }
+        if !context_allows_feedback_operation(
+            context,
+            &request.scope,
+            PROXIMITY_CAPABILITY_ID_V1,
+            PROXIMITY_USE_CASE_ID_V1,
+        ) {
+            return Pr13ProximityRuntimeOutcomeV1::Denied;
+        }
+        let Ok(configuration) = self.configuration.current().await else {
+            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+        };
+        if let Some(interruption) = interrupted(context) {
+            return interruption;
+        }
+        let Some(threshold) = ProximityThresholdPinV1::from_current_configuration(&configuration)
+        else {
+            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+        };
+        if threshold.configuration_digest != *expected_configuration_digest {
+            return Pr13ProximityRuntimeOutcomeV1::Denied;
+        }
+        self.evaluate_with_threshold_pin(context, request, &threshold)
+            .await
+    }
+
     pub async fn evaluate(
         &self,
         context: &RequestContext,
@@ -354,25 +461,8 @@ where
         else {
             return Pr13ProximityRuntimeOutcomeV1::Unavailable;
         };
-        let Some(batch) = self.evidence.current_evidence(context, request).await else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
-        };
-        if let Some(interruption) = interrupted(context) {
-            return interruption;
-        }
-        let mut contributions = Vec::with_capacity(batch.evidence.len());
-        for item in batch.evidence {
-            let Some(contribution) = build_proximity_contribution(request, &threshold, item) else {
-                return Pr13ProximityRuntimeOutcomeV1::Unavailable;
-            };
-            contributions.push(contribution);
-        }
-        let Some(contributor) =
-            Pr13ProximityFindingContributorV1::new(contributions, batch.coverage)
-        else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
-        };
-        Pr13ProximityRuntimeOutcomeV1::Completed(contributor)
+        self.evaluate_with_threshold_pin(context, request, &threshold)
+            .await
     }
 }
 
@@ -445,7 +535,10 @@ fn build_proximity_contribution(
         evidence.observed_at,
         evidence.expires_at,
         tier,
-        (tier == ProximityTierV1::Configured).then_some(&threshold.configuration_revision),
+        (tier == ProximityTierV1::Configured).then_some((
+            &threshold.configuration_revision,
+            &threshold.configuration_digest,
+        )),
     ))
     .ok()?;
     let suffix = identity
@@ -457,6 +550,7 @@ fn build_proximity_contribution(
             canonical_sha256(&(
                 PROXIMITY_CONFIGURATION_REVISION_DOMAIN_V1,
                 &threshold.configuration_revision,
+                &threshold.configuration_digest,
             ))
             .ok()?,
         )
@@ -478,8 +572,7 @@ fn build_proximity_contribution(
         tier,
         threshold_value_basis_points: (tier == ProximityTierV1::Configured)
             .then_some(threshold.value_basis_points),
-        // The shared domain currently requires a ManifestDigest here. The
-        // provider pin itself retains only the canonical configuration revision.
+        // One digest binds both canonical revision and effective behavior.
         threshold_revision,
         raw_risk_basis_points: Some(evidence.raw_risk_basis_points),
         observed_at: evidence.observed_at,
@@ -501,4 +594,179 @@ pub fn open_pr13_proximity_runtime<A, C>(
     configuration: C,
 ) -> Option<ConcretePr13ProximityRuntimeOwnerV1<A, C>> {
     Pr13ProximityRuntimeOwnerV1::new(scope, evidence, configuration)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_application::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::configuration::{ConfigurationLayerIdV1, ConfigurationValueV1};
+    use tracedecay_domain::{ActorId, CommitId, ProjectId, RefId, RepositoryId, WorktreeId};
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    use super::*;
+
+    struct MutatingEvidence {
+        current_configuration: Arc<Mutex<ConfigurationCurrentStateV1>>,
+        drifted_configuration: ConfigurationCurrentStateV1,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CanonicalProximityEvidenceAuthorityV1 for MutatingEvidence {
+        fn current_evidence<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a ProximityEvaluationRequestV1,
+        ) -> FeedbackPortFuture<'a, Option<CanonicalProximityEvidenceBatchV1>> {
+            Box::pin(async move {
+                *self
+                    .current_configuration
+                    .lock()
+                    .expect("configuration lock") = self.drifted_configuration.clone();
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                CanonicalProximityEvidenceBatchV1::new(Vec::new(), ProximityCoverageV1::Complete)
+            })
+        }
+    }
+
+    fn scope_and_context() -> (FeedbackScopeV1, RequestContext) {
+        let project_id = ProjectId::new("project.proximity-pin").expect("project");
+        let repository_id = RepositoryId::new("repository.proximity-pin").expect("repository");
+        let worktree_id = WorktreeId::new("worktree.proximity-pin").expect("worktree");
+        let branch_ref = "refs/heads/proximity-pin".to_owned();
+        let scope = FeedbackScopeV1 {
+            project_id: project_id.clone(),
+            repository_id: repository_id.clone(),
+            worktree_id: worktree_id.clone(),
+            branch_ref: branch_ref.clone(),
+            head_commit_id: CommitId::new("commit.proximity-pin").expect("commit"),
+        };
+        let resolved_scope = ResolvedScope::new(
+            project_id,
+            repository_id,
+            worktree_id,
+            Some(RefId::new(branch_ref).expect("ref")),
+        )
+        .expect("resolved scope");
+        let capability =
+            CapabilityId::new(PROXIMITY_CAPABILITY_ID_V1.to_owned()).expect("capability");
+        let use_case = UseCaseId::new(PROXIMITY_USE_CASE_ID_V1.to_owned()).expect("use case");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.proximity-pin").expect("grant"),
+            1,
+            canonical_sha256(&("proximity-pin-grant", &resolved_scope)).expect("digest"),
+            ActorId::new("actor.proximity-pin").expect("issuer"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            resolved_scope.clone(),
+            BTreeSet::from([capability]),
+            BTreeSet::from([use_case]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        let context = RequestContext::new(
+            ActorId::new("actor.proximity-pin").expect("actor"),
+            resolved_scope,
+            grant,
+            RequestId::new("request.proximity-pin").expect("request"),
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active("cancel.proximity-pin").expect("cancellation"),
+        )
+        .expect("context");
+        (scope, context)
+    }
+
+    fn configuration(revision: &str, threshold: Option<u64>) -> ConfigurationCurrentStateV1 {
+        let layers = threshold
+            .map(|threshold| crate::config::resolver::ConfigurationLayerV1 {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: ProjectId::new("project.proximity-pin").expect("project"),
+                },
+                revision_id: ConfigurationRevisionId::new(revision).expect("revision"),
+                entries: BTreeMap::from([(
+                    SettingKey::new(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1).expect("key"),
+                    ConfigurationValueV1::Unsigned(threshold),
+                )]),
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let snapshot = crate::config::resolver::resolve_configuration(
+            &crate::config::registry::ConfigurationRegistry::core().expect("registry"),
+            &layers,
+        )
+        .expect("configuration")
+        .snapshot;
+        ConfigurationCurrentStateV1 {
+            revision_id: ConfigurationRevisionId::new(revision).expect("revision"),
+            snapshot,
+        }
+    }
+
+    #[tokio::test]
+    async fn threshold_pin_is_immutable_in_cycle_and_refreshes_next_cycle() {
+        let (scope, context) = scope_and_context();
+        let authorized = configuration("configuration.proximity-pin.authorized", None);
+        let authorized_pin = ProximityThresholdPinV1::from_current_configuration(&authorized)
+            .expect("authorized threshold");
+        let drifted = configuration("configuration.proximity-pin.drifted", Some(7_500));
+        let drifted_pin = ProximityThresholdPinV1::from_current_configuration(&drifted)
+            .expect("drifted threshold");
+        assert_ne!(
+            authorized_pin.configuration_revision,
+            drifted_pin.configuration_revision
+        );
+        assert_ne!(
+            authorized_pin.configuration_digest,
+            drifted_pin.configuration_digest
+        );
+        let current_configuration = Arc::new(Mutex::new(authorized.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let owner = open_pr13_proximity_runtime(
+            scope.clone(),
+            MutatingEvidence {
+                current_configuration: Arc::clone(&current_configuration),
+                drifted_configuration: drifted.clone(),
+                calls: Arc::clone(&calls),
+            },
+            (),
+        )
+        .expect("owner");
+        let request = ProximityEvaluationRequestV1 {
+            scope,
+            observed_at: UtcMicros(2),
+        };
+
+        assert!(matches!(
+            owner
+                .evaluate_with_threshold_pin(&context, &request, &authorized_pin)
+                .await,
+            Pr13ProximityRuntimeOutcomeV1::Completed(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            current_configuration
+                .lock()
+                .expect("configuration lock")
+                .revision_id,
+            drifted.revision_id
+        );
+
+        assert!(matches!(
+            owner
+                .evaluate_with_threshold_pin(&context, &request, &drifted_pin)
+                .await,
+            Pr13ProximityRuntimeOutcomeV1::Completed(_)
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a later cycle must use its newly authorized threshold pin"
+        );
+    }
 }
