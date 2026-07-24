@@ -625,6 +625,15 @@ export function GraphCanvas({
         raf = requestAnimationFrame(step);
       }
     };
+    // A caller-owned field (BrainPage's SSE-driven activation, say) is struck
+    // from entirely outside this closure — a React effect calls
+    // `field.strike(...)` in response to a real event with no knowledge of
+    // this render loop. Without this, that strike lands on the field but the
+    // loop already went to sleep while cold and nothing here ever pokes it
+    // awake again: the heat sits invisible and never decays either, since
+    // `field.tick` only runs inside `step`. Subscribing turns every real
+    // strike, wherever it originates, into a wake call.
+    const unsubscribeField = field.subscribe(wake);
     // One static composition of the resting field, so the graph is fully
     // rendered before anything ever fires.
     syncGlow();
@@ -662,6 +671,7 @@ export function GraphCanvas({
 
     return () => {
       if (raf) cancelAnimationFrame(raf);
+      unsubscribeField();
       themeObserver.disconnect();
       renderer.kill();
       sigmaRef.current = null;
