@@ -81,6 +81,7 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
             timestamp INTEGER,
             ordinal INTEGER NOT NULL,
             text TEXT NOT NULL,
+            metadata_json TEXT,
             PRIMARY KEY(provider, message_id)
         );",
     )

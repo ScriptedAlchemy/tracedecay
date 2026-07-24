@@ -4,7 +4,7 @@ use crate::store::memory::DatabaseFactStore;
 use crate::store::memory::primitives::{OwnerKey, storage_message};
 use tempfile::tempdir;
 use tracedecay_domain::{Confidence, FactId, FactOwnerV1, ProjectId, UtcMicros};
-use tracedecay_store::FactCompatibilityResult;
+use tracedecay_store::{FactCompatibilityResult, FactCompatibilityStoreError, FactStoreError};
 
 async fn seed_fact(db: &crate::db::Database, owner: &FactOwnerV1, fact_id: &FactId) {
     let key = OwnerKey::new(owner).unwrap();
@@ -268,8 +268,16 @@ async fn curated_correction_rejects_self_only_evidence_without_writing_provenanc
             })
         })
         .await;
-    let error = failed.unwrap_err().to_string();
-    assert!(error.contains("evidence cannot be the corrected fact"));
+    let FactCompatibilityStoreError::Store(FactStoreError::Storage { source, .. }) =
+        failed.unwrap_err()
+    else {
+        panic!("self-only correction must fail as a storage contract violation");
+    };
+    assert!(
+        source
+            .to_string()
+            .contains("evidence cannot be the corrected fact")
+    );
 
     let writer = db
         .writer_connection("verify self evidence rejection")

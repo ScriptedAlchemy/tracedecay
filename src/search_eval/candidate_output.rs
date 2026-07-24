@@ -483,7 +483,7 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
         &mut self,
         request: ProjectionBatchRequestV1,
     ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
-        let decisions: Vec<ChunkProjectionDecisionV1> = request
+        let mut decisions: Vec<ChunkProjectionDecisionV1> = request
             .changes
             .added_or_changed
             .iter()
@@ -500,6 +500,35 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                 output_digest: change.current_digest.clone(),
             })
             .collect();
+        decisions.extend(
+            request
+                .changes
+                .deleted
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: None,
+                    operation: ProjectionOperationV1::Deleted,
+                    outcome: ProjectionOutcomeV1::Applied,
+                    output_digest: None,
+                }),
+        );
+        decisions.extend(
+            request
+                .changes
+                .reused
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: change.current_digest.clone(),
+                    operation: ProjectionOperationV1::Reused,
+                    outcome: ProjectionOutcomeV1::Reused,
+                    output_digest: None,
+                }),
+        );
+        decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
         build_batch_receipt(&request, &decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
