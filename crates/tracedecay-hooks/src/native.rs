@@ -59,6 +59,7 @@ impl NativeHookSignalV1 {
 /// A successfully decoded provider-native event. This type intentionally has
 /// no field capable of retaining a host payload or workspace path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecodedNativeHookEventV1 {
     pub host: HookHostV1,
     pub signal: NativeHookSignalV1,

@@ -183,7 +183,7 @@ pub enum HookLifecyclePhaseV1 {
 /// Closed, content-free event body. It cannot represent prompts, commands,
 /// arguments, output, logs, source text, paths, credentials, or reasoning.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookEventV2 {
     SessionBoundary {
         boundary: HookBoundaryV1,
@@ -286,6 +286,7 @@ impl HookEventEnvelopeV2 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookCapabilityV1 {
     pub family: HookEventFamily,
     pub support: HookEventSupportV1,
@@ -343,6 +344,7 @@ impl HookScopeBindingV1 {
 /// Exact typed envelope bytes are encoded by the transport implementation;
 /// callers supply only bounded framing metadata here, never arbitrary bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolEntryV1 {
     pub envelope: HookEventEnvelopeV2,
     pub encoded_len: u32,
@@ -351,6 +353,7 @@ pub struct HookSpoolEntryV1 {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolUsageV1 {
     pub host_records: u32,
     pub host_bytes: u64,
@@ -671,6 +674,21 @@ mod tests {
             Err(HookContractError::BindingMismatch)
         );
         assert!(!called);
+    }
+
+    #[test]
+    fn closed_hook_wire_rejects_unknown_event_and_capability_fields() {
+        let mut wire = serde_json::to_value(envelope()).unwrap();
+        wire["event"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HookEventEnvelopeV2>(wire).is_err());
+
+        let mut capability = serde_json::to_value(HookCapabilityV1 {
+            family: HookEventFamily::SessionBoundary,
+            support: HookEventSupportV1::Native,
+        })
+        .unwrap();
+        capability["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HookCapabilityV1>(capability).is_err());
     }
 
     #[test]

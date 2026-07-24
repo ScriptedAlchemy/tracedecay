@@ -49,6 +49,7 @@ const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 /// Per-host and per-session bounds. Callers may narrow these for a host test
 /// or constrained installation but can never widen the checked-in limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolLimitsV1 {
     pub max_host_records: u32,
     pub max_host_bytes: u64,
@@ -87,6 +88,7 @@ impl HookSpoolLimitsV1 {
 /// Configuration owned by the thin host adapter. Time is caller-provided so
 /// the spool does not read a clock or invent a product timing policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolConfigV1 {
     pub host: HookHostV1,
     pub limits: HookSpoolLimitsV1,
@@ -114,6 +116,7 @@ impl HookSpoolConfigV1 {
 /// A durable replay record. `envelope` is the exact canonical payload framed
 /// on disk; `framed_len` includes the length prefix and checksum.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolRecordV1 {
     pub sequence: u64,
     pub protected_session_id: [u8; 32],
@@ -128,6 +131,7 @@ pub struct HookSpoolRecordV1 {
 /// discarded unless a matching append intent proves they are an unpublished
 /// partial tail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolOpenReportV1 {
     pub pending_records: u32,
     pub pending_bytes: u64,
@@ -139,6 +143,7 @@ pub struct HookSpoolOpenReportV1 {
 
 /// Opaque lease evidence held by exactly one local writer at a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolWriterLeaseV1 {
     pub token: [u8; 16],
     pub expires_at: UtcMicros,
@@ -154,6 +159,7 @@ pub enum HookSpoolAckDispositionV1 {
 /// A daemon receipt acknowledgement. The receipt is opaque transport evidence
 /// and does not assert a business/application effect by itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpoolAckV1 {
     pub sequence: u64,
     pub receipt_id: [u8; 16],
