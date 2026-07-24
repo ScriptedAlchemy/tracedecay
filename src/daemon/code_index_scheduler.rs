@@ -456,6 +456,13 @@ pub(super) struct LatestCompleteCodeIndexV1 {
     generation: CodeIndexPublishedGenerationV1,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SemanticEvaluationCodeSnapshotV1 {
+    pub source_generation: CodeGenerationId,
+    pub source_manifest_digest: ManifestDigest,
+    pub snapshot_digest: ManifestDigest,
+}
+
 /// Production exact/lexical/graph owners bound to one immutable published
 /// generation. Lanes remain independently disableable by omitting a field from
 /// composition; this bundle only proves the daemon can mint all three from the
@@ -470,6 +477,20 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 }
 
 impl LatestCompleteCodeIndexV1 {
+    fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
+        SemanticEvaluationCodeSnapshotV1 {
+            source_generation: self.generation.manifest().generation_id.clone(),
+            source_manifest_digest: self
+                .generation
+                .projection()
+                .request()
+                .changes
+                .manifest_digest
+                .clone(),
+            snapshot_digest: self.generation.manifest().snapshot_digest.clone(),
+        }
+    }
+
     /// The sealed generation identity as a display string. Used by the dashboard
     /// code-index freshness read port and Doctor code-index mapping.
     pub(in crate::daemon) fn generation_id_string(&self) -> String {
@@ -480,6 +501,10 @@ impl LatestCompleteCodeIndexV1 {
     /// generation. Serves as the last-reconcile watermark the dashboard reports.
     pub(in crate::daemon) fn sealed_at_micros(&self) -> i64 {
         self.generation.manifest().seal.sealed_at.0
+    }
+
+    pub(in crate::daemon) fn snapshot_digest(&self) -> &tracedecay_domain::ManifestDigest {
+        &self.generation.manifest().snapshot_digest
     }
 
     pub fn exact(
@@ -720,7 +745,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             new_debouncer(WATCH_DEBOUNCE, None, move |result: DebounceEventResult| {
                 let mut hints = hints
                     .lock()
-                    .unwrap_or_else(|_| panic!("code-index hint lock"));
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match result {
                     Ok(events) => {
                         for event in events {
@@ -749,7 +774,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn notify_path(&self, path: PathBuf) {
         self.hints
             .lock()
-            .unwrap_or_else(|_| panic!("code-index hint lock"))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path(path);
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
@@ -758,7 +783,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn notify_overflow(&self) {
         self.hints
             .lock()
-            .unwrap_or_else(|_| panic!("code-index hint lock"))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
@@ -790,7 +815,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             let hints = self
                 .hints
                 .lock()
-                .unwrap_or_else(|_| panic!("code-index hint lock"))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             overflow_reconciled |= hints.overflow;
             let mut captured = self.capture_authoritative_snapshot()?;
@@ -945,7 +970,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             let mut hints = self
                 .hints
                 .lock()
-                .unwrap_or_else(|_| panic!("code-index hint lock"));
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for path in paths {
                 hints.path(path);
             }
@@ -998,7 +1023,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn pending_hint_paths(&self) -> BTreeSet<PathBuf> {
         self.hints
             .lock()
-            .unwrap_or_else(|_| panic!("code-index hint lock"))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .paths
             .clone()
     }
@@ -1177,7 +1202,7 @@ mod tests;
 mod classification;
 pub(crate) mod identity;
 pub(in crate::daemon) mod pr9_runtime;
-mod queries;
+pub(in crate::daemon) mod queries;
 mod registry;
 pub(crate) mod semantic_query_runtime;
 

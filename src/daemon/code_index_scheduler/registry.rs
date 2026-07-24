@@ -19,6 +19,8 @@ use super::{
     LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1, sha256_hex,
 };
 
+const MAX_CONCURRENT_BACKGROUND_RECONCILES: usize = 1;
+
 pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) repository_id: RepositoryId,
     pub(super) worktree_id: WorktreeId,
@@ -31,7 +33,12 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>,
     )>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) task: tokio::task::JoinHandle<()>,
+}
+
+pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 #[derive(Clone)]
@@ -39,6 +46,7 @@ pub(in crate::daemon) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
+    background_reconcile_admission: Arc<tokio::sync::Semaphore>,
 }
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -47,6 +55,9 @@ impl CodeIndexSchedulerRegistryV1 {
             max_worktrees,
             byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_BACKGROUND_RECONCILES,
+            )),
         }
     }
 
@@ -83,7 +94,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let latest = {
                 let mut scheduler = scheduler
                     .lock()
-                    .unwrap_or_else(|_| panic!("code-index scheduler lock"));
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let latest = scheduler.latest_complete().map(|latest| latest.generation);
                 scheduler.replace_semantic_schedule_hook(semantic_schedule.clone());
                 latest
@@ -111,10 +122,11 @@ impl CodeIndexSchedulerRegistryV1 {
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let scheduler = Arc::new(Mutex::new(opened));
+        let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let (wake, shutting_down) = {
             let scheduler = scheduler
                 .lock()
-                .unwrap_or_else(|_| panic!("code-index scheduler lock"));
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (
                 Arc::clone(&scheduler.wake),
                 Arc::clone(&scheduler.shutting_down),
@@ -122,9 +134,25 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_wake = Arc::clone(&wake);
+        let worker_semantic_evaluation_publication_gate =
+            Arc::clone(&semantic_evaluation_publication_gate);
+        let worker_background_reconcile_admission =
+            Arc::clone(&self.background_reconcile_admission);
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
+                if shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                let _semantic_evaluation_publication =
+                    worker_semantic_evaluation_publication_gate.lock().await;
+                let Ok(_background_reconcile_admission) =
+                    Arc::clone(&worker_background_reconcile_admission)
+                        .acquire_owned()
+                        .await
+                else {
+                    return;
+                };
                 if shutting_down.load(Ordering::Acquire) {
                     return;
                 }
@@ -132,13 +160,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 let result = tokio::task::spawn_blocking(move || {
                     scheduler
                         .lock()
-                        .unwrap_or_else(|_| panic!("code-index scheduler lock"))
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .reconcile_now()
                 })
                 .await;
-                if result.is_err() || shutting_down.load(Ordering::Acquire) {
+                if shutting_down.load(Ordering::Acquire) {
                     return;
                 }
+                // A task panic must not permanently retire the mounted
+                // worktree. The next coalesced hint wakes this worker again.
+                let _ = result;
             }
         });
         mounted.insert(
@@ -149,6 +180,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 pr9_query_authority: None,
                 semantic_query_authority: None,
                 scheduler,
+                semantic_evaluation_publication_gate,
                 task,
             },
         );
@@ -280,7 +312,7 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree
             .scheduler
             .lock()
-            .unwrap_or_else(|_| panic!("code-index scheduler lock"))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_path(path);
         true
     }
@@ -304,7 +336,7 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree
             .scheduler
             .lock()
-            .unwrap_or_else(|_| panic!("code-index scheduler lock"))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_hook_paths(absolute);
         true
     }
@@ -316,7 +348,7 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree
             .scheduler
             .lock()
-            .ok()?
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .latest_complete()
             .map(|latest| latest.generation.manifest().generation_id.clone())
     }
@@ -339,14 +371,14 @@ impl CodeIndexSchedulerRegistryV1 {
             let mounted = self.mounted.lock().await;
             Arc::clone(&mounted.get(&project_root)?.scheduler)
         };
-        // Run the synchronous reconcile off the async executor. A freshness
-        // reconcile failure is non-fatal for serving: fall back to the last
-        // complete generation rather than denying the query.
+        // Run the synchronous reconcile off the async executor. Freshness is an
+        // admission requirement: if it cannot be established, fail closed
+        // rather than serving a last-known generation that may now be stale.
         tokio::task::spawn_blocking(move || {
             let mut scheduler = scheduler
                 .lock()
-                .unwrap_or_else(|_| panic!("code-index scheduler lock"));
-            let _ = scheduler.ensure_fresh_for_query();
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scheduler.ensure_fresh_for_query().ok()?;
             scheduler.latest_complete()
         })
         .await
@@ -384,6 +416,48 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    pub(in crate::daemon) async fn semantic_evaluation_snapshot_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<super::SemanticEvaluationCodeSnapshotV1> {
+        self.latest_complete_fresh_for_scope(scope)
+            .await
+            .map(|latest| latest.semantic_evaluation_snapshot())
+    }
+
+    pub(in crate::daemon) async fn acquire_semantic_evaluation_publication_lease(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        expected: &super::SemanticEvaluationCodeSnapshotV1,
+    ) -> Option<CodeIndexSemanticEvaluationPublicationLeaseV1> {
+        let gate = {
+            let mounted = self.mounted.lock().await;
+            let mut matched = None;
+            for worktree in mounted.values() {
+                if worktree.repository_id != scope.repository_id
+                    || worktree.worktree_id != scope.worktree_id
+                {
+                    continue;
+                }
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(Arc::clone(&worktree.semantic_evaluation_publication_gate));
+            }
+            matched?
+        };
+        let guard = gate.lock_owned().await;
+        if self
+            .semantic_evaluation_snapshot_for_scope(scope)
+            .await
+            .as_ref()
+            != Some(expected)
+        {
+            return None;
+        }
+        Some(CodeIndexSemanticEvaluationPublicationLeaseV1 { _guard: guard })
+    }
+
     pub(super) fn latest_matches_scope(
         latest: &LatestCompleteCodeIndexV1,
         scope: &tracedecay_application::ResolvedScope,
@@ -415,7 +489,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let scheduler = worktree
                 .scheduler
                 .lock()
-                .unwrap_or_else(|_| panic!("code-index scheduler lock"));
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             scheduler.shutting_down.store(true, Ordering::Release);
             scheduler.wake.notify_one();
         }
