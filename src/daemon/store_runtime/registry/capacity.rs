@@ -5,8 +5,8 @@ use tracedecay_store::RuntimeMaintenanceStateV1;
 
 use super::attachment::attachment_failure;
 use super::{
-    EvictingRuntime, ReadyRuntime, RegistryEntry, RegistryState, StoreRuntimeHandle,
-    StoreRuntimeKey, StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
+    EvictingRuntime, RegistryEntry, RegistryState, StoreRuntimeHandle, StoreRuntimeKey,
+    StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
 };
 
 pub(crate) const MAX_PROJECT_CODE_OPEN_RUNTIMES: usize = 8;
@@ -173,14 +173,22 @@ impl StoreRuntimeRegistry {
                 });
             }
         };
+        // Eviction is terminal once physical admission has been fenced. A
+        // failed drain cannot be restored as Ready, but it must retain the
+        // faulted attachment: dropping it could publish a second writer while
+        // timed-out native work still owns the first one.
         if outcome.is_err() {
             state.entries.insert(
                 reservation.key,
-                RegistryEntry::Ready(ReadyRuntime {
+                RegistryEntry::Evicting(EvictingRuntime {
+                    attempt: evicting.attempt,
                     handle: evicting.handle,
                 }),
             );
+            return outcome;
         }
+        drop(state);
+        drop(evicting);
         outcome
     }
 }
@@ -189,12 +197,12 @@ fn drain_and_close(handle: &StoreRuntimeHandle) -> Result<(), StoreRuntimeRegist
     if let Err(message) = handle.inner.attachment.drain() {
         return Err(attachment_failure("drain", message));
     }
+    if let Err(message) = handle.inner.attachment.close_and_join() {
+        return Err(attachment_failure("close_and_join", message));
+    }
     let physical = handle.physical_snapshot();
     if !physical.is_drained() {
         return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { snapshot: physical });
-    }
-    if let Err(message) = handle.inner.attachment.close_and_join() {
-        return Err(attachment_failure("close_and_join", message));
     }
     handle
         .runtime()

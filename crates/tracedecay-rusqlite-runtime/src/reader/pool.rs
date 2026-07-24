@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fmt,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, Weak,
         mpsc::{Receiver, RecvTimeoutError},
     },
     thread::{self, JoinHandle},
@@ -112,6 +112,7 @@ struct AvailableWorker {
 
 struct PoolState {
     lifecycle: ReaderPoolState,
+    health_admission_open: bool,
     next_id: u64,
     opening_general: u16,
     records: BTreeMap<u64, WorkerRecord>,
@@ -174,6 +175,24 @@ pub struct ReaderPool<E: ReaderQueryExecutor> {
     inner: Arc<PoolInner<E>>,
 }
 
+pub(crate) struct WeakReaderPool<E: ReaderQueryExecutor> {
+    inner: Weak<PoolInner<E>>,
+}
+
+impl<E: ReaderQueryExecutor> Clone for WeakReaderPool<E> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<E: ReaderQueryExecutor> WeakReaderPool<E> {
+    pub(crate) fn upgrade(&self) -> Option<ReaderPool<E>> {
+        self.inner.upgrade().map(|inner| ReaderPool { inner })
+    }
+}
+
 impl<E: ReaderQueryExecutor> Clone for ReaderPool<E> {
     fn clone(&self) -> Self {
         Self {
@@ -199,6 +218,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             executor,
             state: Mutex::new(PoolState {
                 lifecycle: ReaderPoolState::Ready,
+                health_admission_open: true,
                 next_id: 1,
                 opening_general: 0,
                 records: BTreeMap::new(),
@@ -227,6 +247,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 
     pub(crate) fn path(&self) -> &std::path::Path {
         self.inner.locator.path()
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakReaderPool<E> {
+        WeakReaderPool {
+            inner: Arc::downgrade(&self.inner),
+        }
     }
 
     pub(crate) fn execute_migration_query(
@@ -310,6 +336,36 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         }
     }
 
+    /// Stop all reader admission for final attachment shutdown.
+    ///
+    /// Unlike `begin_drain`, this also fences the reserved health lane. The
+    /// health lane remains available during ordinary maintenance drains, but
+    /// retaining it during physical eviction would allow new work to race the
+    /// final close.
+    pub(crate) fn begin_shutdown_drain(&self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.lifecycle = ReaderPoolState::Draining;
+        state.health_admission_open = false;
+        drop(state);
+        self.inner.capacity_changed.notify_all();
+    }
+
+    pub(crate) fn is_quiescent(&self) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.opening_general == 0
+            && state.leased_general == 0
+            && state.leased_health == 0
+            && Arc::strong_count(&self.inner) == 1
+    }
+
     /// Acquire within a caller-selected bound. The caller-owned probe remains
     /// the sole cancellation/deadline authority and is checked before every
     /// capacity decision and bounded condvar wait.
@@ -351,7 +407,9 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.lifecycle == ReaderPoolState::Draining && lane == ReaderLane::General {
+            if state.lifecycle == ReaderPoolState::Draining
+                && (lane == ReaderLane::General || !state.health_admission_open)
+            {
                 return Err(ReaderAcquireError::Interrupted {
                     reason: UnavailableReasonV1::Draining,
                 });

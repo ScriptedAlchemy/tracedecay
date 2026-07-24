@@ -3,7 +3,8 @@ use std::{
     fmt,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use rusqlite::{Savepoint, Transaction};
@@ -25,6 +26,9 @@ use crate::{
 use super::{
     CodeShardLocatorError, CodeShardPhysicalLocator, GraphMutationExecutor, GraphReaderExecutor,
 };
+
+const ATTACHMENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const ATTACHMENT_DRAIN_POLL: Duration = Duration::from_millis(5);
 
 /// Pre-open physical parts that a later daemon registry adapter can own.
 ///
@@ -247,6 +251,7 @@ impl GraphPhysicalAttachmentFactory {
                 writer,
                 readers: Some(readers),
                 admission_open: true,
+                drained: false,
                 closed: false,
                 close_failure: None,
             }),
@@ -313,6 +318,7 @@ struct GraphRuntimePhysicalState {
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<GraphReaderExecutor>>,
     admission_open: bool,
+    drained: bool,
     closed: bool,
     close_failure: Option<String>,
 }
@@ -373,15 +379,11 @@ impl GraphRuntimePhysicalAttachment {
         let writer_telemetry = writer.map(|writer| writer.telemetry_snapshot());
         let readers = state.readers.as_ref().map(ReaderPool::snapshot);
         let reader_handles = readers.map_or(0, |snapshot| {
-            if state.admission_open {
-                u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
-            } else {
-                u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
-            }
+            u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
         });
         GraphRuntimePhysicalSnapshot {
             healthy: writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
-            writer_present: state.admission_open && writer.is_some(),
+            writer_present: writer.is_some(),
             reader_handles,
             queued_operations: writer_telemetry
                 .as_ref()
@@ -399,11 +401,13 @@ impl GraphRuntimePhysicalAttachment {
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<RuntimeSubmitOutcomeV1, GraphDispatchError> {
-        let writer = self
-            .lock_state()
-            .writer
-            .clone()
-            .ok_or(GraphDispatchError::Closed)?;
+        let writer = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(GraphDispatchError::Closed);
+            }
+            state.writer.clone().ok_or(GraphDispatchError::Closed)?
+        };
         writer
             .submit_authorized(request, probe, authority)
             .await
@@ -415,11 +419,13 @@ impl GraphRuntimePhysicalAttachment {
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), GraphDispatchError> {
-        let writer = self
-            .lock_state()
-            .writer
-            .clone()
-            .ok_or(GraphDispatchError::Closed)?;
+        let writer = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(GraphDispatchError::Closed);
+            }
+            state.writer.clone().ok_or(GraphDispatchError::Closed)?
+        };
         writer
             .bounded_incremental_vacuum(max_pages, authority)
             .await
@@ -431,12 +437,17 @@ impl GraphRuntimePhysicalAttachment {
         request: CheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, GraphDispatchError> {
-        let checkpoint = self
-            .lock_state()
-            .writer
-            .as_ref()
-            .ok_or(GraphDispatchError::Closed)?
-            .checkpoint_handle();
+        let checkpoint = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(GraphDispatchError::Closed);
+            }
+            state
+                .writer
+                .as_ref()
+                .ok_or(GraphDispatchError::Closed)?
+                .checkpoint_handle()
+        };
         let ticket = checkpoint
             .trigger_authorized(request, authority)
             .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
@@ -451,11 +462,13 @@ impl GraphRuntimePhysicalAttachment {
         destination: PathBuf,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<OnlineBackupReceipt, GraphDispatchError> {
-        let writer = self
-            .lock_state()
-            .writer
-            .clone()
-            .ok_or(GraphDispatchError::Closed)?;
+        let writer = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(GraphDispatchError::Closed);
+            }
+            state.writer.clone().ok_or(GraphDispatchError::Closed)?
+        };
         writer
             .snapshot_to(destination, authority)
             .await
@@ -467,11 +480,13 @@ impl GraphRuntimePhysicalAttachment {
         request: RuntimeReadRequestV1,
         probe: &dyn RuntimeRequestProbeV1,
     ) -> Result<RuntimeReadOutcomeV1, GraphDispatchError> {
-        let readers = self
-            .lock_state()
-            .readers
-            .clone()
-            .ok_or(GraphDispatchError::Closed)?;
+        let readers = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(GraphDispatchError::Closed);
+            }
+            state.readers.clone().ok_or(GraphDispatchError::Closed)?
+        };
         let mut reader = readers
             .acquire(&request, probe, Duration::ZERO)
             .map_err(GraphDispatchError::Reader)?;
@@ -488,13 +503,65 @@ impl GraphRuntimePhysicalAttachment {
         if state.closed {
             return Ok(());
         }
+        if state.drained {
+            return Ok(());
+        }
+        state.admission_open = false;
         if let Some(writer) = &state.writer {
             writer.begin_drain();
         }
         if let Some(readers) = &state.readers {
-            readers.begin_drain();
+            readers.begin_shutdown_drain();
         }
-        state.admission_open = false;
+        drop(state);
+
+        let started = Instant::now();
+        loop {
+            let state = self.lock_state();
+            let writer_quiescent = state.writer.as_ref().is_none_or(|writer| {
+                Arc::strong_count(writer) == 1
+                    && writer.telemetry_snapshot().queue.queued_operations == 0
+            });
+            let readers_quiescent = state.readers.as_ref().is_none_or(ReaderPool::is_quiescent);
+            if writer_quiescent && readers_quiescent {
+                break;
+            }
+            if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
+                let queued = state
+                    .writer
+                    .as_ref()
+                    .map(|writer| writer.telemetry_snapshot().queue.queued_operations)
+                    .unwrap_or(0);
+                let leased = state.readers.as_ref().map_or(0, |readers| {
+                    let snapshot = readers.snapshot();
+                    u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
+                });
+                return Err(format!(
+                    "graph physical attachment did not quiesce within {ATTACHMENT_DRAIN_TIMEOUT:?}: {leased} leased readers and {queued} queued writes"
+                ));
+            }
+            drop(state);
+            thread::sleep(ATTACHMENT_DRAIN_POLL);
+        }
+
+        let mut state = self.lock_state();
+        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
+            Ok(writer) => writer,
+            Err(writer) => {
+                state.writer = Some(writer);
+                return Err("graph writer is still serving a request".to_owned());
+            }
+        };
+        let readers = state.readers.take();
+        drop(readers);
+        if let Some(writer) = writer
+            && let Err(error) = writer.shutdown_and_join()
+        {
+            let message = format!("join graph writer: {error}");
+            state.close_failure = Some(message.clone());
+            return Err(message);
+        }
+        state.drained = true;
         Ok(())
     }
 
@@ -509,36 +576,11 @@ impl GraphRuntimePhysicalAttachment {
         if state.admission_open {
             return Err("graph physical attachment must drain before close".to_owned());
         }
-        let leased_readers = state.readers.as_ref().map_or(0, |readers| {
-            let snapshot = readers.snapshot();
-            u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
-        });
-        let queued = state
-            .writer
-            .as_ref()
-            .map(|writer| writer.telemetry_snapshot())
-            .map_or(0, |snapshot| snapshot.queue.queued_operations);
-        if leased_readers != 0 || queued != 0 {
-            return Err(format!(
-                "graph physical attachment still has {leased_readers} readers and {queued} queued writes"
-            ));
+        if !state.drained {
+            return Err("graph physical attachment has not completed drain".to_owned());
         }
-        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
-            Ok(writer) => writer,
-            Err(writer) => {
-                state.writer = Some(writer);
-                return Err("graph writer is still serving a request".to_owned());
-            }
-        };
-        let readers = state.readers.take();
-        drop(readers);
-        if let Some(writer) = writer {
-            if let Err(error) = writer.shutdown_and_join() {
-                let message = format!("join graph writer: {error}");
-                state.closed = true;
-                state.close_failure = Some(message.clone());
-                return Err(message);
-            }
+        if state.writer.is_some() || state.readers.is_some() {
+            return Err("graph physical attachment retained handles after drain".to_owned());
         }
         state.closed = true;
         Ok(())

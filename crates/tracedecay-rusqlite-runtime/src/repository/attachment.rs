@@ -3,7 +3,8 @@ use std::{
     fmt,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use rusqlite::Transaction;
@@ -26,6 +27,9 @@ use crate::{
 };
 
 use super::{ConcreteRepositoryReadExecutor, ConcreteRepositoryWriteExecutor};
+
+const ATTACHMENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const ATTACHMENT_DRAIN_POLL: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RepositoryPhysicalAttachmentFactory;
@@ -146,6 +150,7 @@ impl RepositoryPhysicalAttachmentFactory {
                 writer: Some(Arc::new(writer)),
                 readers: Some(readers),
                 admission_open: true,
+                drained: false,
                 closed: false,
                 close_failure: None,
             }),
@@ -228,6 +233,7 @@ struct RepositoryRuntimePhysicalState {
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
     admission_open: bool,
+    drained: bool,
     closed: bool,
     close_failure: Option<String>,
 }
@@ -287,15 +293,11 @@ impl RepositoryRuntimePhysicalAttachment {
         let writer_telemetry = writer.map(|writer| writer.telemetry_snapshot());
         let readers = state.readers.as_ref().map(ReaderPool::snapshot);
         let reader_handles = readers.map_or(0, |snapshot| {
-            if state.admission_open {
-                u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
-            } else {
-                u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
-            }
+            u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
         });
         RepositoryRuntimePhysicalSnapshot {
             healthy: writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
-            writer_present: state.admission_open && writer.is_some(),
+            writer_present: writer.is_some(),
             reader_handles,
             queued_operations: writer_telemetry
                 .as_ref()
@@ -313,11 +315,16 @@ impl RepositoryRuntimePhysicalAttachment {
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<RuntimeSubmitOutcomeV1, RepositoryDispatchError> {
-        let writer = self
-            .lock_state()
-            .writer
-            .clone()
-            .ok_or(RepositoryDispatchError::Closed)?;
+        let writer = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(RepositoryDispatchError::Closed);
+            }
+            state
+                .writer
+                .clone()
+                .ok_or(RepositoryDispatchError::Closed)?
+        };
         writer
             .submit_authorized(request, probe, authority)
             .await
@@ -329,11 +336,16 @@ impl RepositoryRuntimePhysicalAttachment {
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), RepositoryDispatchError> {
-        let writer = self
-            .lock_state()
-            .writer
-            .clone()
-            .ok_or(RepositoryDispatchError::Closed)?;
+        let writer = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(RepositoryDispatchError::Closed);
+            }
+            state
+                .writer
+                .clone()
+                .ok_or(RepositoryDispatchError::Closed)?
+        };
         writer
             .bounded_incremental_vacuum(max_pages, authority)
             .await
@@ -345,12 +357,17 @@ impl RepositoryRuntimePhysicalAttachment {
         request: CheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
-        let checkpoint = self
-            .lock_state()
-            .writer
-            .as_ref()
-            .ok_or(RepositoryDispatchError::Closed)?
-            .checkpoint_handle();
+        let checkpoint = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(RepositoryDispatchError::Closed);
+            }
+            state
+                .writer
+                .as_ref()
+                .ok_or(RepositoryDispatchError::Closed)?
+                .checkpoint_handle()
+        };
         let ticket = checkpoint
             .trigger_authorized(request, authority)
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
@@ -365,11 +382,16 @@ impl RepositoryRuntimePhysicalAttachment {
         destination: PathBuf,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<OnlineBackupReceipt, RepositoryDispatchError> {
-        let writer = self
-            .lock_state()
-            .writer
-            .clone()
-            .ok_or(RepositoryDispatchError::Closed)?;
+        let writer = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(RepositoryDispatchError::Closed);
+            }
+            state
+                .writer
+                .clone()
+                .ok_or(RepositoryDispatchError::Closed)?
+        };
         writer
             .snapshot_to(destination, authority)
             .await
@@ -381,11 +403,16 @@ impl RepositoryRuntimePhysicalAttachment {
         request: RuntimeReadRequestV1,
         probe: &dyn RuntimeRequestProbeV1,
     ) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
-        let readers = self
-            .lock_state()
-            .readers
-            .clone()
-            .ok_or(RepositoryDispatchError::Closed)?;
+        let readers = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(RepositoryDispatchError::Closed);
+            }
+            state
+                .readers
+                .clone()
+                .ok_or(RepositoryDispatchError::Closed)?
+        };
         let mut reader = readers
             .acquire(&request, probe, Duration::ZERO)
             .map_err(RepositoryDispatchError::Reader)?;
@@ -402,13 +429,65 @@ impl RepositoryRuntimePhysicalAttachment {
         if state.closed {
             return Ok(());
         }
+        if state.drained {
+            return Ok(());
+        }
+        state.admission_open = false;
         if let Some(writer) = &state.writer {
             writer.begin_drain();
         }
         if let Some(readers) = &state.readers {
-            readers.begin_drain();
+            readers.begin_shutdown_drain();
         }
-        state.admission_open = false;
+        drop(state);
+
+        let started = Instant::now();
+        loop {
+            let state = self.lock_state();
+            let writer_quiescent = state.writer.as_ref().is_none_or(|writer| {
+                Arc::strong_count(writer) == 1
+                    && writer.telemetry_snapshot().queue.queued_operations == 0
+            });
+            let readers_quiescent = state.readers.as_ref().is_none_or(ReaderPool::is_quiescent);
+            if writer_quiescent && readers_quiescent {
+                break;
+            }
+            if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
+                let queued = state
+                    .writer
+                    .as_ref()
+                    .map(|writer| writer.telemetry_snapshot().queue.queued_operations)
+                    .unwrap_or(0);
+                let leased = state.readers.as_ref().map_or(0, |readers| {
+                    let snapshot = readers.snapshot();
+                    u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
+                });
+                return Err(format!(
+                    "repository physical attachment did not quiesce within {ATTACHMENT_DRAIN_TIMEOUT:?}: {leased} leased readers and {queued} queued writes"
+                ));
+            }
+            drop(state);
+            thread::sleep(ATTACHMENT_DRAIN_POLL);
+        }
+
+        let mut state = self.lock_state();
+        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
+            Ok(writer) => writer,
+            Err(writer) => {
+                state.writer = Some(writer);
+                return Err("repository writer is still serving a request".to_owned());
+            }
+        };
+        let readers = state.readers.take();
+        drop(readers);
+        if let Some(writer) = writer
+            && let Err(error) = writer.shutdown_and_join()
+        {
+            let message = format!("join repository writer: {error}");
+            state.close_failure = Some(message.clone());
+            return Err(message);
+        }
+        state.drained = true;
         Ok(())
     }
 
@@ -423,36 +502,11 @@ impl RepositoryRuntimePhysicalAttachment {
         if state.admission_open {
             return Err("repository physical attachment must drain before close".to_owned());
         }
-        let leased_readers = state.readers.as_ref().map_or(0, |readers| {
-            let snapshot = readers.snapshot();
-            u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
-        });
-        let queued = state
-            .writer
-            .as_ref()
-            .map(|writer| writer.telemetry_snapshot())
-            .map_or(0, |snapshot| snapshot.queue.queued_operations);
-        if leased_readers != 0 || queued != 0 {
-            return Err(format!(
-                "repository physical attachment still has {leased_readers} readers and {queued} queued writes"
-            ));
+        if !state.drained {
+            return Err("repository physical attachment has not completed drain".to_owned());
         }
-        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
-            Ok(writer) => writer,
-            Err(writer) => {
-                state.writer = Some(writer);
-                return Err("repository writer is still serving a request".to_owned());
-            }
-        };
-        let readers = state.readers.take();
-        drop(readers);
-        if let Some(writer) = writer {
-            if let Err(error) = writer.shutdown_and_join() {
-                let message = format!("join repository writer: {error}");
-                state.closed = true;
-                state.close_failure = Some(message.clone());
-                return Err(message);
-            }
+        if state.writer.is_some() || state.readers.is_some() {
+            return Err("repository physical attachment retained handles after drain".to_owned());
         }
         state.closed = true;
         Ok(())

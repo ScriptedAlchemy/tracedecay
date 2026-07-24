@@ -248,6 +248,44 @@ fn gated_physical_attachment_owns_real_workers_and_drains_before_close() {
     assert_eq!(runtime_tables, 0, "attachment startup must not migrate");
 }
 
+#[cfg(windows)]
+#[test]
+fn initialized_graph_abort_closes_handles_and_removes_every_sidecar() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("initialized-graph.db");
+    let binding = worktree_binding("worktree.windows-abort");
+    let locator = tracedecay_store::VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        tracedecay_domain::LocatorDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap(),
+    );
+    let attachment = GraphPhysicalAttachmentFactory
+        .initialize(binding, locator, path.clone(), AdmissionConfigV1::default())
+        .unwrap();
+    attachment
+        .migration_sql_handle()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE initialized_abort(value INTEGER);
+             INSERT INTO initialized_abort VALUES (1);"
+                .to_owned(),
+        )
+        .unwrap();
+    let family = ["", "-wal", "-shm", "-journal"].map(|suffix| {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(suffix);
+        std::path::PathBuf::from(candidate)
+    });
+    assert!(family[1].exists(), "write must create a WAL sidecar");
+
+    attachment.abort_initialization().unwrap();
+
+    assert!(
+        family.iter().all(|candidate| !candidate.exists()),
+        "aborted initialization left a SQLite family member behind"
+    );
+}
+
 #[test]
 fn graph_mutation_fixture_proves_exact_rollback() {
     let mut connection = Connection::open_in_memory().unwrap();

@@ -205,3 +205,62 @@ fn create_new_refuses_to_replace_an_existing_database() {
         OpenedDatabaseFileError::Create
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_pinned_file_either_blocks_replacement_or_detects_the_new_file() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.db");
+    let retired = directory.path().join("identity.retired.db");
+    let replacement = directory.path().join("identity.replacement.db");
+    std::fs::write(&path, b"original").unwrap();
+    std::fs::write(&replacement, b"replacement").unwrap();
+    let pinned = OpenedDatabaseFile::pin(&path).unwrap();
+    let mut retained = pinned.clone_file().unwrap();
+
+    match std::fs::rename(&path, &retired) {
+        Ok(()) => {
+            std::fs::rename(&replacement, &path).unwrap();
+            assert_eq!(
+                pinned.verify_current_path(&path),
+                Err(OpenedDatabaseFileError::Replaced)
+            );
+            retained.seek(SeekFrom::Start(0)).unwrap();
+            let mut contents = Vec::new();
+            retained.read_to_end(&mut contents).unwrap();
+            assert_eq!(contents, b"original");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            pinned.verify_current_path(&path).unwrap();
+            drop(retained);
+            drop(pinned);
+            std::fs::rename(&path, &retired)
+                .expect("replacement must become possible after retained handles close");
+            std::fs::rename(&replacement, &path).unwrap();
+        }
+        Err(error) => panic!("unexpected Windows replacement error: {error}"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_discard_created_removes_the_complete_sqlite_family() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fresh.db");
+    let created = OpenedDatabaseFile::create_new(&path).unwrap();
+    let sidecars = [
+        sidecar_path(&path, "-wal"),
+        sidecar_path(&path, "-shm"),
+        sidecar_path(&path, "-journal"),
+    ];
+    for sidecar in &sidecars {
+        std::fs::write(sidecar, b"sidecar").unwrap();
+    }
+
+    created.discard_created(&path).unwrap();
+
+    assert!(!path.exists());
+    assert!(sidecars.iter().all(|sidecar| !sidecar.exists()));
+}
