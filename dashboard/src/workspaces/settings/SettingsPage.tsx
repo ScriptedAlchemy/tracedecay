@@ -20,7 +20,7 @@ export function SettingsPage() {
         <h1 className="text-sm font-semibold tracking-tight">Settings</h1>
         <span className="text-2xs text-text-muted">effective configuration · read-only</span>
       </div>
-      <OverviewGrid className="grid-cols-1 xl:grid-cols-2">
+      <OverviewGrid className="grid-cols-1">
         <OverviewCard title="Effective configuration">
           <LegacyBoundary title="Settings" pending={settings.isPending} result={settings.data}>
             {(data) => <KeyValueTree value={data} />}

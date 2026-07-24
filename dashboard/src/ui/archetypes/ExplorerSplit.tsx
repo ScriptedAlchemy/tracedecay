@@ -175,9 +175,35 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
     return <span className="text-text-muted">—</span>;
   }
   if (typeof value !== 'object') {
-    return <span className="td-value break-all text-2xs text-text-secondary">{String(value)}</span>;
+    return (
+      <span className="td-value break-words text-2xs text-text-secondary">{String(value)}</span>
+    );
   }
-  const entries = Array.isArray(value)
+  const isArray = Array.isArray(value);
+  // A flat array of primitives (glob lists, tags, provider names — the common
+  // case for config-shaped payloads) reads far better as a wrapped chip row
+  // than as N index-labelled dt/dd pairs: no meaningless "0", "1", "2" legends
+  // eating the label column, and no extra nesting depth for the width
+  // collapse below to compound against.
+  if (isArray && value.every((v) => v === null || typeof v !== 'object')) {
+    if (value.length === 0) return <span className="text-text-muted">empty</span>;
+    return (
+      <div className="flex flex-wrap gap-1">
+        {value.slice(0, 60).map((v, i) => (
+          <span
+            key={i}
+            className="td-value break-words rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-text-secondary"
+          >
+            {v === null || v === undefined ? '—' : String(v)}
+          </span>
+        ))}
+        {value.length > 60 ? (
+          <span className="text-2xs text-text-muted">… {value.length - 60} more</span>
+        ) : null}
+      </div>
+    );
+  }
+  const entries = isArray
     ? value.map((v, i) => [String(i), v] as const)
     : Object.entries(value as Record<string, unknown>);
   if (entries.length === 0) return <span className="text-text-muted">empty</span>;
@@ -186,7 +212,12 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
       {entries.slice(0, 60).map(([k, v]) => (
         <div
           key={k}
-          className="grid grid-cols-[8rem_1fr] gap-2 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0"
+          // minmax(...) lets the label column give way under pressure (deep
+          // nesting, a 320px viewport) instead of reserving a hard 8rem no
+          // matter what — a fixed track never shrinks, so a narrow container
+          // forced the value column to negative space and every value
+          // wrapped one character per line.
+          className="grid grid-cols-[minmax(5rem,9rem)_1fr] gap-2 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0"
         >
           <dt className="td-legend truncate pt-px" title={k}>
             {k}

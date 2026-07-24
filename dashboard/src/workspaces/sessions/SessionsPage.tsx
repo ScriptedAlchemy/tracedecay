@@ -136,7 +136,9 @@ export function SessionsPage() {
                           {role}
                         </span>
                         <span className="min-w-0 flex-1 truncate">{snippet}</span>
-                        <span className="tabular shrink-0 text-2xs text-text-muted">{when}</span>
+                        <span className="tabular hidden shrink-0 text-2xs text-text-muted sm:inline">
+                          {when}
+                        </span>
                       </DataRow>
                     );
                   })}
@@ -179,7 +181,15 @@ export function SessionsPage() {
                           {String(count)} msgs
                         </span>
                       ) : null}
-                      <span className="tabular shrink-0 text-2xs text-text-muted">{when}</span>
+                      {/* The timestamp is the widest fixed-width field in this
+                       * row; at 320px it and the message count alone left no
+                       * room at all for the session id (the actually-useful
+                       * identifier), so the id rendered as an empty sliver.
+                       * Drop the timestamp below `sm` rather than let it win
+                       * that fight every time. */}
+                      <span className="tabular hidden shrink-0 text-2xs text-text-muted sm:inline">
+                        {when}
+                      </span>
                     </DataRow>
                   );
                 }}
