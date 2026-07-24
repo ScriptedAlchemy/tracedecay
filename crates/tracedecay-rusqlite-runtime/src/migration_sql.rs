@@ -927,6 +927,7 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_transaction(
     transaction: Transaction<'_>,
     receiver: Receiver<TransactionCommand>,
@@ -1202,6 +1203,7 @@ fn execute_batch(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn with_migration_guard<T, F>(
     connection: &Connection,
     allow_savepoints: bool,

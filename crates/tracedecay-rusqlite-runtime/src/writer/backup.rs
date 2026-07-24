@@ -203,7 +203,6 @@ pub(super) fn run_online_backup(
         Ok(completed) => completed,
         Err(error) => {
             let abort = control.abort.get();
-            drop(control);
             command.settle(Err(map_backup_error(error, abort)));
             return;
         }
@@ -225,7 +224,6 @@ pub(super) fn run_online_backup(
             WriterActorError::OnlineBackupFailed(error)
         }
     });
-    drop(control);
     command.settle(result);
 }
 

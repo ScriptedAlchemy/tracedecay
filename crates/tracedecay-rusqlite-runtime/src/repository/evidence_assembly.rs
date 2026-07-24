@@ -364,7 +364,7 @@ impl EvidenceAssemblyExecutor {
                             Ok(span)
                         },
                     )?;
-                if &span.owner != &owner.owner
+                if span.owner != owner.owner
                     || span.span_id != contribution.span_id
                     || span.occurrence_set_id != contribution.occurrence_set_id
                     || &contribution.span_anchor_id != span.anchor.anchor_id()
@@ -409,7 +409,7 @@ impl EvidenceAssemblyExecutor {
                                 row.get::<_, String>(6).and_then(decode)?;
                             occurrence.validate().map_err(invalid)?;
                             if occurrence.occurrence_id.as_str() != occurrence_id
-                                || &occurrence.owner != &owner.owner
+                                || occurrence.owner != owner.owner
                                 || stored_owner.as_str() != evidence_owner_digest.as_str()
                                 || occurrence.timeline.digest().map_err(invalid)?.as_str()
                                     != timeline_digest
@@ -469,7 +469,7 @@ fn validate_occurrence_set(
     let occurrence_set: CanonicalSourceOccurrenceSetRecordV1 = decode(record_json)?;
     occurrence_set.validate().map_err(invalid)?;
     if occurrence_set.occurrence_set_id != span.occurrence_set_id
-        || &occurrence_set.owner != &owner.owner
+        || occurrence_set.owner != owner.owner
         || owner_digest != canonical_digest(&owner.owner)?
         || record_digest != canonical_digest(&occurrence_set)?
     {

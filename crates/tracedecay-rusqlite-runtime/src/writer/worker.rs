@@ -524,6 +524,7 @@ enum WorkerWake {
     CheckpointRetry,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_work(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     migration_sql_receiver: &mut mpsc::Receiver<MigrationSqlWriterCommand>,
@@ -581,6 +582,7 @@ async fn wait_for_work(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_wake(
     wake: WorkerWake,
     queue: &mut FairQueue<AcceptedRequest>,

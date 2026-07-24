@@ -92,6 +92,7 @@ impl RepositoryPhysicalAttachmentFactory {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn attach_opened(
         &self,
         binding: StoreRuntimeBindingV1,
