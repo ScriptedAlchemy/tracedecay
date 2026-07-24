@@ -18,6 +18,15 @@ async fn open_registered_db(
     DaemonDatabaseScope,
     Arc<RegisteredGlobalDb>,
 ) {
+    // `create_dir_all` in the callers honours the ambient umask, so under a
+    // group-writable umask (0002) the profile root lands at 0775 and profile
+    // identity refuses it. A real profile root is always 0700; make the
+    // fixture match rather than depending on the developer's umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let identity = crate::daemon::profile_identity::load_or_create(profile_root).unwrap();
     let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
     let scope =
@@ -302,7 +311,11 @@ async fn sweep_collects_orphan_store_and_retires_row() {
         .await
         .unwrap();
     assert!(report.applied);
-    assert_eq!(report.outcome.collected.len(), 1);
+    assert_eq!(
+        report.outcome.collected.len(),
+        1,
+        "ordinary empty stores must remain collectable: {report:#?}"
+    );
     assert_eq!(report.retired_registry_rows, 1);
     assert!(!orphan_data_root.exists(), "orphan store must be collected");
     assert!(live_root.exists());
@@ -629,7 +642,11 @@ async fn seed_store(
 ) -> PathBuf {
     let data_root = profile_root.join("stores").join(store_id);
     std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(data_root.join("graph.db"), b"payload-bytes").unwrap();
+    // A real (schema-empty) SQLite file, not raw bytes: the durable-memory
+    // guard opens this file through `sqlite_read_snapshot` before any
+    // collection, so the fixture must be a database the guard can actually
+    // inspect and prove carries no `memory_facts`/etc. rows.
+    rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
 
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
@@ -699,4 +716,326 @@ async fn seed_project(
         .await
         .unwrap();
     transaction.commit().await.unwrap();
+}
+
+// === Durable-memory guard ===================================================
+
+/// A store whose graph database carries durable `memory_facts` rows must
+/// never be collected, even when every registry/manifest/payload revival
+/// check passes and the store is otherwise a textbook orphan.
+#[tokio::test]
+async fn durable_memory_rows_block_orphan_store_collection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("moved-away-repo");
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let base = 1_700_000_000i64;
+    let data_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_memory",
+        "store_memory",
+        &dead_root,
+        base - 100 * DAY,
+    )
+    .await;
+
+    {
+        let connection = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+                 INSERT INTO memory_facts (fact_id, content) VALUES (1, 'durable fact');",
+            )
+            .unwrap();
+    }
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, base, true)
+        .await
+        .unwrap();
+
+    assert!(
+        report.outcome.collected.is_empty(),
+        "a store with durable memory rows must never be collected"
+    );
+    assert_eq!(report.outcome.errors.len(), 1);
+    assert_eq!(
+        report.outcome.errors[0].kind,
+        CollectionFailureKind::DurableDataProtected
+    );
+    assert!(
+        data_root.exists(),
+        "durable-memory-protected store must remain on disk"
+    );
+    assert!(
+        db.list_code_projects(usize::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|project| project.project_id == "proj_memory"),
+        "registry row for a protected store must not be retired"
+    );
+}
+
+/// The guard is schema-discovered, so current and future Memory V2 tables are
+/// protected without adding every table name to a second hand-maintained list.
+#[tokio::test]
+async fn memory_v2_rows_block_orphan_store_collection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("moved-away-repo");
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let base = 1_700_000_000i64;
+    let data_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_memory_v2",
+        "store_memory_v2",
+        &dead_root,
+        base - 100 * DAY,
+    )
+    .await;
+
+    {
+        let connection = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_v2_assertions (
+                    assertion_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                 );
+                 INSERT INTO memory_v2_assertions (assertion_id, payload)
+                 VALUES ('assertion-1', 'durable v2 fact');",
+            )
+            .unwrap();
+    }
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, base, true)
+        .await
+        .unwrap();
+
+    assert!(report.outcome.collected.is_empty());
+    assert_eq!(
+        report.outcome.errors[0].kind,
+        CollectionFailureKind::DurableDataProtected
+    );
+    assert!(data_root.exists());
+}
+
+/// A durable memory table that exists but is empty must not block collection
+/// — only an actual row does.
+#[tokio::test]
+async fn empty_memory_table_does_not_block_collection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let dead_root = tmp.path().join("moved-away-repo");
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    let base = 1_700_000_000i64;
+    let data_root = seed_store(
+        &db,
+        &profile_root,
+        "proj_empty_memory",
+        "store_empty_memory",
+        &dead_root,
+        base - 100 * DAY,
+    )
+    .await;
+    {
+        let connection = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_facts (
+                    fact_id INTEGER PRIMARY KEY,
+                    content TEXT NOT NULL
+                 );
+                 CREATE VIRTUAL TABLE memory_facts_fts USING fts5(content);",
+            )
+            .unwrap();
+    }
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, base, true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.outcome.collected.len(),
+        1,
+        "empty durable-memory tables must not block collection: {report:#?}"
+    );
+    assert!(!data_root.exists());
+}
+
+// === Unregistered store directories =========================================
+
+#[tokio::test]
+async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+
+    let registered_root = tmp.path().join("registered-repo");
+    std::fs::create_dir_all(&registered_root).unwrap();
+    seed_project(&db, "proj_registered", &registered_root, 1_700_000_000).await;
+    let registered_dir = profile_root.join("projects").join("proj_registered");
+    std::fs::create_dir_all(&registered_dir).unwrap();
+
+    // A genuinely unregistered directory: no `code_projects` row was ever
+    // written for it.
+    let unregistered_dir = profile_root.join("projects").join("proj_ghost");
+    std::fs::create_dir_all(&unregistered_dir).unwrap();
+    std::fs::write(unregistered_dir.join("payload.bin"), vec![0u8; 4096]).unwrap();
+
+    // A stray, unsafely-named entry under `projects/` must never be treated
+    // as a candidate.
+    std::fs::write(profile_root.join("projects").join("not-a-store.txt"), b"x").unwrap();
+
+    let now = 1_700_100_000i64;
+    let findings = census_unregistered_project_dirs(&db, &profile_root, now)
+        .await
+        .unwrap();
+
+    assert_eq!(findings.len(), 1, "findings: {findings:?}");
+    assert_eq!(findings[0].project_dir_name, "proj_ghost");
+    assert_eq!(findings[0].data_root, unregistered_dir);
+    assert!(findings[0].size_bytes >= 4096);
+}
+
+#[tokio::test]
+async fn sweep_unregistered_stores_collects_past_retention_and_retains_young() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+
+    let base = 1_700_000_000i64;
+    let old_dir = profile_root.join("projects").join("proj_old_ghost");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::write(old_dir.join("payload.bin"), b"old").unwrap();
+    filetime::set_file_mtime(
+        old_dir.join("payload.bin"),
+        filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
+    )
+    .unwrap();
+
+    let young_dir = profile_root.join("projects").join("proj_young_ghost");
+    std::fs::create_dir_all(&young_dir).unwrap();
+    std::fs::write(young_dir.join("payload.bin"), b"young").unwrap();
+    filetime::set_file_mtime(
+        young_dir.join("payload.bin"),
+        filetime::FileTime::from_unix_time(base - DAY, 0),
+    )
+    .unwrap();
+
+    // Dry run: classifies but mutates nothing.
+    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, false)
+        .await
+        .unwrap();
+    assert_eq!(report.plan.collect.len(), 1);
+    assert_eq!(report.plan.collect[0].project_dir_name, "proj_old_ghost");
+    assert_eq!(report.plan.retained_immature.len(), 1);
+    assert!(!report.applied);
+    assert!(old_dir.exists(), "dry run must not delete");
+
+    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
+        .await
+        .unwrap();
+    assert!(report.applied);
+    assert_eq!(report.outcome.collected.len(), 1);
+    assert!(
+        !old_dir.exists(),
+        "past-retention unregistered dir must be collected"
+    );
+    assert!(
+        young_dir.exists(),
+        "immature unregistered dir must be retained"
+    );
+}
+
+/// A registered project id must never be treated as an unregistered
+/// candidate, and re-registering between census and collection must abort
+/// the delete for that finding (closing the revival window).
+#[tokio::test]
+async fn sweep_unregistered_stores_aborts_when_directory_gets_registered_first() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+
+    let base = 1_700_000_000i64;
+    let dir = profile_root.join("projects").join("proj_became_live");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("payload.bin"), b"payload").unwrap();
+    filetime::set_file_mtime(
+        dir.join("payload.bin"),
+        filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
+    )
+    .unwrap();
+
+    let findings = census_unregistered_project_dirs(&db, &profile_root, base)
+        .await
+        .unwrap();
+    assert_eq!(findings.len(), 1);
+    let plan = plan_unregistered_collection(findings, 7 * DAY);
+    assert_eq!(plan.collect.len(), 1);
+
+    // The directory gets registered for real between census and apply.
+    let live_root = tmp.path().join("now-live-repo");
+    std::fs::create_dir_all(&live_root).unwrap();
+    seed_project(&db, "proj_became_live", &live_root, base).await;
+
+    let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
+        .await
+        .unwrap();
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(
+        outcome.errors[0].kind,
+        CollectionFailureKind::RegistryChanged
+    );
+    assert!(
+        dir.exists(),
+        "a directory registered before delete must survive"
+    );
+}
+
+/// A durable-memory guard applies to unregistered directories exactly as it
+/// does to registered orphan stores.
+#[tokio::test]
+async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+
+    let base = 1_700_000_000i64;
+    let dir = profile_root.join("projects").join("proj_ghost_with_memory");
+    std::fs::create_dir_all(&dir).unwrap();
+    {
+        let connection = rusqlite::Connection::open(dir.join(crate::config::DB_FILENAME)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+                 INSERT INTO memory_facts (fact_id, content) VALUES (1, 'durable fact');",
+            )
+            .unwrap();
+    }
+    filetime::set_file_mtime(
+        dir.join(crate::config::DB_FILENAME),
+        filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
+    )
+    .unwrap();
+
+    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
+        .await
+        .unwrap();
+    assert!(report.outcome.collected.is_empty());
+    assert_eq!(
+        report.outcome.errors[0].kind,
+        CollectionFailureKind::DurableDataProtected
+    );
+    assert!(dir.exists());
 }

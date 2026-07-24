@@ -198,6 +198,11 @@ pub enum CollectionFailureKind {
     RegistryChanged,
     ManifestChanged,
     PayloadChanged,
+    /// The store's graph database carries rows in a durable per-project memory
+    /// table (or the check could not prove otherwise). Never collected, even
+    /// when every other eligibility check passed — see
+    /// [`DurableMemoryCheck`]/[`check_durable_memory_rows`].
+    DurableDataProtected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,6 +438,23 @@ pub(crate) async fn execute_registered_collection(
             continue;
         }
 
+        let graph_db_relpath = store_graph_db_relpath(finding.expected_manifest_bytes.as_deref());
+        let scratch_root = durable_check_scratch_root(profile_root);
+        match check_durable_memory_rows(&finding.data_root, &graph_db_relpath, &scratch_root).await
+        {
+            DurableMemoryCheck::Empty => {}
+            DurableMemoryCheck::Present | DurableMemoryCheck::Unverifiable => {
+                transaction.rollback().await.map_err(|error| {
+                    orphan_db_error("rollback durable-memory-protected orphan store", error)
+                })?;
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::DurableDataProtected,
+                });
+                continue;
+            }
+        }
+
         match std::fs::remove_dir_all(&finding.data_root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -513,14 +535,148 @@ fn orphan_db_error(
     }
 }
 
+/// Result of checking a store's graph database for durable memory rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableMemoryCheck {
+    /// No durable memory table has any row (including: none of the tables
+    /// exist, or the database file itself does not exist). Safe to collect.
+    Empty,
+    /// At least one durable memory table has at least one row.
+    Present,
+    /// The check could not prove the store is free of durable memory rows
+    /// (I/O error, corrupt/locked database, the source changed mid-check).
+    /// Fails closed: treated exactly like `Present` by every caller.
+    Unverifiable,
+}
+
+/// Best-effort determination of the graph-database relative path for a store,
+/// from its manifest bytes when available. Falls back to the default graph DB
+/// filename, which is what every profile-sharded store uses absent an
+/// enrollment-time override.
+fn store_graph_db_relpath(manifest_bytes: Option<&[u8]>) -> PathBuf {
+    manifest_bytes
+        .and_then(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok())
+        .map(|manifest| manifest.graph_db_relpath)
+        .unwrap_or_else(|| PathBuf::from(crate::config::DB_FILENAME))
+}
+
+/// The read-snapshot scratch directory for durable-memory checks.
+///
+/// It lives under the *profile* root, never inside the store being examined.
+/// Two reasons, both load-bearing: the store is a deletion candidate, and
+/// writing into it bumps the newest mtime that
+/// [`newest_mtime_secs`] uses as the revival fence — a store that failed one
+/// check would have its age reset by the check itself and could never mature
+/// past the retention window again.
+fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
+    profile_root.join("scratch").join("sqlite-read")
+}
+
+/// Checks whether `data_root`'s graph database carries rows in any canonical
+/// `memory_*` table. This intentionally discovers tables from the schema
+/// instead of maintaining a fixed list: both legacy memory and Memory V2 add
+/// durable tables, and a newly added table must be protected automatically.
+/// Side-effect-free with respect to the store: opens the database through
+/// [`crate::sqlite_read_snapshot`], so the live store is never mutated or
+/// locked against a concurrent writer.
+async fn check_durable_memory_rows(
+    data_root: &Path,
+    graph_db_relpath: &Path,
+    scratch_root: &Path,
+) -> DurableMemoryCheck {
+    let graph_db_path = data_root.join(graph_db_relpath);
+    if !graph_db_path.exists() {
+        // No database file at all: there is no schema that could carry rows.
+        return DurableMemoryCheck::Empty;
+    }
+    // The snapshot layer creates only the final scratch component, so its
+    // parent must exist first. Without this the snapshot fails NotFound, the
+    // check fails closed as `Unverifiable`, and — because `Unverifiable` is
+    // treated exactly like `Present` — *every* collection is refused. That is
+    // safe, but it silently disables orphan reclamation entirely.
+    if std::fs::create_dir_all(scratch_root).is_err() {
+        return DurableMemoryCheck::Unverifiable;
+    }
+    let snapshot = match crate::sqlite_read_snapshot::open_in(&graph_db_path, scratch_root).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => return DurableMemoryCheck::Unverifiable,
+    };
+    let connection = snapshot.connection();
+    let mut rows = match connection
+        .query(
+            "SELECT name
+             FROM pragma_table_list
+             WHERE schema = 'main'
+               AND type = 'table'
+               AND name LIKE ?1 ESCAPE '\\'
+             ORDER BY name",
+            crate::db::engine::params!["memory\\_%"],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return DurableMemoryCheck::Unverifiable,
+    };
+    let mut present_tables = Vec::new();
+    loop {
+        match rows.next().await {
+            Ok(Some(row)) => match row.get::<String>(0) {
+                Ok(name) => present_tables.push(name),
+                Err(_) => return DurableMemoryCheck::Unverifiable,
+            },
+            Ok(None) => break,
+            Err(_) => return DurableMemoryCheck::Unverifiable,
+        }
+    }
+    for table in present_tables {
+        // `pragma_table_list.type = 'table'` intentionally excludes FTS
+        // virtual/shadow tables, whose internal config rows are derived and
+        // exist even when there is no durable memory. Identifiers cannot be
+        // SQL parameters, so only interpolate TraceDecay's canonical shape;
+        // an unexpected name fails closed rather than becoming SQL text.
+        if !is_memory_table_identifier(&table) {
+            return DurableMemoryCheck::Unverifiable;
+        }
+        let probe_sql = format!("SELECT 1 FROM \"{table}\" LIMIT 1");
+        let mut probe_rows = match connection.query(&probe_sql, ()).await {
+            Ok(rows) => rows,
+            Err(_) => return DurableMemoryCheck::Unverifiable,
+        };
+        match probe_rows.next().await {
+            Ok(Some(_)) => return DurableMemoryCheck::Present,
+            Ok(None) => {}
+            Err(_) => return DurableMemoryCheck::Unverifiable,
+        }
+    }
+    if snapshot.validate_source().is_err() {
+        // The file changed under us mid-check: cannot trust an empty result.
+        return DurableMemoryCheck::Unverifiable;
+    }
+    DurableMemoryCheck::Empty
+}
+
+fn is_memory_table_identifier(table: &str) -> bool {
+    table.strip_prefix("memory_").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
 /// Newest mtime under `dir`, unix seconds, or `0` when nothing is readable.
+///
+/// Symlinks are not followed, and are stat'd as links rather than targets.
+/// This walk is the revival fence for a delete: following a symlink would let
+/// a link planted under a store recurse without bound, or make the fence read
+/// an unrelated directory's mtime instead of the payload's.
 fn newest_mtime_secs(dir: &Path) -> i64 {
     fn walk(path: &Path, newest: &mut i64) {
         let Ok(entries) = std::fs::read_dir(path) else {
             return;
         };
         for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else {
+            let Ok(meta) = entry.path().symlink_metadata() else {
                 continue;
             };
             if let Ok(modified) = meta.modified()
@@ -718,6 +874,305 @@ pub async fn sweep_orphan_stores(
         outcome,
         relinked_registry_rows,
         retired_registry_rows,
+    })
+}
+
+// === Unregistered store directories (plan 38 §2, disjoint audit class) =====
+//
+// `build_store_census` walks *from* the registry: for every registered
+// project, for every one of its registered store instances. A store dir with
+// no registry trace at all — no `code_projects` row for its identity, ever —
+// is invisible to that walk no matter how large it grows. This is a distinct
+// failure mode from [`StoreDisposition::Orphaned`] (whose registry row still
+// exists; only its root vanished): here the row itself is gone, e.g. because
+// `migrate registry-gc` removed the stale identity row without also removing
+// the on-disk payload it pointed at. The owner's audit measured this class at
+// 322 directories / 655 MB in one profile. This section is a bottom-up
+// counterpart: scan `profile_root/projects/*` (the layout every
+// profile-sharded store uses, see [`crate::storage::profile_sharded_data_root`])
+// and flag any leaf directory whose name is not a currently-registered
+// `project_id`.
+
+/// One store directory found on disk with no registry identity at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnregisteredStoreFinding {
+    /// The `projects/` leaf directory name — the project id this store would
+    /// have if it were registered.
+    pub project_dir_name: String,
+    pub data_root: PathBuf,
+    /// `now - newest mtime under data_root`, clamped at zero.
+    pub age_secs: i64,
+    pub size_bytes: u64,
+    /// Payload mtime fence captured at census time; re-verified before delete.
+    pub(crate) expected_payload_mtime_secs: i64,
+}
+
+/// Bottom-up scan of `profile_root/projects/*`. Pure I/O plus one registry
+/// read; never deletes anything. A directory is a candidate only when its
+/// name both looks like a real project id ([`crate::storage::validate_project_id`])
+/// and has no matching `code_projects` row — a stray file or a directory with
+/// an unsafe name is skipped outright rather than risking misclassification.
+pub async fn census_unregistered_project_dirs(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    now: i64,
+) -> crate::errors::Result<Vec<UnregisteredStoreFinding>> {
+    let registered: std::collections::HashSet<String> = db
+        .list_code_projects(usize::MAX)
+        .await?
+        .into_iter()
+        .map(|project| project.project_id)
+        .collect();
+    let projects_dir = profile_root.join("projects");
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return Ok(Vec::new());
+    };
+    let mut findings = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            // Never a store: a stray file under `projects/` is not part of the
+            // profile-sharded contract and is left alone.
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if crate::storage::validate_project_id(&name).is_err() || registered.contains(&name) {
+            continue;
+        }
+        let data_root = entry.path();
+        let last_write_secs = newest_mtime_secs(&data_root);
+        let size_bytes = dir_size_bytes(&data_root);
+        findings.push(UnregisteredStoreFinding {
+            project_dir_name: name,
+            data_root,
+            age_secs: now.saturating_sub(last_write_secs).max(0),
+            size_bytes,
+            expected_payload_mtime_secs: last_write_secs,
+        });
+    }
+    findings.sort_by(|left, right| left.project_dir_name.cmp(&right.project_dir_name));
+    Ok(findings)
+}
+
+/// The partitioned collection decision over a set of unregistered-store
+/// findings. There is no `Live`/`Relinkable` disposition here — an
+/// unregistered directory has no registry identity to resolve at all — so
+/// every finding is either past the retention window or not.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnregisteredCollectionPlan {
+    pub collect: Vec<UnregisteredStoreFinding>,
+    pub retained_immature: Vec<UnregisteredStoreFinding>,
+}
+
+impl UnregisteredCollectionPlan {
+    /// Total bytes that collecting [`Self::collect`] would reclaim.
+    pub fn collectable_bytes(&self) -> u64 {
+        self.collect
+            .iter()
+            .fold(0u64, |acc, f| acc.saturating_add(f.size_bytes))
+    }
+}
+
+/// Partition findings under a retention window. Pure.
+pub fn plan_unregistered_collection(
+    findings: Vec<UnregisteredStoreFinding>,
+    retention_secs: i64,
+) -> UnregisteredCollectionPlan {
+    let mut plan = UnregisteredCollectionPlan::default();
+    for finding in findings {
+        if finding.age_secs >= retention_secs {
+            plan.collect.push(finding);
+        } else {
+            plan.retained_immature.push(finding);
+        }
+    }
+    plan
+}
+
+/// Deletes every directory in `plan.collect`, holding one write transaction
+/// per store across a final revival recheck (still-unregistered, payload
+/// unchanged, no durable memory rows) through the removal, so the window
+/// between census and delete can never silently destroy a directory that was
+/// registered or written to in between.
+pub async fn execute_unregistered_collection(
+    db: &RegisteredGlobalDb,
+    plan: &UnregisteredCollectionPlan,
+    profile_root: &Path,
+) -> crate::errors::Result<CollectionOutcome> {
+    let mut outcome = CollectionOutcome::default();
+    let Ok(canonical_profile) = profile_root.canonicalize() else {
+        outcome
+            .errors
+            .extend(plan.collect.iter().map(|finding| CollectionFailure {
+                store_id: finding.project_dir_name.clone(),
+                kind: CollectionFailureKind::InspectFailed,
+            }));
+        return Ok(outcome);
+    };
+    for finding in &plan.collect {
+        // Containment + shape: only ever delete an exact, safely-named
+        // `<profile>/projects/<id>` leaf.
+        let expected = profile_root
+            .join("projects")
+            .join(&finding.project_dir_name);
+        if expected != finding.data_root
+            || crate::storage::validate_project_id(&finding.project_dir_name).is_err()
+        {
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.project_dir_name.clone(),
+                kind: CollectionFailureKind::OutsideProfile,
+            });
+            continue;
+        }
+        let Ok(canonical_target) = finding.data_root.canonicalize() else {
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.project_dir_name.clone(),
+                kind: CollectionFailureKind::InspectFailed,
+            });
+            continue;
+        };
+        if canonical_target == canonical_profile
+            || !canonical_target.starts_with(&canonical_profile)
+        {
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.project_dir_name.clone(),
+                kind: CollectionFailureKind::OutsideProfile,
+            });
+            continue;
+        }
+
+        let transaction = db.begin_write_transaction().await?;
+        let mut rows = transaction
+            .query(
+                "SELECT 1 FROM code_projects WHERE project_id = ?1",
+                crate::db::engine::params![finding.project_dir_name.as_str()],
+            )
+            .await
+            .map_err(|error| orphan_db_error("recheck unregistered store identity", error))?;
+        let now_registered = rows
+            .next()
+            .await
+            .map_err(|error| orphan_db_error("read unregistered store identity", error))?
+            .is_some();
+        drop(rows);
+        if now_registered {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| orphan_db_error("rollback newly-registered store", error))?;
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.project_dir_name.clone(),
+                kind: CollectionFailureKind::RegistryChanged,
+            });
+            continue;
+        }
+        if finding.data_root.exists()
+            && newest_mtime_secs(&finding.data_root) != finding.expected_payload_mtime_secs
+        {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| orphan_db_error("rollback revived unregistered payload", error))?;
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.project_dir_name.clone(),
+                kind: CollectionFailureKind::PayloadChanged,
+            });
+            continue;
+        }
+
+        let manifest_bytes = std::fs::read(
+            finding
+                .data_root
+                .join(crate::storage::STORE_MANIFEST_FILENAME),
+        )
+        .ok();
+        let graph_db_relpath = store_graph_db_relpath(manifest_bytes.as_deref());
+        let scratch_root = durable_check_scratch_root(profile_root);
+        match check_durable_memory_rows(&finding.data_root, &graph_db_relpath, &scratch_root).await
+        {
+            DurableMemoryCheck::Empty => {}
+            DurableMemoryCheck::Present | DurableMemoryCheck::Unverifiable => {
+                transaction.rollback().await.map_err(|error| {
+                    orphan_db_error(
+                        "rollback durable-memory-protected unregistered store",
+                        error,
+                    )
+                })?;
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.project_dir_name.clone(),
+                    kind: CollectionFailureKind::DurableDataProtected,
+                });
+                continue;
+            }
+        }
+
+        match std::fs::remove_dir_all(&finding.data_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                transaction.rollback().await.map_err(|error| {
+                    orphan_db_error("rollback failed unregistered removal", error)
+                })?;
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.project_dir_name.clone(),
+                    kind: CollectionFailureKind::RemoveFailed,
+                });
+                continue;
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| orphan_db_error("commit unregistered store fence", error))?;
+
+        outcome.reclaimed_bytes = outcome.reclaimed_bytes.saturating_add(finding.size_bytes);
+        outcome.collected.push(CollectedStore {
+            project_id: finding.project_dir_name.clone(),
+            store_id: finding.project_dir_name.clone(),
+            data_root: finding.data_root.clone(),
+            size_bytes: finding.size_bytes,
+        });
+    }
+    Ok(outcome)
+}
+
+/// The report returned by an unregistered-store sweep.
+#[derive(Debug, Clone, Default)]
+pub struct UnregisteredStoreSweepReport {
+    pub plan: UnregisteredCollectionPlan,
+    pub applied: bool,
+    pub outcome: CollectionOutcome,
+}
+
+/// Typed daemon/doctor entry point for the unregistered-directory class:
+/// census → plan → optionally collect. Mirrors [`sweep_orphan_stores`]'s
+/// dry-run/apply contract exactly, over the disjoint on-disk-only finding
+/// class above.
+pub async fn sweep_unregistered_stores(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    retention_secs: i64,
+    now: i64,
+    apply: bool,
+) -> crate::errors::Result<UnregisteredStoreSweepReport> {
+    let findings = census_unregistered_project_dirs(db, profile_root, now).await?;
+    let plan = plan_unregistered_collection(findings, retention_secs);
+    if !apply {
+        return Ok(UnregisteredStoreSweepReport {
+            plan,
+            applied: false,
+            outcome: CollectionOutcome::default(),
+        });
+    }
+    let outcome = execute_unregistered_collection(db, &plan, profile_root).await?;
+    Ok(UnregisteredStoreSweepReport {
+        plan,
+        applied: true,
+        outcome,
     })
 }
 

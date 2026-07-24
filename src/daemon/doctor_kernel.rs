@@ -472,14 +472,49 @@ pub async fn collect_orphan_store_findings(
     let Ok(report) = report else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    storage_family_read(report
-        .plan
-        .collect
-        .iter()
-        .chain(report.plan.retained_immature.iter())
-        .chain(report.plan.relink.iter())
-        .filter_map(crate::doctor::registry_drift::orphan_store_doctor_finding)
-        .collect())
+    storage_family_read(
+        report
+            .plan
+            .collect
+            .iter()
+            .chain(report.plan.retained_immature.iter())
+            .chain(report.plan.relink.iter())
+            .filter_map(crate::doctor::registry_drift::orphan_store_doctor_finding)
+            .collect(),
+    )
+}
+
+/// Collect the daemon's read-only unregistered-store-directory Doctor
+/// findings for a profile (plan 38 §2's disjoint on-disk-only audit class —
+/// a store directory with no `code_projects` row at all, invisible to the
+/// registry-driven walk [`collect_orphan_store_findings`] performs). Runs the
+/// bottom-up sweep in classification-only mode (no collection).
+pub async fn collect_unregistered_store_findings(
+    global_db: &crate::global_db::RegisteredGlobalDb,
+    profile_root: &Path,
+    retention_secs: i64,
+    now: i64,
+) -> DoctorStorageFamilyReadV1 {
+    let report = crate::retention::orphan_stores::sweep_unregistered_stores(
+        global_db,
+        profile_root,
+        retention_secs,
+        now,
+        false,
+    )
+    .await;
+    let Ok(report) = report else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    storage_family_read(
+        report
+            .plan
+            .collect
+            .iter()
+            .chain(report.plan.retained_immature.iter())
+            .filter_map(crate::doctor::registry_drift::unregistered_store_doctor_finding)
+            .collect(),
+    )
 }
 
 /// Adapter over storage retention/size findings (Storage family).
