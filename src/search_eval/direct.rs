@@ -6,13 +6,16 @@ use thiserror::Error;
 
 #[path = "candidate_output.rs"]
 pub mod candidate_output;
+#[path = "pr10_native.rs"]
+pub mod pr10_native;
 
 pub use candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, GenerateCandidateOutputsOptions,
     GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-    ProductionCandidateOutputV1, WorkloadQueryV1, compute_corpus_digest, compute_workload_digest,
-    generate_candidate_outputs, load_candidate_workload, retrieve_partition_query_bytes,
-    validate_workload_for_tuning, write_generate_outputs,
+    ProductionCandidateOutputV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
+    compute_corpus_digest, compute_workload_digest, generate_candidate_outputs,
+    load_candidate_workload, retrieve_partition_query_bytes, validate_workload_for_tuning,
+    write_generate_outputs,
 };
 
 const DEFAULT_WORKLOAD: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
@@ -217,6 +220,20 @@ fn evaluate_profile(
             output.profile_id
         )));
     }
+    let profile = workload
+        .profile_matrix
+        .iter()
+        .find(|profile| profile.profile_id == output.profile_id)
+        .ok_or_else(|| {
+            SearchEvalError::Contract(format!("unknown output profile_id {}", output.profile_id))
+        })?;
+    let expected_optional_stages = candidate_output::optional_stage_measurements(profile);
+    if output.optional_stages != expected_optional_stages {
+        return Err(SearchEvalError::Contract(format!(
+            "{}:{} optional stage status disagrees with its declared profile",
+            output.profile_id, output.partition
+        )));
+    }
     let mut results = Vec::new();
     let mut seen_queries = BTreeMap::new();
     for row in &output.queries {
@@ -370,7 +387,13 @@ fn evaluate_query(
     let first_useful_rank = row
         .ranked
         .iter()
-        .position(|candidate| anchors.contains(&candidate.anchor))
+        .position(|candidate| {
+            anchors.contains(&candidate.anchor)
+                || candidate
+                    .anchors
+                    .iter()
+                    .any(|candidate_anchor| anchors.contains(candidate_anchor))
+        })
         .map(|rank| rank as u32 + 1);
     let wrong_scope_hits = row
         .ranked
@@ -382,6 +405,10 @@ fn evaluate_query(
         .iter()
         .filter(|candidate| {
             forbidden_anchors.contains(&candidate.anchor)
+                || candidate
+                    .anchors
+                    .iter()
+                    .any(|candidate_anchor| forbidden_anchors.contains(candidate_anchor))
                 || forbidden_documents.contains(&candidate.document_id)
         })
         .count();
@@ -423,6 +450,21 @@ fn evaluate_resources(
     workload: &CandidateWorkloadV1,
     output: &ProductionCandidateOutputV1,
 ) -> DirectEvaluationStatusV1 {
+    if output.resources.len() != 2 {
+        return DirectEvaluationStatusV1::Fail;
+    }
+    let Some(current) = output.resources.get("current") else {
+        return DirectEvaluationStatusV1::Fail;
+    };
+    let Some(ten_x) = output.resources.get("10x") else {
+        return DirectEvaluationStatusV1::Fail;
+    };
+    let Some(expected_ten_x_chunks) = current.eligible_chunks.checked_mul(10) else {
+        return DirectEvaluationStatusV1::Fail;
+    };
+    if current.eligible_chunks == 0 || ten_x.eligible_chunks != expected_ten_x_chunks {
+        return DirectEvaluationStatusV1::Fail;
+    }
     let mut pending = false;
     for (name, budget) in [
         ("current", &workload.resource_budgets.current),
@@ -431,19 +473,36 @@ fn evaluate_resources(
         let Some(sample) = output.resources.get(name) else {
             return DirectEvaluationStatusV1::Fail;
         };
-        if sample.measured_queries != sample.latency_samples_us.len() as u64 {
+        if sample.measured_queries != sample.latency_samples_us.len() as u64
+            || sample.measured_queries != output.queries.len() as u64
+            || sample.latency_samples_us.is_empty()
+        {
             return DirectEvaluationStatusV1::Fail;
         }
         if sample
             .peak_rss_bytes
             .is_some_and(|peak| peak > budget.maximum_peak_rss_bytes)
+            || p99_latency_us(&sample.latency_samples_us)
+                .is_none_or(|p99| p99 > budget.maximum_p99_latency_us)
         {
             return DirectEvaluationStatusV1::Fail;
         }
         match sample.status {
-            OptionalStageMeasurementV1::Pending => pending = true,
-            OptionalStageMeasurementV1::NotRequested => {
-                return DirectEvaluationStatusV1::Fail;
+            ResourceMeasurementStatusV1::Measured => {
+                if sample.pending_reason.is_some() || sample.peak_rss_bytes.is_none() {
+                    return DirectEvaluationStatusV1::Fail;
+                }
+            }
+            ResourceMeasurementStatusV1::Pending => {
+                if sample.peak_rss_bytes.is_some()
+                    || !sample
+                        .pending_reason
+                        .as_deref()
+                        .is_some_and(|reason| !reason.trim().is_empty())
+                {
+                    return DirectEvaluationStatusV1::Fail;
+                }
+                pending = true;
             }
         }
     }
@@ -452,6 +511,13 @@ fn evaluate_resources(
     } else {
         DirectEvaluationStatusV1::Pass
     }
+}
+
+fn p99_latency_us(samples: &[u64]) -> Option<u64> {
+    let mut ordered = samples.to_vec();
+    ordered.sort_unstable();
+    let rank = ordered.len().saturating_mul(99).div_ceil(100);
+    ordered.get(rank.saturating_sub(1)).copied()
 }
 
 const fn pass_if(condition: bool) -> DirectEvaluationStatusV1 {
@@ -480,5 +546,21 @@ fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEva
         DirectEvaluationStatusV1::Pending
     } else {
         DirectEvaluationStatusV1::Pass
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::p99_latency_us;
+
+    #[test]
+    fn p99_uses_nearest_rank_over_real_samples() {
+        assert_eq!(p99_latency_us(&[]), None);
+        assert_eq!(p99_latency_us(&[7]), Some(7));
+        assert_eq!(
+            p99_latency_us(&(1..=100).rev().collect::<Vec<_>>()),
+            Some(99)
+        );
+        assert_eq!(p99_latency_us(&(1..=101).collect::<Vec<_>>()), Some(100));
     }
 }
