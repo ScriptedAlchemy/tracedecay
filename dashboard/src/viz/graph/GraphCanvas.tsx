@@ -170,6 +170,23 @@ export function GraphCanvas({
   const fieldRef = useRef<ActivationField | null>(null);
   if (activation) fieldRef.current = activation;
   else if (!fieldRef.current) fieldRef.current = new ActivationField();
+  // Selection and the select handler are read through refs rather than closed
+  // over, so they can change without re-running the mount effect. They used to
+  // sit in its dependency list, and `onSelect` is an inline arrow at every call
+  // site: every parent render — including one per live SSE pulse — tore the
+  // renderer down and re-ran a 200-iteration ForceAtlas2 layout. That both
+  // burned a layout per event and hid the sleeping render loop behind a
+  // remount. The effect now depends on topology alone.
+  const selectedIdRef = useRef<string | null | undefined>(selectedId);
+  selectedIdRef.current = selectedId;
+  const onSelectRef = useRef<((id: string | null) => void) | undefined>(onSelect);
+  onSelectRef.current = onSelect;
+
+  // Selection is a static repaint, not an animation: recolour once and leave
+  // the loop asleep.
+  useEffect(() => {
+    sigmaRef.current?.refresh();
+  }, [selectedId]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -378,7 +395,7 @@ export function GraphCanvas({
       defaultEdgeColor: rgba(colors.edge, 0.9),
       nodeReducer: (node, data) => {
         if (isManaged(node)) return data;
-        const isSelected = node === selectedId;
+        const isSelected = node === selectedIdRef.current;
         const isHovered = node === hovered;
         const isNeighbor =
           hovered != null && (neighborsOf.get(node)?.includes(hovered) === true || isHovered);
@@ -472,7 +489,7 @@ export function GraphCanvas({
     });
     renderer.on('clickNode', ({ node }) => {
       if (isManaged(node)) return;
-      onSelect?.(node);
+      onSelectRef.current?.(node);
       // Traveling activation: the struck node fires now; its neighborhood
       // fires one synaptic delay later (real caller/reference edges only).
       field.strike([node], 1);
@@ -481,7 +498,7 @@ export function GraphCanvas({
       else setTimeout(() => { field.strike(neighbors, 0.55); wake(); }, 140);
       wake();
     });
-    renderer.on('clickStage', () => onSelect?.(null));
+    renderer.on('clickStage', () => onSelectRef.current?.(null));
 
     // ---- glow companions ------------------------------------------------
     // Every point is a body with falloff, not a flat disc: a tight corona in
@@ -625,14 +642,13 @@ export function GraphCanvas({
         raf = requestAnimationFrame(step);
       }
     };
-    // A caller-owned field (BrainPage's SSE-driven activation, say) is struck
-    // from entirely outside this closure — a React effect calls
-    // `field.strike(...)` in response to a real event with no knowledge of
-    // this render loop. Without this, that strike lands on the field but the
-    // loop already went to sleep while cold and nothing here ever pokes it
-    // awake again: the heat sits invisible and never decays either, since
-    // `field.tick` only runs inside `step`. Subscribing turns every real
-    // strike, wherever it originates, into a wake call.
+    // A caller-owned field is struck from entirely outside this closure: the
+    // Brain's SSE effect calls `field.strike(...)` when a real event lands,
+    // with no knowledge of this render loop. If the loop is asleep (which,
+    // correctly, it is whenever the field is cold) that heat would sit
+    // undrawn and undecayed forever. Subscribing turns every real strike,
+    // wherever it originates, into exactly one wake — and nothing else can
+    // produce one, because the field has no clock.
     const unsubscribeField = field.subscribe(wake);
     // One static composition of the resting field, so the graph is fully
     // rendered before anything ever fires.
@@ -676,7 +692,7 @@ export function GraphCanvas({
       renderer.kill();
       sigmaRef.current = null;
     };
-  }, [nodes, edges, selectedId, onSelect]);
+  }, [nodes, edges]);
 
   if (nodes.length === 0) {
     return (

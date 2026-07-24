@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { familyLabel, formatEventAge, summarizeActivity } from './activitySummary.ts';
+import {
+  ageTickIntervalMs,
+  familyLabel,
+  formatDuration,
+  summarizeActivity,
+} from './activitySummary.ts';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 
 function pulse(
@@ -12,17 +17,26 @@ function pulse(
 
 describe('summarizeActivity', () => {
   it('reports an empty ring honestly rather than a zero-filled shape', () => {
-    expect(summarizeActivity([])).toEqual({ total: 0, families: [], ratePerMinute: null });
+    expect(summarizeActivity([], 60_000)).toEqual({
+      total: 0,
+      families: [],
+      peak: null,
+      spanMs: null,
+      ratePerMinute: 0,
+    });
   });
 
   it('ranks families by count, most active first, ties broken alphabetically', () => {
-    const summary = summarizeActivity([
-      pulse('heartbeat', 1_000),
-      pulse('project_registry_changed', 1_100),
-      pulse('heartbeat', 1_200),
-      pulse('storage_telemetry_invalidated', 1_300),
-      pulse('heartbeat', 1_400),
-    ]);
+    const summary = summarizeActivity(
+      [
+        pulse('heartbeat', 1_000),
+        pulse('project_registry_changed', 1_100),
+        pulse('heartbeat', 1_200),
+        pulse('storage_telemetry_invalidated', 1_300),
+        pulse('heartbeat', 1_400),
+      ],
+      2_000,
+    );
     expect(summary.total).toBe(5);
     expect(summary.families).toEqual([
       { family: 'heartbeat', label: 'heartbeat', count: 3 },
@@ -31,24 +45,20 @@ describe('summarizeActivity', () => {
     ]);
   });
 
-  it('leaves the rate unmeasurable for a single pulse rather than fabricating a number', () => {
-    const summary = summarizeActivity([pulse('heartbeat', 1_000)]);
-    expect(summary.ratePerMinute).toBeNull();
+  it('measures a single recent pulse against the trailing window', () => {
+    const summary = summarizeActivity([pulse('heartbeat', 1_000)], 2_000);
+    expect(summary.ratePerMinute).toBe(1);
+    expect(summary.spanMs).toBeNull();
   });
 
-  it('leaves the rate unmeasurable when every pulse landed in the same instant', () => {
-    const summary = summarizeActivity([pulse('heartbeat', 1_000), pulse('heartbeat', 1_000)]);
-    expect(summary.ratePerMinute).toBeNull();
-  });
-
-  it('measures a real rate across the ring\'s own observed span', () => {
-    // Two intervals (three pulses) spanning 30s: 2 intervals / 30s * 60s = 4/min.
-    const summary = summarizeActivity([
-      pulse('heartbeat', 0),
-      pulse('heartbeat', 15_000),
-      pulse('heartbeat', 30_000),
-    ]);
-    expect(summary.ratePerMinute).toBeCloseTo(4, 5);
+  it('drops old pulses from the trailing rate without deleting ring history', () => {
+    const summary = summarizeActivity(
+      [pulse('heartbeat', 1_000), pulse('heartbeat', 61_000)],
+      62_000,
+    );
+    expect(summary.total).toBe(2);
+    expect(summary.spanMs).toBe(60_000);
+    expect(summary.ratePerMinute).toBe(1);
   });
 });
 
@@ -65,17 +75,25 @@ describe('familyLabel', () => {
   });
 });
 
-describe('formatEventAge', () => {
+describe('formatDuration', () => {
   it('renders an em dash for no observation rather than a fabricated age', () => {
-    expect(formatEventAge(null)).toBe('—');
-    expect(formatEventAge(-5)).toBe('—');
-    expect(formatEventAge(Number.NaN)).toBe('—');
+    expect(formatDuration(null)).toBe('—');
+    expect(formatDuration(-5)).toBe('—');
+    expect(formatDuration(Number.NaN)).toBe('—');
   });
 
   it('steps through the relative-time vocabulary', () => {
-    expect(formatEventAge(500)).toBe('just now');
-    expect(formatEventAge(45_000)).toBe('45s ago');
-    expect(formatEventAge(120_000)).toBe('2m ago');
-    expect(formatEventAge(7_200_000)).toBe('2h ago');
+    expect(formatDuration(500)).toBe('<1s');
+    expect(formatDuration(45_000)).toBe('45s');
+    expect(formatDuration(120_000)).toBe('2m');
+    expect(formatDuration(7_200_000)).toBe('2h');
+  });
+});
+
+describe('ageTickIntervalMs', () => {
+  it('slows the clock as the displayed age loses resolution', () => {
+    expect(ageTickIntervalMs(5_000)).toBe(1_000);
+    expect(ageTickIntervalMs(120_000)).toBe(15_000);
+    expect(ageTickIntervalMs(7_200_000)).toBe(60_000);
   });
 });
