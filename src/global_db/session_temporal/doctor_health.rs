@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::db::engine::{Error as EngineError, Executor};
+use crate::db::engine::{Error as EngineError, Executor, QueryExecutor};
 use crate::global_db::RegisteredGlobalDb;
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
@@ -667,12 +667,14 @@ pub(crate) async fn session_temporal_doctor_health_at(
 }
 
 impl RegisteredGlobalDb {
-    /// Produces a redacted, non-mutating temporal health snapshot for Doctor.
-    ///
-    /// Delegates to [`session_temporal_doctor_health_at`] so diagnosis never
-    /// uses the authority-held writer lane connection.
+    /// Produces a redacted, non-mutating temporal health snapshot through the
+    /// retained registered reader pool.
     pub(crate) async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
-        session_temporal_doctor_health_at(self.db_path()).await
+        let snapshot = match self.read_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return unavailable_report(classify_engine_error(&error)),
+        };
+        diagnose_snapshot(&snapshot).await
     }
 
     /// Rebuilds only temporal FTS derived indexes after an explicit request.
@@ -686,7 +688,7 @@ impl RegisteredGlobalDb {
         &self,
         apply: bool,
     ) -> crate::db::engine::Result<(usize, usize)> {
-        let report = session_temporal_doctor_health_at(self.db_path()).await;
+        let report = self.session_temporal_doctor_health().await;
         if report.status != SessionTemporalHealthStatus::Complete {
             return Err(repair_refused(
                 "temporal health is unavailable, partial, or locked",
@@ -899,6 +901,127 @@ fn diagnose_connection(conn: &RusqliteConnection) -> SessionTemporalHealthReport
     }
 }
 
+async fn diagnose_snapshot(conn: &impl QueryExecutor) -> SessionTemporalHealthReport {
+    let inventory = match snapshot_schema_inventory(conn).await {
+        Ok(inventory) => inventory,
+        Err(error) => return unavailable_report(classify_engine_error(&error)),
+    };
+    let temporal_tables = inventory
+        .tables
+        .iter()
+        .filter(|name| name.starts_with("session_"))
+        .count();
+    if temporal_tables == 0 {
+        return SessionTemporalHealthReport {
+            status: SessionTemporalHealthStatus::Unavailable,
+            findings: vec![finding(
+                SessionTemporalHealthFindingKind::MigrationGap,
+                required_table_names().count() as u64,
+            )],
+            reason: None,
+        };
+    }
+
+    let mut status = SessionTemporalHealthStatus::Complete;
+    let mut findings = Vec::new();
+    let missing_tables = required_table_names()
+        .filter(|table| !inventory.tables.contains(*table))
+        .count() as u64;
+    if missing_tables > 0 {
+        status = SessionTemporalHealthStatus::Partial;
+        findings.push(finding(
+            SessionTemporalHealthFindingKind::MigrationGap,
+            missing_tables,
+        ));
+    } else {
+        match snapshot_schema_version(conn).await {
+            Ok(Some(version)) if version == SESSION_TEMPORAL_SCHEMA_VERSION => {}
+            Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::MigrationGap, 1)),
+            Err(error) => {
+                if is_engine_locked(&error) {
+                    return unavailable_report(SessionTemporalHealthStatus::Locked);
+                }
+                status = SessionTemporalHealthStatus::Partial;
+            }
+        }
+    }
+
+    let missing_triggers = REQUIRED_TRIGGERS
+        .iter()
+        .filter(|(name, expected)| match inventory.triggers.get(*name) {
+            Some(actual) => normalize_sql(actual) != normalize_sql(expected),
+            None => true,
+        })
+        .count() as u64;
+    if missing_triggers > 0 {
+        findings.push(finding(
+            SessionTemporalHealthFindingKind::TriggerAuditDrift,
+            missing_triggers,
+        ));
+    }
+
+    let missing_indexes = REQUIRED_INDEXES
+        .iter()
+        .filter(|name| !inventory.indexes.contains(**name))
+        .count() as u64;
+    if missing_indexes > 0 {
+        status = SessionTemporalHealthStatus::Partial;
+        merge_finding(
+            &mut findings,
+            SessionTemporalHealthFindingKind::MigrationGap,
+            missing_indexes,
+        );
+    }
+
+    match snapshot_column_shape_drift(conn, &inventory).await {
+        Ok(0) => {}
+        Ok(drift) => {
+            status = SessionTemporalHealthStatus::Partial;
+            merge_finding(
+                &mut findings,
+                SessionTemporalHealthFindingKind::MigrationGap,
+                drift,
+            );
+        }
+        Err(error) if is_engine_locked(&error) => {
+            return unavailable_report(SessionTemporalHealthStatus::Locked);
+        }
+        Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
+    }
+
+    for check in CHECKS {
+        if check
+            .tables
+            .iter()
+            .any(|table| !inventory.tables.contains(*table))
+        {
+            status = SessionTemporalHealthStatus::Partial;
+            continue;
+        }
+        match snapshot_count(conn, check.sql).await {
+            Ok(0) => {}
+            Ok(value) => merge_finding(&mut findings, check.kind, value),
+            Err(error) if is_fts_finding(check.kind) && is_fts_virtual_table_corruption(&error) => {
+                merge_finding(&mut findings, check.kind, 1);
+            }
+            Err(error) if is_engine_locked(&error) => {
+                return SessionTemporalHealthReport {
+                    status: SessionTemporalHealthStatus::Locked,
+                    findings,
+                    reason: None,
+                };
+            }
+            Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
+        }
+    }
+    findings.sort_by_key(SessionTemporalHealthFinding::kind);
+    SessionTemporalHealthReport {
+        status,
+        findings,
+        reason: None,
+    }
+}
+
 struct SchemaInventory {
     tables: BTreeSet<String>,
     indexes: BTreeSet<String>,
@@ -942,6 +1065,43 @@ fn schema_inventory(conn: &RusqliteConnection) -> Result<SchemaInventory, rusqli
     })
 }
 
+async fn snapshot_schema_inventory(
+    conn: &impl QueryExecutor,
+) -> crate::db::engine::Result<SchemaInventory> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger')",
+            (),
+        )
+        .await?;
+    let mut tables = BTreeSet::new();
+    let mut indexes = BTreeSet::new();
+    let mut triggers = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let kind: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let sql: String = row.get(2)?;
+        match kind.as_str() {
+            "table" => {
+                tables.insert(name);
+            }
+            "index" => {
+                indexes.insert(name);
+            }
+            "trigger" => {
+                triggers.insert(name, sql);
+            }
+            _ => {}
+        }
+    }
+    Ok(SchemaInventory {
+        tables,
+        indexes,
+        triggers,
+    })
+}
+
 fn column_shape_drift(
     conn: &RusqliteConnection,
     inventory: &SchemaInventory,
@@ -956,6 +1116,32 @@ fn column_shape_drift(
         let mut actual = Vec::new();
         for row in rows {
             actual.push(row?);
+        }
+        if actual.as_slice() != expected {
+            drift = drift.saturating_add(1).min(MAX_FINDING_COUNT);
+        }
+    }
+    Ok(drift)
+}
+
+async fn snapshot_column_shape_drift(
+    conn: &impl QueryExecutor,
+    inventory: &SchemaInventory,
+) -> crate::db::engine::Result<u64> {
+    let mut drift = 0_u64;
+    for &(table, expected) in TEMPORAL_TABLE_COLUMNS {
+        if !inventory.tables.contains(table) {
+            continue;
+        }
+        let mut rows = conn
+            .query(
+                "SELECT name FROM pragma_table_info(?1) ORDER BY cid",
+                [table],
+            )
+            .await?;
+        let mut actual = Vec::new();
+        while let Some(row) = rows.next().await? {
+            actual.push(row.get::<String>(0)?);
         }
         if actual.as_slice() != expected {
             drift = drift.saturating_add(1).min(MAX_FINDING_COUNT);
@@ -980,8 +1166,35 @@ fn schema_version(conn: &RusqliteConnection) -> Result<Option<i64>, rusqlite::Er
     .optional()
 }
 
+async fn snapshot_schema_version(
+    conn: &impl QueryExecutor,
+) -> crate::db::engine::Result<Option<i64>> {
+    let mut rows = conn
+        .query(
+            "SELECT version FROM session_temporal_schema_migrations
+             WHERE name = 'session-temporal'",
+            (),
+        )
+        .await?;
+    rows.next().await?.map(|row| row.get(0)).transpose()
+}
+
 fn count(conn: &RusqliteConnection, sql: &str) -> Result<u64, rusqlite::Error> {
     let value: Option<i64> = conn.query_row(sql, [], |row| row.get(0)).optional()?;
+    Ok(value
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(0)
+        .min(MAX_FINDING_COUNT))
+}
+
+async fn snapshot_count(conn: &impl QueryExecutor, sql: &str) -> crate::db::engine::Result<u64> {
+    let mut rows = conn.query(sql, ()).await?;
+    let value = rows
+        .next()
+        .await?
+        .map(|row| row.get::<Option<i64>>(0))
+        .transpose()?
+        .flatten();
     Ok(value
         .and_then(|value| u64::try_from(value).ok())
         .unwrap_or(0)
@@ -1125,6 +1338,19 @@ fn classify_rusqlite_error_raw(error: &rusqlite::Error) -> SessionTemporalHealth
     } else {
         SessionTemporalHealthStatus::Unavailable
     }
+}
+
+fn classify_engine_error(error: &EngineError) -> SessionTemporalHealthStatus {
+    if is_engine_locked(error) {
+        SessionTemporalHealthStatus::Locked
+    } else {
+        SessionTemporalHealthStatus::Unavailable
+    }
+}
+
+fn is_engine_locked(error: &EngineError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("locked") || message.contains("busy")
 }
 
 fn is_rusqlite_locked(error: &rusqlite::Error) -> bool {
