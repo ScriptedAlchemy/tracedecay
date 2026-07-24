@@ -206,6 +206,65 @@ fn native_record_identity_is_independent_of_generation_and_ordering_position() {
 }
 
 #[test]
+fn claude_native_identity_survives_transcript_relocation() {
+    let native_record_id = ObservationId::new("message.fixture").unwrap();
+    let identity = |source_key: &str, generation, start, end| {
+        ClaudeObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_source(
+                SessionId::new("session.fixture").unwrap(),
+                SessionId::new(source_key).unwrap(),
+            )
+            .unwrap(),
+            ObservationScopeV1::Profile,
+            ClaudeFileGenerationV1::new(generation).unwrap(),
+            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            native_record_id.clone(),
+        )
+        .unwrap()
+    };
+
+    let original = identity("source.original", 1, 10, 11);
+    let relocated = identity("source.relocated", 2, 40, 41);
+    assert_eq!(
+        CanonicalObservationIdV1::derive(&original).unwrap(),
+        CanonicalObservationIdV1::derive(&relocated).unwrap()
+    );
+
+    let other_session = ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationSourceIdentityV1::for_source(
+            SessionId::new("session.other").unwrap(),
+            SessionId::new("source.relocated").unwrap(),
+        )
+        .unwrap(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(2).unwrap(),
+        ClaudeByteRangeV1::new(40, 41).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        native_record_id,
+    )
+    .unwrap();
+    assert_ne!(
+        CanonicalObservationIdV1::derive(&original).unwrap(),
+        CanonicalObservationIdV1::derive(&other_session).unwrap()
+    );
+
+    let other_record = ClaudeObservationIdentityMaterialV1::for_native_record(
+        original.source().clone(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(2).unwrap(),
+        ClaudeByteRangeV1::new(40, 41).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new("message.other").unwrap(),
+    )
+    .unwrap();
+    assert_ne!(
+        CanonicalObservationIdV1::derive(&original).unwrap(),
+        CanonicalObservationIdV1::derive(&other_record).unwrap()
+    );
+}
+
+#[test]
 fn canonical_envelope_preserves_typed_facts_without_inventing_relations() {
     let range = ClaudeByteRangeV1::new(4, 5).unwrap();
     let envelope = CanonicalObservationEnvelopeV1::new(

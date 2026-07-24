@@ -494,6 +494,25 @@ impl CanonicalObservationIdV1 {
     ) -> Result<Self, ObservationContractError> {
         material.validate()?;
         if is_default_observation_provider(material.source().provider()) {
+            if let Some(native_record_id) = material.native_record_id() {
+                #[derive(Serialize)]
+                struct ClaudeNativeIdentity<'a> {
+                    provider: &'a ProviderId,
+                    session_id: &'a SessionId,
+                    scope: &'a ObservationScopeV1,
+                    native_record_id: &'a ObservationId,
+                }
+
+                return Self::new(domain_digest(
+                    CLAUDE_OBSERVATION_ID_DOMAIN,
+                    &ClaudeNativeIdentity {
+                        provider: material.source().provider(),
+                        session_id: material.source().session_id(),
+                        scope: material.scope(),
+                        native_record_id,
+                    },
+                )?);
+            }
             return Self::new(domain_digest(CLAUDE_OBSERVATION_ID_DOMAIN, material)?);
         }
         if let Some(native_record_id) = material.native_record_id() {

@@ -830,6 +830,7 @@ pub(crate) async fn ingest_source_with_observations_with_admission(
         }
         attempted_sources = attempted_sources.saturating_add(1);
         let source_budget = remaining_bytes.min(STRICT_JSONL_BATCH_BYTES);
+        remaining_bytes = remaining_bytes.saturating_sub(source_budget);
         let outcome = match process_source(&processing_context, &path, Some(source_budget)).await {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -845,7 +846,13 @@ pub(crate) async fn ingest_source_with_observations_with_admission(
                 continue;
             }
         };
-        remaining_bytes = remaining_bytes.saturating_sub(outcome.source_bytes_scanned);
+        if outcome.source_bytes_scanned <= source_budget {
+            remaining_bytes =
+                remaining_bytes.saturating_add(source_budget - outcome.source_bytes_scanned);
+        } else {
+            remaining_bytes =
+                remaining_bytes.saturating_sub(outcome.source_bytes_scanned - source_budget);
+        }
         stats = stats.merge(outcome);
     }
     if deferred > 0 || attempted_sources < scheduled_source_count {

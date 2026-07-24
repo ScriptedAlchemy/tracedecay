@@ -13,35 +13,14 @@ pub(super) fn claude_source_id(path: &Path) -> Option<String> {
 }
 
 pub(super) fn claude_observation_source_id(path: &Path) -> String {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    digest_claude_observation_source_id(
-        claude_observation_source_platform(),
-        &crate::os_str_bytes::native_os_str_bytes(canonical.as_os_str()),
-    )
+    let transcript_id = path.file_stem().unwrap_or_else(|| path.as_os_str());
+    digest_claude_observation_source_id(claude_source_component(transcript_id).as_bytes())
 }
 
-#[cfg(unix)]
-fn claude_observation_source_platform() -> &'static str {
-    "unix-path"
-}
-
-#[cfg(windows)]
-fn claude_observation_source_platform() -> &'static str {
-    "windows-path-utf16le"
-}
-
-#[cfg(not(any(unix, windows)))]
-fn claude_observation_source_platform() -> &'static str {
-    "rust-path"
-}
-
-fn digest_claude_observation_source_id(platform: &str, native_path: &[u8]) -> String {
+fn digest_claude_observation_source_id(native_transcript_id: &[u8]) -> String {
     format!(
         "{CLAUDE_OBSERVATION_SOURCE_ID_PREFIX}-{}",
-        canonical_framed_sha256(
-            CLAUDE_OBSERVATION_SOURCE_ID_DOMAIN,
-            &[platform.as_bytes(), native_path],
-        )
+        canonical_framed_sha256(CLAUDE_OBSERVATION_SOURCE_ID_DOMAIN, &[native_transcript_id])
     )
 }
 

@@ -341,22 +341,32 @@ fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
 
 #[cfg(unix)]
 #[test]
-fn observation_source_ids_are_private_and_distinguish_same_named_transcripts() {
+fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
     use std::os::unix::ffi::OsStrExt;
 
     let root = tempfile::tempdir().unwrap();
     let first = root.path().join("account-one/session.jsonl");
     let second = root.path().join("account-two/session.jsonl");
+    let other = root.path().join("account-two/other-session.jsonl");
     std::fs::create_dir_all(first.parent().unwrap()).unwrap();
     std::fs::create_dir_all(second.parent().unwrap()).unwrap();
     std::fs::write(&first, "").unwrap();
     std::fs::write(&second, "").unwrap();
+    std::fs::write(&other, "").unwrap();
 
     let first_identity = identify_claude_source(&first).unwrap();
     let second_identity = identify_claude_source(&second).unwrap();
+    let other_identity = identify_claude_source(&other).unwrap();
     assert_eq!(first_identity.session_id, second_identity.session_id);
-    assert_ne!(first_identity.source_id, second_identity.source_id);
-    for (identity, path) in [(&first_identity, &first), (&second_identity, &second)] {
+    assert_eq!(first_identity.source_id, second_identity.source_id);
+    assert_ne!(first_identity.source_id, other_identity.source_id);
+    assert!(!first_identity.source_id.contains("session"));
+    assert!(!other_identity.source_id.contains("other-session"));
+    for (identity, path) in [
+        (&first_identity, &first),
+        (&second_identity, &second),
+        (&other_identity, &other),
+    ] {
         let canonical = std::fs::canonicalize(path).unwrap();
         let raw_hex = hex::encode(canonical.as_os_str().as_bytes());
         assert!(!identity.source_id.contains(&raw_hex));
