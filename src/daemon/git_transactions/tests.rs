@@ -430,6 +430,7 @@ impl GitIndexRecoveryExecutor for FakeNative {
 struct TestPolicy {
     allow: Arc<std::sync::atomic::AtomicBool>,
     calls: Arc<AtomicUsize>,
+    evaluated_at: Arc<Mutex<Option<UtcMicros>>>,
 }
 
 impl TestPolicy {
@@ -437,6 +438,7 @@ impl TestPolicy {
         Self {
             allow: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             calls: Arc::new(AtomicUsize::new(0)),
+            evaluated_at: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -460,7 +462,11 @@ impl GitIndexPolicyRecheckPort for TestPolicy {
             policy_revision: request.authority.policy.revision,
             policy_digest: request.proof.policy_digest.clone(),
             configuration_digest: request.proof.configuration_digest.clone(),
-            evaluated_at: request.observed_at,
+            evaluated_at: self
+                .evaluated_at
+                .lock()
+                .expect("policy evaluated-at")
+                .unwrap_or(request.observed_at),
         })
     }
 }
@@ -531,6 +537,7 @@ struct TestHarness {
     discard_calls: Arc<AtomicUsize>,
     allow: Arc<std::sync::atomic::AtomicBool>,
     policy_calls: Arc<AtomicUsize>,
+    policy_evaluated_at: Arc<Mutex<Option<UtcMicros>>>,
 }
 
 fn test_store(directory: &tempfile::TempDir) -> DaemonGitIndexTransactionStore {
@@ -623,6 +630,7 @@ fn test_port(
     let policy = TestPolicy::allowing();
     let allow = Arc::clone(&policy.allow);
     let policy_calls = Arc::clone(&policy.calls);
+    let policy_evaluated_at = Arc::clone(&policy.evaluated_at);
     TestHarness {
         _directory: directory,
         port: DaemonGitIndexTransactionPort::new(
@@ -638,6 +646,7 @@ fn test_port(
         discard_calls,
         allow,
         policy_calls,
+        policy_evaluated_at,
     }
 }
 
@@ -769,6 +778,27 @@ fn rejected_admitted_apply_discards_ephemeral_preview_material() {
     assert!(
         result.is_ok(),
         "a pre-native denial receives a no-change receipt"
+    );
+    assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
+    let harness = test_port([], []);
+    *harness
+        .policy_evaluated_at
+        .lock()
+        .expect("policy evaluated-at") = Some(harness.request.context.deadline().expires_at);
+
+    let result = harness
+        .port
+        .apply(&harness.request)
+        .expect("elapsed deadline is a durable no-change result");
+
+    assert_eq!(
+        result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
