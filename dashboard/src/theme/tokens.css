@@ -113,6 +113,12 @@
    * The recipe is fixed and tiny: one inset hairline of light along the top
    * edge, one soft shadow below. Never a bevel, never a stack. */
   --raw-well: oklch(0.118 0.0035 262);
+  /* A raised face catches the light, so it moves AWAY from the substrate in
+   * whichever direction "toward the lamp" means for the current theme. On
+   * graphite that is upward in lightness; on paper it is upward too, which is
+   * why this cannot simply be surface-2 -- on the light ramp surface-2 is
+   * DARKER than the panel it sits on and a raised readout read as a recess. */
+  --raw-raised: oklch(0.228 0.004 260);
   --shadow-well:
     inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
   --shadow-raised:
@@ -189,6 +195,7 @@
   /* Light: a well is a shallow tray cut into paper, so it goes DOWN in
    * lightness from surface-0 by about the same step the dark theme goes. */
   --raw-well: oklch(0.945 0.0018 260);
+  --raw-raised: oklch(1 0 0);
 }
 
 [data-contrast='more'] {
@@ -205,6 +212,7 @@
    * a well is told apart by its border alone, which is what high contrast
    * asked for. */
   --raw-well: var(--raw-surface-0);
+  --raw-raised: var(--raw-surface-0);
   --shadow-well: none;
   --shadow-raised: none;
 }
