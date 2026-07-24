@@ -1,4 +1,5 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
+import { Chart } from '../../viz/chart/Chart.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { SavingsOverviewPayloadSchema } from './contracts.ts';
@@ -54,6 +55,36 @@ export function CostsPage() {
               />
             </div>
             <OverviewGrid>
+              <OverviewCard title="Savings by window">
+                {ledger ? (
+                  <Chart
+                    ariaLabel="Saved tokens across today, last 7 days, last 30 days, and all time; the stat tiles above carry the exact values"
+                    height={180}
+                    option={{
+                      xAxis: {
+                        type: 'category',
+                        data: ['today', '7d', '30d', 'all time'],
+                      },
+                      yAxis: { type: 'value' },
+                      series: [
+                        {
+                          type: 'bar',
+                          barWidth: 22,
+                          itemStyle: { borderRadius: [3, 3, 0, 0] },
+                          data: [
+                            ledger.today.saved_tokens,
+                            ledger.last_7d.saved_tokens,
+                            ledger.last_30d.saved_tokens,
+                            ledger.all_time.saved_tokens,
+                          ],
+                        },
+                      ],
+                    }}
+                  />
+                ) : (
+                  <p className="text-2xs text-text-muted">ledger unavailable</p>
+                )}
+              </OverviewCard>
               <OverviewCard title="Actual spend (turn ledger)">
                 {data.turns.available ? (
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular">
