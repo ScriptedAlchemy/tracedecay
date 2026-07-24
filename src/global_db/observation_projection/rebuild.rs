@@ -248,9 +248,22 @@ async fn stage_projection_alias_batch_transaction(
         .await
         .map_err(|error| storage("read projection alias batch", error))?
     {
-        aliases_staged_through = row
+        let sequence = row
             .get(0)
             .map_err(|error| storage("read projection alias batch", error))?;
+        let expected = aliases_staged_through.checked_add(1).ok_or_else(|| {
+            storage_message(
+                "stage projection alias batch",
+                "observation sequence overflow before alias frontier",
+            )
+        })?;
+        if sequence != expected {
+            return Err(storage_message(
+                "stage projection alias batch",
+                "observation sequence gap before alias frontier",
+            ));
+        }
+        aliases_staged_through = sequence;
     }
     drop(rows);
     if aliases_staged_through < job.frontier && aliases_staged_through == job.aliases_staged_through
@@ -343,6 +356,19 @@ async fn stage_projection_rebuild_batch_transaction(
     let mut projected_rows = job.projected_rows;
     let mut skipped_observations = job.skipped_observations;
     for (sequence, observation) in page {
+        let sequence_i64 = sequence_i64(sequence)?;
+        let expected = staged_through.checked_add(1).ok_or_else(|| {
+            storage_message(
+                "stage projection rebuild batch",
+                "observation sequence overflow before rebuild frontier",
+            )
+        })?;
+        if sequence_i64 != expected {
+            return Err(storage_message(
+                "stage projection rebuild batch",
+                "observation sequence gap before rebuild frontier",
+            ));
+        }
         let mut effect =
             derive_projection_for_rebuild(transaction, &observation, &job.generation).await?;
         write_effect_converging_collisions(
@@ -364,7 +390,7 @@ async fn stage_projection_rebuild_batch_transaction(
                 skipped_observations = skipped_observations.saturating_add(1);
             }
         }
-        staged_through = sequence_i64(sequence)?;
+        staged_through = sequence_i64;
     }
     if staged_through < job.frontier && staged_through == job.staged_through {
         return Err(storage_message(

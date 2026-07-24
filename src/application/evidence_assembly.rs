@@ -8,7 +8,9 @@ use thiserror::Error;
 use tracedecay_application::feedback::{
     FeedbackCompletedPublicationV1, FeedbackCycleExecutionResult,
 };
-use tracedecay_application::{DisclosureClass, RequestContext as ProductRequestContext};
+use tracedecay_application::{
+    DisclosureClass, RequestAdmission, RequestContext as ProductRequestContext,
+};
 use tracedecay_domain::{
     DurableObservationV1, FactOwnerV1, ManifestDigest, RetrievalAnchorId, RetrievalAnchorRecordV2,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, canonical_sha256,
@@ -21,8 +23,8 @@ use crate::application::session::{
     SessionTemporalExecutionPort, SessionTemporalQuery,
 };
 use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
-use crate::db::Database;
 use crate::db::engine::{Executor, QueryExecutor, Rows, Value, params};
+use crate::db::{Database, DatabaseAccessMode};
 use crate::global_db::RegisteredGlobalDb;
 use crate::query::temporal::TemporalKernelResult;
 use crate::query::temporal::context::VersionedTokenEstimator;
@@ -925,6 +927,16 @@ pub(crate) struct RuntimeEvidenceAssemblyStore {
     authority: crate::db::DatabaseAuthority,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EvidenceAssemblyAnchorResolutionV1 {
+    Resolved {
+        record: tracedecay_domain::RetrievalAnchorRecordV3,
+        derivatives: Vec<tracedecay_store::RetrievalAnchorDerivativeV1>,
+    },
+    Tombstone(tracedecay_store::RetrievalAnchorTombstoneV1),
+    Unavailable,
+}
+
 impl RuntimeEvidenceAssemblyStore {
     pub(crate) fn new(
         profile_id: tracedecay_domain::UserProfileId,
@@ -975,6 +987,31 @@ impl RuntimeEvidenceAssemblyStore {
             return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
         }
         Ok(())
+    }
+
+    pub(crate) async fn resolve_anchor(
+        &self,
+        context: &ProductRequestContext,
+        owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
+        anchor_id: &RetrievalAnchorId,
+    ) -> tracedecay_store::EvidenceAssemblyStoreResult<EvidenceAssemblyAnchorResolutionV1> {
+        authorize_runtime_anchor_resolution_at(context, owner, evidence_runtime_now())?;
+        self.validate_owner(owner)?;
+        anchor_id.validate().map_err(evidence_runtime_invalid)?;
+
+        let anchor_owner = tracedecay_store::RetrievalAnchorOwnerV1::V3(owner.owner.clone());
+        let database =
+            Database::publish_runtime(self.runtime.clone(), DatabaseAccessMode::ReadOnly)
+                .await
+                .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+        if database.canonical_database_path() != self.authority.canonical_database_path() {
+            return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
+        }
+        let snapshot = database
+            .begin_engine_read_snapshot("resolve evidence assembly anchor")
+            .await
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+        resolve_anchor_snapshot(&snapshot, anchor_id, &anchor_owner).await
     }
 
     fn read(
@@ -1040,6 +1077,200 @@ impl RuntimeEvidenceAssemblyStore {
         }
         Ok(result)
     }
+}
+
+async fn resolve_anchor_snapshot(
+    snapshot: &(impl QueryExecutor + Sync),
+    anchor_id: &RetrievalAnchorId,
+    owner: &tracedecay_store::RetrievalAnchorOwnerV1,
+) -> tracedecay_store::EvidenceAssemblyStoreResult<EvidenceAssemblyAnchorResolutionV1> {
+    let owner_json = serde_json::to_string(owner)
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+    let mut rows = snapshot
+        .query(
+            "SELECT anchor.anchor_json, anchor.projection_generation,
+                    disposition.disposition_id, disposition.state,
+                    disposition.superseded_by, disposition.reason_class,
+                    disposition.effective_at, disposition.record_json
+             FROM retrieval_anchors AS anchor
+             LEFT JOIN retrieval_anchor_dispositions AS disposition
+               ON disposition.sequence = (
+                   SELECT latest.sequence
+                   FROM retrieval_anchor_dispositions AS latest
+                   WHERE latest.anchor_id = anchor.anchor_id
+                     AND latest.owner_json = anchor.owner_json
+                   ORDER BY latest.sequence DESC LIMIT 1
+               )
+             WHERE anchor.anchor_id = ?1 AND anchor.owner_json = ?2",
+            params![anchor_id.as_str(), owner_json.as_str()],
+        )
+        .await
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?
+    else {
+        return Ok(EvidenceAssemblyAnchorResolutionV1::Unavailable);
+    };
+    let anchor_json: String = row
+        .get(0)
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+    let projection_generation: String = row
+        .get(1)
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+    let disposition_columns = (
+        row.get::<Option<String>>(2),
+        row.get::<Option<String>>(3),
+        row.get::<Option<String>>(4),
+        row.get::<Option<String>>(5),
+        row.get::<Option<i64>>(6),
+        row.get::<Option<String>>(7),
+    );
+    drop(rows);
+
+    let disposition = match disposition_columns {
+        (Ok(None), Ok(None), Ok(None), Ok(None), Ok(None), Ok(None)) => None,
+        (
+            Ok(Some(disposition_id)),
+            Ok(Some(state)),
+            Ok(superseded_by),
+            Ok(Some(reason_class)),
+            Ok(Some(effective_at)),
+            Ok(Some(record_json)),
+        ) => {
+            let record: tracedecay_store::RetrievalAnchorDispositionRecordV1 =
+                serde_json::from_str(&record_json)
+                    .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+            record
+                .validate()
+                .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+            if record.disposition_id() != disposition_id
+                || record.anchor_id() != anchor_id
+                || record.owner() != owner
+                || record.state().as_str() != state
+                || record.superseded_by().map(RetrievalAnchorId::as_str) != superseded_by.as_deref()
+                || record.reason_class().as_str() != reason_class
+                || record.effective_at().0 != effective_at
+            {
+                return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
+            }
+            Some(record)
+        }
+        _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+    };
+
+    if let Some(disposition) = disposition {
+        if matches!(
+            disposition.state(),
+            tracedecay_store::AnchorDispositionStateV1::Redacted
+                | tracedecay_store::AnchorDispositionStateV1::Expired
+                | tracedecay_store::AnchorDispositionStateV1::Quarantined
+                | tracedecay_store::AnchorDispositionStateV1::Deleted
+                | tracedecay_store::AnchorDispositionStateV1::Unavailable
+        ) {
+            let tombstone = tracedecay_store::RetrievalAnchorTombstoneV1::new(
+                anchor_id.clone(),
+                owner.clone(),
+                disposition.state(),
+                disposition.reason_class(),
+                disposition.effective_at(),
+            )
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+            return Ok(EvidenceAssemblyAnchorResolutionV1::Tombstone(tombstone));
+        }
+        if disposition.state() != tracedecay_store::AnchorDispositionStateV1::Active {
+            return Ok(EvidenceAssemblyAnchorResolutionV1::Unavailable);
+        }
+    }
+
+    let stored: tracedecay_store::StoredRetrievalAnchorRecordV1 =
+        serde_json::from_str(&anchor_json)
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+    stored
+        .validate()
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+    if stored.anchor_id() != anchor_id
+        || stored.owner() != owner.clone()
+        || stored.projection_generation().as_str() != projection_generation
+    {
+        return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
+    }
+    let tracedecay_store::StoredRetrievalAnchorRecordV1::V3(record) = stored else {
+        return Ok(EvidenceAssemblyAnchorResolutionV1::Unavailable);
+    };
+
+    let mut rows = snapshot
+        .query(
+            "SELECT lineage.derivative_kind, lineage.derivative_id,
+                    lineage.direct_evidence
+             FROM retrieval_anchor_reverse_lineage AS lineage
+             WHERE lineage.source_anchor_id = ?1 AND lineage.owner_json = ?2
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM retrieval_anchor_derivative_tombstones AS tombstone
+                   WHERE tombstone.source_anchor_id = lineage.source_anchor_id
+                     AND tombstone.owner_json = lineage.owner_json
+                     AND tombstone.derivative_kind = lineage.derivative_kind
+                     AND tombstone.derivative_id = lineage.derivative_id
+               )
+             ORDER BY lineage.derivative_kind, lineage.derivative_id",
+            params![anchor_id.as_str(), owner_json],
+        )
+        .await
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+    let mut derivatives = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?
+    {
+        let kind = tracedecay_store::AnchorDerivativeKindV1::parse(
+            &row.get::<String>(0)
+                .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?,
+        )
+        .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+        let derivative_id: String = row
+            .get(1)
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+        let direct_evidence: i64 = row
+            .get(2)
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
+        if !matches!(direct_evidence, 0 | 1) {
+            return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
+        }
+        derivatives.push(
+            tracedecay_store::RetrievalAnchorDerivativeV1::new(
+                anchor_id.clone(),
+                owner.clone(),
+                kind,
+                derivative_id,
+                direct_evidence == 1,
+            )
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?,
+        );
+    }
+    Ok(EvidenceAssemblyAnchorResolutionV1::Resolved {
+        record,
+        derivatives,
+    })
+}
+
+fn authorize_runtime_anchor_resolution_at(
+    context: &ProductRequestContext,
+    owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
+    observed_at: UtcMicros,
+) -> tracedecay_store::EvidenceAssemblyStoreResult<()> {
+    owner.validate()?;
+    if context.validate().is_err()
+        || context.admission_at(observed_at) != RequestAdmission::Admitted
+        || context.grant().disclosure < DisclosureClass::Evidence
+        || owner.owner.project_id() != Some(&context.scope().project_id)
+        || owner.scope_digest != context.scope().scope_digest
+    {
+        return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
+    }
+    Ok(())
 }
 
 impl tracedecay_store::EvidenceAssemblyStore for RuntimeEvidenceAssemblyStore {
