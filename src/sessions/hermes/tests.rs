@@ -998,7 +998,7 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(open_read_only_strict(&missing).await.is_err());
     assert!(!missing.exists());
 
-    let path = dir.path().join("state.db");
+    let path = dir.path().join("state #?%.db");
     write_minimal_legacy_state_db(&path, 1);
     let before = std::fs::read(&path).unwrap();
     let wal = sqlite_sidecar(&path, "-wal");
@@ -1038,6 +1038,62 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(!wal.exists());
     assert!(!shm.exists());
     assert!(!journal.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hermes_reader_supports_non_utf8_database_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir
+        .path()
+        .join(std::ffi::OsString::from_vec(b"state-\xff.db".to_vec()));
+    write_minimal_legacy_state_db(&path, 1);
+
+    let conn = open_read_only_strict(&path)
+        .await
+        .expect("open non-UTF-8 foreign database path");
+    validate_required_schema(&conn)
+        .await
+        .expect("read required schema");
+}
+
+#[tokio::test]
+async fn corrupt_and_incomplete_state_databases_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+
+    let corrupt = dir.path().join("corrupt.db");
+    std::fs::write(&corrupt, b"not a sqlite database").unwrap();
+    if let Ok(conn) = open_read_only_strict(&corrupt).await {
+        assert!(message_columns(&conn).await.is_err());
+    }
+
+    let incomplete = dir.path().join("incomplete.db");
+    let conn = rusqlite::Connection::open(&incomplete).unwrap();
+    conn.execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY);")
+        .unwrap();
+    drop(conn);
+    let conn = open_read_only_strict(&incomplete).await.unwrap();
+    assert!(message_columns(&conn).await.is_err());
+
+    let malformed = dir.path().join("malformed.db");
+    let conn = rusqlite::Connection::open(&malformed).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY);
+         CREATE TABLE messages (
+             id INTEGER PRIMARY KEY,
+             session_id TEXT NOT NULL,
+             content TEXT,
+             timestamp REAL NOT NULL
+         );",
+    )
+    .unwrap();
+    drop(conn);
+    let conn = open_read_only_strict(&malformed).await.unwrap();
+    assert!(validate_required_schema(&conn).await.is_err());
 }
 
 #[tokio::test]

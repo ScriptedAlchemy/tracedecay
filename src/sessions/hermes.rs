@@ -51,7 +51,7 @@ pub(crate) use rows::HermesRow;
 #[cfg(test)]
 pub(crate) use state_db::{
     message_columns, open_read_only_strict, read_new_rows_strict, select_new_messages_sql,
-    table_columns,
+    table_columns, validate_required_schema,
 };
 
 const PROVIDER: &str = "hermes";
@@ -64,4 +64,6 @@ const MAX_HERMES_VALUE_BYTES: usize = MAX_OBSERVATION_RECORD_BYTES;
 const MAX_HERMES_IDENTITY_BYTES: usize = 512;
 /// Cumulative SQL-measured bytes admitted into one page (reuses JSONL batch bound).
 const MAX_HERMES_PAGE_BYTES: u64 = STRICT_JSONL_BATCH_BYTES;
+/// Aggregate source bytes admitted by an ordinary catch-up sweep.
+const DEFAULT_HERMES_SWEEP_BYTES: u64 = MAX_HERMES_PAGE_BYTES;
 const MAX_HERMES_PROJECTIONS_PER_DRAIN: usize = 256;

@@ -10,11 +10,16 @@ use crate::application::host_admission::HostAdmissionFacade;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::{TranscriptIngestStats, path_belongs_to_project};
 
+use super::DEFAULT_HERMES_SWEEP_BYTES;
 use super::coverage::drain_hermes_projections_with_admission;
 use super::state_db::{
     try_ingest_state_db_bounded_with_admission, try_ingest_state_db_for_projects,
     try_ingest_user_state_db_bounded_with_admission,
 };
+
+fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
+    IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_HERMES_SWEEP_BYTES))
+}
 
 /// Result of a Hermes sweep with one aggregate logical source-byte budget.
 #[derive(Debug, Default, Clone)]
@@ -96,7 +101,12 @@ pub async fn ingest_homes_for_projects(
     destinations: &[ProjectIngestDestination<'_>],
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
+    let mut budget = new_sweep_budget(None);
     for source in all_profile_sources(hermes_homes) {
+        if budget.exhausted() {
+            budget.defer();
+            break;
+        }
         let eligible = destinations
             .iter()
             .filter(|destination| {
@@ -107,7 +117,7 @@ pub async fn ingest_homes_for_projects(
         if eligible.is_empty() {
             continue;
         }
-        match try_ingest_state_db_for_projects(&source, &eligible).await {
+        match try_ingest_state_db_for_projects(&source, &eligible, &mut budget).await {
             Ok(source_stats) => stats = stats.merge(source_stats),
             Err(error) => tracing::debug!(
                 state_db = %source.state_db.display(),
@@ -168,11 +178,12 @@ pub async fn ingest_homes_capped_with_admission(
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
     let mut outcome = HermesSweepOutcome::default();
-    let mut budget = match max_new_bytes {
-        Some(limit) => IngestByteBudget::bounded(limit),
-        None => IngestByteBudget::unbounded(),
-    };
+    let mut budget = new_sweep_budget(max_new_bytes);
     for source in candidate_state_dbs(hermes_homes, project_root) {
+        if budget.exhausted() {
+            budget.defer();
+            break;
+        }
         match try_ingest_state_db_bounded_with_admission(
             &source,
             project_root,
@@ -243,11 +254,12 @@ pub async fn ingest_user_homes_capped(
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
     let mut outcome = HermesSweepOutcome::default();
-    let mut budget = match max_new_bytes {
-        Some(limit) => IngestByteBudget::bounded(limit),
-        None => IngestByteBudget::unbounded(),
-    };
+    let mut budget = new_sweep_budget(max_new_bytes);
     for source in all_profile_sources(hermes_homes) {
+        if budget.exhausted() {
+            budget.defer();
+            break;
+        }
         match try_ingest_user_state_db_bounded_with_admission(
             admission,
             &source,
@@ -281,11 +293,12 @@ async fn ingest_user_homes_capped_with_admission(
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
     let mut outcome = HermesSweepOutcome::default();
-    let mut budget = match max_new_bytes {
-        Some(limit) => IngestByteBudget::bounded(limit),
-        None => IngestByteBudget::unbounded(),
-    };
+    let mut budget = new_sweep_budget(max_new_bytes);
     for source in all_profile_sources(hermes_homes) {
+        if budget.exhausted() {
+            budget.defer();
+            break;
+        }
         match try_ingest_user_state_db_bounded_with_admission(
             admission,
             &source,
@@ -344,7 +357,7 @@ pub(crate) async fn ingest_legacy_pinned_profile(
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
-    let mut budget = IngestByteBudget::unbounded();
+    let mut budget = new_sweep_budget(None);
     let stats = try_ingest_state_db_bounded_with_admission(
         &source,
         project_root,
@@ -353,6 +366,12 @@ pub(crate) async fn ingest_legacy_pinned_profile(
         &mut budget,
     )
     .await?;
+    if budget.deferred() {
+        return Err(format!(
+            "legacy Hermes state store '{}' exceeded the bounded import sweep",
+            source.state_db.display()
+        ));
+    }
     drain_hermes_projections_with_admission(admission, &scope).await?;
     Ok(stats)
 }
@@ -458,4 +477,18 @@ fn source_is_candidate_for_project(source: &HermesProfileSource, project_root: &
     source.legacy_project_pin.is_some()
         || crate::worktree::git_worktree_root(project_root).is_some()
         || crate::config::has_project_database(project_root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_sweeps_have_a_finite_aggregate_budget() {
+        let default = new_sweep_budget(None);
+        assert_eq!(default.remaining(), Some(DEFAULT_HERMES_SWEEP_BYTES));
+
+        let explicit = new_sweep_budget(Some(17));
+        assert_eq!(explicit.remaining(), Some(17));
+    }
 }

@@ -68,6 +68,38 @@ fn table_columns_sync(
     Ok(out)
 }
 
+fn validate_required_columns(
+    table: &str,
+    columns: &std::collections::BTreeSet<String>,
+    required: &[&str],
+) -> Result<(), String> {
+    let missing = required
+        .iter()
+        .copied()
+        .filter(|column| !columns.contains(*column))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Hermes SQLite table '{table}' is missing required columns: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn validate_required_schema(conn: &SqliteReadConn) -> Result<(), String> {
+    let messages = message_columns(conn).await?;
+    let sessions = table_columns(conn, "sessions").await?;
+    validate_required_columns(
+        "messages",
+        &messages,
+        &["id", "session_id", "role", "content", "timestamp"],
+    )?;
+    validate_required_columns("sessions", &sessions, &["id"])
+}
+
 fn sql_byte_len(expr: &str) -> String {
     format!("length(CAST({expr} AS BLOB))")
 }
@@ -306,10 +338,15 @@ async fn open_state_source(
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await?,
-        &table_columns(&conn, "sessions").await?,
-    );
+    let message_columns = message_columns(&conn).await?;
+    let session_columns = table_columns(&conn, "sessions").await?;
+    validate_required_columns(
+        "messages",
+        &message_columns,
+        &["id", "session_id", "role", "content", "timestamp"],
+    )?;
+    validate_required_columns("sessions", &session_columns, &["id"])?;
+    let select_sql = select_new_messages_sql(&message_columns, &session_columns);
     Ok((
         conn,
         generation,
@@ -425,6 +462,7 @@ pub(crate) async fn try_ingest_state_db_bounded_with_admission(
 pub(crate) async fn try_ingest_state_db_for_projects(
     source: &HermesProfileSource,
     destinations: &[ProjectIngestDestination<'_>],
+    budget: &mut IngestByteBudget,
 ) -> Result<TranscriptIngestStats, String> {
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
@@ -446,10 +484,19 @@ pub(crate) async fn try_ingest_state_db_for_projects(
         if row_count == 0 {
             return Ok(stats);
         }
+        let bounded_count = new
+            .items
+            .iter()
+            .take_while(|row| budget.try_consume(hermes_budget_bytes(row)))
+            .count();
+        if bounded_count == 0 {
+            return Ok(stats);
+        }
+        let bounded = &new.items[..bounded_count];
         // Per-page route cache: avoid unbounded growth across many SQLite pages.
         let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
         let locations = turn_project_locations_for_destinations(
-            &new.items,
+            bounded,
             &destination_matchers,
             source,
             &mut destination_routes,
@@ -457,7 +504,7 @@ pub(crate) async fn try_ingest_state_db_for_projects(
         for (index, destination) in destinations.iter().enumerate() {
             let admitted = admit_rows_with_admission(
                 destination.admission,
-                &new.items,
+                bounded,
                 scopes[index].clone(),
                 generation,
                 file_identity,
@@ -485,7 +532,13 @@ pub(crate) async fn try_ingest_state_db_for_projects(
                 .sessions_upserted
                 .saturating_add(admitted.sessions_upserted);
         }
-        read_cursor.position = new.new_cursor.position;
+        read_cursor.position = bounded
+            .last()
+            .and_then(|row| u64::try_from(row.id).ok())
+            .unwrap_or(read_cursor.position);
+        if bounded_count < row_count {
+            return Ok(stats);
+        }
         if new.truncated_by_byte_budget {
             continue;
         }
