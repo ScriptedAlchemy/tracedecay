@@ -1,41 +1,654 @@
-import { KeyValueTree } from '../../ui/archetypes/ExplorerSplit.tsx';
+import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Search, X } from 'lucide-react';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { OverviewCard } from '../../ui/archetypes/OverviewGrid';
+import { cn } from '../../ui/cn';
+import { Lamp, WorkspaceHeader } from '../../ui/instrument.tsx';
+import {
+  buildSettingsModel,
+  countSettings,
+  filterOverrides,
+  filterRows,
+  splitPath,
+  type ConfigRow,
+  type ConfigSection,
+  type EnvOverride,
+  type OriginKind,
+  type SettingsModel,
+} from './settingsModel.ts';
 
-/** Settings: effective layered configuration (read-only first; typed patch
- * preview/validate/CAS lands with the config-surface phase). */
+/**
+ * Settings: effective configuration, with provenance shown exactly as far as
+ * the wire supports it and no further.
+ *
+ * `/api/settings` reports effective values — it does not attribute individual
+ * keys to the file or default that set them, and the groups it returns do not
+ * address a shared key namespace. So this surface does not draw a
+ * layer-override stack; that would be a fabrication. What it does show is real:
+ *
+ *   - ORIGIN per group: the file path or endpoint the payload names as the
+ *     source of that group's values (`config_path` / `config_endpoint`).
+ *   - EXPLICIT vs DEFAULT for process-environment overrides, the one place the
+ *     payload carries per-value provenance (`environment.variables[].active`).
+ *   - The gap itself, stated on the surface rather than papered over.
+ *
+ * Values are typed at render: booleans are lamped pills, numbers tabular, paths
+ * dim their directory so the meaningful tail reads first. Read-only, and every
+ * literal comes from `/api/settings`.
+ */
 export function SettingsPage() {
   const settings = useLegacy(['settings'], '/api/settings', AnyObject);
 
   return (
-    <div
-      className="flex h-full flex-col overflow-auto"
-      tabIndex={0}
-      role="region"
-      aria-label="Settings content"
-    >
-      <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-tight">Settings</h1>
-        <span className="text-2xs text-text-muted">effective configuration · read-only</span>
-      </div>
-      {/*
-       * A single card has no business inside OverviewGrid's responsive
-       * grid-cols-1/2/3: `cn()` is plain clsx (no tailwind-merge), so an
-       * override className can't reliably beat OverviewGrid's own
-       * `xl:grid-cols-3` in cascade order — the card kept rendering at
-       * roughly a third of the viewport width, which is exactly the
-       * pressure that collapsed the config tree's value column to one
-       * character per line. A plain full-width wrapper sidesteps the fight.
-       */}
-      <div className="p-2">
-        <OverviewCard title="Effective configuration">
-          <LegacyBoundary title="Settings" pending={settings.isPending} result={settings.data}>
-            {(data) => <KeyValueTree value={data} />}
-          </LegacyBoundary>
-        </OverviewCard>
-      </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <LegacyBoundary title="Settings" pending={settings.isPending} result={settings.data}>
+        {(data) => <SettingsSurface payload={data} />}
+      </LegacyBoundary>
     </div>
   );
+}
+
+function SettingsSurface({ payload }: { payload: unknown }) {
+  const model = useMemo(() => buildSettingsModel(payload), [payload]);
+  const [query, setQuery] = useState('');
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
+  const overrides = useMemo(
+    () => filterOverrides(model.overrides, query),
+    [model.overrides, query],
+  );
+
+  const filtered = useMemo(
+    () =>
+      model.sections
+        .map((section) => ({ section, rows: filterRows(section.rows, query) }))
+        // The environment section still earns its place while its generic rows
+        // are filtered out, as long as an override matched the same query.
+        .filter(
+          (entry) =>
+            entry.rows.length > 0 ||
+            (entry.section.origin === 'environment' && overrides.length > 0),
+        ),
+    [model.sections, query, overrides.length],
+  );
+
+  const shown = useMemo(
+    () => filtered.reduce((total, entry) => total + countSettings(entry.rows), 0),
+    [filtered],
+  );
+
+  const jumpTo = useCallback((id: string) => {
+    const container = scrollRef.current;
+    const target = container?.querySelector<HTMLElement>(`[data-section="${id}"]`);
+    if (!container || !target) return;
+    container.scrollTo({ top: target.offsetTop - 4, behavior: 'auto' });
+  }, []);
+
+  return (
+    <>
+      <WorkspaceHeader
+        // `channels.ts` keys its channel list on unprefixed paths, so a
+        // leading slash here silently falls through to the `--` fallback.
+        path="settings"
+        title="Settings"
+        note="effective configuration · read-only"
+        actions={
+          model.stamps.length > 0 ? (
+            <span className="flex shrink-0 flex-wrap items-center gap-1.5">
+              {model.stamps.map((stamp) => (
+                <span
+                  key={`${stamp.label}:${stamp.value}`}
+                  className="inline-flex items-center gap-1 border border-edge-subtle px-1.5 py-0.5"
+                >
+                  <span className="td-legend">{stamp.label}</span>
+                  <span className="td-value text-3xs text-text-secondary">
+                    {stamp.value}
+                  </span>
+                </span>
+              ))}
+            </span>
+          ) : null
+        }
+      />
+
+      <div className="flex shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3 py-2">
+        <div className="relative min-w-0 flex-1 md:max-w-md">
+          <Search
+            aria-hidden
+            size={13}
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-muted"
+          />
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && query !== '') {
+                event.stopPropagation();
+                setQuery('');
+              }
+            }}
+            placeholder="Filter keys and values…"
+            aria-label="Filter configuration"
+            className="h-8 w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 pl-7 pr-7 text-xs text-text-primary outline-none placeholder:text-text-muted focus-visible:border-accent"
+          />
+          {query !== '' ? (
+            <button
+              type="button"
+              onClick={() => {
+                setQuery('');
+                searchRef.current?.focus();
+              }}
+              aria-label="Clear filter"
+              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center text-text-muted hover:text-text-primary"
+            >
+              <X aria-hidden size={12} />
+            </button>
+          ) : null}
+        </div>
+        <p className="td-value shrink-0 text-3xs text-text-muted" aria-live="polite">
+          {query === ''
+            ? `${model.settingCount} settings`
+            : `${shown} of ${model.settingCount} settings`}
+        </p>
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        <SectionIndex entries={filtered} total={model.sections.length} onJump={jumpTo} />
+        <div
+          ref={scrollRef}
+          tabIndex={0}
+          role="region"
+          aria-label="Effective configuration"
+          className="min-w-0 flex-1 overflow-auto"
+        >
+          {filtered.length === 0 ? (
+            <p className="p-8 text-center text-xs text-text-muted">
+              no key or value matches “{query}”
+            </p>
+          ) : (
+            <>
+              {query === '' ? <OriginBand model={model} onJump={jumpTo} /> : null}
+              {filtered.map(({ section, rows }) => (
+                <ConfigSectionBlock
+                  key={section.id}
+                  section={section}
+                  rows={rows}
+                  overrides={section.origin === 'environment' ? overrides : []}
+                  query={query}
+                />
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ index --*/
+
+function SectionIndex({
+  entries,
+  total,
+  onJump,
+}: {
+  entries: ReadonlyArray<{ section: ConfigSection; rows: ConfigRow[] }>;
+  total: number;
+  onJump: (id: string) => void;
+}) {
+  return (
+    <nav
+      aria-label="Configuration groups"
+      tabIndex={0}
+      className="hidden w-48 shrink-0 flex-col overflow-auto border-r border-edge-subtle bg-surface-1 md:flex"
+    >
+      <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+        <span className="td-title">
+          {entries.length === total ? 'Groups' : `${entries.length}/${total} groups`}
+        </span>
+        <span aria-hidden className="td-rule" />
+      </div>
+      <div className="flex flex-col p-1.5">
+        {entries.map(({ section, rows }) => (
+          <button
+            key={section.id}
+            type="button"
+            onClick={() => onJump(section.id)}
+            className="flex items-center gap-2 px-1.5 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary focus-visible:bg-surface-2"
+          >
+            <OriginMark origin={section.origin} />
+            <span className="min-w-0 flex-1 truncate">{section.title}</span>
+            <span className="td-value shrink-0 text-3xs text-text-muted">
+              {countSettings(rows)}
+            </span>
+          </button>
+        ))}
+      </div>
+    </nav>
+  );
+}
+
+const ORIGIN_GLYPH: Readonly<Record<OriginKind, string>> = {
+  file: 'F',
+  environment: 'E',
+  resolved: 'R',
+};
+
+const ORIGIN_WORD: Readonly<Record<OriginKind, string>> = {
+  file: 'from file',
+  environment: 'process environment',
+  resolved: 'daemon-resolved',
+};
+
+/** Origin as an engraved initial. Decorative — every use sits beside the word. */
+function OriginMark({ origin, className }: { origin: OriginKind; className?: string }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'td-value flex size-4 shrink-0 items-center justify-center border text-3xs',
+        origin === 'resolved'
+          ? 'border-edge-subtle text-text-muted'
+          : 'border-edge-strong text-text-secondary',
+        className,
+      )}
+    >
+      {ORIGIN_GLYPH[origin]}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------- origin band --*/
+
+/**
+ * The provenance headline — deliberately a statement of ORIGIN, not of
+ * precedence. Each card names the source the payload gives for that group and
+ * how many values it carries. The band also states, in plain text, the thing
+ * the payload cannot tell us, because a surface that quietly implies per-key
+ * layer attribution would be lying.
+ */
+function OriginBand({
+  model,
+  onJump,
+}: {
+  model: SettingsModel;
+  onJump: (id: string) => void;
+}) {
+  if (model.sections.length === 0) return null;
+  return (
+    <section aria-labelledby="settings-origins" className="border-b border-edge-subtle p-3">
+      <div className="mb-1.5 flex items-center gap-2.5">
+        <h2 id="settings-origins" className="td-title">
+          Provenance
+        </h2>
+        <span aria-hidden className="td-rule" />
+      </div>
+      <p className="mb-2.5 max-w-3xl text-2xs leading-relaxed text-text-muted">
+        <span className="text-text-secondary">
+          This API reports effective values only.
+        </span>{' '}
+        It does not attribute an individual key to the file or default that set
+        it, and these groups do not address a shared key namespace — so no
+        override order is shown. What is real: where each group is read from,
+        and which process-environment overrides are actually in force.
+      </p>
+      <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {model.sections.map((section) => (
+          <li key={section.id} className="min-w-0">
+            <button
+              type="button"
+              onClick={() => onJump(section.id)}
+              className="flex w-full min-w-0 flex-col gap-1 border border-edge-subtle bg-surface-1 px-2.5 py-2 text-left hover:border-edge-strong focus-visible:border-accent"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <OriginMark origin={section.origin} />
+                <span className="min-w-0 flex-1 truncate text-xs font-semibold text-text-primary">
+                  {section.title}
+                </span>
+                <span className="td-value shrink-0 text-3xs text-text-muted">
+                  {section.settingCount}
+                </span>
+              </span>
+              <span className="td-legend truncate">{ORIGIN_WORD[section.origin]}</span>
+              <span className="block truncate text-2xs text-text-muted">
+                {section.blurb}
+              </span>
+              {section.location ? (
+                <span className="td-value block min-w-0 break-all text-3xs">
+                  {section.locationKind === 'path' ? (
+                    <PathText value={section.location} />
+                  ) : (
+                    <span className="text-text-secondary">{section.location}</span>
+                  )}
+                </span>
+              ) : null}
+              {section.origin === 'environment' && model.overrides.length > 0 ? (
+                <span className="flex items-center gap-1.5 pt-0.5">
+                  <Lamp
+                    tone={model.activeOverrides > 0 ? 'bg-state-ready' : 'bg-surface-3'}
+                  />
+                  <span className="text-2xs text-text-secondary">
+                    {model.activeOverrides} of {model.overrides.length} overrides in
+                    force
+                  </span>
+                </span>
+              ) : null}
+              {section.notes.length > 0 ? (
+                <span className="flex flex-wrap gap-1 pt-0.5">
+                  {section.notes.map((note) => (
+                    <span
+                      key={note}
+                      className="border border-edge-subtle px-1.5 py-px text-2xs text-text-secondary"
+                    >
+                      {note}
+                    </span>
+                  ))}
+                </span>
+              ) : null}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/* ---------------------------------------------------------------- section --*/
+
+function ConfigSectionBlock({
+  section,
+  rows,
+  overrides,
+  query,
+}: {
+  section: ConfigSection;
+  rows: ConfigRow[];
+  overrides: readonly EnvOverride[];
+  query: string;
+}) {
+  const headingId = `settings-${section.id}-heading`;
+  return (
+    <section data-section={section.id} aria-labelledby={headingId} className="min-w-0">
+      <header className="sticky top-0 z-10 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 border-y border-edge-subtle bg-surface-2 px-3 py-1.5">
+        <OriginMark origin={section.origin} />
+        <h2 id={headingId} className="text-xs font-semibold tracking-tight">
+          {section.title}
+        </h2>
+        <span className="td-legend">{ORIGIN_WORD[section.origin]}</span>
+        {section.location ? (
+          <span className="td-value min-w-0 truncate text-3xs">
+            {section.locationKind === 'path' ? (
+              <PathText value={section.location} />
+            ) : (
+              <span className="text-text-secondary">{section.location}</span>
+            )}
+          </span>
+        ) : null}
+        <span className="td-value ml-auto shrink-0 text-3xs text-text-muted">
+          {countSettings(rows)}
+        </span>
+      </header>
+      <div className="px-3 py-2">
+        {overrides.length > 0 ? (
+          <OverrideList overrides={overrides} query={query} />
+        ) : null}
+        <RowGroup rows={rows} query={query} start={0} depth={0} />
+      </div>
+    </section>
+  );
+}
+
+/* --------------------------------------------------------------- overrides --*/
+
+/**
+ * The only genuine per-value provenance on the wire: for each variable the
+ * daemon reports, whether it is set in the process environment (an override in
+ * force, with its literal value) or unset (so a default applies). Active first,
+ * because an override in force is the thing worth finding.
+ *
+ * The state is carried by the word "in force" / "unset" as much as by the lamp
+ * — colour never states it alone.
+ */
+function OverrideList({
+  overrides,
+  query,
+}: {
+  overrides: readonly EnvOverride[];
+  query: string;
+}) {
+  const ordered = useMemo(
+    () => [...overrides].sort((a, b) => Number(b.active) - Number(a.active)),
+    [overrides],
+  );
+  return (
+    <div className="mb-3">
+      <h3 className="mb-1 flex items-center gap-2.5 border-b border-edge-subtle pb-1">
+        <span className="td-title">Overrides</span>
+        <span aria-hidden className="td-rule" />
+        <span className="td-value shrink-0 text-3xs text-text-muted">
+          {ordered.filter((item) => item.active).length}/{ordered.length} in force
+        </span>
+      </h3>
+      <ul className="flex flex-col">
+        {ordered.map((item) => (
+          <li
+            key={item.name}
+            className="grid grid-cols-1 gap-x-3 gap-y-0.5 border-b border-edge-subtle/60 py-1.5 last:border-b-0 md:grid-cols-[minmax(6rem,15rem)_minmax(0,1fr)]"
+          >
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Lamp tone={item.active ? 'bg-state-ready' : 'bg-surface-3'} />
+              <span className="td-value min-w-0 break-all text-2xs text-text-primary">
+                <Highlight text={item.name} query={query} />
+              </span>
+            </div>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                <span
+                  className={cn(
+                    'td-legend',
+                    item.active ? 'text-text-secondary' : 'text-text-muted',
+                  )}
+                >
+                  {item.active ? 'in force' : 'unset · default applies'}
+                </span>
+                {item.value != null ? (
+                  <span className="td-value min-w-0 break-all text-2xs text-text-primary">
+                    <Highlight text={item.value} query={query} />
+                  </span>
+                ) : null}
+              </span>
+              {item.description ? (
+                <span className="text-2xs leading-snug text-text-muted">
+                  <Highlight text={item.description} query={query} />
+                </span>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- rows --*/
+
+/**
+ * Renders one nesting level: consecutive leaf rows share a `<dl>` so the key
+ * column aligns, and each nested group opens its own titled block. (A heading
+ * cannot live inside a `<dl>`, so groups break the list rather than nest in it.)
+ *
+ * Nesting is expressed as an indent under a heading rather than as a nested
+ * label/value grid — the same lesson `KeyValueTree` learned the hard way: a
+ * per-level label track compounds until the value column measures 0px. Here
+ * exactly one label track is ever reserved, at any depth.
+ */
+function RowGroup({
+  rows,
+  query,
+  start,
+  depth,
+}: {
+  rows: ConfigRow[];
+  query: string;
+  start: number;
+  depth: number;
+}) {
+  const blocks: ReactNode[] = [];
+  let leaves: ConfigRow[] = [];
+  const flushLeaves = (key: string) => {
+    if (leaves.length === 0) return;
+    const batch = leaves;
+    leaves = [];
+    blocks.push(
+      <dl key={key} className="flex flex-col">
+        {batch.map((row) => (
+          <ValueRow key={row.id} row={row} query={query} />
+        ))}
+      </dl>,
+    );
+  };
+
+  for (let index = start; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (row.depth < depth) break;
+    if (row.depth > depth) continue;
+    if (row.kind === 'group') {
+      flushLeaves(`leaves-${row.id}`);
+      blocks.push(
+        <div key={row.id} className="mt-2 first:mt-0">
+          <h3 className="flex items-baseline gap-2 border-b border-edge-subtle pb-1">
+            <span className="td-value text-2xs font-semibold text-text-secondary">
+              <Highlight text={row.label} query={query} />
+            </span>
+            <span className="td-value text-3xs text-text-muted">
+              {row.count} {row.count === 1 ? 'value' : 'values'}
+            </span>
+          </h3>
+          <div className="border-l border-edge-subtle pl-2.5 pt-1">
+            <RowGroup rows={rows} query={query} start={index + 1} depth={depth + 1} />
+          </div>
+        </div>,
+      );
+    } else {
+      leaves.push(row);
+    }
+  }
+  flushLeaves('leaves-tail');
+  return <>{blocks}</>;
+}
+
+/** One key/value pair: aligned columns on wide viewports, stacked on narrow. */
+function ValueRow({ row, query }: { row: ConfigRow; query: string }) {
+  return (
+    <div className="grid grid-cols-1 gap-x-4 gap-y-0.5 border-b border-edge-subtle/60 py-1 last:border-b-0 md:grid-cols-[minmax(6rem,13rem)_minmax(0,1fr)] md:items-baseline">
+      <dt className="td-legend min-w-0 truncate normal-case tracking-normal" title={row.id}>
+        <Highlight text={row.label} query={query} />
+      </dt>
+      <dd className="min-w-0">
+        <ValueCell row={row} query={query} />
+      </dd>
+    </div>
+  );
+}
+
+function ValueCell({ row, query }: { row: ConfigRow; query: string }) {
+  if (row.kind === 'boolean') {
+    const on = row.value === true;
+    return (
+      <span
+        className={cn(
+          'td-value inline-flex items-center gap-1.5 border px-1.5 py-px text-2xs',
+          on ? 'border-edge-strong text-text-primary' : 'border-edge-subtle text-text-muted',
+        )}
+      >
+        <Lamp tone={on ? 'bg-state-ready' : 'bg-surface-3'} />
+        {on ? 'true' : 'false'}
+      </span>
+    );
+  }
+  if (row.kind === 'number') {
+    return (
+      <span className="td-value text-2xs text-text-primary" data-cell="numeric">
+        {typeof row.value === 'number' ? row.value.toLocaleString() : row.text}
+      </span>
+    );
+  }
+  if (row.kind === 'null') {
+    return <span className="td-value text-2xs text-text-muted">null</span>;
+  }
+  if (row.kind === 'path') {
+    return (
+      <span className="td-value block min-w-0 break-all text-2xs">
+        <PathText value={String(row.value)} query={query} />
+      </span>
+    );
+  }
+  if (row.kind === 'list') {
+    const items = Array.isArray(row.value) ? row.value : [];
+    if (items.length === 0) {
+      return <span className="text-2xs text-text-muted">{row.text}</span>;
+    }
+    return (
+      <span className="flex flex-wrap gap-1">
+        {items.map((item, index) => (
+          <span
+            key={`${String(item)}-${index}`}
+            className="td-value border border-edge-subtle bg-surface-2 px-1.5 py-px text-2xs text-text-secondary"
+          >
+            <Highlight text={String(item)} query={query} />
+          </span>
+        ))}
+      </span>
+    );
+  }
+  return (
+    <span className="td-value block min-w-0 break-words text-2xs text-text-primary">
+      <Highlight text={row.text} query={query} />
+    </span>
+  );
+}
+
+/** A path reads from its tail: dim the directory, keep the last segment bright. */
+function PathText({ value, query = '' }: { value: string; query?: string }) {
+  const { head, tail } = splitPath(value);
+  return (
+    <>
+      {head ? (
+        <span className="text-text-muted">
+          <Highlight text={head} query={query} />
+        </span>
+      ) : null}
+      <span className="text-text-primary">
+        <Highlight text={tail} query={query} />
+      </span>
+    </>
+  );
+}
+
+/** Marks every occurrence of the active filter inside a literal. */
+function Highlight({ text, query }: { text: string; query: string }) {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return <>{text}</>;
+  const parts: ReactNode[] = [];
+  const haystack = text.toLowerCase();
+  let cursor = 0;
+  let found = haystack.indexOf(needle, cursor);
+  while (found >= 0) {
+    if (found > cursor) parts.push(text.slice(cursor, found));
+    parts.push(
+      <mark
+        key={`${found}`}
+        className="bg-accent/25 px-px text-text-primary underline decoration-accent decoration-1 underline-offset-2"
+      >
+        {text.slice(found, found + needle.length)}
+      </mark>,
+    );
+    cursor = found + needle.length;
+    found = haystack.indexOf(needle, cursor);
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
 }
