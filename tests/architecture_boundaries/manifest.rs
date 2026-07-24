@@ -58,6 +58,9 @@ const INTENTIONAL_STANDALONE_RUST_INPUTS: &[&str] = &[
     "tests/fixtures/context_eval_project/src/storage/cache.rs",
     "tests/fixtures/context_eval_project/src/storage/config_store.rs",
     "tests/fixtures/context_eval_project/src/storage/mod.rs",
+    // Managed-run diagnostics fixture: copied into a temporary project and
+    // indexed as source input rather than compiled by this workspace.
+    "tests/fixtures/pr12_managed_run_overlay/src/auth/login.rs",
     // Search-quality evaluation corpus: sample project sources indexed by the
     // PR9 search-eval harness. Deliberately source input, not crate modules.
     "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs",
@@ -69,6 +72,7 @@ const INTENTIONAL_STANDALONE_RUST_INPUTS: &[&str] = &[
     "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs",
     "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
     "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs",
+    "tests/fixtures/search_quality/incremental/time-after.rs",
     // Distribution acceptance copies this into the packaged example path; it is
     // not a workspace Cargo target in the development tree.
     "tests/distribution/fastembed/acceptance.rs",

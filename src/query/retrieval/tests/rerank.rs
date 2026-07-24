@@ -2,7 +2,8 @@ use std::cell::Cell;
 
 use tracedecay_domain::{
     AuthorizedRerankView, ExactClass, FreshnessCompatibilityV1, OptionalStagePublicStatus,
-    RankedCandidate, RerankPolicy, RetrievalAnchorId, SanitizedStageFailure,
+    RankedCandidate, RerankPolicy, RetrievalAnchorId, RetrieverKind, RetrieverOutcome,
+    SanitizedStageFailure,
 };
 
 use super::*;
