@@ -1026,6 +1026,10 @@ impl HostAdmissionTestRuntimeV1 {
         profile_root: PathBuf,
         project: Option<(PathBuf, ProjectId)>,
     ) -> crate::errors::Result<Self> {
+        prepare_host_admission_test_profile_root(&profile_root)?;
+        if let Some((project_root, project_id)) = project.as_ref() {
+            prepare_host_admission_test_project_root(project_root, project_id)?;
+        }
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let nonce = HOST_ADMISSION_TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let database_scope = crate::db::enter_daemon_database_scope(
@@ -4877,6 +4881,76 @@ impl HostAdmissionTestRuntimeV1 {
                 })?;
         store.replay_observations(request).await
     }
+}
+
+#[cfg(unix)]
+fn prepare_host_admission_test_profile_root(profile_root: &Path) -> crate::errors::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(profile_root).map_err(|error| crate::errors::TraceDecayError::Config {
+        message: format!(
+            "failed to create host-admission test profile '{}': {error}",
+            profile_root.display()
+        ),
+    })?;
+    let metadata = std::fs::symlink_metadata(profile_root).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: format!(
+                "failed to inspect host-admission test profile '{}': {error}",
+                profile_root.display()
+            ),
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "host-admission test profile '{}' must be a regular directory",
+                profile_root.display()
+            ),
+        });
+    }
+    std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700)).map_err(
+        |error| crate::errors::TraceDecayError::Config {
+            message: format!(
+                "failed to restrict host-admission test profile '{}': {error}",
+                profile_root.display()
+            ),
+        },
+    )
+}
+
+#[cfg(not(unix))]
+fn prepare_host_admission_test_profile_root(profile_root: &Path) -> crate::errors::Result<()> {
+    std::fs::create_dir_all(profile_root).map_err(|error| crate::errors::TraceDecayError::Config {
+        message: format!(
+            "failed to create host-admission test profile '{}': {error}",
+            profile_root.display()
+        ),
+    })
+}
+
+fn prepare_host_admission_test_project_root(
+    project_root: &Path,
+    project_id: &ProjectId,
+) -> crate::errors::Result<()> {
+    std::fs::create_dir_all(project_root).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: format!(
+                "failed to create host-admission test project '{}': {error}",
+                project_root.display()
+            ),
+        }
+    })?;
+    if crate::storage::read_enrollment_marker(project_root)?.is_none() {
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
