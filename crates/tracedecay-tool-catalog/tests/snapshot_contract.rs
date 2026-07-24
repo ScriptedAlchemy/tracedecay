@@ -292,6 +292,7 @@ fn snapshot_rejects_handler_schema_drift() {
     })
     .unwrap();
     let stale_handler = ApplicationHandlerDescriptorV1::new(
+        manifest.capability_id().clone(),
         manifest.use_case_id().clone(),
         manifest.request_schema().clone(),
         schema("schema.source.body.result", 512),
@@ -309,5 +310,51 @@ fn snapshot_rejects_handler_schema_drift() {
     assert_eq!(
         builder.build(),
         Err(CatalogValidationError::HandlerSchemaMismatch { capability_id })
+    );
+}
+
+#[test]
+fn snapshot_rejects_handler_capability_drift() {
+    let profile_id = profile_id("profile.default");
+    let manifest_capability_id = capability_id("capability.source.body");
+    let manifest = read_manifest(
+        manifest_capability_id.clone(),
+        use_case_id("use-case.source.body"),
+        schema("schema.source.body.request", 128),
+        schema("schema.source.body.result", 256),
+        Vec::new(),
+        vec![profile_id.clone()],
+    );
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: ContributionId::new("contribution.source-body").unwrap(),
+        depends_on: Vec::new(),
+        capabilities: vec![manifest.clone()],
+        retrieval_primitives: Vec::new(),
+        bindings: Vec::new(),
+    })
+    .unwrap();
+    let handler_capability_id = capability_id("capability.source.lines");
+    let stale_handler = ApplicationHandlerDescriptorV1::new(
+        handler_capability_id.clone(),
+        manifest.use_case_id().clone(),
+        manifest.request_schema().clone(),
+        manifest.result_schema().clone(),
+    );
+    let mut builder = CatalogSnapshotBuilderV1::new();
+    builder
+        .add_contribution(contribution)
+        .add_handler(stale_handler)
+        .add_profile(profile(
+            profile_id,
+            vec![manifest_capability_id.clone()],
+            ProfileBudget::DEFAULT,
+        ));
+
+    assert_eq!(
+        builder.build(),
+        Err(CatalogValidationError::HandlerCapabilityMismatch {
+            capability_id: manifest_capability_id,
+            handler_capability_id,
+        })
     );
 }

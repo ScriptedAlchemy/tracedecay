@@ -993,6 +993,8 @@ pub struct FeedbackCycleResultV1 {
     pub result_id: FeedbackResultId,
     pub cycle_id: FeedbackCycleId,
     pub scope: FeedbackScopeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_identity: Option<FeedbackContentIdentityV1>,
     pub durability: FeedbackDurabilityV1,
     pub policy_digest: ManifestDigest,
     pub configuration_digest: ManifestDigest,
@@ -1042,6 +1044,7 @@ impl FeedbackCycleResultV1 {
             result_id,
             cycle_id: request.cycle_id.clone(),
             scope: request.scope.clone(),
+            content_identity: Some(request.content.clone()),
             durability: request.durability(),
             policy_digest: request.policy_digest.clone(),
             configuration_digest: request.configuration_digest.clone(),
@@ -1065,6 +1068,14 @@ impl FeedbackCycleResultV1 {
         self.result_id.validate()?;
         self.cycle_id.validate()?;
         self.scope.validate()?;
+        if let Some(content_identity) = &self.content_identity {
+            content_identity.validate()?;
+            if content_identity.durability() != self.durability {
+                return Err(DomainError::NonCanonical {
+                    field: "feedback result content durability",
+                });
+            }
+        }
         self.policy_digest.validate()?;
         self.configuration_digest.validate()?;
         if let Some(impact) = &self.impact {

@@ -14,8 +14,7 @@ use tracedecay_domain::{
 };
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRoutingDispositionV1,
-    CapabilityRoutingReasonV1, CapabilityRoutingRequestV1, ScopeMatchV1,
-    TruthFreshnessRequirementV1, TruthSourceStateV1,
+    CapabilityRoutingReasonV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -135,7 +134,9 @@ fn production_composition_preserves_static_unavailability_for_policy() {
             PolicyConsumerV1::CapabilityRouting,
             &context,
             CapabilityAvailabilityV1::Available,
+            ScopeMatchV1::Match,
             TruthSourceStateV1::Fresh,
+            CapabilityEffectClassV1::GitIndexStage,
             TruthFreshnessRequirementV1::Fresh,
             None,
             UtcMicros(10),
@@ -179,7 +180,9 @@ fn callable_route_preserves_runtime_unavailability_and_snapshot_digests() {
                 PolicyConsumerV1::RetrievalRouting,
                 &context,
                 availability,
+                ScopeMatchV1::Match,
                 TruthSourceStateV1::Fresh,
+                CapabilityEffectClassV1::Read,
                 TruthFreshnessRequirementV1::Fresh,
                 None,
                 UtcMicros(10),
@@ -205,13 +208,13 @@ fn callable_route_preserves_runtime_unavailability_and_snapshot_digests() {
 #[test]
 fn callable_route_returns_typed_denial_for_a_missing_operation_grant() {
     let composition = PolicyEvaluatorCompositionV1::from_application_catalog().unwrap();
-    let context = evaluation_context_for(
-        CapabilityId::new("capability.application.feedback.get").unwrap(),
-        UseCaseId::new("use-case.application.feedback.get").unwrap(),
-    );
     let operation = feedback_surface_operation("feedback_diagnostics")
         .unwrap()
         .unwrap();
+    let context = evaluation_context_for(
+        CapabilityId::new("capability.application.feedback.get").unwrap(),
+        operation.use_case_id().clone(),
+    );
 
     let evaluation = operation
         .evaluate_policy_route(
@@ -219,7 +222,9 @@ fn callable_route_returns_typed_denial_for_a_missing_operation_grant() {
             PolicyConsumerV1::RetrievalRouting,
             &context,
             CapabilityAvailabilityV1::Available,
+            ScopeMatchV1::Match,
             TruthSourceStateV1::Fresh,
+            CapabilityEffectClassV1::Read,
             TruthFreshnessRequirementV1::Fresh,
             None,
             UtcMicros(10),
@@ -254,21 +259,20 @@ fn local_live_disagreement_preserves_both_independent_watermarks() {
             CapabilityAvailabilityV1::Available,
             ScopeMatchV1::Match,
             TruthSourceStateV1::Partial,
-            0,
         )
         .unwrap();
     let capability = candidate.capability_id.clone();
-    let request = CapabilityRoutingRequestV1 {
-        declared_capability_order: vec![capability.clone()],
-        candidates: vec![candidate],
-        authorized_capabilities: BTreeSet::from([capability]),
-        required_effect_class: CapabilityEffectClassV1::Read,
-        required_freshness: TruthFreshnessRequirementV1::FreshOrPartial,
-        policy_revision: context.policy_revision(),
-        policy_digest: context.policy_digest().clone(),
-        configuration_digest: context.configuration().effective_behavior_digest.clone(),
-        evaluated_at: UtcMicros(10),
-    };
+    let request = composition
+        .routing_request(
+            &context,
+            &UseCaseId::new("use-case.application.feedback.diagnostics").unwrap(),
+            vec![capability],
+            vec![candidate],
+            CapabilityEffectClassV1::Read,
+            TruthFreshnessRequirementV1::FreshOrPartial,
+            UtcMicros(10),
+        )
+        .unwrap();
     let horizon = PolicyEvidenceHorizonV1 {
         local_session: PolicyEvidenceFrontierV1 {
             watermark: watermark("local-session", 11),
@@ -308,25 +312,68 @@ fn routing_rejects_a_substituted_plan20_configuration_snapshot() {
             CapabilityAvailabilityV1::Available,
             ScopeMatchV1::Match,
             TruthSourceStateV1::Fresh,
-            0,
         )
         .unwrap();
     let capability = candidate.capability_id.clone();
-    let request = CapabilityRoutingRequestV1 {
-        declared_capability_order: vec![capability.clone()],
-        candidates: vec![candidate],
-        authorized_capabilities: BTreeSet::from([capability]),
-        required_effect_class: CapabilityEffectClassV1::Read,
-        required_freshness: TruthFreshnessRequirementV1::Fresh,
-        policy_revision: context.policy_revision(),
-        policy_digest: context.policy_digest().clone(),
-        configuration_digest: digest('f'),
-        evaluated_at: UtcMicros(10),
-    };
+    let mut request = composition
+        .routing_request(
+            &context,
+            &UseCaseId::new("use-case.application.feedback.diagnostics").unwrap(),
+            vec![capability],
+            vec![candidate],
+            CapabilityEffectClassV1::Read,
+            TruthFreshnessRequirementV1::Fresh,
+            UtcMicros(10),
+        )
+        .unwrap();
+    request.configuration_digest = digest('f');
 
     assert!(
         composition
             .route(PolicyConsumerV1::RetrievalRouting, &context, &request, None,)
             .is_err()
+    );
+}
+
+#[test]
+fn routing_returns_typed_cancellation_from_the_bound_request_authority() {
+    let composition = PolicyEvaluatorCompositionV1::from_application_catalog().unwrap();
+    let active = evaluation_context();
+    let context = PolicyEvaluationContextV1::new(
+        active.request().clone().with_cancellation(
+            CancellationContext::cancelled("cancellation.policy.fixture", UtcMicros(9)).unwrap(),
+        ),
+        active.configuration_revision().clone(),
+        active.configuration().clone(),
+        active.policy_revision(),
+        active.policy_digest().clone(),
+    )
+    .unwrap();
+    let candidate = composition
+        .candidate(
+            "capability.application.feedback.diagnostics",
+            CapabilityAvailabilityV1::Available,
+            ScopeMatchV1::Match,
+            TruthSourceStateV1::Fresh,
+        )
+        .unwrap();
+    let request = composition
+        .routing_request(
+            &context,
+            &UseCaseId::new("use-case.application.feedback.diagnostics").unwrap(),
+            vec![candidate.capability_id.clone()],
+            vec![candidate],
+            CapabilityEffectClassV1::Read,
+            TruthFreshnessRequirementV1::Fresh,
+            UtcMicros(10),
+        )
+        .unwrap();
+
+    let evaluation = composition
+        .route(PolicyConsumerV1::RetrievalRouting, &context, &request, None)
+        .unwrap();
+    assert_eq!(
+        evaluation.decision.ordered_reason_codes,
+        vec![CapabilityRoutingReasonV1::RequestCancelled]
     );
 }

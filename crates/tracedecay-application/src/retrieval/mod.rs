@@ -24,7 +24,9 @@ pub use callable_code_catalog::{
     callable_code_operations, callable_code_request_schema, callable_code_result_schema,
 };
 pub use callable_code_service::{
-    CallableCodeQueryFuture, CallableCodeQueryPort, CallableCodeQueryService,
+    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
+    CallableCodeAuthorizationPort, CallableCodeQueryFuture, CallableCodeQueryPort,
+    CallableCodeQueryService,
 };
 pub use ports::{
     AffectedTestsRetrievalPort, AnchorHydrationPort, GraphImpactRetrievalPort, GraphRetrievalPort,
@@ -34,9 +36,10 @@ pub use ports::{
 pub use requests::{
     AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest, AnchorExpandResult,
     GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
-    HealthReadRequest, HealthReadResult, PageRequest, ResultProjection, RetrievalOrder,
-    RetrievalRequestMeta, SessionLookupRequest, SessionLookupResult, SourceLinesRequest,
-    SourceLinesResult, SourceReference, SymbolSearchRequest, SymbolSearchResult,
+    HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, PageRequest, ResultProjection,
+    RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest, SessionLookupResult,
+    SourceLinesRequest, SourceLinesResult, SourceReference, SymbolSearchRequest,
+    SymbolSearchResult,
 };
 pub use service::{
     AffectedTestsService, GraphCallersService, SourceLinesService, SymbolSearchService,

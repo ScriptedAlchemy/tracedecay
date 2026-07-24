@@ -9,9 +9,12 @@ use std::pin::Pin;
 use tracedecay_domain::{CodeGenerationId, TemporalModeV1, UtcMicros};
 use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
-use crate::authorization::{AuthorizationPort, AuthorizationService};
+use crate::authorization::{AuthorizationAdmission, AuthorizationPort, AuthorizationService};
 use crate::context::RequestContext;
-use crate::result::{ApplicationProblem, ApplicationResult, RetryDirective, SafeDiagnostic};
+use crate::handlers::ApplicationOperation;
+use crate::result::{
+    ApplicationProblem, ApplicationResult, AuthorityReceipt, RetryDirective, SafeDiagnostic,
+};
 
 use super::callable_code::{
     CallableCodeOperationKind, CallableCodeOperations, CodeHierarchyRequest, CodeImpactRequest,
@@ -20,7 +23,7 @@ use super::callable_code::{
     LexicalOccurrenceRecord, ModuleApiRequest, PhraseSearchRequest, QualifiedNameRequest,
     SourceMetadataRecord, SourceMetadataRequest, ValidatedCodeQueryRequest,
 };
-use super::service::{evidence_envelope, problem_envelope};
+use super::service::{evidence_envelope_with_async_publication_recheck, problem_envelope};
 use super::{
     RetrievalPortContext, RetrievalPortOutcome, SymbolPrimitiveRecord, SymbolRelationRecord,
     TypeHierarchyRecord,
@@ -30,6 +33,7 @@ const UNPINNED_LATEST_GENERATION_SENTINEL: &str = "code-generation:unpinned-late
 
 pub type CallableCodeQueryFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<CodeQueryPage<T>>> + Send + 'a>>;
+pub type CallableCodeAuthorizationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Typed application port over the existing exact, lexical, and graph
 /// kernels. Implementations select the requested immutable generation and
@@ -109,9 +113,94 @@ pub trait CallableCodeQueryPort: Send + Sync {
     ) -> CallableCodeQueryFuture<'a, SourceMetadataRecord>;
 }
 
-pub struct CallableCodeQueryService<P, A, E> {
+/// Opaque authorization admission retained across one callable-code read.
+///
+/// Canonical source authorization keeps its full proof. A production route
+/// that already resolved exact project/source access may instead retain its
+/// route-owned receipt without reconstructing policy inputs.
+#[derive(Clone, Debug)]
+pub enum CallableCodeAuthorizationAdmission {
+    Source(Box<AuthorizationAdmission>),
+    Routed(AuthorityReceipt),
+}
+
+impl CallableCodeAuthorizationAdmission {
+    pub fn receipt(&self) -> &AuthorityReceipt {
+        match self {
+            Self::Source(admission) => admission.receipt(),
+            Self::Routed(receipt) => receipt,
+        }
+    }
+}
+
+/// Authorization boundary for callable-code application reads.
+pub trait CallableCodeAuthorizationPort: Send + Sync {
+    fn admit<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<
+        'a,
+        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
+    >;
+
+    fn recheck_publication<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        admission: &'a CallableCodeAuthorizationAdmission,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>>;
+}
+
+impl<P, E> CallableCodeAuthorizationPort for AuthorizationService<P, E>
+where
+    P: AuthorizationPort + Send + Sync,
+    E: SourceAuthorizationEvaluator + Send + Sync,
+{
+    fn admit<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<
+        'a,
+        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
+    > {
+        Box::pin(async move {
+            AuthorizationService::admit(self, context, operation, observed_at)
+                .map(|admission| CallableCodeAuthorizationAdmission::Source(Box::new(admission)))
+        })
+    }
+
+    fn recheck_publication<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        admission: &'a CallableCodeAuthorizationAdmission,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
+        Box::pin(async move {
+            let CallableCodeAuthorizationAdmission::Source(admission) = admission else {
+                return Err(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                ));
+            };
+            AuthorizationService::recheck_publication(
+                self,
+                context,
+                operation,
+                admission,
+                observed_at,
+            )
+        })
+    }
+}
+
+pub struct CallableCodeQueryService<P, A> {
     port: P,
-    authorization: AuthorizationService<A, E>,
+    authorization: A,
     operations: CallableCodeOperations,
 }
 
@@ -127,7 +216,11 @@ macro_rules! callable_code_service_method {
             if request.validate().is_err() {
                 return problem_envelope(context, operation, invalid_code_query_problem());
             }
-            let admission = match self.authorization.admit(context, operation, observed_at) {
+            let admission = match self
+                .authorization
+                .admit(context, operation, observed_at)
+                .await
+            {
                 Ok(admission) => admission,
                 Err(problem) => return problem_envelope(context, operation, problem),
             };
@@ -148,29 +241,32 @@ macro_rules! callable_code_service_method {
             ) {
                 return problem_envelope(context, operation, problem);
             }
-            evidence_envelope(
+            evidence_envelope_with_async_publication_recheck(
                 context,
                 operation,
-                &self.authorization,
-                &admission,
+                admission.receipt(),
                 outcome,
                 observed_at,
+                |finished_at| {
+                    self.authorization.recheck_publication(
+                        context,
+                        operation,
+                        &admission,
+                        finished_at,
+                    )
+                },
             )
+            .await
         }
     };
 }
 
-impl<P, A, E> CallableCodeQueryService<P, A, E>
+impl<P, A> CallableCodeQueryService<P, A>
 where
     P: CallableCodeQueryPort,
-    A: AuthorizationPort,
-    E: SourceAuthorizationEvaluator,
+    A: CallableCodeAuthorizationPort,
 {
-    pub fn new(
-        port: P,
-        authorization: AuthorizationService<A, E>,
-        operations: CallableCodeOperations,
-    ) -> Self {
+    pub fn new(port: P, authorization: A, operations: CallableCodeOperations) -> Self {
         Self {
             port,
             authorization,
@@ -293,7 +389,14 @@ fn validate_code_query_outcome<T>(
             return Err(invalid_code_query_outcome_problem());
         }
         let returned = page.items.len() as u64;
+        let cursor_state_valid = match (&page.next_cursor, evidence.page.expires_at) {
+            (Some(_), Some(expires_at)) => expires_at.0 > evidence.finished_at.0,
+            (None, None) => true,
+            _ => false,
+        };
         if returned > u64::from(requested_page_size)
+            || (page.next_cursor.is_some() && page.total == Some(returned))
+            || !cursor_state_valid
             || evidence.page.returned != returned
             || evidence.coverage.returned != returned
             || evidence.page.total != page.total
@@ -306,7 +409,13 @@ fn validate_code_query_outcome<T>(
             Some(generation)
                 if unpinned && generation.as_str() != UNPINNED_LATEST_GENERATION_SENTINEL => {}
             Some(generation) if !unpinned && generation == requested_generation => {}
-            None if !unpinned => {}
+            None if matches!(
+                outcome,
+                RetrievalPortOutcome::Cancelled(_)
+                    | RetrievalPortOutcome::TimedOut(_)
+                    | RetrievalPortOutcome::Failed(_)
+                    | RetrievalPortOutcome::Unavailable(_)
+            ) => {}
             _ => return Err(stale_code_query_problem()),
         }
     }

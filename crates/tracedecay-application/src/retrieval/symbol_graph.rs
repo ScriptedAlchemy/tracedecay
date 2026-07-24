@@ -195,6 +195,13 @@ pub struct SymbolSearchPrimitiveRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+impl SymbolSearchPrimitiveRequest {
+    /// Validate this request before dispatching it to a primitive port.
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactSymbolRequest {
@@ -202,6 +209,13 @@ pub struct ExactSymbolRequest {
     pub scope: SymbolGraphScope,
     pub lazy_index_ignored_dependencies: bool,
     pub meta: RetrievalRequestMeta,
+}
+
+impl ExactSymbolRequest {
+    /// Validate this request before dispatching it to a primitive port.
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +226,13 @@ pub struct SignatureSearchRequest {
     pub is_async: Option<bool>,
     pub scope: SymbolGraphScope,
     pub meta: RetrievalRequestMeta,
+}
+
+impl SignatureSearchRequest {
+    /// Validate this request before dispatching it to a primitive port.
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -229,6 +250,13 @@ pub struct ImplementationsRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+impl ImplementationsRequest {
+    /// Validate this request before dispatching it to a primitive port.
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TypeHierarchyRequest {
@@ -236,6 +264,13 @@ pub struct TypeHierarchyRequest {
     pub maximum_depth: u32,
     pub scope: SymbolGraphScope,
     pub meta: RetrievalRequestMeta,
+}
+
+impl TypeHierarchyRequest {
+    /// Validate this request before dispatching it to a primitive port.
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -248,6 +283,13 @@ pub struct GraphRelationRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+impl GraphRelationRequest {
+    /// Validate this request before dispatching it to a primitive port.
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GraphImpactPrimitiveRequest {
@@ -255,6 +297,13 @@ pub struct GraphImpactPrimitiveRequest {
     pub maximum_depth: u32,
     pub scope: SymbolGraphScope,
     pub meta: RetrievalRequestMeta,
+}
+
+impl GraphImpactPrimitiveRequest {
+    /// Validate this request before dispatching it to a primitive port.
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        <Self as ValidatedPrimitiveRequest>::validate(self)
+    }
 }
 
 trait ValidatedPrimitiveRequest {

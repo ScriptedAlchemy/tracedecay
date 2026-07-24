@@ -18,6 +18,7 @@ use crate::validation::{CatalogValidationError, validate_catalog};
 /// function pointer, trait object, service locator, or runtime registration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptorV1 {
+    capability_id: CapabilityId,
     use_case_id: UseCaseId,
     request_schema: SchemaRef,
     result_schema: SchemaRef,
@@ -25,15 +26,21 @@ pub struct ApplicationHandlerDescriptorV1 {
 
 impl ApplicationHandlerDescriptorV1 {
     pub fn new(
+        capability_id: CapabilityId,
         use_case_id: UseCaseId,
         request_schema: SchemaRef,
         result_schema: SchemaRef,
     ) -> Self {
         Self {
+            capability_id,
             use_case_id,
             request_schema,
             result_schema,
         }
+    }
+
+    pub fn capability_id(&self) -> &CapabilityId {
+        &self.capability_id
     }
 
     pub fn use_case_id(&self) -> &UseCaseId {

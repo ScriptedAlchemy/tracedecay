@@ -90,6 +90,7 @@ pub fn read_manifest(
 
 pub fn handler_for(manifest: &CapabilityManifestV1) -> ApplicationHandlerDescriptorV1 {
     ApplicationHandlerDescriptorV1::new(
+        manifest.capability_id().clone(),
         manifest.use_case_id().clone(),
         manifest.request_schema().clone(),
         manifest.result_schema().clone(),

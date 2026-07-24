@@ -7,13 +7,15 @@ use tracedecay_application::retrieval::{
     SymbolPrimitiveRecord, SymbolRelationRecord, TypeHierarchyRecord,
 };
 use tracedecay_application::{
-    ApplicationOutcome, ApplicationProblemKind, AuthorizationService,
-    CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeQueryFuture,
+    ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
+    AuthorityReceipt, AuthorizationService, CALLABLE_CODE_OPERATION_COUNT,
+    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
+    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryFuture,
     CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
     CodeImplementationsRequest, CodeQueryPage, CodeQueryScope, CodeRelationRequest,
     CodeSignatureRequest, CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRecord,
     ExactOccurrenceRequest, LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageRequest,
-    PhraseSearchRequest, QualifiedNameRequest, ResultProjection, RetrievalOrder,
+    PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection, RetrievalOrder,
     RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRecord,
     SourceMetadataRequest, callable_code_catalog_contribution, callable_code_handler_descriptors,
     callable_code_operations,
@@ -23,6 +25,9 @@ use tracedecay_domain::{
     QueryNormalizationRevision, RetrieverKind, SanitizerRevision, TemporalModeV1, UtcMicros,
 };
 use tracedecay_policy::authorization::SourceAuthorizationEvaluatorV1;
+use tracedecay_tool_catalog::{
+    AuthorityRequirement, BindingStatus, BindingSurface, LifecycleClass,
+};
 
 fn meta() -> RetrievalRequestMeta {
     RetrievalRequestMeta::current(
@@ -85,8 +90,11 @@ fn block_on<F: Future>(future: F) -> F::Output {
 #[derive(Clone, Copy)]
 enum ExactPortScenario {
     Valid,
+    ValidCursor,
+    UnexpectedCursor,
     ResolvedGeneration,
     MissingGeneration,
+    UnavailableWithoutGeneration,
     MismatchedPageCounts,
     InvalidFallback,
     WrongTemporalMode,
@@ -110,12 +118,16 @@ impl ExactOnlyPort {
         if matches!(self.scenario, ExactPortScenario::InvalidFallback) {
             pr9_fallback.digest = common::id(common::SHA256_B);
         }
-        let next_cursor = matches!(self.scenario, ExactPortScenario::Valid)
-            .then(|| OpaqueCursor::new("cursor.generation.fixture.page-2").unwrap());
+        let next_cursor = matches!(
+            self.scenario,
+            ExactPortScenario::ValidCursor | ExactPortScenario::UnexpectedCursor
+        )
+        .then(|| OpaqueCursor::new("cursor.generation.fixture.page-2").unwrap());
+        let total = u64::from(matches!(self.scenario, ExactPortScenario::ValidCursor));
         let page = CodeQueryPage {
             generation: generation.clone(),
             items: Vec::new(),
-            total: Some(0),
+            total: Some(total),
             next_cursor: next_cursor.clone(),
             pr9_fallback: Some(pr9_fallback),
         };
@@ -123,20 +135,31 @@ impl ExactOnlyPort {
         evidence.temporal.source_generation =
             (!matches!(self.scenario, ExactPortScenario::MissingGeneration))
                 .then(|| generation.clone());
+        if matches!(
+            self.scenario,
+            ExactPortScenario::UnavailableWithoutGeneration
+        ) {
+            evidence.payload = None;
+            evidence.temporal.source_generation = None;
+            return RetrievalPortOutcome::Unavailable(evidence);
+        }
         if matches!(self.scenario, ExactPortScenario::WrongTemporalMode) {
             evidence.temporal.requested_mode = TemporalModeV1::AsOf {
                 cutoff: UtcMicros(1),
             };
         }
-        evidence.coverage.visited = Some(0);
-        evidence.coverage.eligible = Some(0);
+        evidence.coverage.visited = Some(total);
+        evidence.coverage.eligible = Some(total);
         evidence.coverage.returned = 0;
-        evidence.page.total = Some(0);
+        evidence.page.total = Some(total);
         evidence.page.returned = u64::from(matches!(
             self.scenario,
             ExactPortScenario::MismatchedPageCounts
         ));
         evidence.page.cursor = next_cursor;
+        if matches!(self.scenario, ExactPortScenario::ValidCursor) {
+            evidence.page.expires_at = Some(UtcMicros(10));
+        }
         RetrievalPortOutcome::Completed(evidence)
     }
 }
@@ -188,6 +211,44 @@ impl CallableCodeQueryPort for ExactOnlyPort {
     unused_callable_port_method!(source_metadata, SourceMetadataRequest, SourceMetadataRecord);
 }
 
+struct RoutedAuthorization;
+
+impl CallableCodeAuthorizationPort for RoutedAuthorization {
+    fn admit<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        _operation: &'a ApplicationOperation,
+        _observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<
+        'a,
+        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
+    > {
+        Box::pin(async move {
+            Ok(CallableCodeAuthorizationAdmission::Routed(
+                common::authority(context),
+            ))
+        })
+    }
+
+    fn recheck_publication<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        _operation: &'a ApplicationOperation,
+        admission: &'a CallableCodeAuthorizationAdmission,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
+        Box::pin(async move {
+            let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
+                panic!("routed authorization admission remains opaque");
+            };
+            let mut current = common::authority(context);
+            assert_eq!(admission.policy, current.policy);
+            current.revalidated_at = observed_at;
+            Ok(current)
+        })
+    }
+}
+
 fn execute_exact(
     scenario: ExactPortScenario,
 ) -> tracedecay_application::ApplicationResult<CodeQueryPage<ExactOccurrenceRecord>> {
@@ -213,6 +274,30 @@ fn execute_exact_in_scope(
         ExactOccurrenceRequest::new("ApplicationOperation", None, scope, meta()).unwrap(),
         UtcMicros(2),
     ))
+}
+
+#[test]
+fn callable_code_service_accepts_route_owned_authorization() {
+    let operations = callable_code_operations().unwrap();
+    let context = common::context(operations.get(CallableCodeOperationKind::ExactOccurrence));
+    let service = CallableCodeQueryService::new(
+        ExactOnlyPort {
+            scenario: ExactPortScenario::Valid,
+        },
+        RoutedAuthorization,
+        operations,
+    );
+
+    let result = block_on(service.exact_occurrence(
+        &context,
+        ExactOccurrenceRequest::new("ApplicationOperation", None, scope(), meta()).unwrap(),
+        UtcMicros(2),
+    ))
+    .unwrap();
+    let ApplicationOutcome::Evidence(packet) = result.outcome else {
+        panic!("route-authorized callable query returns evidence");
+    };
+    assert_eq!(packet.authority.revalidated_at, UtcMicros(3));
 }
 
 #[test]
@@ -245,6 +330,34 @@ fn callable_code_requests_are_generation_bound_and_bounded() {
     );
     assert!(PhraseSearchRequest::new(query("empty phrases"), Vec::new(), scope(), meta()).is_err());
     assert!(SourceMetadataRequest::new(Vec::new(), scope(), meta()).is_err());
+}
+
+#[test]
+fn callable_code_service_reauthorizes_then_delegates_cursor_to_port() {
+    let operations = callable_code_operations().unwrap();
+    let context = common::context(operations.get(CallableCodeOperationKind::ExactOccurrence));
+    let service = CallableCodeQueryService::new(
+        ExactOnlyPort {
+            scenario: ExactPortScenario::Valid,
+        },
+        RoutedAuthorization,
+        operations,
+    );
+    let cursor = OpaqueCursor::new("cursor.unsupported").unwrap();
+    let request = ExactOccurrenceRequest::new(
+        "ApplicationOperation",
+        None,
+        scope(),
+        RetrievalRequestMeta::current(
+            PageRequest::new(25, Some(cursor)).unwrap(),
+            ResultProjection::Evidence,
+            RetrievalOrder::Relevance,
+        ),
+    )
+    .unwrap();
+
+    let result = block_on(service.exact_occurrence(&context, request, UtcMicros(2))).unwrap();
+    assert!(matches!(result.outcome, ApplicationOutcome::Evidence(_)));
 }
 
 #[test]
@@ -284,6 +397,24 @@ fn callable_code_service_rejects_unresolved_unpinned_marker_outcome() {
 }
 
 #[test]
+fn callable_code_service_preserves_unavailable_when_unpinned_has_no_generation() {
+    let result = execute_exact_in_scope(
+        ExactPortScenario::UnavailableWithoutGeneration,
+        scope_for("code-generation:unpinned-latest.v1"),
+    )
+    .unwrap();
+    let ApplicationOutcome::Evidence(packet) = result.outcome else {
+        panic!("unavailable callable code state remains typed evidence");
+    };
+    assert_eq!(
+        packet.execution.termination,
+        tracedecay_application::OperationTermination::Failed
+    );
+    assert!(packet.temporal.source_generation.is_none());
+    assert!(packet.payload.is_none());
+}
+
+#[test]
 fn callable_code_service_preserves_exact_equality_for_pinned_request() {
     let problem = execute_exact(ExactPortScenario::ResolvedGeneration).unwrap_err();
     assert_eq!(problem.problem.kind(), ApplicationProblemKind::Stale);
@@ -308,7 +439,7 @@ fn callable_code_service_rejects_non_current_temporal_evidence() {
 }
 
 #[test]
-fn callable_code_service_preserves_generation_coverage_cursor_and_fallback() {
+fn callable_code_service_preserves_generation_coverage_and_fallback() {
     let result = execute_exact(ExactPortScenario::Valid).unwrap();
     let ApplicationOutcome::Evidence(packet) = result.outcome else {
         panic!("callable code query must return evidence");
@@ -320,11 +451,31 @@ fn callable_code_service_preserves_generation_coverage_cursor_and_fallback() {
     assert_eq!(packet.coverage.completeness, CoverageCompleteness::Complete);
     assert_eq!(packet.coverage.returned, 0);
     let page = packet.payload.unwrap();
-    assert_eq!(
-        page.next_cursor.as_ref().unwrap().as_str(),
-        "cursor.generation.fixture.page-2"
-    );
+    assert!(page.next_cursor.is_none());
     page.pr9_fallback.as_ref().unwrap().validate().unwrap();
+}
+
+#[test]
+fn callable_code_service_rejects_an_unresumable_port_cursor() {
+    let problem = execute_exact(ExactPortScenario::UnexpectedCursor).unwrap_err();
+    assert_eq!(problem.problem.kind(), ApplicationProblemKind::Unavailable);
+    assert_eq!(
+        problem.problem.diagnostic.as_ref().unwrap().code,
+        "application.code-query.invalid-port-evidence"
+    );
+}
+
+#[test]
+fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
+    let result = execute_exact(ExactPortScenario::ValidCursor).unwrap();
+    let ApplicationOutcome::Evidence(packet) = result.outcome else {
+        panic!("valid continuation returns evidence");
+    };
+    assert_eq!(packet.page.expires_at, Some(UtcMicros(10)));
+    assert_eq!(
+        packet.page.cursor.as_ref().map(OpaqueCursor::as_str),
+        Some("cursor.generation.fixture.page-2")
+    );
 }
 
 #[test]
@@ -356,7 +507,7 @@ fn callable_code_page_preserves_generation_cursor_and_pr9_fallback() {
 }
 
 #[test]
-fn callable_code_catalog_is_complete_without_claiming_transport_bindings() {
+fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
     let contribution = callable_code_catalog_contribution().unwrap();
     let descriptors = callable_code_handler_descriptors().unwrap();
     let operations = callable_code_operations().unwrap();
@@ -365,19 +516,107 @@ fn callable_code_catalog_is_complete_without_claiming_transport_bindings() {
         CallableCodeOperationKind::ALL.len(),
         CALLABLE_CODE_OPERATION_COUNT
     );
-    assert_eq!(
-        contribution.capabilities().len(),
-        CALLABLE_CODE_OPERATION_COUNT
-    );
-    assert_eq!(descriptors.len(), CALLABLE_CODE_OPERATION_COUNT);
+    let canonical_equivalents = [
+        CallableCodeOperationKind::SymbolSearch,
+        CallableCodeOperationKind::QualifiedName,
+        CallableCodeOperationKind::SignatureSearch,
+        CallableCodeOperationKind::Implementations,
+        CallableCodeOperationKind::TypeHierarchy,
+        CallableCodeOperationKind::Callers,
+        CallableCodeOperationKind::Impact,
+        CallableCodeOperationKind::ModuleApi,
+        CallableCodeOperationKind::SourceMetadata,
+    ];
+    let callable_catalog_count = CALLABLE_CODE_OPERATION_COUNT - canonical_equivalents.len();
+    assert_eq!(contribution.capabilities().len(), callable_catalog_count);
+    assert_eq!(descriptors.len(), callable_catalog_count);
     assert_eq!(operations.iter().count(), CALLABLE_CODE_OPERATION_COUNT);
-    assert!(contribution.bindings().is_empty());
-    assert!(
-        contribution
-            .capabilities()
+    for kind in canonical_equivalents {
+        let capability_id = format!(
+            "capability.application.code-query.{}",
+            kind.as_str().replace('_', "-")
+        );
+        assert!(
+            contribution
+                .capabilities()
+                .iter()
+                .all(|capability| capability.capability_id().as_str() != capability_id),
+            "{kind:?} is owned by its canonical application surface"
+        );
+    }
+    let reachable = [
+        ("exact_occurrence", "code_exact_occurrence"),
+        ("phrase_search", "code_phrase_search"),
+        ("callees", "code_callees"),
+    ];
+    assert_eq!(contribution.bindings().len(), reachable.len() * 3);
+    for capability in contribution.capabilities() {
+        assert_eq!(
+            capability.authority(),
+            AuthorityRequirement::CapabilityGrantWithRevalidation
+        );
+        assert_eq!(capability.lifecycle(), LifecycleClass::Resumable);
+        let pagination = capability
+            .pagination()
+            .expect("direct callable code query is resumable");
+        assert_eq!(pagination.default_page_size(), 10);
+        assert_eq!(pagination.maximum_page_size(), 1_000);
+        assert_eq!(pagination.cursor_ttl_millis(), 15 * 60 * 1_000);
+        let kind = CallableCodeOperationKind::ALL
+            .into_iter()
+            .find(|kind| {
+                capability.capability_id().as_str()
+                    == format!(
+                        "capability.application.code-query.{}",
+                        kind.as_str().replace('_', "-")
+                    )
+            })
+            .expect("capability maps to one callable-code operation");
+        let Some((_, surface_operation)) = reachable
             .iter()
-            .all(|capability| capability.binding_ids().is_empty())
-    );
+            .find(|(operation, _)| *operation == kind.as_str())
+        else {
+            panic!("{kind:?} must be owned by a canonical equivalent or a callable binding");
+        };
+        assert!(capability.availability().is_callable());
+        assert_eq!(
+            capability.profile_eligibility(),
+            &[tracedecay_tool_catalog::ProfileId::new("profile.default").unwrap()]
+        );
+        assert_eq!(capability.binding_ids().len(), 3);
+        for surface in [
+            BindingSurface::Cli,
+            BindingSurface::Mcp,
+            BindingSurface::Http,
+        ] {
+            let surface_name = match surface {
+                BindingSurface::Cli => "cli",
+                BindingSurface::Mcp => "mcp",
+                BindingSurface::Http => "http",
+                BindingSurface::Lsp => "lsp",
+                BindingSurface::Dashboard => "dashboard",
+            };
+            let binding = contribution
+                .bindings()
+                .iter()
+                .find(|binding| {
+                    binding.capability_id() == capability.capability_id()
+                        && binding.surface() == surface
+                })
+                .expect("reachable operation has one binding per transport");
+            assert_eq!(
+                binding.binding_id().as_str(),
+                format!("binding.{surface_name}.{surface_operation}.v1")
+            );
+            assert_eq!(binding.operation().as_str(), *surface_operation);
+            assert_eq!(binding.status(), &BindingStatus::Current);
+            assert!(binding.protocol_revisions().contains(1));
+            assert!(!binding.protocol_revisions().contains(2));
+            assert!(binding.required_features().is_empty());
+            assert!(!binding.is_alias());
+            assert!(capability.binding_ids().contains(binding.binding_id()));
+        }
+    }
 
     let declared: Vec<_> = operations
         .iter()

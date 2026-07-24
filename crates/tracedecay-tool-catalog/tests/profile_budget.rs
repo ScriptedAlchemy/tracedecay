@@ -145,3 +145,58 @@ fn profile_absence_is_explicit_in_snapshot_discovery() {
             .is_empty()
     );
 }
+
+#[test]
+fn paired_profiles_reject_capabilities_without_cli_and_mcp_bindings() {
+    let profile_id = profile_id("profile.default");
+    let capability_id = capability_id("capability.source.outline");
+    let manifest = read_manifest(
+        capability_id.clone(),
+        use_case_id("use-case.source.outline"),
+        schema("schema.source.outline.request", 128),
+        schema("schema.source.outline.result", 256),
+        Vec::new(),
+        vec![profile_id.clone()],
+    );
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: ContributionId::new("contribution.source").unwrap(),
+        depends_on: Vec::new(),
+        capabilities: vec![manifest.clone()],
+        retrieval_primitives: Vec::new(),
+        bindings: Vec::new(),
+    })
+    .unwrap();
+    let profile = ProfileDefinition::new(ProfileDefinitionInputV1 {
+        profile_id: profile_id.clone(),
+        kind: ProfileKind::Default,
+        capability_ids: vec![capability_id.clone()],
+        enabled_surfaces: vec![BindingSurface::Cli, BindingSurface::Mcp],
+        requires_cli_mcp_pairing: true,
+        budget: ProfileBudget::DEFAULT,
+        routing_fixtures: vec![
+            RoutingFixtureV1::new(
+                "outline source",
+                RoutingFixtureExpectation::Select {
+                    capability_id: capability_id.clone(),
+                },
+            )
+            .unwrap(),
+            RoutingFixtureV1::new("do nothing", RoutingFixtureExpectation::Reject).unwrap(),
+        ],
+    })
+    .unwrap();
+    let mut builder = CatalogSnapshotBuilderV1::new();
+    builder
+        .add_contribution(contribution)
+        .add_handler(handler_for(&manifest))
+        .add_profile(profile);
+
+    assert_eq!(
+        builder.build(),
+        Err(CatalogValidationError::PairedProfileMissingBinding {
+            profile_id,
+            capability_id,
+            surface: BindingSurface::Cli,
+        })
+    );
+}

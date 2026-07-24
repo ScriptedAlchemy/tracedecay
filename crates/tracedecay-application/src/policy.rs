@@ -9,13 +9,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
-use tracedecay_domain::{ManifestDigest, VectorWatermark, canonical_sha256};
+use tracedecay_domain::{
+    CapabilityId as DomainCapabilityId, ManifestDigest, UtcMicros, VectorWatermark,
+    canonical_sha256,
+};
 use tracedecay_policy::analyzer::{
     AnalyzerAdmissionEvaluatorV1, AnalyzerAdmissionInputV1, AnalyzerAdmissionSnapshotV1,
 };
 use tracedecay_policy::authorization::{
-    SourceAuthorizationDecisionV1, SourceAuthorizationEvaluator, SourceAuthorizationEvaluatorV1,
-    SourceAuthorizationInputV1, SourceOwnerV1,
+    PolicyIdentifierV1, SourceAuthorizationDecisionV1, SourceAuthorizationEvaluator,
+    SourceAuthorizationEvaluatorV1, SourceAuthorizationInputV1, SourceOwnerV1,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluator,
@@ -27,17 +30,21 @@ use tracedecay_policy::git::{
 };
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRouteCandidateV1,
-    CapabilityRoutingDecisionV1, CapabilityRoutingEvaluator, CapabilityRoutingEvaluatorV1,
-    CapabilityRoutingRequestV1, ScopeMatchV1, TruthSourceStateV1,
+    CapabilityRoutingCancellationV1, CapabilityRoutingDecisionV1, CapabilityRoutingEvaluator,
+    CapabilityRoutingEvaluatorV1, CapabilityRoutingGrantStateV1, CapabilityRoutingGrantV1,
+    CapabilityRoutingRequestV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
-use tracedecay_tool_catalog::{AvailabilityContract, EffectClass};
+use tracedecay_tool_catalog::{AvailabilityContract, EffectClass, UseCaseId};
 
-use crate::context::{RequestAdmission, RequestContext, ResolvedScope};
+use crate::context::{CancellationState, RequestAdmission, RequestContext, ResolvedScope};
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptors, application_handler_descriptors};
 use crate::retrieval::catalog::application_catalog_contributions;
 
 const POLICY_CAPABILITY_DIGEST_DOMAIN: &str = "tracedecay.application.policy-capability.v1";
+const POLICY_ROUTING_CATALOG_DIGEST_DOMAIN: &str =
+    "tracedecay.application.policy-routing-catalog.v1";
+const POLICY_ROUTING_CATALOG_REVISION: u64 = 1;
 
 /// Named production journey consuming one retained pure evaluator.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -211,12 +218,13 @@ pub struct PolicyEvaluationV1<T> {
 }
 
 /// Handler-backed catalog capability projected for pure routing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct RegisteredPolicyCapabilityV1 {
     capability_id: String,
+    use_case_id: String,
     catalog_availability: CapabilityAvailabilityV1,
     effect_class: EffectClass,
-    catalog_digest: ManifestDigest,
+    capability_digest: ManifestDigest,
 }
 
 impl RegisteredPolicyCapabilityV1 {
@@ -232,8 +240,12 @@ impl RegisteredPolicyCapabilityV1 {
         self.catalog_availability
     }
 
-    pub fn catalog_digest(&self) -> &ManifestDigest {
-        &self.catalog_digest
+    pub fn use_case_id(&self) -> &str {
+        &self.use_case_id
+    }
+
+    pub fn capability_digest(&self) -> &ManifestDigest {
+        &self.capability_digest
     }
 }
 
@@ -244,6 +256,8 @@ impl RegisteredPolicyCapabilityV1 {
 #[derive(Clone, Debug)]
 pub struct PolicyEvaluatorCompositionV1 {
     capabilities: BTreeMap<String, RegisteredPolicyCapabilityV1>,
+    catalog_revision: u64,
+    catalog_digest: ManifestDigest,
     routing: CapabilityRoutingEvaluatorV1,
     analyzer: AnalyzerAdmissionEvaluatorV1,
     source_authorization: SourceAuthorizationEvaluatorV1,
@@ -284,9 +298,13 @@ impl PolicyEvaluatorCompositionV1 {
             let capability_id = capability.capability_id().as_str().to_owned();
             let registered = RegisteredPolicyCapabilityV1 {
                 capability_id: capability_id.clone(),
+                use_case_id: capability.use_case_id().as_str().to_owned(),
                 catalog_availability: catalog_availability(capability.availability()),
                 effect_class: capability.effect(),
-                catalog_digest: canonical_sha256(&(POLICY_CAPABILITY_DIGEST_DOMAIN, capability))?,
+                capability_digest: canonical_sha256(&(
+                    POLICY_CAPABILITY_DIGEST_DOMAIN,
+                    capability,
+                ))?,
             };
             if capabilities.insert(capability_id, registered).is_some() {
                 return Err(ApplicationContractError::Duplicate {
@@ -294,8 +312,15 @@ impl PolicyEvaluatorCompositionV1 {
                 });
             }
         }
+        let catalog_digest = canonical_sha256(&(
+            POLICY_ROUTING_CATALOG_DIGEST_DOMAIN,
+            POLICY_ROUTING_CATALOG_REVISION,
+            &capabilities,
+        ))?;
         Ok(Self {
             capabilities,
+            catalog_revision: POLICY_ROUTING_CATALOG_REVISION,
+            catalog_digest,
             routing: CapabilityRoutingEvaluatorV1::default(),
             analyzer: AnalyzerAdmissionEvaluatorV1::default(),
             source_authorization: SourceAuthorizationEvaluatorV1::default(),
@@ -318,7 +343,6 @@ impl PolicyEvaluatorCompositionV1 {
         runtime_availability: CapabilityAvailabilityV1,
         scope_match: ScopeMatchV1,
         truth_source_state: TruthSourceStateV1,
-        priority: u32,
     ) -> Result<CapabilityRouteCandidateV1, ApplicationContractError> {
         let registered =
             self.capabilities
@@ -327,7 +351,8 @@ impl PolicyEvaluatorCompositionV1 {
                     field: "policy route",
                 })?;
         Ok(CapabilityRouteCandidateV1 {
-            capability_id: tracedecay_domain::CapabilityId::new(registered.capability_id.clone())?,
+            capability_id: DomainCapabilityId::new(registered.capability_id.clone())?,
+            use_case_id: policy_identifier(&registered.use_case_id)?,
             availability: if registered.catalog_availability
                 == CapabilityAvailabilityV1::Unavailable
             {
@@ -338,8 +363,39 @@ impl PolicyEvaluatorCompositionV1 {
             scope_match,
             effect_class: route_effect(registered.effect_class)?,
             truth_source_state,
-            catalog_digest: registered.catalog_digest.clone(),
-            priority,
+            catalog_revision: self.catalog_revision,
+            catalog_digest: self.catalog_digest.clone(),
+            capability_digest: registered.capability_digest.clone(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn routing_request(
+        &self,
+        context: &PolicyEvaluationContextV1,
+        use_case_id: &UseCaseId,
+        declared_capability_order: Vec<DomainCapabilityId>,
+        candidates: Vec<CapabilityRouteCandidateV1>,
+        required_effect_class: CapabilityEffectClassV1,
+        required_freshness: TruthFreshnessRequirementV1,
+        evaluated_at: UtcMicros,
+    ) -> Result<CapabilityRoutingRequestV1, ApplicationContractError> {
+        context.validate()?;
+        Ok(CapabilityRoutingRequestV1 {
+            requested_use_case_id: policy_identifier(use_case_id.as_str())?,
+            declared_capability_order,
+            candidates,
+            grant: routing_grant(context.request())?,
+            required_effect_class,
+            required_freshness,
+            catalog_revision: self.catalog_revision,
+            catalog_digest: self.catalog_digest.clone(),
+            policy_revision: context.policy_revision(),
+            policy_digest: context.policy_digest().clone(),
+            configuration_digest: context.configuration().effective_behavior_digest.clone(),
+            deadline: context.request().deadline().expires_at,
+            cancellation: routing_cancellation(context.request()),
+            evaluated_at,
         })
     }
 
@@ -377,11 +433,6 @@ impl PolicyEvaluatorCompositionV1 {
             &request.policy_digest,
             &request.configuration_digest,
         )?;
-        if context.request.admission_at(request.evaluated_at) != RequestAdmission::Admitted {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "policy routing request authority",
-            });
-        }
         self.validate_route_request(context, request)?;
         Ok(PolicyEvaluationV1 {
             consumer,
@@ -527,7 +578,8 @@ impl PolicyEvaluatorCompositionV1 {
             .map(|capability| capability.as_str())
             .collect::<BTreeSet<_>>();
         if request
-            .authorized_capabilities
+            .grant
+            .allowed_capabilities
             .iter()
             .any(|capability| !granted.contains(capability.as_str()))
         {
@@ -535,10 +587,25 @@ impl PolicyEvaluatorCompositionV1 {
                 field: "policy route authorization",
             });
         }
+        if request.catalog_revision != self.catalog_revision
+            || request.catalog_digest != self.catalog_digest
+            || request.grant != routing_grant(context.request())?
+            || request.deadline != context.request().deadline().expires_at
+            || request.cancellation != routing_cancellation(context.request())
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "policy route authority snapshot",
+            });
+        }
         for capability in &request.declared_capability_order {
-            if !self.capabilities.contains_key(capability.as_str()) {
+            let Some(registered) = self.capabilities.get(capability.as_str()) else {
                 return Err(ApplicationContractError::Inconsistent {
                     field: "declared policy route",
+                });
+            };
+            if policy_identifier(&registered.use_case_id)? != request.requested_use_case_id {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "declared policy use case",
                 });
             }
         }
@@ -550,8 +617,11 @@ impl PolicyEvaluatorCompositionV1 {
             };
             if (registered.catalog_availability == CapabilityAvailabilityV1::Unavailable
                 && candidate.availability != CapabilityAvailabilityV1::Unavailable)
+                || candidate.use_case_id != policy_identifier(&registered.use_case_id)?
                 || candidate.effect_class != route_effect(registered.effect_class)?
-                || candidate.catalog_digest != registered.catalog_digest
+                || candidate.catalog_revision != self.catalog_revision
+                || candidate.catalog_digest != self.catalog_digest
+                || candidate.capability_digest != registered.capability_digest
             {
                 return Err(ApplicationContractError::Inconsistent {
                     field: "policy route catalog projection",
@@ -559,6 +629,47 @@ impl PolicyEvaluatorCompositionV1 {
             }
         }
         Ok(())
+    }
+}
+
+fn policy_identifier(value: &str) -> Result<PolicyIdentifierV1, ApplicationContractError> {
+    PolicyIdentifierV1::new(value).map_err(|_| ApplicationContractError::InvalidIdentifier {
+        field: "policy routing identifier",
+    })
+}
+
+fn routing_grant(
+    request: &RequestContext,
+) -> Result<CapabilityRoutingGrantV1, ApplicationContractError> {
+    let grant = request.grant();
+    Ok(CapabilityRoutingGrantV1 {
+        grant_id: policy_identifier(grant.grant_id.as_str())?,
+        revision: grant.revision,
+        digest: grant.digest.clone(),
+        allowed_capabilities: grant
+            .allowed_capabilities
+            .iter()
+            .map(|capability| DomainCapabilityId::new(capability.as_str().to_owned()))
+            .collect::<Result<_, _>>()?,
+        allowed_use_cases: grant
+            .allowed_use_cases
+            .iter()
+            .map(|use_case| policy_identifier(use_case.as_str()))
+            .collect::<Result<_, _>>()?,
+        issued_at: grant.issued_at,
+        expires_at: grant.expires_at,
+        state: CapabilityRoutingGrantStateV1::Active,
+    })
+}
+
+fn routing_cancellation(request: &RequestContext) -> CapabilityRoutingCancellationV1 {
+    match &request.cancellation().state {
+        CancellationState::Active => CapabilityRoutingCancellationV1::Active,
+        CancellationState::Cancelled { requested_at } => {
+            CapabilityRoutingCancellationV1::Cancelled {
+                requested_at: *requested_at,
+            }
+        }
     }
 }
 

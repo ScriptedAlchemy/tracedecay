@@ -41,6 +41,24 @@ impl SourceAuthorizationRecordedResultV1 {
             decision,
         }
     }
+
+    fn is_internally_consistent(&self) -> bool {
+        self.evaluator_version.is_valid()
+            && self.decision.evaluator_version == self.evaluator_version
+            && self.decision.input_digest == self.input.input_digest()
+            && self.decision.policy_revision == self.input.policy_revision
+            && self.decision.policy_digest == self.input.policy_digest
+            && self.decision.configuration_digest == self.input.configuration_digest
+            && self.decision.content_status == self.input.content_status
+            && self.decision.evidence_references
+                == self
+                    .input
+                    .evidence_references
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            && self.decision.has_valid_digest()
+    }
 }
 
 /// Every current-best-effort substitution is explicit and stable.
@@ -90,6 +108,15 @@ pub fn replay_source_authorization(
     request: SourceAuthorizationReplayRequestV1,
 ) -> SourceAuthorizationReplayResultV1 {
     let recorded_input_digest = request.recorded.input.input_digest();
+    if !request.recorded.is_internally_consistent() {
+        return SourceAuthorizationReplayResultV1 {
+            mode: request.mode,
+            recorded_input_digest,
+            decision: None,
+            substitutions: Vec::new(),
+            ordered_reason_codes: vec![PolicyReasonCodeV1::ReplayRecordInvalid],
+        };
+    }
     match request.mode {
         ReplayModeV1::RecordedResult => SourceAuthorizationReplayResultV1 {
             mode: request.mode,
@@ -120,17 +147,21 @@ pub fn replay_source_authorization(
                 };
             }
             let decision = evaluator.evaluate(&request.recorded.input);
-            let ordered_reason_codes = if decision == request.recorded.decision {
-                Vec::new()
-            } else {
-                vec![PolicyReasonCodeV1::ReplayDecisionMismatch]
-            };
+            if decision != request.recorded.decision {
+                return SourceAuthorizationReplayResultV1 {
+                    mode: request.mode,
+                    recorded_input_digest,
+                    decision: None,
+                    substitutions: Vec::new(),
+                    ordered_reason_codes: vec![PolicyReasonCodeV1::ReplayDecisionMismatch],
+                };
+            }
             SourceAuthorizationReplayResultV1 {
                 mode: request.mode,
                 recorded_input_digest,
                 decision: Some(decision),
                 substitutions: Vec::new(),
-                ordered_reason_codes,
+                ordered_reason_codes: Vec::new(),
             }
         }
         ReplayModeV1::CurrentBestEffort => {

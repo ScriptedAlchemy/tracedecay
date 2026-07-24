@@ -33,6 +33,7 @@ pub fn application_catalog_contributions()
         crate::git::git_surface_catalog_contribution()?,
         crate::configuration::configuration_surface_catalog_contribution()?,
         crate::feedback::feedback_surface_catalog_contribution()?,
+        crate::source_edit::source_edit_catalog_contribution()?,
     ])
 }
 
@@ -42,7 +43,11 @@ struct PrimitiveReadSpec {
     use_case: &'static str,
 }
 
-const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 12] = [
+const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 16] = [
+    primitive_spec("code_signature_search"),
+    primitive_spec("code_implementations"),
+    primitive_spec("code_type_hierarchy"),
+    primitive_spec("code_callers"),
     primitive_spec("session_lookup"),
     primitive_spec("qualified_name"),
     primitive_spec("call_chain"),
@@ -98,6 +103,9 @@ fn primitive_operation(
 pub fn primitive_read_operation(
     operation: &str,
 ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
+    if operation == "code_symbol_search" {
+        return symbol_search_operation().map(Some);
+    }
     PRIMITIVE_READ_SPECS
         .iter()
         .find(|spec| spec.operation == operation)
@@ -248,14 +256,41 @@ pub fn symbol_search_handler_descriptor()
     )
 }
 
-/// Inert catalog contribution for the declared symbol-search use case.
+/// Catalog contribution for the declared symbol-search use case.
 ///
-/// Root composition remains outside this crate; this function has no dispatch,
-/// binding, profile, storage, or transport side effect.
+/// Root composition remains outside this crate; the contribution declares
+/// transport bindings but has no dispatch, storage, or transport side effect.
 pub fn symbol_search_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;
     let result_schema = symbol_search_result_schema()?;
+    let mut bindings = Vec::with_capacity(3);
+    let mut binding_ids = Vec::with_capacity(3);
+    for surface in [
+        BindingSurface::Cli,
+        BindingSurface::Mcp,
+        BindingSurface::Http,
+    ] {
+        let surface_name = match surface {
+            BindingSurface::Cli => "cli",
+            BindingSurface::Mcp => "mcp",
+            BindingSurface::Http => "http",
+            BindingSurface::Lsp => "lsp",
+            BindingSurface::Dashboard => "dashboard",
+        };
+        let binding_id = BindingId::new(format!("binding.{surface_name}.code_symbol_search.v1"))?;
+        bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+            binding_id: binding_id.clone(),
+            capability_id: capability_id.clone(),
+            surface,
+            operation: SurfaceOperationName::new("code_symbol_search")?,
+            protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+            required_features: Vec::new(),
+            status: BindingStatus::Current,
+            alias_of: None,
+        })?);
+        binding_ids.push(binding_id);
+    }
     let capability = CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id: capability_id.clone(),
         use_case_id: tracedecay_tool_catalog::UseCaseId::new(SYMBOL_SEARCH_USE_CASE)?,
@@ -298,7 +333,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
             TerminalState::Partial,
         ])?,
         availability: AvailabilityContract::Available,
-        binding_ids: Vec::new(),
+        binding_ids,
         profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),
     })?;
@@ -347,7 +382,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         depends_on: Vec::new(),
         capabilities: vec![capability],
         retrieval_primitives: vec![primitive],
-        bindings: Vec::new(),
+        bindings,
     })?)
 }
 

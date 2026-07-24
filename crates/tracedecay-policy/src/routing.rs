@@ -1,4 +1,4 @@
-//! Pure capability routing over explicit catalog facts.
+//! Pure capability routing over explicit catalog and grant facts.
 //!
 //! A route is selected only from caller-declared capability order. Missing or
 //! unavailable capabilities never cause an inferred fallback.
@@ -69,39 +69,100 @@ impl TruthFreshnessRequirementV1 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityRoutingGrantStateV1 {
+    Active,
+    Revoked,
+    Stale,
+    Ambiguous,
+}
+
+/// One immutable, current grant snapshot supplied by the application
+/// authority. Policy can narrow or reject it, but cannot issue or refresh it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityRoutingGrantV1 {
+    pub grant_id: PolicyIdentifierV1,
+    pub revision: u64,
+    pub digest: ManifestDigest,
+    pub allowed_capabilities: BTreeSet<CapabilityId>,
+    pub allowed_use_cases: BTreeSet<PolicyIdentifierV1>,
+    pub issued_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub state: CapabilityRoutingGrantStateV1,
+}
+
+impl CapabilityRoutingGrantV1 {
+    fn is_valid(&self) -> bool {
+        self.grant_id.is_valid()
+            && self.revision > 0
+            && self.digest.validate().is_ok()
+            && !self.allowed_capabilities.is_empty()
+            && self
+                .allowed_capabilities
+                .iter()
+                .all(|capability| capability.validate().is_ok())
+            && !self.allowed_use_cases.is_empty()
+            && self
+                .allowed_use_cases
+                .iter()
+                .all(PolicyIdentifierV1::is_valid)
+            && self.issued_at < self.expires_at
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CapabilityRoutingCancellationV1 {
+    Active,
+    Cancelled { requested_at: UtcMicros },
+}
+
 /// A catalog-projected candidate. The catalog/runtime owner provides every
 /// availability and truth-source fact; this crate does not inspect one.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityRouteCandidateV1 {
     pub capability_id: CapabilityId,
+    pub use_case_id: PolicyIdentifierV1,
     pub availability: CapabilityAvailabilityV1,
     pub scope_match: ScopeMatchV1,
     pub effect_class: CapabilityEffectClassV1,
     pub truth_source_state: TruthSourceStateV1,
+    pub catalog_revision: u64,
     pub catalog_digest: ManifestDigest,
-    pub priority: u32,
+    pub capability_digest: ManifestDigest,
 }
 
 impl CapabilityRouteCandidateV1 {
     fn is_valid(&self) -> bool {
-        self.capability_id.validate().is_ok() && self.catalog_digest.validate().is_ok()
+        self.capability_id.validate().is_ok()
+            && self.use_case_id.is_valid()
+            && self.catalog_revision > 0
+            && self.catalog_digest.validate().is_ok()
+            && self.capability_digest.validate().is_ok()
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityRoutingRequestV1 {
+    pub requested_use_case_id: PolicyIdentifierV1,
     /// Ordered by explicit caller/catalog declaration. This is the only
     /// fallback relation policy may consider.
     pub declared_capability_order: Vec<CapabilityId>,
     pub candidates: Vec<CapabilityRouteCandidateV1>,
-    pub authorized_capabilities: BTreeSet<CapabilityId>,
+    pub grant: CapabilityRoutingGrantV1,
     pub required_effect_class: CapabilityEffectClassV1,
     pub required_freshness: TruthFreshnessRequirementV1,
+    pub catalog_revision: u64,
+    pub catalog_digest: ManifestDigest,
     pub policy_revision: u64,
     pub policy_digest: ManifestDigest,
     pub configuration_digest: ManifestDigest,
+    pub deadline: UtcMicros,
+    pub cancellation: CapabilityRoutingCancellationV1,
     pub evaluated_at: UtcMicros,
 }
 
@@ -118,7 +179,17 @@ pub enum CapabilityRoutingDispositionV1 {
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityRoutingReasonV1 {
     InvalidRequest,
+    RequestCancelled,
+    DeadlineExceeded,
+    GrantRevoked,
+    GrantStale,
+    GrantAmbiguous,
+    GrantNotYetIssued,
+    GrantExpired,
+    UseCaseNotAuthorized,
     CapabilityNotAuthorized,
+    CatalogSnapshotMismatch,
+    CandidateUseCaseMismatch,
     CapabilityUnavailable,
     CapabilityStale,
     CapabilityUnknown,
@@ -136,6 +207,12 @@ pub struct CapabilityRoutingDecisionV1 {
     pub evaluator_id: PolicyIdentifierV1,
     pub evaluator_revision: u64,
     pub input_digest: ManifestDigest,
+    pub requested_use_case_id: PolicyIdentifierV1,
+    pub grant_id: PolicyIdentifierV1,
+    pub grant_revision: u64,
+    pub grant_digest: ManifestDigest,
+    pub catalog_revision: u64,
+    pub catalog_digest: ManifestDigest,
     pub policy_revision: u64,
     pub policy_digest: ManifestDigest,
     pub configuration_digest: ManifestDigest,
@@ -176,6 +253,12 @@ impl CapabilityRoutingEvaluatorV1 {
             evaluator_id: self.evaluator_id.clone(),
             evaluator_revision: self.evaluator_revision,
             input_digest: policy_digest("tracedecay.policy.capability-routing-input.v1", request),
+            requested_use_case_id: request.requested_use_case_id.clone(),
+            grant_id: request.grant.grant_id.clone(),
+            grant_revision: request.grant.revision,
+            grant_digest: request.grant.digest.clone(),
+            catalog_revision: request.catalog_revision,
+            catalog_digest: request.catalog_digest.clone(),
             policy_revision: request.policy_revision,
             policy_digest: request.policy_digest.clone(),
             configuration_digest: request.configuration_digest.clone(),
@@ -189,14 +272,14 @@ impl CapabilityRoutingEvaluatorV1 {
 impl CapabilityRoutingEvaluator for CapabilityRoutingEvaluatorV1 {
     fn evaluate(&self, request: &CapabilityRoutingRequestV1) -> CapabilityRoutingDecisionV1 {
         let mut declared = BTreeSet::new();
-        if request.declared_capability_order.is_empty()
+        if !request.requested_use_case_id.is_valid()
+            || request.declared_capability_order.is_empty()
+            || !request.grant.is_valid()
+            || request.catalog_revision == 0
+            || request.catalog_digest.validate().is_err()
             || request.policy_revision == 0
             || request.policy_digest.validate().is_err()
             || request.configuration_digest.validate().is_err()
-            || request
-                .authorized_capabilities
-                .iter()
-                .any(|capability| capability.validate().is_err())
             || request
                 .candidates
                 .iter()
@@ -211,6 +294,91 @@ impl CapabilityRoutingEvaluator for CapabilityRoutingEvaluatorV1 {
                 CapabilityRoutingDispositionV1::Indeterminate,
                 None,
                 vec![CapabilityRoutingReasonV1::InvalidRequest],
+            );
+        }
+        if matches!(
+            request.cancellation,
+            CapabilityRoutingCancellationV1::Cancelled { .. }
+        ) {
+            return self.decision(
+                request,
+                CapabilityRoutingDispositionV1::Indeterminate,
+                None,
+                vec![CapabilityRoutingReasonV1::RequestCancelled],
+            );
+        }
+        if request.evaluated_at >= request.deadline {
+            return self.decision(
+                request,
+                CapabilityRoutingDispositionV1::Indeterminate,
+                None,
+                vec![CapabilityRoutingReasonV1::DeadlineExceeded],
+            );
+        }
+        match request.grant.state {
+            CapabilityRoutingGrantStateV1::Revoked => {
+                return self.decision(
+                    request,
+                    CapabilityRoutingDispositionV1::Deny,
+                    None,
+                    vec![CapabilityRoutingReasonV1::GrantRevoked],
+                );
+            }
+            CapabilityRoutingGrantStateV1::Stale => {
+                return self.decision(
+                    request,
+                    CapabilityRoutingDispositionV1::Indeterminate,
+                    None,
+                    vec![CapabilityRoutingReasonV1::GrantStale],
+                );
+            }
+            CapabilityRoutingGrantStateV1::Ambiguous => {
+                return self.decision(
+                    request,
+                    CapabilityRoutingDispositionV1::Indeterminate,
+                    None,
+                    vec![CapabilityRoutingReasonV1::GrantAmbiguous],
+                );
+            }
+            CapabilityRoutingGrantStateV1::Active => {}
+        }
+        if request.evaluated_at < request.grant.issued_at {
+            return self.decision(
+                request,
+                CapabilityRoutingDispositionV1::Deny,
+                None,
+                vec![CapabilityRoutingReasonV1::GrantNotYetIssued],
+            );
+        }
+        if request.evaluated_at >= request.grant.expires_at {
+            return self.decision(
+                request,
+                CapabilityRoutingDispositionV1::Deny,
+                None,
+                vec![CapabilityRoutingReasonV1::GrantExpired],
+            );
+        }
+        if !request
+            .grant
+            .allowed_use_cases
+            .contains(&request.requested_use_case_id)
+        {
+            return self.decision(
+                request,
+                CapabilityRoutingDispositionV1::Deny,
+                None,
+                vec![CapabilityRoutingReasonV1::UseCaseNotAuthorized],
+            );
+        }
+        if request.candidates.iter().any(|candidate| {
+            candidate.catalog_revision != request.catalog_revision
+                || candidate.catalog_digest != request.catalog_digest
+        }) {
+            return self.decision(
+                request,
+                CapabilityRoutingDispositionV1::Indeterminate,
+                None,
+                vec![CapabilityRoutingReasonV1::CatalogSnapshotMismatch],
             );
         }
 
@@ -233,7 +401,12 @@ impl CapabilityRoutingEvaluator for CapabilityRoutingEvaluatorV1 {
                 saw_unavailable = true;
                 continue;
             }
-            if !request.authorized_capabilities.contains(capability_id) {
+            if candidate.use_case_id != request.requested_use_case_id {
+                reasons.push(CapabilityRoutingReasonV1::CandidateUseCaseMismatch);
+                saw_denied = true;
+                continue;
+            }
+            if !request.grant.allowed_capabilities.contains(capability_id) {
                 reasons.push(CapabilityRoutingReasonV1::CapabilityNotAuthorized);
                 saw_denied = true;
                 continue;

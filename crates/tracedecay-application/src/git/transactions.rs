@@ -372,11 +372,12 @@ impl GitIndexApplyPortResultV1 {
                 field: "git index apply port binding",
             });
         }
-        let expected_termination = match self.receipt.outcome {
-            GitIndexReceiptOutcomeV1::Committed => EffectTermination::Completed,
-            GitIndexReceiptOutcomeV1::AbortedNoChange => EffectTermination::Failed,
-            GitIndexReceiptOutcomeV1::NeedsInspection => EffectTermination::EffectUnknown,
-        };
+        let expected_termination =
+            effect_termination_for_result(self.receipt.outcome, self.execution.termination).ok_or(
+                ApplicationContractError::Inconsistent {
+                    field: "git index apply terminal outcome",
+                },
+            )?;
         if self.execution.termination != expected_operation_termination(expected_termination)
             || (expected_termination == EffectTermination::EffectUnknown
                 && self.reconciliation != ReconciliationState::Pending)
@@ -486,6 +487,11 @@ where
         let expected_state = result.receipt.old_snapshot_digest.clone();
         let committed_state = (result.receipt.outcome == GitIndexReceiptOutcomeV1::Committed)
             .then(|| result.receipt.final_snapshot_digest.clone());
+        let effect_termination =
+            effect_termination_for_result(result.receipt.outcome, result.execution.termination)
+                .ok_or(ApplicationContractError::Inconsistent {
+                    field: "git index apply terminal outcome",
+                })?;
         let receipt = EffectReceipt {
             operation: request.binding.use_case_id.clone(),
             request_id: request.context.request_id().clone(),
@@ -499,11 +505,7 @@ where
             configuration_digest: request.proof.configuration_digest,
             catalog_digest: request.proof.catalog_digest,
             privacy_digest: request.proof.privacy_digest,
-            outcome: match result.receipt.outcome {
-                GitIndexReceiptOutcomeV1::Committed => EffectTermination::Completed,
-                GitIndexReceiptOutcomeV1::AbortedNoChange => EffectTermination::Failed,
-                GitIndexReceiptOutcomeV1::NeedsInspection => EffectTermination::EffectUnknown,
-            },
+            outcome: effect_termination,
             committed_state,
             external_proof: request.proof.external_proof,
         };
@@ -592,5 +594,29 @@ const fn expected_operation_termination(termination: EffectTermination) -> Opera
         EffectTermination::Failed => OperationTermination::Failed,
         EffectTermination::Partial => OperationTermination::Partial,
         EffectTermination::EffectUnknown => OperationTermination::EffectUnknown,
+    }
+}
+
+const fn effect_termination_for_result(
+    outcome: GitIndexReceiptOutcomeV1,
+    execution: OperationTermination,
+) -> Option<EffectTermination> {
+    match (outcome, execution) {
+        (GitIndexReceiptOutcomeV1::Committed, OperationTermination::Completed) => {
+            Some(EffectTermination::Completed)
+        }
+        (GitIndexReceiptOutcomeV1::AbortedNoChange, OperationTermination::Failed) => {
+            Some(EffectTermination::Failed)
+        }
+        (GitIndexReceiptOutcomeV1::AbortedNoChange, OperationTermination::Cancelled) => {
+            Some(EffectTermination::Cancelled)
+        }
+        (GitIndexReceiptOutcomeV1::AbortedNoChange, OperationTermination::TimedOut) => {
+            Some(EffectTermination::TimedOut)
+        }
+        (GitIndexReceiptOutcomeV1::NeedsInspection, OperationTermination::EffectUnknown) => {
+            Some(EffectTermination::EffectUnknown)
+        }
+        _ => None,
     }
 }

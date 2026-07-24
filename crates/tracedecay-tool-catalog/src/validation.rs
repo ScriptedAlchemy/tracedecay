@@ -48,6 +48,11 @@ pub enum CatalogValidationError {
     },
     #[error("capability {capability_id} and its application handler use incompatible schemas")]
     HandlerSchemaMismatch { capability_id: CapabilityId },
+    #[error("capability {capability_id} resolves to a handler for {handler_capability_id}")]
+    HandlerCapabilityMismatch {
+        capability_id: CapabilityId,
+        handler_capability_id: CapabilityId,
+    },
     #[error("duplicate binding ID {0}")]
     DuplicateBindingId(BindingId),
     #[error("duplicate {surface:?} operation spelling {operation}")]
@@ -288,6 +293,12 @@ fn validate_handler_contracts(
                 use_case_id: capability.use_case_id().clone(),
             });
         };
+        if handler.capability_id() != capability.capability_id() {
+            return Err(CatalogValidationError::HandlerCapabilityMismatch {
+                capability_id: capability.capability_id().clone(),
+                handler_capability_id: handler.capability_id().clone(),
+            });
+        }
         if handler.request_schema() != capability.request_schema()
             || handler.result_schema() != capability.result_schema()
         {
@@ -650,21 +661,19 @@ fn validate_paired_profile(
                 && binding.surface() == BindingSurface::Mcp
                 && profile.enables_surface(BindingSurface::Mcp)
         });
-        if cli || mcp {
-            if !cli {
-                return Err(CatalogValidationError::PairedProfileMissingBinding {
-                    profile_id: profile.profile_id().clone(),
-                    capability_id: capability_id.clone(),
-                    surface: BindingSurface::Cli,
-                });
-            }
-            if !mcp {
-                return Err(CatalogValidationError::PairedProfileMissingBinding {
-                    profile_id: profile.profile_id().clone(),
-                    capability_id: capability_id.clone(),
-                    surface: BindingSurface::Mcp,
-                });
-            }
+        if !cli {
+            return Err(CatalogValidationError::PairedProfileMissingBinding {
+                profile_id: profile.profile_id().clone(),
+                capability_id: capability_id.clone(),
+                surface: BindingSurface::Cli,
+            });
+        }
+        if !mcp {
+            return Err(CatalogValidationError::PairedProfileMissingBinding {
+                profile_id: profile.profile_id().clone(),
+                capability_id: capability_id.clone(),
+                surface: BindingSurface::Mcp,
+            });
         }
     }
     Ok(())
