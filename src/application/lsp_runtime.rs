@@ -27,8 +27,8 @@ use tracedecay_application::{
     ResultProjection, RetrievalOrder, RetrievalRequestMeta,
 };
 use tracedecay_domain::feedback::{
-    FeedbackCycleResultV1, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1,
-    ProviderEvaluationStateV1,
+    FeedbackContentIdentityV1, FeedbackCycleResultV1, FeedbackFindingLifecycleV1,
+    FeedbackFindingV1, FeedbackImpactStateV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, DiagnosticRecordStateV1, DiagnosticSeverityV1,
@@ -54,13 +54,14 @@ use crate::daemon::lsp_gateway::{
     ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
     ContextProjectionIdentity, ContextProjectionItem, ContextProjectionKind,
     ContextProjectionOutcome, ContextProjectionRegistration, ContextProjectionRequest,
-    DiagnosticSeverity, DiagnosticSource, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    GatewayCapabilities, GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData,
-    GatewayDiagnosticIdentity, GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
-    LspDiagnosticDocumentPort, LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
-    MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES, ManagedDiagnosticSnapshot,
-    ManagedDiagnosticSnapshotPort, Pr12LspSessionFactory, SemanticProviderPort,
-    TRACEDECAY_CONTEXT_REVISION, UpstreamCapabilities, byte_offset_to_utf16_position,
+    DiagnosticSeverity, DiagnosticSource, DiagnosticTrigger, FeedbackCycleRequest,
+    FeedbackCycleRuntimePort, GatewayCapabilities, GatewayDiagnostic, GatewayDiagnosticCoverage,
+    GatewayDiagnosticData, GatewayDiagnosticIdentity, GatewayDiagnosticLifecycle,
+    GatewayDiagnosticProviderState, LspDiagnosticDocumentPort, LspRuntimeFailure, LspRuntimeFuture,
+    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
+    ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort, Pr12LspSessionFactory,
+    SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION, UpstreamCapabilities,
+    byte_offset_to_utf16_position,
 };
 use crate::db::Database;
 use crate::diagnostics::lsp::adapters::builtin_adapters;
@@ -440,6 +441,16 @@ where
         let documents = Arc::clone(&self.documents);
         Box::pin(async move {
             let document = documents.snapshot(root, document_uri.clone()).await?;
+            let Some(document_content_digest) = scope.document_content_digest.as_ref() else {
+                return Err(LspRuntimeFailure::new(
+                    "diagnostic-document-identity-unavailable",
+                ));
+            };
+            if crate::code_index::intake::content_digest(document.text.as_bytes())
+                != *document_content_digest
+            {
+                return Err(LspRuntimeFailure::new("diagnostic-document-content-stale"));
+            }
             let store = DiagnosticsStore::new(database.conn());
             let coverage = gateway_diagnostic_coverage(cycle_coverage(&cycle));
             let mut diagnostics = Vec::new();
@@ -460,6 +471,7 @@ where
                 let target_file = cycle.impact.as_ref().map(|impact| &impact.target.file);
                 if target_file != Some(&record.file_occurrence_id)
                     || record.generation_id != scope.code_generation_id
+                    || record.content_digest != *document_content_digest
                     || !matches!(record.state, DiagnosticRecordStateV1::Current)
                     || record
                         .source_revision
@@ -697,6 +709,9 @@ impl ConcretePr12FeedbackLspSource {
         let payload = evidence
             .payload
             .ok_or_else(|| LspRuntimeFailure::new("feedback-current-result-unavailable"))?;
+        if !feedback_content_is_current(payload.cycle.content_identity.as_ref(), &scope) {
+            return Err(LspRuntimeFailure::new("feedback-source-identity-stale"));
+        }
         Ok(CurrentFeedbackCycle {
             scope,
             result: payload,
@@ -937,6 +952,14 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
     ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
         let source = self.clone();
         Box::pin(async move {
+            source
+                .cycle
+                .execute(FeedbackCycleRequest {
+                    root_uri: request.root.uri().to_owned(),
+                    document_uri: request.document_uri.clone(),
+                    trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
+                })
+                .await?;
             let current = source
                 .current_cycle(request.root.clone(), Some(request.document_uri.clone()))
                 .await?;
@@ -1142,6 +1165,23 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
     }
 }
 
+fn feedback_content_is_current(
+    content_identity: Option<&FeedbackContentIdentityV1>,
+    scope: &LspFeedbackProjectionScope,
+) -> bool {
+    matches!(
+        content_identity,
+        Some(FeedbackContentIdentityV1::SavedContent {
+            generation_digest,
+            file_digest,
+        }) if generation_digest == &scope.snapshot_digest
+            && scope
+                .document_content_digest
+                .as_ref()
+                .is_none_or(|digest| digest.as_str() == file_digest.as_str())
+    )
+}
+
 fn valid_context_expansion_record(
     record: &StoredLspContextExpansionV1,
     root: &AdmittedRoot,
@@ -1307,54 +1347,84 @@ fn test_run_projection(
     scope: LspFeedbackProjectionScope,
     snapshot: ManagedTestRunSnapshot,
 ) -> ContextProjectionOutcome {
-    if snapshot.generation != scope.generation {
+    let termination = match snapshot.termination {
+        Some(termination) => termination,
+        None if snapshot.deadline.is_elapsed_at(now_micros()) => OperationTermination::TimedOut,
+        None => return ContextProjectionOutcome::Pending,
+    };
+    let Some(head_commit_id) = snapshot.head_commit_id.as_ref() else {
         return ContextProjectionOutcome::Deferred {
-            reason: "managed-test-run-generation-mismatch".to_owned(),
+            reason: "managed-test-run-head-unbound".to_owned(),
+        };
+    };
+    let Some(code_generation_id) = snapshot.code_generation_id.as_ref() else {
+        return ContextProjectionOutcome::Deferred {
+            reason: "managed-test-run-code-generation-unbound".to_owned(),
+        };
+    };
+    if head_commit_id != &scope.head_commit_id || code_generation_id != &scope.code_generation_id {
+        return ContextProjectionOutcome::Deferred {
+            reason: "managed-test-run-source-identity-stale".to_owned(),
         };
     }
-    let Some(termination) = snapshot.termination else {
-        return ContextProjectionOutcome::Pending;
-    };
-    let omitted_count = usize::try_from(
-        snapshot
-            .completed
-            .saturating_sub(snapshot.results.len() as u64)
-            .saturating_add(
-                snapshot
-                    .results
-                    .len()
-                    .saturating_sub(MAX_CONTEXT_PROJECTION_ITEMS) as u64,
-            ),
-    )
-    .unwrap_or(usize::MAX);
-    let operation_id = snapshot.operation_id.to_string();
-    let items = snapshot
+    let missing_results = snapshot
+        .completed
+        .saturating_sub(snapshot.results.len() as u64);
+    let bounded_omissions = snapshot
         .results
-        .into_iter()
-        .take(MAX_CONTEXT_PROJECTION_ITEMS)
-        .enumerate()
-        .map(|(index, result)| ContextProjectionItem {
-            stable_id: format!("{operation_id}.{index}"),
-            summary: bounded_test_run_summary(&result.test, result.passed),
-            retrieval_handle: None,
-        })
-        .collect();
-    let producer_state = producer_state_for_termination(&termination);
-    let coverage = match termination {
-        OperationTermination::Completed
-            if snapshot
-                .total
-                .is_none_or(|total| snapshot.completed == total)
-                && omitted_count == 0 =>
-        {
-            ContextCoverage::Complete
+        .len()
+        .saturating_sub(MAX_CONTEXT_PROJECTION_ITEMS) as u64;
+    let mut omitted_count =
+        usize::try_from(missing_results.saturating_add(bounded_omissions)).unwrap_or(usize::MAX);
+    let completed_with_full_results = snapshot.total == Some(snapshot.completed)
+        && snapshot.results.len() as u64 == snapshot.completed
+        && omitted_count == 0;
+    let (coverage, producer_state, include_results) = match termination {
+        OperationTermination::Completed if completed_with_full_results => (
+            ContextCoverage::Complete,
+            ContextProducerState::Complete,
+            true,
+        ),
+        OperationTermination::Completed | OperationTermination::Partial => (
+            ContextCoverage::Partial,
+            ContextProducerState::Partial,
+            true,
+        ),
+        OperationTermination::Cancelled => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Cancelled,
+            false,
+        ),
+        OperationTermination::TimedOut => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::TimedOut,
+            false,
+        ),
+        OperationTermination::Failed => {
+            (ContextCoverage::Failed, ContextProducerState::Failed, false)
         }
-        OperationTermination::Completed | OperationTermination::Partial => ContextCoverage::Partial,
-        OperationTermination::Failed => ContextCoverage::Failed,
-        OperationTermination::Cancelled | OperationTermination::TimedOut => {
-            ContextCoverage::Partial
-        }
-        OperationTermination::EffectUnknown => ContextCoverage::Unavailable,
+        OperationTermination::EffectUnknown => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Unavailable,
+            false,
+        ),
+    };
+    let operation_id = snapshot.operation_id.to_string();
+    let items = if include_results {
+        snapshot
+            .results
+            .into_iter()
+            .take(MAX_CONTEXT_PROJECTION_ITEMS)
+            .enumerate()
+            .map(|(index, result)| ContextProjectionItem {
+                stable_id: format!("{operation_id}.{index}"),
+                summary: bounded_test_run_summary(&result.test, result.passed),
+                retrieval_handle: None,
+            })
+            .collect()
+    } else {
+        omitted_count = omitted_count.saturating_add(snapshot.results.len());
+        Vec::new()
     };
     let omission_reasons = projection_omission_reasons(coverage, omitted_count, producer_state);
     ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
@@ -1398,18 +1468,6 @@ fn projection_omission_reasons(
         );
     }
     reasons
-}
-
-fn producer_state_for_termination(termination: &OperationTermination) -> ContextProducerState {
-    match termination {
-        OperationTermination::Completed => ContextProducerState::Complete,
-        OperationTermination::Partial => ContextProducerState::Partial,
-        OperationTermination::Cancelled => ContextProducerState::Cancelled,
-        OperationTermination::TimedOut => ContextProducerState::TimedOut,
-        OperationTermination::Failed | OperationTermination::EffectUnknown => {
-            ContextProducerState::Failed
-        }
-    }
 }
 
 fn bounded_test_run_summary(test: &str, passed: bool) -> String {
@@ -2029,11 +2087,21 @@ mod context_expansion_tests {
 
 #[cfg(test)]
 mod projection_tests {
-    use super::finding_item;
-    use tracedecay_domain::feedback::{
-        FeedbackDiagnosticClassificationV1, FeedbackFindingId, FeedbackFindingLifecycleV1,
-        FeedbackFindingV1, ProviderEvaluationStateV1,
+    use super::{
+        LspFeedbackProjectionScope, feedback_content_is_current, finding_item, test_run_projection,
     };
+    use crate::application::operation_stream::{
+        ManagedTestRunResult, ManagedTestRunSnapshot, OperationId,
+    };
+    use crate::daemon::lsp_gateway::{
+        AdmittedRoot, ContextCoverage, ContextProducerState, ContextProjectionOutcome,
+    };
+    use tracedecay_application::{Deadline, OperationTermination, RequestId};
+    use tracedecay_domain::feedback::{
+        FeedbackContentIdentityV1, FeedbackDiagnosticClassificationV1, FeedbackFindingId,
+        FeedbackFindingLifecycleV1, FeedbackFindingV1, ProviderEvaluationStateV1,
+    };
+    use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest, UtcMicros};
 
     fn finding(lifecycle: FeedbackFindingLifecycleV1) -> FeedbackFindingV1 {
         FeedbackFindingV1 {
@@ -2043,6 +2111,23 @@ mod projection_tests {
             retrieval_anchor_id: None,
             provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
             safe_bounded_preview: Some("bounded finding".to_owned()),
+        }
+    }
+
+    fn projection_scope() -> LspFeedbackProjectionScope {
+        LspFeedbackProjectionScope {
+            head_commit_id: CommitId::new("0123456789abcdef0123456789abcdef01234567")
+                .expect("commit"),
+            code_generation_id: CodeGenerationId::new("generation.v1.aaaaaaaa.00000001")
+                .expect("code generation"),
+            snapshot_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("snapshot digest"),
+            invalidation_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
+                .expect("invalidation digest"),
+            snapshot_content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64)))
+                .expect("snapshot content digest"),
+            document_content_digest: None,
+            generation: 42,
         }
     }
 
@@ -2058,6 +2143,166 @@ mod projection_tests {
                 finding_item(&finding(lifecycle)).is_none(),
                 "{lifecycle:?} finding remained visible"
             );
+        }
+    }
+
+    #[test]
+    fn feedback_projection_requires_exact_saved_generation_and_file_identity() {
+        let file_digest =
+            ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("file digest");
+        let scope = LspFeedbackProjectionScope {
+            document_content_digest: Some(
+                ContentDigest::new(file_digest.as_str().to_owned()).expect("document digest"),
+            ),
+            ..projection_scope()
+        };
+        let current = FeedbackContentIdentityV1::SavedContent {
+            generation_digest: scope.snapshot_digest.clone(),
+            file_digest: file_digest.clone(),
+        };
+        let stale_generation = FeedbackContentIdentityV1::SavedContent {
+            generation_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+                .expect("stale generation"),
+            file_digest: file_digest.clone(),
+        };
+        let stale_file = FeedbackContentIdentityV1::SavedContent {
+            generation_digest: scope.snapshot_digest.clone(),
+            file_digest: ManifestDigest::new(format!("sha256:{}", "f".repeat(64)))
+                .expect("stale file"),
+        };
+
+        assert!(feedback_content_is_current(Some(&current), &scope));
+        assert!(!feedback_content_is_current(
+            Some(&stale_generation),
+            &scope
+        ));
+        assert!(!feedback_content_is_current(Some(&stale_file), &scope));
+        assert!(!feedback_content_is_current(None, &scope));
+    }
+
+    #[test]
+    fn root_latest_test_run_is_not_relabelled_as_current_code_scope() {
+        let scope = projection_scope();
+        let snapshot = ManagedTestRunSnapshot {
+            operation_id: OperationId::from_request(
+                RequestId::new("request.test-run.unbound").expect("request"),
+            ),
+            generation: 7,
+            head_commit_id: None,
+            code_generation_id: None,
+            deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            results: Vec::new(),
+            completed: 0,
+            total: Some(0),
+            termination: Some(OperationTermination::Completed),
+        };
+
+        assert_eq!(
+            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot),
+            ContextProjectionOutcome::Deferred {
+                reason: "managed-test-run-head-unbound".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn current_complete_test_run_projects_ready_results() {
+        let scope = projection_scope();
+        let snapshot = ManagedTestRunSnapshot {
+            operation_id: OperationId::from_request(
+                RequestId::new("request.test-run.current").expect("request"),
+            ),
+            generation: 7,
+            head_commit_id: Some(scope.head_commit_id.clone()),
+            code_generation_id: Some(scope.code_generation_id.clone()),
+            deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            results: vec![ManagedTestRunResult {
+                test: "suite::passes".to_owned(),
+                passed: true,
+            }],
+            completed: 1,
+            total: Some(1),
+            termination: Some(OperationTermination::Completed),
+        };
+
+        let ContextProjectionOutcome::Ready(envelope) =
+            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
+        else {
+            panic!("current complete run must be ready");
+        };
+        assert_eq!(envelope.coverage, ContextCoverage::Complete);
+        assert_eq!(envelope.producer_state, ContextProducerState::Complete);
+        assert_eq!(envelope.items.len(), 1);
+        assert_eq!(envelope.items[0].summary, "passed: suite::passes");
+    }
+
+    #[test]
+    fn expired_unfinished_test_run_projects_timed_out_unavailable() {
+        let scope = projection_scope();
+        let snapshot = ManagedTestRunSnapshot {
+            operation_id: OperationId::from_request(
+                RequestId::new("request.test-run.expired").expect("request"),
+            ),
+            generation: 7,
+            head_commit_id: Some(scope.head_commit_id.clone()),
+            code_generation_id: Some(scope.code_generation_id.clone()),
+            deadline: Deadline::new(UtcMicros(1)).expect("deadline"),
+            results: Vec::new(),
+            completed: 0,
+            total: Some(1),
+            termination: None,
+        };
+
+        let ContextProjectionOutcome::Ready(envelope) =
+            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
+        else {
+            panic!("expired run must produce a terminal projection");
+        };
+        assert_eq!(envelope.coverage, ContextCoverage::Unavailable);
+        assert_eq!(envelope.producer_state, ContextProducerState::TimedOut);
+        assert!(envelope.items.is_empty());
+    }
+
+    #[test]
+    fn noncomplete_test_terminations_use_protocol_valid_state_pairs() {
+        for (termination, coverage, producer_state) in [
+            (
+                OperationTermination::Partial,
+                ContextCoverage::Partial,
+                ContextProducerState::Partial,
+            ),
+            (
+                OperationTermination::Cancelled,
+                ContextCoverage::Unavailable,
+                ContextProducerState::Cancelled,
+            ),
+            (
+                OperationTermination::EffectUnknown,
+                ContextCoverage::Unavailable,
+                ContextProducerState::Unavailable,
+            ),
+        ] {
+            let scope = projection_scope();
+            let snapshot = ManagedTestRunSnapshot {
+                operation_id: OperationId::from_request(
+                    RequestId::new(format!("request.test-run.{termination:?}")).expect("request"),
+                ),
+                generation: 7,
+                head_commit_id: Some(scope.head_commit_id.clone()),
+                code_generation_id: Some(scope.code_generation_id.clone()),
+                deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+                results: Vec::new(),
+                completed: 0,
+                total: Some(1),
+                termination: Some(termination),
+            };
+            let ContextProjectionOutcome::Ready(envelope) =
+                test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
+            else {
+                panic!("{termination:?} run must be ready");
+            };
+            assert_eq!(envelope.coverage, coverage);
+            assert_eq!(envelope.producer_state, producer_state);
         }
     }
 }

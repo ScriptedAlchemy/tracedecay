@@ -25,8 +25,9 @@ use tracedecay_application::{
     StreamFrontier, StreamGap, StreamTermination,
 };
 use tracedecay_domain::{
-    ActorId, ProjectId, RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
-    SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
+    ActorId, CodeGenerationId, CommitId, ProjectId, RetrievalGrainV1, SessionCursorKeyIdV1,
+    SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -123,6 +124,9 @@ enum OperationAuthorization {
     },
     ProjectRoot {
         root_uri: String,
+        head_commit_id: Option<CommitId>,
+        code_generation_id: Option<CodeGenerationId>,
+        deadline: Deadline,
     },
 }
 
@@ -280,6 +284,9 @@ pub(crate) struct ManagedTestRunResult {
 pub(crate) struct ManagedTestRunSnapshot {
     pub(crate) operation_id: OperationId,
     pub(crate) generation: u64,
+    pub(crate) head_commit_id: Option<CommitId>,
+    pub(crate) code_generation_id: Option<CodeGenerationId>,
+    pub(crate) deadline: Deadline,
     pub(crate) results: Vec<ManagedTestRunResult>,
     pub(crate) completed: u64,
     pub(crate) total: Option<u64>,
@@ -575,6 +582,9 @@ impl OperationEventAuthority {
         &self,
         root_uri: String,
         request_id: RequestId,
+        head_commit_id: Option<CommitId>,
+        code_generation_id: Option<CodeGenerationId>,
+        deadline: Deadline,
     ) -> Result<OperationEmitter, OperationEventError> {
         if root_uri.len() > 4_096 || !root_uri.starts_with("file:") {
             return Err(OperationEventError::InvalidTestRunEvent);
@@ -585,7 +595,12 @@ impl OperationEventAuthority {
             originating_request_id: request_id.clone(),
             operation: OperationKind::TestRun,
             event_disclosure: DisclosureClass::Metadata,
-            authorization: OperationAuthorization::ProjectRoot { root_uri },
+            authorization: OperationAuthorization::ProjectRoot {
+                root_uri,
+                head_commit_id,
+                code_generation_id,
+                deadline,
+            },
         };
         let mut state = self.inner.state.lock().await;
         if let Some(record) = state.operations.get(&operation_id) {
@@ -658,7 +673,10 @@ impl OperationEventAuthority {
                 record.binding.operation == OperationKind::TestRun
                     && matches!(
                         &record.binding.authorization,
-                        OperationAuthorization::ProjectRoot { root_uri: retained }
+                        OperationAuthorization::ProjectRoot {
+                            root_uri: retained,
+                            ..
+                        }
                             if retained.trim_end_matches('/') == root_uri.trim_end_matches('/')
                     )
             })
@@ -694,11 +712,58 @@ impl OperationEventAuthority {
             });
         Ok(ManagedTestRunSnapshot {
             operation_id: record.binding.operation_id.clone(),
-            generation: record.next_sequence,
+            generation: record.generation,
+            head_commit_id: match &record.binding.authorization {
+                OperationAuthorization::ProjectRoot { head_commit_id, .. } => {
+                    head_commit_id.clone()
+                }
+                OperationAuthorization::Request { .. } => None,
+            },
+            code_generation_id: match &record.binding.authorization {
+                OperationAuthorization::ProjectRoot {
+                    code_generation_id, ..
+                } => code_generation_id.clone(),
+                OperationAuthorization::Request { .. } => None,
+            },
+            deadline: match &record.binding.authorization {
+                OperationAuthorization::ProjectRoot { deadline, .. } => deadline.clone(),
+                OperationAuthorization::Request { .. } => {
+                    return Err(OperationEventError::InvalidTestRunEvent);
+                }
+            },
             results,
             completed,
             total,
             termination,
+        })
+    }
+
+    /// Requests cancellation for one exact trusted project-local test run.
+    pub(crate) async fn cancel_managed_test_run(
+        &self,
+        operation_id: &OperationId,
+        root_uri: &str,
+    ) -> Result<OperationCancelOutcome, OperationEventError> {
+        let state = self.inner.state.lock().await;
+        let record = state
+            .operations
+            .get(operation_id)
+            .ok_or(OperationEventError::FrontierExpired)?;
+        if !matches!(
+            &record.binding.authorization,
+            OperationAuthorization::ProjectRoot { root_uri: retained, .. }
+                if retained.trim_end_matches('/') == root_uri.trim_end_matches('/')
+        ) {
+            return Err(OperationEventError::NotFoundOrNotAuthorized);
+        }
+        if record.terminal.is_some() {
+            return Ok(OperationCancelOutcome::AlreadyTerminal);
+        }
+        let already_requested = record.cancellation.send_replace(true);
+        Ok(if already_requested {
+            OperationCancelOutcome::AlreadyRequested
+        } else {
+            OperationCancelOutcome::Requested
         })
     }
 
@@ -1192,7 +1257,7 @@ fn operation_resume_snapshot(
             scope.scope_digest.as_str().to_owned(),
             access_digest.clone(),
         ),
-        OperationAuthorization::ProjectRoot { root_uri } => (
+        OperationAuthorization::ProjectRoot { root_uri, .. } => (
             canonical_sha256(&("operation-stream-root-v1", root_uri))
                 .map_err(|_| OperationEventError::ResumeUnavailable)?
                 .as_str()
@@ -1289,9 +1354,12 @@ fn operation_resume_verification_error(error: CursorError) -> OperationEventErro
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::{ApplicationProblemKind, RequestId};
+    use tracedecay_application::{ApplicationProblemKind, Deadline, RequestId};
+    use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
 
-    use super::OperationEventError;
+    use super::{
+        OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    };
 
     #[test]
     fn operation_stream_errors_use_canonical_problem_envelopes() {
@@ -1309,5 +1377,73 @@ mod tests {
             expired.problem.code,
             "operation_event.resume_expired".to_owned()
         );
+    }
+
+    #[tokio::test]
+    async fn managed_test_snapshot_retains_operation_generation() {
+        let authority = OperationEventAuthority::default();
+        let emitter = authority
+            .begin_managed_test_run(
+                "file:///workspace".to_owned(),
+                RequestId::new("request.test-run.generation").expect("request id"),
+                Some(
+                    CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit"),
+                ),
+                Some(CodeGenerationId::new("generation.test.current").expect("code generation")),
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+            .await
+            .expect("managed test run");
+        emitter
+            .test_result("suite::passes".to_owned(), true)
+            .await
+            .expect("test result");
+        emitter.progress(1, Some(1)).await.expect("test progress");
+
+        let snapshot = authority
+            .latest_managed_test_run("file:///workspace")
+            .await
+            .expect("managed test snapshot");
+
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(
+            snapshot.head_commit_id.as_ref().map(CommitId::as_str),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(
+            snapshot
+                .code_generation_id
+                .as_ref()
+                .map(CodeGenerationId::as_str),
+            Some("generation.test.current")
+        );
+        assert_eq!(snapshot.deadline.expires_at, UtcMicros(10_000));
+        assert_eq!(snapshot.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn managed_test_authority_cancellation_reaches_the_emitter() {
+        let authority = OperationEventAuthority::default();
+        let request_id = RequestId::new("request.test-run.cancel").expect("request id");
+        let operation_id = OperationId::from_request(request_id.clone());
+        let emitter = authority
+            .begin_managed_test_run(
+                "file:///workspace".to_owned(),
+                request_id,
+                None,
+                None,
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+            .await
+            .expect("managed test run");
+
+        assert_eq!(
+            authority
+                .cancel_managed_test_run(&operation_id, "file:///workspace")
+                .await
+                .expect("cancel"),
+            OperationCancelOutcome::Requested
+        );
+        assert!(emitter.is_cancelled());
     }
 }

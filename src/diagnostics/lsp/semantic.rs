@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as SyncMutex};
 
+use lsp_types::PrepareRenameResponse;
 use serde_json::{Value, json};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
@@ -11,8 +12,9 @@ use crate::application::context::CancellationToken;
 use crate::daemon::lsp_gateway::{
     AdmittedRoot, LspAnalyzerCancellationAuthority, LspPosition, LspRequestId, LspRuntimeFuture,
     LspSemanticOperationOutcome, LspSemanticRequestAuthority, Pr12SemanticProviderAdapter,
-    SemanticCapability, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
-    SemanticResponse, utf16_position_to_byte_offset,
+    RenameCandidate, RenameCandidateResult, RenameCandidateUnavailableReason, SemanticCapability,
+    SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
+    byte_offset_to_utf16_position, utf16_position_to_byte_offset,
 };
 use crate::db::Database;
 use crate::diagnostics::lsp::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
@@ -96,12 +98,22 @@ pub fn pr12_semantic_authorities_from_parts(
     graph: Arc<DatabaseGraphSemanticAuthority>,
 ) -> Pr12ProductionSemanticAuthorities {
     let analyzer_available = upstream.is_some();
+    let rename = upstream.as_ref().map(|upstream| {
+        Pr12SemanticProviderAdapter::shared(
+            runtime.clone(),
+            Arc::new(RenameCandidateMergeAuthority {
+                analyzer: upstream.clone(),
+                graph: graph.clone(),
+            }),
+        )
+    });
     let upstream =
         upstream.map(|upstream| Pr12SemanticProviderAdapter::shared(runtime.clone(), upstream));
     let graph = Pr12SemanticProviderAdapter::shared(runtime, graph);
     let provider = Arc::new(StdioGraphSemanticProvider {
         upstream: upstream.clone(),
         graph: graph.clone(),
+        rename: rename.clone(),
         graph_requests: SyncMutex::new(BTreeSet::new()),
     });
     let semantics: Arc<dyn SemanticProviderPort + Send + Sync> = provider.clone();
@@ -110,12 +122,17 @@ pub fn pr12_semantic_authorities_from_parts(
             provider,
             upstream,
             graph,
+            rename,
         });
+    let mut semantic_capabilities = graph_semantic_capabilities();
+    if analyzer_available {
+        semantic_capabilities.insert(SemanticCapability::RenameCandidate);
+    }
     Pr12ProductionSemanticAuthorities {
         semantics,
         cancellation,
         analyzer_available,
-        semantic_capabilities: graph_semantic_capabilities(),
+        semantic_capabilities,
     }
 }
 
@@ -123,6 +140,7 @@ struct SemanticCancellationGroup {
     provider: Arc<StdioGraphSemanticProvider>,
     upstream: Option<Arc<Pr12SemanticProviderAdapter>>,
     graph: Arc<Pr12SemanticProviderAdapter>,
+    rename: Option<Arc<Pr12SemanticProviderAdapter>>,
 }
 
 impl LspAnalyzerCancellationAuthority for SemanticCancellationGroup {
@@ -133,7 +151,151 @@ impl LspAnalyzerCancellationAuthority for SemanticCancellationGroup {
                 .as_ref()
                 .is_some_and(|upstream| upstream.cancel_request(root, request_id))
             | self.graph.cancel_request(root, request_id)
+            | self
+                .rename
+                .as_ref()
+                .is_some_and(|rename| rename.cancel_request(root, request_id))
     }
+}
+
+struct RenameCandidateMergeAuthority {
+    analyzer: Arc<StdioLspSemanticAuthority>,
+    graph: Arc<DatabaseGraphSemanticAuthority>,
+}
+
+impl LspSemanticRequestAuthority for RenameCandidateMergeAuthority {
+    fn start(
+        &self,
+        root: AdmittedRoot,
+        request_id: LspRequestId,
+        request: LspSemanticRequest,
+    ) -> LspRuntimeFuture<LspSemanticOperationOutcome> {
+        let LspSemanticRequest::PrepareRename(params) = &request else {
+            return Box::pin(async { LspSemanticOperationOutcome::Unavailable });
+        };
+        let document_uri = params.text_document.uri.to_string();
+        let analyzer = self
+            .analyzer
+            .start(root.clone(), request_id.clone(), request.clone());
+        let graph = self.graph.start(root, request_id, request);
+        Box::pin(async move {
+            let (analyzer, graph) = tokio::join!(analyzer, graph);
+            LspSemanticOperationOutcome::RenameCandidate(merge_rename_candidate_outcomes(
+                &document_uri,
+                analyzer,
+                graph,
+            ))
+        })
+    }
+
+    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+        self.analyzer.cancel_request(root, request_id) | self.graph.cancel_request(root, request_id)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RawRenameCandidate {
+    range: crate::daemon::lsp_gateway::LspRange,
+    placeholder: Option<String>,
+}
+
+fn merge_rename_candidate_outcomes(
+    document_uri: &str,
+    analyzer: LspSemanticOperationOutcome,
+    graph: LspSemanticOperationOutcome,
+) -> RenameCandidateResult {
+    let analyzer = match rename_candidate_from_outcome(analyzer, true) {
+        Ok(candidate) => candidate,
+        Err(reason) => return RenameCandidateResult::Unavailable { reason },
+    };
+    let graph = match rename_candidate_from_outcome(graph, false) {
+        Ok(candidate) => candidate,
+        Err(reason) => return RenameCandidateResult::Unavailable { reason },
+    };
+    let (Some(analyzer), Some(graph)) = (analyzer, graph) else {
+        return RenameCandidateResult::Unavailable {
+            reason: RenameCandidateUnavailableReason::EvidenceAbsent,
+        };
+    };
+    if analyzer.range != graph.range
+        || analyzer
+            .placeholder
+            .as_ref()
+            .is_some_and(|placeholder| Some(placeholder) != graph.placeholder.as_ref())
+    {
+        return RenameCandidateResult::Unavailable {
+            reason: RenameCandidateUnavailableReason::AmbiguousEvidence,
+        };
+    }
+    let Some(placeholder) = graph.placeholder.or(analyzer.placeholder) else {
+        return RenameCandidateResult::Unavailable {
+            reason: RenameCandidateUnavailableReason::AmbiguousEvidence,
+        };
+    };
+    RenameCandidateResult::Available(RenameCandidate {
+        document_uri: document_uri.to_owned(),
+        range: graph.range,
+        placeholder,
+    })
+}
+
+fn rename_candidate_from_outcome(
+    outcome: LspSemanticOperationOutcome,
+    analyzer: bool,
+) -> std::result::Result<Option<RawRenameCandidate>, RenameCandidateUnavailableReason> {
+    match outcome {
+        LspSemanticOperationOutcome::Complete(value) => parse_raw_rename_candidate(value),
+        LspSemanticOperationOutcome::Partial { coverage, .. } => Err(
+            if coverage.contains("stale") || coverage.contains("superseded") {
+                RenameCandidateUnavailableReason::StaleEvidence
+            } else if analyzer {
+                RenameCandidateUnavailableReason::AnalyzerUnavailable
+            } else {
+                RenameCandidateUnavailableReason::GraphUnavailable
+            },
+        ),
+        LspSemanticOperationOutcome::Unavailable => Err(if analyzer {
+            RenameCandidateUnavailableReason::AnalyzerUnavailable
+        } else {
+            RenameCandidateUnavailableReason::GraphUnavailable
+        }),
+        LspSemanticOperationOutcome::RenameCandidate(_) => {
+            Err(RenameCandidateUnavailableReason::AmbiguousEvidence)
+        }
+    }
+}
+
+fn parse_raw_rename_candidate(
+    value: Value,
+) -> std::result::Result<Option<RawRenameCandidate>, RenameCandidateUnavailableReason> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let (range, placeholder) = match serde_json::from_value::<PrepareRenameResponse>(value)
+        .map_err(|_| RenameCandidateUnavailableReason::AmbiguousEvidence)?
+    {
+        PrepareRenameResponse::Range(range) => (range, None),
+        PrepareRenameResponse::RangeWithPlaceholder { range, placeholder }
+            if !placeholder.is_empty() =>
+        {
+            (range, Some(placeholder))
+        }
+        PrepareRenameResponse::RangeWithPlaceholder { .. }
+        | PrepareRenameResponse::DefaultBehavior { .. } => {
+            return Err(RenameCandidateUnavailableReason::AmbiguousEvidence);
+        }
+    };
+    let range = crate::daemon::lsp_gateway::LspRange {
+        start: LspPosition {
+            line: range.start.line,
+            character: range.start.character,
+        },
+        end: LspPosition {
+            line: range.end.line,
+            character: range.end.character,
+        },
+    };
+    Ok(Some(RawRenameCandidate { range, placeholder }))
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -145,6 +307,7 @@ struct ProviderRequestKey {
 struct StdioGraphSemanticProvider {
     upstream: Option<Arc<Pr12SemanticProviderAdapter>>,
     graph: Arc<Pr12SemanticProviderAdapter>,
+    rename: Option<Arc<Pr12SemanticProviderAdapter>>,
     graph_requests: SyncMutex<BTreeSet<ProviderRequestKey>>,
 }
 
@@ -171,6 +334,18 @@ impl SemanticProviderPort for StdioGraphSemanticProvider {
         request_id: &LspRequestId,
         request: &SemanticRequest,
     ) -> SemanticProviderOutcome<SemanticResponse> {
+        if matches!(request, SemanticRequest::RenameCandidate { .. }) {
+            return self.rename.as_ref().map_or_else(
+                || {
+                    SemanticProviderOutcome::Complete(SemanticResponse::RenameCandidate(
+                        RenameCandidateResult::Unavailable {
+                            reason: RenameCandidateUnavailableReason::AnalyzerUnavailable,
+                        },
+                    ))
+                },
+                |rename| SemanticProviderPort::request(rename, root, request_id, request),
+            );
+        }
         let key = Self::key(root, request_id);
         let graph_selected = match self.graph_requests.try_lock() {
             Ok(requests) => requests.contains(&key),
@@ -525,6 +700,37 @@ async fn graph_semantic_request(
                 )
                 .await
             }
+            LspSemanticRequest::PrepareRename(params) => {
+                let node = node_at_position(
+                    database,
+                    project_root,
+                    params.text_document.uri.as_str(),
+                    params.position.line,
+                    params.position.character,
+                )
+                .await?;
+                Ok(GraphProjection::complete(match node {
+                    Some(node) => match node_identifier_range(project_root, &node)? {
+                        Some(range) => {
+                            json!({
+                                    "range": {
+                                        "start": {
+                                            "line": range.start.line,
+                                            "character": range.start.character,
+                                        },
+                                        "end": {
+                                            "line": range.end.line,
+                                            "character": range.end.character,
+                                        },
+                                    },
+                                "placeholder": node.name,
+                            })
+                        }
+                        None => Value::Null,
+                    },
+                    None => Value::Null,
+                }))
+            }
         }
     }
     .await;
@@ -742,6 +948,67 @@ fn select_node_at_lsp_position(
                 .cmp(&node_position_span(right))
                 .then_with(|| left.qualified_name.cmp(&right.qualified_name))
         }))
+}
+
+fn node_identifier_range(
+    project_root: &Path,
+    node: &Node,
+) -> Result<Option<crate::daemon::lsp_gateway::LspRange>> {
+    let document_path = scoped_document_path(project_root, &node.file_path)?;
+    let text =
+        crate::sync::read_source_file(&document_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read semantic document: {error}"),
+        })?;
+    let line_start = if node.start_line == 0 {
+        Some(0)
+    } else {
+        text.match_indices('\n')
+            .nth(node.start_line.saturating_sub(1) as usize)
+            .map(|(offset, _)| offset.saturating_add(1))
+    };
+    let Some(line_start) = line_start else {
+        return Ok(None);
+    };
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |offset| line_start.saturating_add(offset));
+    let search_start = line_start.saturating_add(node.start_column as usize);
+    if search_start > line_end || !text.is_char_boundary(search_start) {
+        return Ok(None);
+    }
+    let declaration_line = &text[search_start..line_end];
+    let identifier = declaration_line
+        .match_indices(&node.name)
+        .find(|(offset, matched)| {
+            let before = declaration_line[..*offset].chars().next_back();
+            let after = declaration_line[offset.saturating_add(matched.len())..]
+                .chars()
+                .next();
+            !before.is_some_and(identifier_character) && !after.is_some_and(identifier_character)
+        })
+        .map(|(offset, matched)| {
+            let start = search_start.saturating_add(offset);
+            (start, start.saturating_add(matched.len()))
+        });
+    let Some((start, end)) = identifier else {
+        return Ok(None);
+    };
+    Ok(Some(crate::daemon::lsp_gateway::LspRange {
+        start: byte_offset_to_utf16_position(&text, start).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid graph rename start position: {error:?}"),
+            }
+        })?,
+        end: byte_offset_to_utf16_position(&text, end).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid graph rename end position: {error:?}"),
+            }
+        })?,
+    }))
+}
+
+fn identifier_character(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
 }
 
 fn node_contains_byte_position(node: &Node, line: u32, byte_column: u32) -> bool {
@@ -1065,6 +1332,122 @@ mod tests {
             error
                 .to_string()
                 .contains("outside the admitted project root")
+        );
+    }
+
+    #[test]
+    fn graph_rename_evidence_uses_the_identifier_not_the_full_node_span() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let source = fixture.path().join("src");
+        std::fs::create_dir(&source).expect("source");
+        std::fs::write(source.join("lib.rs"), "fn 名称(名称: usize) {}\n").expect("document");
+        let mut node = function_node("名称", 0, 27);
+        node.end_column = 27;
+
+        let range = node_identifier_range(fixture.path(), &node)
+            .expect("range projection")
+            .expect("identifier");
+        assert_eq!(
+            range,
+            crate::daemon::lsp_gateway::LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 3,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 5,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn rename_candidate_requires_exact_analyzer_graph_agreement() {
+        let candidate = json!({
+            "range": {
+                "start": { "line": 0, "character": 3 },
+                "end": { "line": 0, "character": 7 }
+            },
+            "placeholder": "name"
+        });
+        assert!(matches!(
+            merge_rename_candidate_outcomes(
+                "file:///root/src/lib.rs",
+                LspSemanticOperationOutcome::Complete(candidate.clone()),
+                LspSemanticOperationOutcome::Complete(candidate),
+            ),
+            RenameCandidateResult::Available(RenameCandidate {
+                placeholder,
+                ..
+            }) if placeholder == "name"
+        ));
+
+        let disagreement = merge_rename_candidate_outcomes(
+            "file:///root/src/lib.rs",
+            LspSemanticOperationOutcome::Complete(json!({
+                "range": {
+                    "start": { "line": 0, "character": 3 },
+                    "end": { "line": 0, "character": 7 }
+                },
+                "placeholder": "analyzer_name"
+            })),
+            LspSemanticOperationOutcome::Complete(json!({
+                "range": {
+                    "start": { "line": 0, "character": 3 },
+                    "end": { "line": 0, "character": 7 }
+                },
+                "placeholder": "graph_name"
+            })),
+        );
+        assert_eq!(
+            disagreement,
+            RenameCandidateResult::Unavailable {
+                reason: RenameCandidateUnavailableReason::AmbiguousEvidence,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_or_absent_analyzer_rename_evidence_is_typed_unavailable() {
+        assert_eq!(
+            merge_rename_candidate_outcomes(
+                "file:///root/src/lib.rs",
+                LspSemanticOperationOutcome::Partial {
+                    value: Value::Null,
+                    coverage: "analyzer-stale-result".to_owned(),
+                },
+                LspSemanticOperationOutcome::Complete(Value::Null),
+            ),
+            RenameCandidateResult::Unavailable {
+                reason: RenameCandidateUnavailableReason::StaleEvidence,
+            }
+        );
+        assert_eq!(
+            merge_rename_candidate_outcomes(
+                "file:///root/src/lib.rs",
+                LspSemanticOperationOutcome::Unavailable,
+                LspSemanticOperationOutcome::Complete(Value::Null),
+            ),
+            RenameCandidateResult::Unavailable {
+                reason: RenameCandidateUnavailableReason::AnalyzerUnavailable,
+            }
+        );
+        assert_eq!(
+            merge_rename_candidate_outcomes(
+                "file:///root/src/lib.rs",
+                LspSemanticOperationOutcome::Complete(Value::Null),
+                LspSemanticOperationOutcome::Complete(json!({
+                    "range": {
+                        "start": { "line": 0, "character": 3 },
+                        "end": { "line": 0, "character": 7 }
+                    },
+                    "placeholder": "name"
+                })),
+            ),
+            RenameCandidateResult::Unavailable {
+                reason: RenameCandidateUnavailableReason::EvidenceAbsent,
+            }
         );
     }
 }

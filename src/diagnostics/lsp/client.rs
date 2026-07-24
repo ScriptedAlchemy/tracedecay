@@ -9,15 +9,16 @@ use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     DocumentSymbolRequest, GotoDeclaration, GotoDeclarationParams, GotoDefinition,
     GotoImplementation, GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams,
-    HoverRequest, References, Request as LspRequest, SignatureHelpRequest, TypeHierarchyPrepare,
-    TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
+    HoverRequest, PrepareRenameRequest, References, Request as LspRequest, SignatureHelpRequest,
+    TypeHierarchyPrepare, TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     Diagnostic as StandardDiagnostic, DiagnosticSeverity as StandardDiagnosticSeverity,
     DocumentSymbolParams, GotoDefinitionParams, HoverParams, NumberOrString,
-    PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, TypeHierarchyPrepareParams,
-    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, WorkspaceSymbolParams,
+    PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, TextDocumentPositionParams,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
+    WorkspaceSymbolParams,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -97,6 +98,7 @@ pub enum LspSemanticRequest {
     PrepareTypeHierarchy(TypeHierarchyPrepareParams),
     TypeHierarchySupertypes(TypeHierarchySupertypesParams),
     TypeHierarchySubtypes(TypeHierarchySubtypesParams),
+    PrepareRename(TextDocumentPositionParams),
 }
 
 impl LspSemanticRequest {
@@ -117,6 +119,7 @@ impl LspSemanticRequest {
             Self::PrepareTypeHierarchy(_) => TypeHierarchyPrepare::METHOD,
             Self::TypeHierarchySupertypes(_) => TypeHierarchySupertypes::METHOD,
             Self::TypeHierarchySubtypes(_) => TypeHierarchySubtypes::METHOD,
+            Self::PrepareRename(_) => PrepareRenameRequest::METHOD,
         }
     }
 }
@@ -368,6 +371,9 @@ impl StdioLspClient {
                 self.type_hierarchy_subtypes(params, cancellation, timeouts)
                     .await
             }
+            LspSemanticRequest::PrepareRename(params) => {
+                self.prepare_rename(params, cancellation, timeouts).await
+            }
         }
     }
 
@@ -521,6 +527,16 @@ impl StdioLspClient {
             .await
     }
 
+    pub async fn prepare_rename(
+        &mut self,
+        params: TextDocumentPositionParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<PrepareRenameRequest>(params, cancellation, timeouts)
+            .await
+    }
+
     async fn request_json<R>(
         &mut self,
         params: R::Params,
@@ -628,6 +644,7 @@ impl StdioLspClient {
         timeouts: LspRefreshTimeouts,
     ) -> Result<Vec<CodeDiagnostic>> {
         let mut uri_to_document = BTreeMap::new();
+        let mut expected_versions = BTreeMap::new();
         for document in &documents {
             let uri = file_uri(&project_root.join(&document.relative_path));
             uri_to_document.insert(uri.clone(), document.clone());
@@ -670,18 +687,25 @@ impl StdioLspClient {
                 timeouts.message_io,
             )
             .await?;
-            self.document_versions.insert(uri, change_version);
+            self.document_versions.insert(uri.clone(), change_version);
+            expected_versions.insert(uri, change_version);
         }
 
+        if uri_to_document.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
-        let quiet_deadline = tokio::time::Instant::now() + timeouts.diagnostics_quiet;
+        let refresh_deadline = tokio::time::Instant::now() + timeouts.refresh;
+        let mut quiet_deadline = None;
         loop {
             let now = tokio::time::Instant::now();
-            if now >= quiet_deadline {
+            let deadline = quiet_deadline
+                .map(|deadline: tokio::time::Instant| deadline.min(refresh_deadline))
+                .unwrap_or(refresh_deadline);
+            if now >= deadline {
                 break;
             }
-            let Some(message) =
-                read_message_until(&mut self.reader, quiet_deadline, timeouts).await?
+            let Some(message) = read_message_until(&mut self.reader, deadline, timeouts).await?
             else {
                 break;
             };
@@ -694,6 +718,9 @@ impl StdioLspClient {
             let Ok(published) = serde_json::from_value::<PublishDiagnosticsParams>(params) else {
                 continue;
             };
+            if !is_current_diagnostic_publication(&published, &expected_versions) {
+                continue;
+            }
             let Some(document) = uri_to_document.get(published.uri.as_str()) else {
                 continue;
             };
@@ -705,21 +732,30 @@ impl StdioLspClient {
                     .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
                     .collect(),
             );
+            quiet_deadline = Some(tokio::time::Instant::now() + timeouts.diagnostics_quiet);
         }
-        // Servers that publish empty diagnostics for clean files (rust-analyzer,
-        // tsserver) will produce one `publishDiagnostics` per requested URI, so a
-        // fully complete batch has `diagnostics_by_uri.len() == uri_to_document.len()`.
-        // Servers that suppress empty publishes (only publishing for files WITH
-        // problems) never emit for clean files, so those batches look "partial"
-        // even though every dirty file reported. To avoid dropping real results in
-        // that case, only treat the batch as a genuine timeout when NOTHING arrived
-        // (matching the #237 behavior of not recording a genuine timeout as
-        // complete); otherwise return the diagnostics that were actually published.
-        if diagnostics_by_uri.is_empty() && !uri_to_document.is_empty() {
+        if !diagnostic_batch_is_complete(&expected_versions, &diagnostics_by_uri) {
             return Err(refresh_timed_out(timeouts));
         }
         Ok(diagnostics_by_uri.into_values().flatten().collect())
     }
+}
+
+fn is_current_diagnostic_publication(
+    published: &PublishDiagnosticsParams,
+    expected_versions: &BTreeMap<String, i32>,
+) -> bool {
+    expected_versions.get(published.uri.as_str()).copied() == published.version
+}
+
+fn diagnostic_batch_is_complete(
+    expected_versions: &BTreeMap<String, i32>,
+    diagnostics_by_uri: &BTreeMap<String, Vec<CodeDiagnostic>>,
+) -> bool {
+    expected_versions.len() == diagnostics_by_uri.len()
+        && expected_versions
+            .keys()
+            .all(|uri| diagnostics_by_uri.contains_key(uri))
 }
 
 impl Drop for StdioLspClient {
@@ -1104,9 +1140,15 @@ fn code_to_string(value: NumberOrString) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use lsp_types::PublishDiagnosticsParams;
     use serde_json::json;
 
-    use super::{cancel_request_message, file_uri_from_path_text};
+    use super::{
+        cancel_request_message, diagnostic_batch_is_complete, file_uri_from_path_text,
+        is_current_diagnostic_publication,
+    };
 
     #[test]
     fn file_uri_encodes_lsp_paths() {
@@ -1134,5 +1176,44 @@ mod tests {
                 "params": { "id": 42 },
             })
         );
+    }
+
+    #[test]
+    fn diagnostics_require_the_exact_requested_document_version() {
+        let uri = "file:///workspace/src/lib.rs";
+        let expected = BTreeMap::from([(uri.to_owned(), 4)]);
+        let current: PublishDiagnosticsParams = serde_json::from_value(json!({
+            "uri": uri,
+            "version": 4,
+            "diagnostics": [],
+        }))
+        .expect("current diagnostics");
+        let stale: PublishDiagnosticsParams = serde_json::from_value(json!({
+            "uri": uri,
+            "version": 3,
+            "diagnostics": [],
+        }))
+        .expect("stale diagnostics");
+        let versionless: PublishDiagnosticsParams = serde_json::from_value(json!({
+            "uri": uri,
+            "diagnostics": [],
+        }))
+        .expect("versionless diagnostics");
+
+        assert!(is_current_diagnostic_publication(&current, &expected));
+        assert!(!is_current_diagnostic_publication(&stale, &expected));
+        assert!(!is_current_diagnostic_publication(&versionless, &expected));
+    }
+
+    #[test]
+    fn diagnostics_reject_partial_fixed_window_batches() {
+        let first = "file:///workspace/src/lib.rs".to_owned();
+        let second = "file:///workspace/src/main.rs".to_owned();
+        let expected = BTreeMap::from([(first.clone(), 4), (second.clone(), 2)]);
+        let partial = BTreeMap::from([(first.clone(), Vec::new())]);
+        let complete = BTreeMap::from([(first, Vec::new()), (second, Vec::new())]);
+
+        assert!(!diagnostic_batch_is_complete(&expected, &partial));
+        assert!(diagnostic_batch_is_complete(&expected, &complete));
     }
 }
