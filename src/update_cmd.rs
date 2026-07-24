@@ -708,15 +708,29 @@ fn reinstall_failure_result(failed: &[String], strict: bool) -> tracedecay::erro
     Ok(())
 }
 
+/// Only warnings whose [`StoreDurabilityClass`](tracedecay::migrate::durability::StoreDurabilityClass)
+/// proves the underlying data `Durable` can fail a `--strict` post-update.
+/// This is the fix for the diagnosed dogfood failure: mounting/migrating a
+/// 15GB `sessions.db` got interrupted, and because every health-pass warning
+/// used to be treated as fatal under `--strict`, that single advisory
+/// warning about recoverable session data failed the whole upgrade and
+/// disabled the daemon. See `tracedecay::doctor::heal` and
+/// `tracedecay::migrate::durability` for the classification this consults.
 fn health_pass_failure_result(
     report: &tracedecay::doctor::heal::HealthPassReport,
     strict: bool,
 ) -> tracedecay::errors::Result<()> {
-    if strict && !report.warnings.is_empty() {
+    let blocking: Vec<&str> = report
+        .warnings
+        .iter()
+        .filter(|warning| warning.blocks_strict_upgrade())
+        .map(|warning| warning.message.as_str())
+        .collect();
+    if strict && !blocking.is_empty() {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message: format!(
                 "dogfood post-update health pass failed: {}",
-                report.warnings.join("; ")
+                blocking.join("; ")
             ),
         });
     }
@@ -1184,7 +1198,9 @@ mod tests {
     #[test]
     fn strict_post_update_propagates_health_pass_failures_only() {
         let failed = tracedecay::doctor::heal::HealthPassReport {
-            warnings: vec!["could not open the global DB".to_string()],
+            warnings: vec![tracedecay::doctor::heal::HealthPassWarning::durable(
+                "could not open the global DB",
+            )],
             ..Default::default()
         };
         let advisory = tracedecay::doctor::heal::HealthPassReport {
@@ -1198,6 +1214,27 @@ mod tests {
             .to_string();
         assert!(error.contains("could not open the global DB"));
         assert!(health_pass_failure_result(&advisory, true).is_ok());
+    }
+
+    /// The diagnosed bug: a warning about a store whose durability class is
+    /// not `Durable` (e.g. a `sessions.db` mount/repair failure -- dominated
+    /// by recoverable transcript/evidence data) must never fail `--strict`,
+    /// even though it is still surfaced to the operator.
+    #[test]
+    fn strict_post_update_never_fails_on_non_durable_store_warnings() {
+        let recoverable_only = tracedecay::doctor::heal::HealthPassReport {
+            warnings: vec![tracedecay::doctor::heal::HealthPassWarning::about_store(
+                "could not mount the current project session store for repair: interrupted",
+                tracedecay::migrate::durability::StoreShardKind::ProjectSessions,
+            )],
+            ..Default::default()
+        };
+
+        assert!(health_pass_failure_result(&recoverable_only, false).is_ok());
+        assert!(
+            health_pass_failure_result(&recoverable_only, true).is_ok(),
+            "a recoverable-store warning must never fail a strict post-update"
+        );
     }
 
     /// Markers advance only when every tracked agent reinstalled (AllOk).

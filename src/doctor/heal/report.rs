@@ -1,8 +1,10 @@
-use super::HealthPassReport;
+use super::{HealthPassReport, HealthPassWarning};
 
 pub(super) fn render_missing_profile_report() -> HealthPassReport {
     let report = HealthPassReport {
-        warnings: vec!["could not determine the profile data directory".to_string()],
+        warnings: vec![HealthPassWarning::durable(
+            "could not determine the profile data directory",
+        )],
         ..HealthPassReport::default()
     };
     render_warnings(&report.warnings);
@@ -75,7 +77,7 @@ pub(super) fn render_health_pass_report(report: &HealthPassReport) {
     render_warnings(&report.warnings);
 }
 
-pub(super) fn render_warnings(warnings: &[String]) {
+pub(super) fn render_warnings(warnings: &[HealthPassWarning]) {
     for warning in warnings {
         eprintln!("  \x1b[33mwarning:\x1b[0m health pass: {warning}");
     }
