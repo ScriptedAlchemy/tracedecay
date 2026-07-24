@@ -116,6 +116,9 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             apply,
             json,
         } => handle_migrate_registry_gc(prefix, apply, json).await,
+        MigrateAction::StorageReport { profile_root, json } => {
+            handle_migrate_storage_report(profile_root, json).await
+        }
         MigrateAction::Rollback {
             manifest,
             confirm_token,
@@ -685,6 +688,77 @@ async fn handle_migrate_registry_gc(
 ) -> tracedecay::errors::Result<()> {
     let report = registry_gc(prefix, apply).await?;
     print_registry_gc_report(report, json)
+}
+
+/// Read-only per-store size / free-page-ratio / unregistered-directory report
+/// (plan 38 §7). Reads `global.db` and every registered project's graph
+/// database directly through `sqlite_read_snapshot` — never through a daemon
+/// broker, never a write path, so this always works even with no daemon
+/// running and never competes with one that is.
+async fn handle_migrate_storage_report(
+    profile_root: Option<String>,
+    json: bool,
+) -> tracedecay::errors::Result<()> {
+    let profile_root = match profile_root {
+        Some(path) => PathBuf::from(path),
+        None => tracedecay::storage::default_profile_root()?,
+    };
+    let report = tracedecay::retention::storage_report::build_storage_report(&profile_root).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!("storage report: {}", report.profile_root);
+    println!(
+        "  global.db: {} bytes",
+        format_bytes(report.global_db_bytes)
+    );
+    println!("  registered stores: {}", report.stores.len());
+    for store in &report.stores {
+        // Free pages are unsampled when the store was busy or unreadable; say
+        // so rather than printing a zero that reads as "no bloat".
+        let free = match (store.free_bytes, store.free_page_ratio) {
+            (Some(free_bytes), Some(ratio)) => format!(
+                "{} free ({:.1}% free pages)",
+                format_bytes(free_bytes),
+                ratio * 100.0
+            ),
+            _ => "free pages not sampled (store busy or unreadable)".to_string(),
+        };
+        println!(
+            "    {} ({}): {} total, {free}",
+            store.project_id,
+            store.canonical_root,
+            format_bytes(store.total_bytes),
+        );
+    }
+    println!(
+        "  unregistered directories: {} ({})",
+        report.unregistered_dir_count,
+        format_bytes(report.unregistered_bytes)
+    );
+    if report.unregistered_dir_count > 0 {
+        println!(
+            "  run the daemon's automatic sweep, or `tracedecay tool tracedecay_admin_cli` \
+             orphan-store collection, to reclaim unregistered directories"
+        );
+    }
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn handle_migrate_rollback(

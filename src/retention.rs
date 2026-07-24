@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use crate::db::engine::{Executor, QueryExecutor};
 use crate::errors::{Result, TraceDecayError};
 
+/// Free-page compaction for tracked branch databases, off the hot path
+/// (plan 38, §6).
+pub mod branch_compaction;
 /// Store-owned quarantine and collection for corruption/recovery artifacts
 /// found beside live databases (plan 38, §5).
 pub mod incident_debris;
@@ -28,6 +31,9 @@ pub mod incident_debris;
 /// profile-sharded store directories whose project identity no longer resolves
 /// to a live repository root (plan 38, §2).
 pub mod orphan_stores;
+/// Read-only, cheap-to-query per-store size and free-page-ratio reporting,
+/// reachable from a command without a live daemon (plan 38, §7).
+pub mod storage_report;
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
