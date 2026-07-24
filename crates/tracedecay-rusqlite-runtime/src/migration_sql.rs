@@ -1371,12 +1371,18 @@ fn authorize_migration_writer(context: rusqlite::hooks::AuthContext<'_>) -> Auth
 
 fn is_allowed_migration_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
     is_migration_read_pragma(pragma_name, pragma_value)
-        || matches!(
-            pragma_value,
-            Some(value)
-                if pragma_name.eq_ignore_ascii_case("auto_vacuum")
-                    && (value.eq_ignore_ascii_case("incremental") || value == "2")
-        )
+        || pragma_value.is_some_and(|value| {
+            (pragma_name.eq_ignore_ascii_case("auto_vacuum")
+                && (value.eq_ignore_ascii_case("incremental") || value == "2"))
+                || (pragma_name.eq_ignore_ascii_case("foreign_keys")
+                    && (value.eq_ignore_ascii_case("on") || value == "1"))
+                || (pragma_name.eq_ignore_ascii_case("defer_foreign_keys")
+                    && (value.eq_ignore_ascii_case("on") || value == "1"))
+                || (pragma_name.eq_ignore_ascii_case("secure_delete")
+                    && (value.eq_ignore_ascii_case("on") || value == "1"))
+                || (pragma_name.eq_ignore_ascii_case("user_version")
+                    && value.parse::<u32>().is_ok())
+        })
 }
 
 fn is_migration_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
@@ -1756,18 +1762,33 @@ mod tests {
     }
 
     #[test]
-    fn writer_actor_allows_only_incremental_auto_vacuum_configuration() {
+    fn writer_actor_allows_only_product_schema_pragmas() {
         let fixture = fixture('a', 'a');
         let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
-        channel
-            .execute_batch("PRAGMA auto_vacuum = INCREMENTAL".to_owned())
-            .expect("repeat safe incremental auto-vacuum");
-        let error = channel
-            .execute_batch("PRAGMA auto_vacuum = NONE".to_owned())
-            .unwrap_err();
-
-        assert!(matches!(error, MigrationSqlError::Sqlite { .. }));
+        for pragma in [
+            "PRAGMA auto_vacuum = INCREMENTAL",
+            "PRAGMA foreign_keys = ON",
+            "PRAGMA defer_foreign_keys = ON",
+            "PRAGMA secure_delete = ON",
+            "PRAGMA user_version = 24",
+        ] {
+            channel
+                .execute_batch(pragma.to_owned())
+                .unwrap_or_else(|error| panic!("{pragma} must remain available: {error}"));
+        }
+        for pragma in [
+            "PRAGMA auto_vacuum = NONE",
+            "PRAGMA foreign_keys = OFF",
+            "PRAGMA secure_delete = OFF",
+            "PRAGMA writable_schema = ON",
+        ] {
+            let error = channel.execute_batch(pragma.to_owned()).unwrap_err();
+            assert!(
+                matches!(error, MigrationSqlError::Sqlite { .. }),
+                "{pragma}: {error}"
+            );
+        }
     }
 
     #[test]
