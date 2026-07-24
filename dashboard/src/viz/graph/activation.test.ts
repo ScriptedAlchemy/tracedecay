@@ -2,17 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { ActivationField } from './activation.ts';
 
 describe('ActivationField subscription', () => {
-  it('notifies subscribers when a strike lands', () => {
+  it('notifies once per strike so an outside striker can wake a renderer', () => {
     const field = new ActivationField();
     const listener = vi.fn();
     field.subscribe(listener);
-    field.strike(['a'], 0.5);
+    field.strike(['a', 'b'], 0.5);
     expect(listener).toHaveBeenCalledTimes(1);
-    field.strike(['a', 'b'], 0.2);
+    field.strike(['a'], 0.5);
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
-  it('never notifies for a strike with no ids — nothing real happened', () => {
+  it('stays silent when a strike carries no ids — nothing real happened', () => {
     const field = new ActivationField();
     const listener = vi.fn();
     field.subscribe(listener);
@@ -20,26 +20,25 @@ describe('ActivationField subscription', () => {
     expect(listener).not.toHaveBeenCalled();
   });
 
+  it('never fires on its own: decay is not an event', () => {
+    // The field has no clock. `tick` is decay bookkeeping driven by whoever is
+    // already drawing; if it notified, a renderer would wake itself forever.
+    const field = new ActivationField({ halfLifeMs: 100 });
+    field.strike(['a'], 1);
+    const listener = vi.fn();
+    field.subscribe(listener);
+    field.tick(0);
+    field.tick(1_000);
+    field.tick(2_000);
+    expect(listener).not.toHaveBeenCalled();
+    expect(field.warm).toBe(false);
+  });
+
   it('stops notifying once unsubscribed', () => {
     const field = new ActivationField();
     const listener = vi.fn();
-    const unsubscribe = field.subscribe(listener);
+    field.subscribe(listener)();
     field.strike(['a'], 1);
-    unsubscribe();
-    field.strike(['a'], 1);
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-
-  it('supports multiple independent subscribers', () => {
-    const field = new ActivationField();
-    const first = vi.fn();
-    const second = vi.fn();
-    field.subscribe(first);
-    const unsubscribeSecond = field.subscribe(second);
-    field.strike(['a'], 1);
-    unsubscribeSecond();
-    field.strike(['a'], 1);
-    expect(first).toHaveBeenCalledTimes(2);
-    expect(second).toHaveBeenCalledTimes(1);
+    expect(listener).not.toHaveBeenCalled();
   });
 });

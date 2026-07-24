@@ -263,7 +263,7 @@ const CONNECTION_STATE: Record<
  *
  * The distinction never rests on colour, and never on the absence of activity.
  */
-function SignalPanel({
+export function SignalPanel({
   pulses,
   sseState,
   lastEventAt,
