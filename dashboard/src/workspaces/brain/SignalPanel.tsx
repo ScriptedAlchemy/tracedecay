@@ -68,7 +68,7 @@ export function SignalPanel({
   const offline = sseState === 'offline';
   const peak = summary.peak;
   return (
-    <div className="pointer-events-none absolute bottom-6 left-6 flex max-w-[calc(100%-3rem)] select-none items-stretch">
+    <div className="flex max-w-full select-none items-stretch">
       <span aria-hidden className="w-2 border-y border-l border-accent/40" />
       <div className="flex min-w-0 flex-col gap-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
         <StateChip kind={connection.kind} detail={connection.detail} />

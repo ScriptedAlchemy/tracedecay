@@ -55,9 +55,7 @@ export function BrainPage() {
                 <SynapseMap
                   groups={groups}
                   activeProjectId={data.active_project_id ?? null}
-                />
-                <InstrumentReadout
-                  items={[
+                  counts={[
                     { label: 'repos', value: data.summary.repo_count },
                     { label: 'projects', value: data.summary.project_count },
                     { label: 'stores', value: totals.stores },
@@ -92,9 +90,11 @@ export function BrainPage() {
 function SynapseMap({
   groups,
   activeProjectId,
+  counts,
 }: {
   groups: ProjectRepoGroup[];
   activeProjectId: string | null;
+  counts: ReadonlyArray<{ label: string; value: number }>;
 }) {
   const selectProject = useScope((s) => s.selectProject);
   const scope = useScope((s) => s.scope);
@@ -210,7 +210,15 @@ function SynapseMap({
         selectedId={scope.kind === 'project' ? scope.projectId : null}
         onSelect={handleSelect}
       />
-      <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
+      {/* One HUD column rather than two free-floating corners. Anchored to the
+        * top of the field and grown downward, both strips stay ON the lit
+        * canvas at every width — a bottom-anchored panel measured from this
+        * column instead sat over the caption BELOW the field on a narrow
+        * viewport, which read as chrome spilled onto the page. */}
+      <div className="pointer-events-none absolute inset-x-6 top-6 flex flex-col items-start gap-2">
+        <InstrumentReadout items={counts} />
+        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
+      </div>
     </>
   );
 }
@@ -224,14 +232,14 @@ function InstrumentReadout({
   items: ReadonlyArray<{ label: string; value: number }>;
 }) {
   return (
-    <div className="pointer-events-none absolute left-6 top-6 flex select-none items-stretch">
+    <div className="flex max-w-full select-none items-stretch">
       <span aria-hidden className="w-2 border-y border-l border-accent/40" />
       {/* The counts and their names were a step apart on the type scale, which
        * on a HUD floating over a dark field made the whole strip read as one
        * grey ribbon. Setting the figures on the display tier and the names on
        * the legend tier puts the two ends of the scale side by side, so the
        * numbers carry from across the room and the labels stay quiet. */}
-      <dl className="flex items-end gap-5 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
+      <dl className="flex min-w-0 flex-wrap items-end gap-x-5 gap-y-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
         {items.map((item) => (
           <div key={item.label} className="flex flex-col gap-1">
             <dd
