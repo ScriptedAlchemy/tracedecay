@@ -1211,16 +1211,18 @@ fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEv
             unavailable = true;
             continue;
         };
-        let natural_language = |profile: &DirectProfileEvaluationV1| {
-            profile
+        let (Some(baseline_natural), Some(candidate_natural)) = (
+            baseline
                 .quality
                 .strata
                 .iter()
-                .find(|stratum| stratum.stratum == "natural_language")
-        };
-        let (Some(baseline_natural), Some(candidate_natural)) =
-            (natural_language(baseline), natural_language(candidate))
-        else {
+                .find(|stratum| stratum.stratum == "natural_language"),
+            candidate
+                .quality
+                .strata
+                .iter()
+                .find(|stratum| stratum.stratum == "natural_language"),
+        ) else {
             unavailable = true;
             continue;
         };
