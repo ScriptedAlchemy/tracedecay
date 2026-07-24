@@ -1,7 +1,7 @@
 #![allow(dead_code)] // in-flight semantic runtime root; Plan 31 native fastembed semantic code search
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 use tracedecay_domain::{
@@ -20,7 +20,8 @@ use self::fastembed_adapter::{
     EmbeddingRuntime, EmbeddingSession, FastEmbedEmbeddingRuntime,
 };
 use self::projector::{
-    CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation_async,
+    CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation,
+    prepare_vector_generation_async,
 };
 use self::runtime_query::{
     CurrentSemanticQueryRuntimeV1, PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory,
@@ -263,6 +264,54 @@ pub(crate) struct DaemonSemanticQueryFactoryV1 {
     inner: Arc<PooledSemanticQueryEmbedderFactory<FastEmbedEmbeddingRuntime>>,
 }
 
+/// Isolated evaluator projection. It reuses the verified production artifact
+/// and FastEmbed runtime, but has no durable vector pointer and cannot replace
+/// a project's active generation.
+pub(crate) struct PreparedSemanticEvaluationProjectionV1 {
+    pub(crate) query_factory: DaemonSemanticQueryFactoryV1,
+    pub(crate) prepared: PreparedVectorGenerationV1,
+}
+
+pub(crate) fn prepare_semantic_evaluation_projection(
+    artifact: LoadedSemanticArtifactV1,
+    request: ProjectionBatchRequestV1,
+    canonical_chunks: &[CodeSearchChunkV1],
+    max_sessions: usize,
+    memory_ceiling_bytes: u64,
+) -> Result<PreparedSemanticEvaluationProjectionV1, SemanticRuntimeScheduleFailureV1> {
+    let authority = artifact.into_authority();
+    let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
+        fastembed_runtime_factory();
+    let runtime = SemanticRuntimeService::new_owned(
+        Arc::clone(&authority),
+        factory,
+        SessionPoolConfigV1 {
+            max_sessions,
+            max_queued_waiters: 0,
+            idle_timeout: std::time::Duration::from_mins(5),
+            memory_ceiling_bytes,
+        },
+    )
+    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+    let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new(
+        request.changes.added_or_changed.len().max(1) as u64,
+    ));
+    let mut encoder = RuntimeChunkVectorEncoderV1::new(Arc::clone(&runtime), progress);
+    let prepared = prepare_vector_generation(
+        authority.projection(),
+        request,
+        canonical_chunks,
+        &mut encoder,
+    )
+    .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+    Ok(PreparedSemanticEvaluationProjectionV1 {
+        query_factory: DaemonSemanticQueryFactoryV1 {
+            inner: PooledSemanticQueryEmbedderFactory::new(runtime),
+        },
+        prepared,
+    })
+}
+
 impl DaemonSemanticQueryFactoryV1 {
     pub(crate) fn create(
         &self,
@@ -272,6 +321,10 @@ impl DaemonSemanticQueryFactoryV1 {
         DaemonSemanticQueryEmbedderV1 {
             inner: self.inner.create(cancellation),
         }
+    }
+
+    pub(crate) fn resident_cache_bytes(&self) -> u64 {
+        self.inner.runtime().stats().resident_bytes
     }
 }
 
@@ -309,10 +362,36 @@ pub(crate) struct DaemonSemanticRuntimeHandleV1 {
     scheduling: SemanticRuntimeSchedulingHandleV1,
     bounds: SemanticRuntimeSchedulingBoundsV1,
     runtime: Arc<RwLock<Option<CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>>>>,
+    transitions: Arc<Mutex<()>>,
     pool_config: SessionPoolConfigV1,
 }
 
+pub(crate) struct PreparedSemanticRuntimeRestoreV1 {
+    pointer: SemanticGenerationPointerV1,
+    runtime: CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>,
+    expected_current: Option<SemanticGenerationPointerV1>,
+    expected_status: SemanticRuntimeScheduleStatusV1,
+}
+
 impl DaemonSemanticRuntimeHandleV1 {
+    fn restore_snapshot(
+        &self,
+    ) -> (
+        Option<SemanticGenerationPointerV1>,
+        SemanticRuntimeScheduleStatusV1,
+    ) {
+        (self.scheduling.current(), self.scheduling.status())
+    }
+
+    fn restore_snapshot_is_current(
+        &self,
+        expected_current: &Option<SemanticGenerationPointerV1>,
+        expected_status: &SemanticRuntimeScheduleStatusV1,
+    ) -> bool {
+        self.scheduling.current().as_ref() == expected_current.as_ref()
+            && &self.scheduling.status() == expected_status
+    }
+
     pub(crate) fn new(
         max_sessions: usize,
         max_projection_units: usize,
@@ -338,6 +417,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                 memory_ceiling_bytes,
             },
             runtime: Arc::new(RwLock::new(None)),
+            transitions: Arc::new(Mutex::new(())),
             pool_config,
         })
     }
@@ -350,6 +430,10 @@ impl DaemonSemanticRuntimeHandleV1 {
         if work.total_units() > self.bounds.max_projection_units {
             return false;
         }
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.scheduling.schedule(work)
     }
 
@@ -375,7 +459,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         let projection_key = request.projection_request.target_projection_key.clone();
         let pool_config = self.pool_config.clone();
         let runtime = Arc::clone(&self.runtime);
-        self.scheduling.schedule(SemanticRuntimeWorkV1::new(
+        let work = SemanticRuntimeWorkV1::new(
             request.target_generation,
             total_units,
             move |progress| async move {
@@ -422,7 +506,12 @@ impl DaemonSemanticRuntimeHandleV1 {
                     Ok(())
                 }))
             },
-        ))
+        );
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.scheduling.schedule(work)
     }
 
     pub(crate) fn bounds(&self) -> SemanticRuntimeSchedulingBoundsV1 {
@@ -434,6 +523,10 @@ impl DaemonSemanticRuntimeHandleV1 {
     }
 
     pub(crate) fn cancel(&self) -> bool {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.scheduling.cancel()
     }
 
@@ -469,6 +562,10 @@ impl DaemonSemanticRuntimeHandleV1 {
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
     ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pointer = self
             .current()
             .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
@@ -493,6 +590,30 @@ impl DaemonSemanticRuntimeHandleV1 {
         pointer: SemanticGenerationPointerV1,
         artifact: LoadedSemanticArtifactV1,
     ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
+        let prepared = self.prepare_restore(pointer, artifact)?;
+        self.commit_restore_if_current(prepared)
+            .then_some(())
+            .ok_or(SemanticRuntimeScheduleFailureV1::Publication)
+    }
+
+    pub(crate) fn prepare_restore(
+        &self,
+        pointer: SemanticGenerationPointerV1,
+        artifact: LoadedSemanticArtifactV1,
+    ) -> Result<PreparedSemanticRuntimeRestoreV1, SemanticRuntimeScheduleFailureV1> {
+        let (expected_current, expected_status) = {
+            let _transition = self
+                .transitions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.restore_snapshot()
+        };
+        if matches!(
+            &expected_status,
+            SemanticRuntimeScheduleStatusV1::Indexing { .. }
+        ) {
+            return Err(SemanticRuntimeScheduleFailureV1::Publication);
+        }
         let authority = artifact.into_authority();
         if authority.projection().projection_key() != &pointer.projection_key {
             return Err(SemanticRuntimeScheduleFailureV1::Publication);
@@ -502,14 +623,36 @@ impl DaemonSemanticRuntimeHandleV1 {
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        Ok(PreparedSemanticRuntimeRestoreV1 {
+            runtime: CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
+            pointer,
+            expected_current,
+            expected_status,
+        })
+    }
+
+    /// Publish a warmed restore only if no scheduler transition occurred while
+    /// it was prepared. This prevents restart/rollback work from cancelling or
+    /// overwriting a newer generation.
+    pub(crate) fn commit_restore(&self, prepared: PreparedSemanticRuntimeRestoreV1) -> bool {
+        self.commit_restore_if_current(prepared)
+    }
+
+    fn commit_restore_if_current(&self, prepared: PreparedSemanticRuntimeRestoreV1) -> bool {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.restore_snapshot_is_current(&prepared.expected_current, &prepared.expected_status)
+        {
+            return false;
+        }
         *self
             .runtime
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
-            CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
-        );
-        self.scheduling.restore_current(pointer);
-        Ok(())
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prepared.runtime);
+        self.scheduling.restore_current(prepared.pointer);
+        true
     }
 
     pub(crate) fn status_projection(&self) -> SemanticRuntimeStatusProjectionV1 {
@@ -758,6 +901,34 @@ mod scheduling_tests {
             SemanticRuntimeScheduleStatusV1::Indexing { .. }
         ));
         release_tx.send(()).expect("release artifact loader");
+    }
+
+    #[tokio::test]
+    async fn stale_restart_snapshot_cannot_replace_newer_indexing_work() {
+        let handle =
+            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
+        let (expected_current, expected_status) = handle.restore_snapshot();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (_release_tx, release_rx) = oneshot::channel::<()>();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('a'),
+            1,
+            move |_cancellation| async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Err(SemanticRuntimeScheduleFailureV1::Cancelled)
+            },
+        )));
+        started_rx.await.expect("newer indexing work started");
+
+        assert!(
+            !handle.restore_snapshot_is_current(&expected_current, &expected_status),
+            "restart publication must compare-and-set its scheduler snapshot"
+        );
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Indexing { .. }
+        ));
     }
 
     #[tokio::test]

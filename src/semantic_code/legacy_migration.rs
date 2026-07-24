@@ -7,17 +7,19 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1, ManifestDigest, VectorGenerationIdV1,
-    canonical_sha256,
+    CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, ManifestDigest,
+    VectorGenerationIdV1, canonical_sha256,
 };
 
 const LEGACY_MIGRATION_RECEIPT_DOMAIN_V1: &str =
     "tracedecay.semantic-code.legacy-vector-migration-receipt.v1";
+const LEGACY_MIGRATION_INVENTORY_DOMAIN_V1: &str =
+    "tracedecay.semantic-code.legacy-vector-inventory.v1";
 const CANONICAL_CHUNK_SET_DOMAIN_V1: &str =
     "tracedecay.semantic-code.legacy-vector-canonical-chunk-set.v1";
 
@@ -27,6 +29,22 @@ const CANONICAL_CHUNK_SET_DOMAIN_V1: &str =
 pub(crate) struct LegacyVectorInventoryV1 {
     pub expected_active_generation: Option<VectorGenerationIdV1>,
     pub entries: Vec<LegacyVectorInventoryEntryV1>,
+}
+
+impl LegacyVectorInventoryV1 {
+    pub(crate) fn canonical_digest(&self) -> Result<ManifestDigest, LegacyVectorMigrationErrorV1> {
+        let mut canonical = self.clone();
+        canonical
+            .entries
+            .sort_by(|left, right| left.legacy_generation().cmp(right.legacy_generation()));
+        validate_inventory(&canonical)?;
+        canonical_sha256(&(
+            LEGACY_MIGRATION_INVENTORY_DOMAIN_V1,
+            &canonical.expected_active_generation,
+            &canonical.entries,
+        ))
+        .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,15 +110,11 @@ impl CanonicalEligibleChunkSetV1 {
             }
         }
         chunks.sort_by(|left, right| left.id.cmp(&right.id));
-        let digest = canonical_sha256(&(
-            CANONICAL_CHUNK_SET_DOMAIN_V1,
-            &source_generation,
-            chunks
-                .iter()
-                .map(|chunk| (&chunk.id, &chunk.content_digest))
-                .collect::<Vec<_>>(),
-        ))
-        .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))?;
+        let identities = chunks
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+            .collect::<Vec<_>>();
+        let digest = canonical_chunk_set_digest(&source_generation, &identities)?;
         Ok(Self {
             source_generation,
             chunks,
@@ -119,6 +133,40 @@ impl CanonicalEligibleChunkSetV1 {
     pub(crate) fn digest(&self) -> &ManifestDigest {
         &self.digest
     }
+}
+
+pub(crate) fn canonical_chunk_set_digest(
+    source_generation: &CodeGenerationId,
+    chunks: &[(CodeSearchChunkId, ContentDigest)],
+) -> Result<ManifestDigest, LegacyVectorMigrationErrorV1> {
+    source_generation
+        .validate()
+        .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))?;
+    if chunks
+        .windows(2)
+        .any(|pair| pair[0].0.cmp(&pair[1].0).is_ge())
+    {
+        return Err(LegacyVectorMigrationErrorV1::CanonicalCode(
+            "canonical chunk identities are duplicated or unordered".to_owned(),
+        ));
+    }
+    for (chunk_id, digest) in chunks {
+        chunk_id
+            .validate()
+            .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))?;
+        digest
+            .validate()
+            .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))?;
+    }
+    canonical_sha256(&(
+        CANONICAL_CHUNK_SET_DOMAIN_V1,
+        source_generation,
+        chunks
+            .iter()
+            .map(|(chunk_id, digest)| (chunk_id, digest))
+            .collect::<Vec<_>>(),
+    ))
+    .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))
 }
 
 /// Result of rebuilding one generation exclusively from retained canonical
@@ -144,6 +192,87 @@ pub(crate) trait LegacyVectorCanonicalRebuildPortV1 {
         &mut self,
         chunks: &CanonicalEligibleChunkSetV1,
     ) -> Result<StagedCanonicalVectorRebuildV1, LegacyVectorMigrationErrorV1>;
+}
+
+/// Production rebuild adapter over retained canonical code.
+///
+/// The callback may stage only into caller-owned scratch storage. This adapter
+/// never accepts legacy vector bytes and has no live publication authority.
+pub(crate) struct ProductionLegacyVectorCanonicalRebuilderV1<Stage> {
+    retained: BTreeMap<CodeGenerationId, CanonicalEligibleChunkSetV1>,
+    stage: Stage,
+    staged_rebuilds: Vec<StagedCanonicalVectorRebuildV1>,
+}
+
+impl<Stage> ProductionLegacyVectorCanonicalRebuilderV1<Stage>
+where
+    Stage: FnMut(
+        &CanonicalEligibleChunkSetV1,
+    ) -> Result<StagedCanonicalVectorRebuildV1, LegacyVectorMigrationErrorV1>,
+{
+    pub(crate) fn try_new(
+        retained: impl IntoIterator<Item = CanonicalEligibleChunkSetV1>,
+        stage: Stage,
+    ) -> Result<Self, LegacyVectorMigrationErrorV1> {
+        let mut retained_by_generation = BTreeMap::new();
+        for chunks in retained {
+            if retained_by_generation
+                .insert(chunks.source_generation().clone(), chunks)
+                .is_some()
+            {
+                return Err(LegacyVectorMigrationErrorV1::CanonicalCode(
+                    "duplicate retained source generation".to_owned(),
+                ));
+            }
+        }
+        Ok(Self {
+            retained: retained_by_generation,
+            stage,
+            staged_rebuilds: Vec::new(),
+        })
+    }
+
+    pub(crate) fn staged_rebuilds(&self) -> &[StagedCanonicalVectorRebuildV1] {
+        &self.staged_rebuilds
+    }
+}
+
+impl<Stage> LegacyVectorCanonicalRebuildPortV1 for ProductionLegacyVectorCanonicalRebuilderV1<Stage>
+where
+    Stage: FnMut(
+        &CanonicalEligibleChunkSetV1,
+    ) -> Result<StagedCanonicalVectorRebuildV1, LegacyVectorMigrationErrorV1>,
+{
+    fn retained_eligible_chunks(
+        &mut self,
+        source_generation: &CodeGenerationId,
+    ) -> Result<Option<CanonicalEligibleChunkSetV1>, LegacyVectorMigrationErrorV1> {
+        Ok(self.retained.get(source_generation).cloned())
+    }
+
+    fn rebuild_from_retained_eligible_code(
+        &mut self,
+        chunks: &CanonicalEligibleChunkSetV1,
+    ) -> Result<StagedCanonicalVectorRebuildV1, LegacyVectorMigrationErrorV1> {
+        if self.retained.get(chunks.source_generation()) != Some(chunks) {
+            return Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch);
+        }
+        if let Some(staged) = self
+            .staged_rebuilds
+            .iter()
+            .find(|staged| staged.source_generation == *chunks.source_generation())
+        {
+            return Ok(staged.clone());
+        }
+        let staged = (self.stage)(chunks)?;
+        if staged.source_generation != *chunks.source_generation()
+            || staged.canonical_chunk_set_digest != *chunks.digest()
+        {
+            return Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch);
+        }
+        self.staged_rebuilds.push(staged.clone());
+        Ok(staged)
+    }
 }
 
 pub(crate) trait LegacyVectorMigrationCancellationV1 {
@@ -190,6 +319,9 @@ pub(crate) struct LegacyVectorMigrationCountsV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LegacyVectorMigrationReceiptV1 {
+    pub inventory_digest: ManifestDigest,
+    pub expected_prior_active_generation: Option<VectorGenerationIdV1>,
+    pub next_active_generation: Option<VectorGenerationIdV1>,
     pub counts: LegacyVectorMigrationCountsV1,
     pub items: Vec<LegacyVectorMigrationItemReceiptV1>,
     pub receipt_digest: ManifestDigest,
@@ -223,6 +355,12 @@ impl LegacyVectorMigrationReceiptV1 {
             .collect::<BTreeSet<_>>()
             .len()
             == self.items.len();
+        let canonical_order = self.items.windows(2).all(|pair| {
+            pair[0]
+                .legacy_generation
+                .cmp(&pair[1].legacy_generation)
+                .is_lt()
+        });
         let expected_counts = LegacyVectorMigrationCountsV1 {
             inventoried: self.items.len() as u64,
             rebuilt: count_outcome(
@@ -238,15 +376,59 @@ impl LegacyVectorMigrationReceiptV1 {
                 LegacyVectorMigrationOutcomeKindV1::QuarantineUnreadable,
             ),
         };
+        let inventory_entries = self
+            .items
+            .iter()
+            .map(|item| match item.outcome {
+                LegacyVectorMigrationOutcomeKindV1::RebuildFromRetainedEligibleCode
+                | LegacyVectorMigrationOutcomeKindV1::DropWithReceipt => item
+                    .source_generation
+                    .clone()
+                    .map(|source_generation| LegacyVectorInventoryEntryV1::Readable {
+                        legacy_generation: item.legacy_generation.clone(),
+                        source_generation,
+                    })
+                    .ok_or(LegacyVectorMigrationErrorV1::InvalidReceipt),
+                LegacyVectorMigrationOutcomeKindV1::QuarantineUnreadable => item
+                    .quarantine_reason_digest
+                    .clone()
+                    .map(|reason_digest| LegacyVectorInventoryEntryV1::Unreadable {
+                        legacy_generation: item.legacy_generation.clone(),
+                        reason_digest,
+                    })
+                    .ok_or(LegacyVectorMigrationErrorV1::InvalidReceipt),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_inventory_digest = LegacyVectorInventoryV1 {
+            expected_active_generation: self.expected_prior_active_generation.clone(),
+            entries: inventory_entries,
+        }
+        .canonical_digest()
+        .map_err(|_| LegacyVectorMigrationErrorV1::InvalidReceipt)?;
+        let expected_next = self
+            .expected_prior_active_generation
+            .as_ref()
+            .and_then(|active| {
+                self.items
+                    .iter()
+                    .find(|item| &item.legacy_generation == active)
+            })
+            .and_then(|item| item.rebuilt_generation.clone());
         let expected_digest = canonical_sha256(&(
             LEGACY_MIGRATION_RECEIPT_DOMAIN_V1,
+            &self.inventory_digest,
+            &self.expected_prior_active_generation,
+            &self.next_active_generation,
             &self.counts,
             &self.items,
         ))
         .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))?;
         if !valid_items
             || !unique_legacy
+            || !canonical_order
             || self.counts != expected_counts
+            || self.inventory_digest != expected_inventory_digest
+            || self.next_active_generation != expected_next
             || self.receipt_digest != expected_digest
         {
             return Err(LegacyVectorMigrationErrorV1::InvalidReceipt);
@@ -269,6 +451,11 @@ pub(crate) struct LegacyVectorMigrationOwnerTransactionV1 {
 impl LegacyVectorMigrationOwnerTransactionV1 {
     pub(crate) fn validate(&self) -> Result<(), LegacyVectorMigrationErrorV1> {
         self.receipt.validate()?;
+        if self.expected_prior_active_generation != self.receipt.expected_prior_active_generation
+            || self.next_active_generation != self.receipt.next_active_generation
+        {
+            return Err(LegacyVectorMigrationErrorV1::InvalidReceipt);
+        }
         let active_item = self
             .expected_prior_active_generation
             .as_ref()
@@ -297,6 +484,8 @@ pub(crate) enum LegacyVectorMigrationErrorV1 {
     DuplicateLegacyGeneration,
     #[error("legacy vector inventory active pointer is absent from the inventory")]
     DanglingActivePointer,
+    #[error("legacy vector inventory changed before replacement")]
+    InventoryChanged,
     #[error("canonical retained code is invalid: {0}")]
     CanonicalCode(String),
     #[error("canonical chunk belongs to a foreign source generation: {0:?}")]
@@ -323,15 +512,26 @@ where
     Rebuilder: LegacyVectorCanonicalRebuildPortV1,
     Cancellation: LegacyVectorMigrationCancellationV1,
 {
-    let mut inventory = inventory.read_only_inventory()?;
-    inventory
+    if cancellation.is_cancelled() {
+        return Err(LegacyVectorMigrationErrorV1::Cancelled);
+    }
+    let mut snapshot = inventory.read_only_inventory()?;
+    snapshot
         .entries
         .sort_by(|left, right| left.legacy_generation().cmp(right.legacy_generation()));
-    validate_inventory(&inventory)?;
+    validate_inventory(&snapshot)?;
+    let inventory_digest = snapshot.canonical_digest()?;
 
     let mut rebuilt_generations = BTreeSet::new();
-    let mut items = Vec::with_capacity(inventory.entries.len());
-    for entry in inventory.entries {
+    let mut rebuilds_by_source: BTreeMap<
+        CodeGenerationId,
+        (
+            Option<ManifestDigest>,
+            Option<StagedCanonicalVectorRebuildV1>,
+        ),
+    > = BTreeMap::new();
+    let mut items = Vec::with_capacity(snapshot.entries.len());
+    for entry in std::mem::take(&mut snapshot.entries) {
         if cancellation.is_cancelled() {
             return Err(LegacyVectorMigrationErrorV1::Cancelled);
         }
@@ -350,37 +550,54 @@ where
             LegacyVectorInventoryEntryV1::Readable {
                 legacy_generation,
                 source_generation,
-            } => match rebuilder.retained_eligible_chunks(&source_generation)? {
-                None => LegacyVectorMigrationItemReceiptV1 {
-                    legacy_generation,
-                    outcome: LegacyVectorMigrationOutcomeKindV1::DropWithReceipt,
-                    source_generation: Some(source_generation),
-                    rebuilt_generation: None,
-                    canonical_chunk_set_digest: None,
-                    quarantine_reason_digest: None,
-                },
-                Some(chunks) if chunks.chunks().is_empty() => LegacyVectorMigrationItemReceiptV1 {
-                    legacy_generation,
-                    outcome: LegacyVectorMigrationOutcomeKindV1::DropWithReceipt,
-                    source_generation: Some(source_generation),
-                    rebuilt_generation: None,
-                    canonical_chunk_set_digest: Some(chunks.digest().clone()),
-                    quarantine_reason_digest: None,
-                },
-                Some(chunks) => {
-                    if chunks.source_generation() != &source_generation {
-                        return Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch);
+            } => {
+                if !rebuilds_by_source.contains_key(&source_generation) {
+                    let retained = rebuilder.retained_eligible_chunks(&source_generation)?;
+                    if cancellation.is_cancelled() {
+                        return Err(LegacyVectorMigrationErrorV1::Cancelled);
                     }
-                    let rebuilt = rebuilder.rebuild_from_retained_eligible_code(&chunks)?;
-                    if rebuilt.source_generation != source_generation
-                        || rebuilt.canonical_chunk_set_digest != *chunks.digest()
-                    {
-                        return Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch);
-                    }
-                    if !rebuilt_generations.insert(rebuilt.rebuilt_generation.clone()) {
-                        return Err(LegacyVectorMigrationErrorV1::DuplicateRebuiltGeneration);
-                    }
-                    LegacyVectorMigrationItemReceiptV1 {
+                    let disposition = match retained {
+                        None => (None, None),
+                        Some(chunks) if chunks.chunks().is_empty() => {
+                            (Some(chunks.digest().clone()), None)
+                        }
+                        Some(chunks) => {
+                            if chunks.source_generation() != &source_generation {
+                                return Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch);
+                            }
+                            let rebuilt = rebuilder.rebuild_from_retained_eligible_code(&chunks)?;
+                            if cancellation.is_cancelled() {
+                                return Err(LegacyVectorMigrationErrorV1::Cancelled);
+                            }
+                            if rebuilt.source_generation != source_generation
+                                || rebuilt.canonical_chunk_set_digest != *chunks.digest()
+                            {
+                                return Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch);
+                            }
+                            if !rebuilt_generations.insert(rebuilt.rebuilt_generation.clone()) {
+                                return Err(
+                                    LegacyVectorMigrationErrorV1::DuplicateRebuiltGeneration,
+                                );
+                            }
+                            (Some(chunks.digest().clone()), Some(rebuilt))
+                        }
+                    };
+                    rebuilds_by_source.insert(source_generation.clone(), disposition);
+                }
+                let (canonical_chunk_set_digest, rebuilt) = rebuilds_by_source
+                    .get(&source_generation)
+                    .cloned()
+                    .ok_or(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch)?;
+                match rebuilt {
+                    None => LegacyVectorMigrationItemReceiptV1 {
+                        legacy_generation,
+                        outcome: LegacyVectorMigrationOutcomeKindV1::DropWithReceipt,
+                        source_generation: Some(source_generation),
+                        rebuilt_generation: None,
+                        canonical_chunk_set_digest,
+                        quarantine_reason_digest: None,
+                    },
+                    Some(rebuilt) => LegacyVectorMigrationItemReceiptV1 {
                         legacy_generation,
                         outcome:
                             LegacyVectorMigrationOutcomeKindV1::RebuildFromRetainedEligibleCode,
@@ -388,11 +605,26 @@ where
                         rebuilt_generation: Some(rebuilt.rebuilt_generation),
                         canonical_chunk_set_digest: Some(rebuilt.canonical_chunk_set_digest),
                         quarantine_reason_digest: None,
-                    }
+                    },
                 }
-            },
+            }
         };
         items.push(item);
+    }
+
+    if cancellation.is_cancelled() {
+        return Err(LegacyVectorMigrationErrorV1::Cancelled);
+    }
+    let mut current_inventory = inventory.read_only_inventory()?;
+    current_inventory
+        .entries
+        .sort_by(|left, right| left.legacy_generation().cmp(right.legacy_generation()));
+    validate_inventory(&current_inventory)?;
+    if current_inventory.canonical_digest()? != inventory_digest {
+        return Err(LegacyVectorMigrationErrorV1::InventoryChanged);
+    }
+    if cancellation.is_cancelled() {
+        return Err(LegacyVectorMigrationErrorV1::Cancelled);
     }
 
     let counts = LegacyVectorMigrationCountsV1 {
@@ -407,30 +639,37 @@ where
             LegacyVectorMigrationOutcomeKindV1::QuarantineUnreadable,
         ),
     };
-    let receipt_digest =
-        canonical_sha256(&(LEGACY_MIGRATION_RECEIPT_DOMAIN_V1, &counts, &items))
-            .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))?;
+    let next_active_generation = snapshot
+        .expected_active_generation
+        .as_ref()
+        .and_then(|active| items.iter().find(|item| &item.legacy_generation == active))
+        .and_then(|item| item.rebuilt_generation.clone());
+    let receipt_digest = canonical_sha256(&(
+        LEGACY_MIGRATION_RECEIPT_DOMAIN_V1,
+        &inventory_digest,
+        &snapshot.expected_active_generation,
+        &next_active_generation,
+        &counts,
+        &items,
+    ))
+    .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))?;
     let receipt = LegacyVectorMigrationReceiptV1 {
+        inventory_digest,
+        expected_prior_active_generation: snapshot.expected_active_generation.clone(),
+        next_active_generation: next_active_generation.clone(),
         counts,
         items,
         receipt_digest,
     };
-    let next_active_generation = inventory
-        .expected_active_generation
-        .as_ref()
-        .and_then(|active| {
-            receipt
-                .items
-                .iter()
-                .find(|item| &item.legacy_generation == active)
-        })
-        .and_then(|item| item.rebuilt_generation.clone());
     let transaction = LegacyVectorMigrationOwnerTransactionV1 {
-        expected_prior_active_generation: inventory.expected_active_generation,
+        expected_prior_active_generation: snapshot.expected_active_generation,
         next_active_generation,
         receipt,
     };
     transaction.validate()?;
+    if cancellation.is_cancelled() {
+        return Err(LegacyVectorMigrationErrorV1::Cancelled);
+    }
     Ok(transaction)
 }
 
@@ -534,6 +773,34 @@ mod tests {
         }
     }
 
+    struct CancelWhenStaged<'a>(&'a std::cell::Cell<bool>);
+
+    impl LegacyVectorMigrationCancellationV1 for CancelWhenStaged<'_> {
+        fn is_cancelled(&self) -> bool {
+            self.0.get()
+        }
+    }
+
+    struct ChangingInventory {
+        reads: std::cell::Cell<u8>,
+        first: LegacyVectorInventoryV1,
+        second: LegacyVectorInventoryV1,
+    }
+
+    impl LegacyVectorInventoryPortV1 for ChangingInventory {
+        fn read_only_inventory(
+            &self,
+        ) -> Result<LegacyVectorInventoryV1, LegacyVectorMigrationErrorV1> {
+            let reads = self.reads.get();
+            self.reads.set(reads.saturating_add(1));
+            Ok(if reads == 0 {
+                self.first.clone()
+            } else {
+                self.second.clone()
+            })
+        }
+    }
+
     fn manifest(value: &str) -> ManifestDigest {
         ManifestDigest::new(value).expect("digest")
     }
@@ -574,6 +841,144 @@ mod tests {
             subtokens: vec![],
             sanitized_text: BoundedSanitizedText::new("code").expect("text"),
         }
+    }
+
+    #[test]
+    fn production_rebuilder_owns_retained_chunks_and_reports_missing_generations() {
+        let source = generation("generation.retained");
+        let retained = CanonicalEligibleChunkSetV1::try_from_chunks(
+            source.clone(),
+            vec![chunk("chunk.retained", &source)],
+        )
+        .expect("canonical chunks");
+        let expected = retained.clone();
+        let mut rebuilder =
+            ProductionLegacyVectorCanonicalRebuilderV1::try_new(vec![retained], |_| {
+                unreachable!("lookup does not stage")
+            })
+            .expect("production rebuilder");
+
+        assert_eq!(
+            rebuilder.retained_eligible_chunks(&source),
+            Ok(Some(expected))
+        );
+        assert_eq!(
+            rebuilder.retained_eligible_chunks(&generation("generation.missing")),
+            Ok(None)
+        );
+        assert!(rebuilder.staged_rebuilds().is_empty());
+    }
+
+    #[test]
+    fn production_rebuilder_validates_the_exact_retained_source_and_result_digest() {
+        let source = generation("generation.retained");
+        let other_source = generation("generation.other");
+        let retained = CanonicalEligibleChunkSetV1::try_from_chunks(
+            source.clone(),
+            vec![chunk("chunk.retained", &source)],
+        )
+        .expect("canonical chunks");
+        let foreign = CanonicalEligibleChunkSetV1::try_from_chunks(
+            other_source.clone(),
+            vec![chunk("chunk.other", &other_source)],
+        )
+        .expect("foreign canonical chunks");
+        let callback_calls = std::cell::Cell::new(0_u8);
+        let mut rebuilder = ProductionLegacyVectorCanonicalRebuilderV1::try_new(
+            vec![retained.clone()],
+            |chunks: &CanonicalEligibleChunkSetV1| {
+                let call = callback_calls.get();
+                callback_calls.set(call + 1);
+                Ok(StagedCanonicalVectorRebuildV1 {
+                    source_generation: if call == 0 {
+                        other_source.clone()
+                    } else {
+                        chunks.source_generation().clone()
+                    },
+                    rebuilt_generation: vector(DIGEST_B),
+                    canonical_chunk_set_digest: if call == 0 {
+                        chunks.digest().clone()
+                    } else {
+                        manifest(DIGEST_C)
+                    },
+                })
+            },
+        )
+        .expect("production rebuilder");
+
+        assert_eq!(
+            rebuilder.rebuild_from_retained_eligible_code(&foreign),
+            Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch)
+        );
+        assert_eq!(callback_calls.get(), 0);
+        assert_eq!(
+            rebuilder.rebuild_from_retained_eligible_code(&retained),
+            Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch)
+        );
+        assert_eq!(callback_calls.get(), 1);
+        assert_eq!(
+            rebuilder.rebuild_from_retained_eligible_code(&retained),
+            Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch)
+        );
+        assert_eq!(callback_calls.get(), 2);
+        assert!(rebuilder.staged_rebuilds().is_empty());
+    }
+
+    #[test]
+    fn production_rebuilder_callback_failure_records_no_staged_result() {
+        let source = generation("generation.retained");
+        let retained = CanonicalEligibleChunkSetV1::try_from_chunks(
+            source.clone(),
+            vec![chunk("chunk.retained", &source)],
+        )
+        .expect("canonical chunks");
+        let mut rebuilder =
+            ProductionLegacyVectorCanonicalRebuilderV1::try_new(vec![retained.clone()], |_| {
+                Err(LegacyVectorMigrationErrorV1::CanonicalCode(
+                    "staging failed".to_owned(),
+                ))
+            })
+            .expect("production rebuilder");
+
+        assert_eq!(
+            rebuilder.rebuild_from_retained_eligible_code(&retained),
+            Err(LegacyVectorMigrationErrorV1::CanonicalCode(
+                "staging failed".to_owned()
+            ))
+        );
+        assert!(rebuilder.staged_rebuilds().is_empty());
+    }
+
+    #[test]
+    fn production_rebuilder_replays_one_staged_result_idempotently() {
+        let source = generation("generation.retained");
+        let retained = CanonicalEligibleChunkSetV1::try_from_chunks(
+            source.clone(),
+            vec![chunk("chunk.retained", &source)],
+        )
+        .expect("canonical chunks");
+        let calls = std::cell::Cell::new(0_u8);
+        let mut rebuilder =
+            ProductionLegacyVectorCanonicalRebuilderV1::try_new(vec![retained.clone()], |chunks| {
+                calls.set(calls.get().saturating_add(1));
+                Ok(StagedCanonicalVectorRebuildV1 {
+                    source_generation: chunks.source_generation().clone(),
+                    rebuilt_generation: vector(DIGEST_B),
+                    canonical_chunk_set_digest: chunks.digest().clone(),
+                })
+            })
+            .expect("production rebuilder");
+
+        let first = rebuilder
+            .rebuild_from_retained_eligible_code(&retained)
+            .expect("first staged rebuild");
+        let second = rebuilder
+            .rebuild_from_retained_eligible_code(&retained)
+            .expect("idempotent staged rebuild");
+
+        assert_eq!(first, second);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(rebuilder.staged_rebuilds(), &[first]);
     }
 
     #[test]
@@ -639,6 +1044,56 @@ mod tests {
     }
 
     #[test]
+    fn legacy_generations_with_one_retained_source_share_one_canonical_rebuild() {
+        let source = generation("generation.shared");
+        let legacy_a = vector(DIGEST_A);
+        let legacy_b = vector(DIGEST_B);
+        let rebuilt = vector(DIGEST_C);
+        let inventory = Inventory(LegacyVectorInventoryV1 {
+            expected_active_generation: Some(legacy_a.clone()),
+            entries: vec![
+                LegacyVectorInventoryEntryV1::Readable {
+                    legacy_generation: legacy_a,
+                    source_generation: source.clone(),
+                },
+                LegacyVectorInventoryEntryV1::Readable {
+                    legacy_generation: legacy_b,
+                    source_generation: source.clone(),
+                },
+            ],
+        });
+        let canonical = CanonicalEligibleChunkSetV1::try_from_chunks(
+            source.clone(),
+            vec![chunk("chunk.shared", &source)],
+        )
+        .expect("canonical chunks");
+        let mut rebuilder = Rebuilder {
+            chunks: BTreeMap::from([(source.clone(), Some(canonical))]),
+            rebuilt: BTreeMap::from([(source, rebuilt.clone())]),
+            observed_chunk_ids: vec![],
+        };
+
+        let transaction = prepare_legacy_vector_migration(
+            &inventory,
+            &mut rebuilder,
+            &NeverCancelLegacyVectorMigrationV1,
+        )
+        .expect("shared rebuild migration");
+
+        assert_eq!(transaction.next_active_generation, Some(rebuilt.clone()));
+        assert_eq!(
+            transaction
+                .receipt
+                .items
+                .iter()
+                .filter_map(|item| item.rebuilt_generation.as_ref())
+                .collect::<Vec<_>>(),
+            vec![&rebuilt, &rebuilt]
+        );
+        assert_eq!(rebuilder.observed_chunk_ids.len(), 1);
+    }
+
+    #[test]
     fn cancellation_returns_no_owner_transaction_or_pointer_swap() {
         let source_a = generation("generation.a");
         let source_b = generation("generation.b");
@@ -689,6 +1144,128 @@ mod tests {
         );
 
         assert_eq!(result, Err(LegacyVectorMigrationErrorV1::Cancelled));
+    }
+
+    #[test]
+    fn cancellation_after_the_final_rebuild_returns_no_owner_transaction() {
+        let source = generation("generation.cancel-after-rebuild");
+        let retained = CanonicalEligibleChunkSetV1::try_from_chunks(
+            source.clone(),
+            vec![chunk("chunk.cancel-after-rebuild", &source)],
+        )
+        .expect("canonical chunks");
+        let inventory = Inventory(LegacyVectorInventoryV1 {
+            expected_active_generation: Some(vector(DIGEST_A)),
+            entries: vec![LegacyVectorInventoryEntryV1::Readable {
+                legacy_generation: vector(DIGEST_A),
+                source_generation: source,
+            }],
+        });
+        let staged = std::cell::Cell::new(false);
+        let mut rebuilder =
+            ProductionLegacyVectorCanonicalRebuilderV1::try_new(vec![retained], |chunks| {
+                staged.set(true);
+                Ok(StagedCanonicalVectorRebuildV1 {
+                    source_generation: chunks.source_generation().clone(),
+                    rebuilt_generation: vector(DIGEST_B),
+                    canonical_chunk_set_digest: chunks.digest().clone(),
+                })
+            })
+            .expect("production rebuilder");
+
+        assert_eq!(
+            prepare_legacy_vector_migration(&inventory, &mut rebuilder, &CancelWhenStaged(&staged),),
+            Err(LegacyVectorMigrationErrorV1::Cancelled)
+        );
+        assert_eq!(rebuilder.staged_rebuilds().len(), 1);
+    }
+
+    #[test]
+    fn inventory_change_after_rebuild_rejects_the_owner_transaction() {
+        let legacy = vector(DIGEST_A);
+        let source = generation("generation.inventory-cas");
+        let first = LegacyVectorInventoryV1 {
+            expected_active_generation: Some(legacy.clone()),
+            entries: vec![LegacyVectorInventoryEntryV1::Readable {
+                legacy_generation: legacy.clone(),
+                source_generation: source.clone(),
+            }],
+        };
+        let second = LegacyVectorInventoryV1 {
+            expected_active_generation: None,
+            entries: vec![LegacyVectorInventoryEntryV1::Readable {
+                legacy_generation: legacy,
+                source_generation: source,
+            }],
+        };
+        let inventory = ChangingInventory {
+            reads: std::cell::Cell::new(0),
+            first,
+            second,
+        };
+        let mut rebuilder = Rebuilder {
+            chunks: BTreeMap::new(),
+            rebuilt: BTreeMap::new(),
+            observed_chunk_ids: vec![],
+        };
+
+        assert_eq!(
+            prepare_legacy_vector_migration(
+                &inventory,
+                &mut rebuilder,
+                &NeverCancelLegacyVectorMigrationV1,
+            ),
+            Err(LegacyVectorMigrationErrorV1::InventoryChanged)
+        );
+        assert_eq!(inventory.reads.get(), 2);
+    }
+
+    #[test]
+    fn durable_receipt_binds_inventory_and_pointer_replacement() {
+        let source = generation("generation.receipt");
+        let legacy = vector(DIGEST_A);
+        let rebuilt = vector(DIGEST_B);
+        let inventory = Inventory(LegacyVectorInventoryV1 {
+            expected_active_generation: Some(legacy.clone()),
+            entries: vec![LegacyVectorInventoryEntryV1::Readable {
+                legacy_generation: legacy.clone(),
+                source_generation: source.clone(),
+            }],
+        });
+        let retained = CanonicalEligibleChunkSetV1::try_from_chunks(
+            source.clone(),
+            vec![chunk("chunk.receipt", &source)],
+        )
+        .expect("canonical chunks");
+        let mut rebuilder = Rebuilder {
+            chunks: BTreeMap::from([(source.clone(), Some(retained))]),
+            rebuilt: BTreeMap::from([(source, rebuilt.clone())]),
+            observed_chunk_ids: vec![],
+        };
+        let transaction = prepare_legacy_vector_migration(
+            &inventory,
+            &mut rebuilder,
+            &NeverCancelLegacyVectorMigrationV1,
+        )
+        .expect("migration transaction");
+
+        assert_eq!(
+            transaction.receipt.inventory_digest,
+            inventory.0.canonical_digest().expect("inventory digest")
+        );
+        assert_eq!(
+            transaction.receipt.expected_prior_active_generation,
+            Some(legacy)
+        );
+        assert_eq!(transaction.receipt.next_active_generation, Some(rebuilt));
+        transaction.receipt.validate().expect("durable receipt");
+
+        let mut tampered = transaction.receipt;
+        tampered.next_active_generation = None;
+        assert_eq!(
+            tampered.validate(),
+            Err(LegacyVectorMigrationErrorV1::InvalidReceipt)
+        );
     }
 
     #[test]
