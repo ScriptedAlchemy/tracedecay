@@ -3,10 +3,14 @@ import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
+import type { LiveActivityPulse, SseConnectionState } from '../../data/sse/connect.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip';
+import { Meter, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
+import { summarizeActivity, formatEventAge } from './activitySummary.ts';
 import {
   ProjectsPayloadSchema,
   type ProjectRegistryEntry,
@@ -97,7 +101,7 @@ function SynapseMap({
   const selectProject = useScope((s) => s.selectProject);
   const scope = useScope((s) => s.scope);
   const activationRef = useRef(new ActivationField({ halfLifeMs: 4200 }));
-  const { state: sseState } = useEventStreamState();
+  const { state: sseState, lastEventAt } = useEventStreamState();
   const { pulses, revision } = useLiveActivity();
   // null until the first pass adopts the connection's current revision: the
   // pulses already in the ring at mount are history, not activity to replay.
@@ -160,20 +164,91 @@ function SynapseMap({
   }, [pulses, revision, sseState, activeProjectId, groups]);
 
   return (
-    <GraphCanvas
-      nodes={nodes}
-      edges={edges}
-      fill
-      activation={activationRef.current}
-      selectedId={scope.kind === 'project' ? scope.projectId : null}
-      onSelect={(id) => {
-        if (id == null || id.startsWith('repo:')) return;
-        const project = groups
-          .flatMap((group) => group.projects)
-          .find((candidate) => candidate.project_id === id);
-        if (project) selectProject(project.project_id, project.label);
-      }}
-    />
+    <>
+      <GraphCanvas
+        nodes={nodes}
+        edges={edges}
+        fill
+        activation={activationRef.current}
+        selectedId={scope.kind === 'project' ? scope.projectId : null}
+        onSelect={(id) => {
+          if (id == null || id.startsWith('repo:')) return;
+          const project = groups
+            .flatMap((group) => group.projects)
+            .find((candidate) => candidate.project_id === id);
+          if (project) selectProject(project.project_id, project.label);
+        }}
+      />
+      <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
+    </>
+  );
+}
+
+/** Live-signal HUD: connection honesty first, then a compact readout of what
+ * the pulse ring actually carries. Every figure here is read off the ring or
+ * the connection object at render time — never a timer of its own, so an
+ * idle system between real events shows the age of its last real event
+ * exactly as long as it stays true, and no longer.
+ *
+ * Connection state is intentionally NOT derived from activity: `offline` is
+ * a genuinely dead stream (the EventSource itself closed) and must never be
+ * inferred from "no pulses lately", which is just a quiet system. The
+ * daemon's own low-chroma `offline` token is deliberately neutral in this
+ * taxonomy — StateChip's icon-plus-label is what actually makes a dead link
+ * unmistakable, not a color. */
+function SignalPanel({
+  pulses,
+  sseState,
+  lastEventAt,
+}: {
+  pulses: readonly LiveActivityPulse[];
+  sseState: SseConnectionState;
+  lastEventAt: number | null;
+}) {
+  const summary = summarizeActivity(pulses);
+  const connectionKind: DomainStateKind =
+    sseState === 'live' ? 'ready' : sseState === 'connecting' ? 'loading' : 'offline';
+  const ageMs = lastEventAt == null ? null : Date.now() - lastEventAt;
+  const topFamily = summary.families[0];
+  return (
+    <div className="pointer-events-none absolute right-6 top-6 flex max-w-64 select-none items-stretch">
+      <span aria-hidden className="w-2 border-y border-l border-accent/40" />
+      <div className="flex min-w-0 flex-col gap-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
+        <div className="flex items-center gap-2">
+          <StateChip kind={connectionKind} />
+        </div>
+        <span className="td-legend">
+          {sseState === 'offline'
+            ? 'event stream unreachable — not idle, disconnected'
+            : ageMs == null
+              ? 'no events observed yet'
+              : `last event ${formatEventAge(ageMs)}`}
+        </span>
+        {summary.families.length > 0 ? (
+          <dl className="flex flex-col gap-1">
+            {summary.families.slice(0, 4).map((entry) => (
+              <div key={entry.family} className="flex items-center gap-2">
+                <dt className="td-legend w-24 shrink-0 truncate">{entry.label}</dt>
+                <Meter
+                  fraction={topFamily ? entry.count / topFamily.count : null}
+                  className="min-w-8 flex-1"
+                />
+                <dd
+                  className="td-value w-5 shrink-0 text-right text-2xs"
+                  data-cell="numeric"
+                >
+                  {entry.count}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        {summary.ratePerMinute != null ? (
+          <Readout label="rate" size="sm" value={summary.ratePerMinute.toFixed(1)} unit="/min" />
+        ) : null}
+      </div>
+      <span aria-hidden className="w-2 border-y border-r border-accent/40" />
+    </div>
   );
 }
 

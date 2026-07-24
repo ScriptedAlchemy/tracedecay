@@ -14,17 +14,38 @@ export class ActivationField {
   private lastTick = 0;
   private readonly halfLifeMs: number;
   private readonly floor: number;
+  private listeners = new Set<() => void>();
 
   constructor(options: ActivationOptions = {}) {
     this.halfLifeMs = options.halfLifeMs ?? 2600;
     this.floor = options.floor ?? 0.02;
   }
 
-  /** Strike nodes with energy (clamped to 1). Cumulative with existing heat. */
+  /** Strike nodes with energy (clamped to 1). Cumulative with existing heat.
+   * Notifies subscribers so an owner outside the renderer that struck the
+   * field (a React effect responding to a live event, say) can wake a
+   * sleeping render loop rather than leaving heat on the field that nothing
+   * ever draws. */
   strike(ids: Iterable<string>, energy = 1): void {
+    let struck = false;
     for (const id of ids) {
       this.heat.set(id, Math.min(1, (this.heat.get(id) ?? 0) + energy));
+      struck = true;
     }
+    if (struck) this.notify();
+  }
+
+  /** Subscribe to be notified whenever a strike lands on this field. Returns
+   * an unsubscribe function. The field has no render loop of its own — this
+   * is the seam a renderer uses to hear about strikes it did not itself
+   * cause. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) listener();
   }
 
   /** Advance decay to `now` (ms clock). Returns true while anything is warm. */
