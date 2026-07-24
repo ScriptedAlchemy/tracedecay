@@ -1,5 +1,6 @@
 //! One bounded, persistent SQLite writer for one authorized shard.
 
+mod backup;
 mod request;
 mod settlement;
 #[cfg(test)]
@@ -29,6 +30,7 @@ use tracedecay_store::{
 };
 
 use crate::{
+    RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
     StorageOperationExecutor,
     admission::{
         Admission, Capacity, DEFAULT_RESERVED_HEALTH_BYTES, DEFAULT_RESERVED_HEALTH_OPERATIONS,
@@ -39,12 +41,23 @@ use crate::{
         CheckpointResult, CheckpointStatus, MaintenanceCheckpointMode, RusqliteCheckpointError,
     },
     maintenance::ExclusiveMaintenancePermit,
+    migration_sql::WriterCommand as MigrationSqlWriterCommand,
     persistence::RuntimeWriterPersistence,
     telemetry::{WriterTelemetry, WriterTelemetrySnapshot},
     watermark::{CommitWatermarkSubscription, CommittedWatermarkPublisher},
 };
 
-use request::{AcceptedRequest, CheckpointCommand};
+struct UnrestrictedRuntimeWriteAuthority;
+
+impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
+    fn verify(&self, _stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
+        Ok(())
+    }
+}
+
+use backup::{OnlineBackupCommand, validate_destination};
+pub use backup::{OnlineBackupReceipt, WriterOnlineBackupError};
+use request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand};
 use worker::Worker;
 
 #[derive(Clone)]
@@ -82,14 +95,30 @@ impl CheckpointHandle {
         &self,
         request: CheckpointRequest,
     ) -> Result<CheckpointTicket, CheckpointControlError> {
+        self.trigger_authorized(request, Arc::new(UnrestrictedRuntimeWriteAuthority))
+    }
+
+    pub fn trigger_authorized(
+        &self,
+        request: CheckpointRequest,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<CheckpointTicket, CheckpointControlError> {
         let (reply, response) = oneshot::channel();
-        let command = CheckpointCommand::new(request.blockers, request.probe, reply);
+        let command = CheckpointCommand::new(request.blockers, request.probe, authority, reply);
         self.enqueue(command, response, WriterState::Ready)
     }
 
     pub fn trigger_maintenance(
         &self,
         request: MaintenanceCheckpointRequest,
+    ) -> Result<CheckpointTicket, CheckpointControlError> {
+        self.trigger_maintenance_authorized(request, Arc::new(UnrestrictedRuntimeWriteAuthority))
+    }
+
+    pub fn trigger_maintenance_authorized(
+        &self,
+        request: MaintenanceCheckpointRequest,
+        authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointTicket, CheckpointControlError> {
         if request.permit.binding() != &self.binding {
             return Err(CheckpointControlError::BindingMismatch);
@@ -99,6 +128,7 @@ impl CheckpointHandle {
             request.blockers,
             request.mode,
             request.permit,
+            authority,
             reply,
         );
         self.enqueue(command, response, WriterState::Draining)
@@ -112,6 +142,9 @@ impl CheckpointHandle {
         >,
         required_state: WriterState,
     ) -> Result<CheckpointTicket, CheckpointControlError> {
+        command
+            .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
+            .map_err(checkpoint_control_error)?;
         if self.shutdown_requested.load(Ordering::Acquire)
             || WriterState::load(&self.state) != required_state
         {
@@ -196,6 +229,7 @@ pub enum CheckpointControlError {
     Busy,
     Unavailable,
     BindingMismatch,
+    AuthorityDenied { stage: RuntimeWriteAuthorityStage },
     Blocked(CheckpointBlockers),
     Driver(String),
 }
@@ -207,6 +241,9 @@ impl fmt::Display for CheckpointControlError {
             Self::Unavailable => formatter.write_str("checkpoint control is unavailable"),
             Self::BindingMismatch => {
                 formatter.write_str("maintenance permit belongs to another shard")
+            }
+            Self::AuthorityDenied { stage } => {
+                write!(formatter, "runtime write authority denied at {stage:?}")
             }
             Self::Blocked(blockers) => {
                 write!(
@@ -229,6 +266,9 @@ fn checkpoint_control_error(
         CheckpointError::Driver(error) => CheckpointControlError::Driver(error.to_string()),
         CheckpointError::MaintenanceStillDraining(blockers) => {
             CheckpointControlError::Blocked(blockers)
+        }
+        CheckpointError::AuthorityDenied(stage) => {
+            CheckpointControlError::AuthorityDenied { stage }
         }
         CheckpointError::InvalidConfig(_) => CheckpointControlError::Unavailable,
     }
@@ -336,8 +376,11 @@ impl Error for WriterStartError {
 pub enum WriterActorError {
     InvalidRequest(StorageRuntimeContractErrorV1),
     ProbeBindingMismatch { field: &'static str },
+    AuthorityDenied { stage: RuntimeWriteAuthorityStage },
     ReplyDropped,
     StorageFailure(StorageRuntimeErrorV1),
+    IncrementalVacuumFailed(String),
+    OnlineBackupFailed(WriterOnlineBackupError),
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
     ThreadPanicked,
 }
@@ -349,8 +392,15 @@ impl fmt::Display for WriterActorError {
             Self::ProbeBindingMismatch { field } => {
                 write!(f, "writer request probe does not match {field}")
             }
+            Self::AuthorityDenied { stage } => {
+                write!(f, "runtime write authority denied at {stage:?}")
+            }
             Self::ReplyDropped => f.write_str("SQLite writer stopped before replying"),
             Self::StorageFailure(error) => write!(f, "SQLite writer failed: {error}"),
+            Self::IncrementalVacuumFailed(message) => {
+                write!(f, "SQLite incremental vacuum failed: {message}")
+            }
+            Self::OnlineBackupFailed(error) => write!(f, "{error}"),
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")
             }
@@ -364,6 +414,7 @@ impl Error for WriterActorError {
         match self {
             Self::InvalidRequest(error) | Self::InvalidWorkerOutcome(error) => Some(error),
             Self::StorageFailure(error) => Some(error),
+            Self::OnlineBackupFailed(error) => Some(error),
             _ => None,
         }
     }
@@ -416,10 +467,14 @@ impl WriterState {
 
 pub struct PersistentWriter {
     binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
     path: PathBuf,
     state: Arc<AtomicU8>,
     shutdown_requested: Arc<AtomicBool>,
     sender: Mutex<Option<mpsc::Sender<AcceptedRequest>>>,
+    migration_sql_sender: Mutex<Option<mpsc::Sender<MigrationSqlWriterCommand>>>,
+    incremental_vacuum_sender: Mutex<Option<mpsc::Sender<IncrementalVacuumCommand>>>,
+    online_backup_sender: Mutex<Option<mpsc::Sender<OnlineBackupCommand>>>,
     checkpoint_sender: Mutex<Option<mpsc::Sender<CheckpointCommand>>>,
     shutdown_sender: Option<mpsc::UnboundedSender<()>>,
     join: Option<JoinHandle<()>>,
@@ -464,10 +519,14 @@ impl PersistentWriter {
         let state = Arc::new(AtomicU8::new(WriterState::Closed as u8));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let binding = locator.binding().clone();
+        let verified_locator = locator.verified_locator().clone();
         let path = locator.path().to_owned();
         let watermark_publisher = CommittedWatermarkPublisher::new(binding.clone());
         let watermark_source = watermark_publisher.subscribe();
         let (sender, receiver) = mpsc::channel(capacity);
+        let (migration_sql_sender, migration_sql_receiver) = mpsc::channel(1);
+        let (incremental_vacuum_sender, incremental_vacuum_receiver) = mpsc::channel(1);
+        let (online_backup_sender, online_backup_receiver) = mpsc::channel(1);
         let (checkpoint_sender, checkpoint_receiver) = mpsc::channel(1);
         let (shutdown_sender, shutdown_receiver) = mpsc::unbounded_channel();
         let (checkpoint_status_tx, checkpoint_status) = watch::channel(CheckpointStatus::default());
@@ -479,6 +538,9 @@ impl PersistentWriter {
             binding: binding.clone(),
             config,
             receiver,
+            migration_sql_receiver,
+            incremental_vacuum_receiver,
+            online_backup_receiver,
             checkpoint_receiver,
             shutdown_receiver,
             persistence,
@@ -497,10 +559,14 @@ impl PersistentWriter {
         match started_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 binding,
+                verified_locator,
                 path,
                 state,
                 shutdown_requested,
                 sender: Mutex::new(Some(sender)),
+                migration_sql_sender: Mutex::new(Some(migration_sql_sender)),
+                incremental_vacuum_sender: Mutex::new(Some(incremental_vacuum_sender)),
+                online_backup_sender: Mutex::new(Some(online_backup_sender)),
                 checkpoint_sender: Mutex::new(Some(checkpoint_sender)),
                 shutdown_sender: Some(shutdown_sender),
                 join: Some(join),
@@ -523,6 +589,18 @@ impl PersistentWriter {
 
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
+    }
+    pub(crate) fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+    pub(crate) fn migration_sql_sender(&self) -> Option<mpsc::Sender<MigrationSqlWriterCommand>> {
+        if self.state() != WriterState::Ready {
+            return None;
+        }
+        self.migration_sql_sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -559,6 +637,16 @@ impl PersistentWriter {
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
     ) -> Result<RuntimeSubmitOutcomeV1, WriterActorError> {
+        self.submit_authorized(request, probe, Arc::new(UnrestrictedRuntimeWriteAuthority))
+            .await
+    }
+
+    pub async fn submit_authorized(
+        &self,
+        request: RuntimeSubmitRequestV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<RuntimeSubmitOutcomeV1, WriterActorError> {
         let request = Arc::new(request);
         request
             .validate()
@@ -573,6 +661,12 @@ impl PersistentWriter {
         }
         if let Some(outcome) = settlement::binding_outcome(&self.binding, &request) {
             return Ok(outcome);
+        }
+        if authority
+            .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
+            .is_err()
+        {
+            return Ok(settlement::missing_authority());
         }
         if self.state() != WriterState::Ready {
             return Ok(self.unavailable());
@@ -589,7 +683,7 @@ impl PersistentWriter {
         let bytes = request.envelope().metadata.admission_bytes;
         self.telemetry.admitted(bytes);
         let (reply, response) = oneshot::channel();
-        let accepted = AcceptedRequest::new(request.clone(), probe, reply, permit);
+        let accepted = AcceptedRequest::new(request.clone(), probe, authority, reply, permit);
         let send_result = {
             let sender = self
                 .sender
@@ -630,6 +724,120 @@ impl PersistentWriter {
         Ok(outcome)
     }
 
+    pub async fn bounded_incremental_vacuum(
+        &self,
+        max_pages: u32,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<(), WriterActorError> {
+        authority
+            .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
+            .map_err(|_| WriterActorError::AuthorityDenied {
+                stage: RuntimeWriteAuthorityStage::BeforeAdmission,
+            })?;
+        if self.state() != WriterState::Ready {
+            return Err(WriterActorError::IncrementalVacuumFailed(
+                "writer is unavailable".to_owned(),
+            ));
+        }
+        let (reply, response) = oneshot::channel();
+        let command = IncrementalVacuumCommand::new(max_pages, authority, reply);
+        let send_result = {
+            let sender = self
+                .incremental_vacuum_sender
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.state() != WriterState::Ready {
+                Err(mpsc::error::TrySendError::Closed(command))
+            } else if let Some(sender) = sender.as_ref() {
+                sender.try_send(command)
+            } else {
+                Err(mpsc::error::TrySendError::Closed(command))
+            }
+        };
+        send_result.map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                WriterActorError::IncrementalVacuumFailed("command channel is busy".to_owned())
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                WriterActorError::IncrementalVacuumFailed("writer is unavailable".to_owned())
+            }
+        })?;
+        response.await.map_err(|_| WriterActorError::ReplyDropped)?
+    }
+
+    pub async fn snapshot_to(
+        &self,
+        destination: PathBuf,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<OnlineBackupReceipt, WriterActorError> {
+        self.enqueue_online_backup(destination, None, authority)
+            .await
+    }
+
+    pub async fn snapshot_to_interruptible(
+        &self,
+        destination: PathBuf,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<OnlineBackupReceipt, WriterActorError> {
+        self.enqueue_online_backup(destination, Some(probe), authority)
+            .await
+    }
+
+    async fn enqueue_online_backup(
+        &self,
+        destination: PathBuf,
+        probe: Option<Arc<dyn RuntimeRequestProbeV1>>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<OnlineBackupReceipt, WriterActorError> {
+        authority
+            .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
+            .map_err(|_| WriterActorError::AuthorityDenied {
+                stage: RuntimeWriteAuthorityStage::BeforeAdmission,
+            })?;
+        if let Some(interruption) = probe.as_ref().and_then(|probe| probe.interruption()) {
+            return Err(WriterActorError::OnlineBackupFailed(match interruption {
+                tracedecay_store::RuntimeInterruptionV1::Cancelled => {
+                    WriterOnlineBackupError::Cancelled
+                }
+                tracedecay_store::RuntimeInterruptionV1::DeadlineExceeded => {
+                    WriterOnlineBackupError::DeadlineExceeded
+                }
+            }));
+        }
+        let destination = validate_destination(&self.path, &destination)
+            .map_err(WriterActorError::OnlineBackupFailed)?;
+        if self.state() != WriterState::Ready {
+            return Err(WriterActorError::OnlineBackupFailed(
+                WriterOnlineBackupError::WriterShuttingDown,
+            ));
+        }
+        let (reply, response) = oneshot::channel();
+        let command = OnlineBackupCommand::new(destination, probe, authority, reply);
+        let send_result = {
+            let sender = self
+                .online_backup_sender
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.state() != WriterState::Ready {
+                Err(mpsc::error::TrySendError::Closed(command))
+            } else if let Some(sender) = sender.as_ref() {
+                sender.try_send(command)
+            } else {
+                Err(mpsc::error::TrySendError::Closed(command))
+            }
+        };
+        send_result.map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::Busy)
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::WriterShuttingDown)
+            }
+        })?;
+        response.await.map_err(|_| WriterActorError::ReplyDropped)?
+    }
+
     fn unavailable(&self) -> RuntimeSubmitOutcomeV1 {
         RuntimeSubmitOutcomeV1::Unavailable {
             reason: self.state().unavailable_reason(),
@@ -644,6 +852,18 @@ impl PersistentWriter {
             Ordering::Acquire,
         );
         self.sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        self.migration_sql_sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        self.incremental_vacuum_sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        self.online_backup_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();

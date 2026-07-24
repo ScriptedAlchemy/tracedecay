@@ -15,7 +15,10 @@ use tracedecay_store::{
 };
 
 use crate::{
-    ExistingWriterLocator, PersistentWriter, WriterStartError, WriterState,
+    CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
+    PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
+    connection::OpenedDatabaseFile,
+    migration_sql::{MigrationSqlError, MigrationSqlHandle},
     reader::{
         ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderQueryExecutor,
         ReaderStartError,
@@ -38,17 +41,74 @@ impl RepositoryPhysicalAttachmentFactory {
         if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
             return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
         }
+        let opened_database =
+            OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+        self.attach_opened(binding, locator, path, admission, opened_database, false)
+    }
+
+    pub fn initialize(
+        &self,
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+        path: PathBuf,
+        admission: AdmissionConfigV1,
+    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
+        if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
+            return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
+        }
+        let opened_database = OpenedDatabaseFile::create_new(&path)
+            .map_err(RepositoryAttachmentStartError::Identity)?;
+        self.attach_opened(binding, locator, path, admission, opened_database, true)
+    }
+
+    fn attach_opened(
+        &self,
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+        path: PathBuf,
+        admission: AdmissionConfigV1,
+        opened_database: OpenedDatabaseFile,
+        created: bool,
+    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
         let writer_locator =
-            ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone())
-                .map_err(RepositoryAttachmentStartError::Writer)?;
-        let reader_locator = ExistingReaderLocator::new(binding.clone(), locator, path.clone())
-            .map_err(RepositoryAttachmentStartError::Reader)?;
-        let writer = PersistentWriter::start(
+            match ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()) {
+                Ok(locator) => locator,
+                Err(error) => {
+                    return Err(repository_start_failure(
+                        opened_database,
+                        &path,
+                        created,
+                        RepositoryAttachmentStartError::Writer(error),
+                    ));
+                }
+            };
+        let reader_locator =
+            match ExistingReaderLocator::new(binding.clone(), locator, path.clone()) {
+                Ok(locator) => locator,
+                Err(error) => {
+                    return Err(repository_start_failure(
+                        opened_database,
+                        &path,
+                        created,
+                        RepositoryAttachmentStartError::Reader(error),
+                    ));
+                }
+            };
+        let writer = match PersistentWriter::start(
             writer_locator,
             admission.clone(),
             ConcreteRepositoryWriteExecutor::default(),
-        )
-        .map_err(RepositoryAttachmentStartError::Writer)?;
+        ) {
+            Ok(writer) => writer,
+            Err(error) => {
+                return Err(repository_start_failure(
+                    opened_database,
+                    &path,
+                    created,
+                    RepositoryAttachmentStartError::Writer(error),
+                ));
+            }
+        };
         let readers = match ReaderPool::start(
             reader_locator,
             admission.readers,
@@ -57,25 +117,58 @@ impl RepositoryPhysicalAttachmentFactory {
             Ok(readers) => readers,
             Err(error) => {
                 let _ = writer.shutdown_and_join();
-                return Err(RepositoryAttachmentStartError::Reader(error));
+                return Err(repository_start_failure(
+                    opened_database,
+                    &path,
+                    created,
+                    RepositoryAttachmentStartError::Reader(error),
+                ));
             }
         };
+        if let Err(error) = opened_database.verify_current_path(&path) {
+            drop(readers);
+            let _ = writer.shutdown_and_join();
+            return Err(repository_start_failure(
+                opened_database,
+                &path,
+                created,
+                RepositoryAttachmentStartError::Identity(error),
+            ));
+        }
+        let opened_file_identity = opened_database.identity();
+        let initialization_file = created.then_some(opened_database);
         Ok(RepositoryRuntimePhysicalAttachment {
             state: Mutex::new(RepositoryRuntimePhysicalState {
                 binding,
                 database_path: path,
+                opened_file_identity,
+                initialization_file,
                 writer: Some(Arc::new(writer)),
                 readers: Some(readers),
                 admission_open: true,
                 closed: false,
+                close_failure: None,
             }),
         })
     }
 }
 
+fn repository_start_failure(
+    opened_database: OpenedDatabaseFile,
+    database_path: &std::path::Path,
+    created: bool,
+    failure: RepositoryAttachmentStartError,
+) -> RepositoryAttachmentStartError {
+    if created && let Err(error) = opened_database.discard_created(database_path) {
+        return RepositoryAttachmentStartError::Identity(error);
+    }
+    failure
+}
+
 #[derive(Debug)]
 pub enum RepositoryAttachmentStartError {
     UnsupportedShardScope,
+    Identity(crate::connection::OpenedDatabaseFileError),
     Reader(ReaderStartError),
     Writer(WriterStartError),
 }
@@ -86,6 +179,7 @@ impl fmt::Display for RepositoryAttachmentStartError {
             Self::UnsupportedShardScope => {
                 formatter.write_str("repository attachment does not own code shards")
             }
+            Self::Identity(error) => write!(formatter, "identify repository attachment: {error}"),
             Self::Reader(error) => write!(formatter, "start repository readers: {error}"),
             Self::Writer(error) => write!(formatter, "start repository writer: {error}"),
         }
@@ -95,6 +189,7 @@ impl fmt::Display for RepositoryAttachmentStartError {
 impl Error for RepositoryAttachmentStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Identity(error) => Some(error),
             Self::Reader(error) => Some(error),
             Self::Writer(error) => Some(error),
             Self::UnsupportedShardScope => None,
@@ -128,15 +223,62 @@ pub struct RepositoryRuntimePhysicalAttachment {
 struct RepositoryRuntimePhysicalState {
     binding: StoreRuntimeBindingV1,
     database_path: PathBuf,
+    opened_file_identity: u64,
+    initialization_file: Option<OpenedDatabaseFile>,
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
     admission_open: bool,
     closed: bool,
+    close_failure: Option<String>,
 }
 
 impl RepositoryRuntimePhysicalAttachment {
     pub fn binding(&self) -> StoreRuntimeBindingV1 {
         self.lock_state().binding.clone()
+    }
+
+    pub fn opened_file_identity(&self) -> u64 {
+        self.lock_state().opened_file_identity
+    }
+
+    pub fn commit_initialization(&self) -> Result<(), String> {
+        let mut state = self.lock_state();
+        let opened = state
+            .initialization_file
+            .as_ref()
+            .ok_or_else(|| "repository attachment has no pending initialization".to_owned())?;
+        opened
+            .verify_current_path(&state.database_path)
+            .map_err(|error| error.to_string())?;
+        state.initialization_file.take();
+        Ok(())
+    }
+
+    pub fn abort_initialization(&self) -> Result<(), String> {
+        self.drain()?;
+        self.close_and_join()?;
+        let mut state = self.lock_state();
+        let Some(opened) = state.initialization_file.take() else {
+            return Ok(());
+        };
+        opened
+            .discard_created(&state.database_path)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn migration_sql_handle(&self) -> Result<MigrationSqlHandle, MigrationSqlError> {
+        let state = self.lock_state();
+        if !state.admission_open || state.closed {
+            return Err(MigrationSqlError::WriterUnavailable);
+        }
+        let writer = state
+            .writer
+            .as_deref()
+            .ok_or(MigrationSqlError::WriterUnavailable)?;
+        let readers = state.readers.as_ref().ok_or_else(|| {
+            MigrationSqlError::ReaderUnavailable("repository readers are unavailable".to_owned())
+        })?;
+        MigrationSqlHandle::attach(writer, readers)
     }
 
     pub fn snapshot(&self) -> RepositoryRuntimePhysicalSnapshot {
@@ -169,6 +311,7 @@ impl RepositoryRuntimePhysicalAttachment {
         &self,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<RuntimeSubmitOutcomeV1, RepositoryDispatchError> {
         let writer = self
             .lock_state()
@@ -176,7 +319,59 @@ impl RepositoryRuntimePhysicalAttachment {
             .clone()
             .ok_or(RepositoryDispatchError::Closed)?;
         writer
-            .submit(request, probe)
+            .submit_authorized(request, probe, authority)
+            .await
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+    }
+
+    pub async fn run_bounded_incremental_compaction(
+        &self,
+        max_pages: u32,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<(), RepositoryDispatchError> {
+        let writer = self
+            .lock_state()
+            .writer
+            .clone()
+            .ok_or(RepositoryDispatchError::Closed)?;
+        writer
+            .bounded_incremental_vacuum(max_pages, authority)
+            .await
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+    }
+
+    pub async fn run_checkpoint(
+        &self,
+        request: CheckpointRequest,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
+        let checkpoint = self
+            .lock_state()
+            .writer
+            .as_ref()
+            .ok_or(RepositoryDispatchError::Closed)?
+            .checkpoint_handle();
+        let ticket = checkpoint
+            .trigger_authorized(request, authority)
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
+        ticket
+            .wait()
+            .await
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+    }
+
+    pub async fn snapshot_to(
+        &self,
+        destination: PathBuf,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<OnlineBackupReceipt, RepositoryDispatchError> {
+        let writer = self
+            .lock_state()
+            .writer
+            .clone()
+            .ok_or(RepositoryDispatchError::Closed)?;
+        writer
+            .snapshot_to(destination, authority)
             .await
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
@@ -218,39 +413,48 @@ impl RepositoryRuntimePhysicalAttachment {
     }
 
     pub fn close_and_join(&self) -> Result<(), String> {
-        let (writer, readers) = {
-            let mut state = self.lock_state();
-            if state.closed {
-                return Ok(());
+        let mut state = self.lock_state();
+        if state.closed {
+            return match &state.close_failure {
+                Some(message) => Err(message.clone()),
+                None => Ok(()),
+            };
+        }
+        if state.admission_open {
+            return Err("repository physical attachment must drain before close".to_owned());
+        }
+        let leased_readers = state.readers.as_ref().map_or(0, |readers| {
+            let snapshot = readers.snapshot();
+            u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
+        });
+        let queued = state
+            .writer
+            .as_ref()
+            .map(|writer| writer.telemetry_snapshot())
+            .map_or(0, |snapshot| snapshot.queue.queued_operations);
+        if leased_readers != 0 || queued != 0 {
+            return Err(format!(
+                "repository physical attachment still has {leased_readers} readers and {queued} queued writes"
+            ));
+        }
+        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
+            Ok(writer) => writer,
+            Err(writer) => {
+                state.writer = Some(writer);
+                return Err("repository writer is still serving a request".to_owned());
             }
-            if state.admission_open {
-                return Err("repository physical attachment must drain before close".to_owned());
-            }
-            let leased_readers = state.readers.as_ref().map_or(0, |readers| {
-                let snapshot = readers.snapshot();
-                u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
-            });
-            let queued = state
-                .writer
-                .as_ref()
-                .map(|writer| writer.telemetry_snapshot())
-                .map_or(0, |snapshot| snapshot.queue.queued_operations);
-            if leased_readers != 0 || queued != 0 {
-                return Err(format!(
-                    "repository physical attachment still has {leased_readers} readers and {queued} queued writes"
-                ));
-            }
-            state.closed = true;
-            (state.writer.take(), state.readers.take())
         };
+        let readers = state.readers.take();
         drop(readers);
         if let Some(writer) = writer {
-            let writer = Arc::try_unwrap(writer)
-                .map_err(|_| "repository writer is still serving a request".to_owned())?;
-            writer
-                .shutdown_and_join()
-                .map_err(|error| format!("join repository writer: {error}"))?;
+            if let Err(error) = writer.shutdown_and_join() {
+                let message = format!("join repository writer: {error}");
+                state.closed = true;
+                state.close_failure = Some(message.clone());
+                return Err(message);
+            }
         }
+        state.closed = true;
         Ok(())
     }
 
@@ -258,6 +462,20 @@ impl RepositoryRuntimePhysicalAttachment {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Drop for RepositoryRuntimePhysicalAttachment {
+    fn drop(&mut self) {
+        let pending = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .initialization_file
+            .is_some();
+        if pending {
+            let _ = self.abort_initialization();
+        }
     }
 }
 
@@ -339,4 +557,121 @@ fn wal_bytes(database_path: &std::path::Path) -> u64 {
     let mut name = database_path.as_os_str().to_os_string();
     name.push("-wal");
     std::fs::metadata(PathBuf::from(name)).map_or(0, |metadata| metadata.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use tracedecay_domain::LocatorDigest;
+    use tracedecay_store::{AdmissionConfigV1, StoreIncarnationV1};
+
+    use crate::migration_sql::{MigrationSqlError, MigrationSqlStatement, MigrationSqlValue};
+
+    use super::*;
+
+    fn binding() -> StoreRuntimeBindingV1 {
+        serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.repository-lifecycle",
+                "profile_id": "profile.repository-lifecycle",
+                "scope": {
+                    "kind": "project",
+                    "project_id": "project.repository-lifecycle"
+                }
+            },
+            "incarnation": 4,
+            "authority_epoch": 12
+        }))
+        .unwrap()
+    }
+
+    fn locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1 {
+        VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            StoreIncarnationV1::new(4).unwrap(),
+            LocatorDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+        )
+    }
+
+    fn statement(sql: &str, params: Vec<MigrationSqlValue>) -> MigrationSqlStatement {
+        MigrationSqlStatement::new(sql.to_owned(), params).unwrap()
+    }
+
+    #[test]
+    fn real_sqlite_attachment_reopens_and_rejects_stale_handles_after_exact_once_close() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("repository.sqlite3");
+        rusqlite::Connection::open(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let locator = locator(&binding);
+        let factory = RepositoryPhysicalAttachmentFactory;
+
+        for cycle in 0_i64..3 {
+            let attachment = factory
+                .attach(
+                    binding.clone(),
+                    locator.clone(),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                )
+                .unwrap();
+            let handle = attachment.migration_sql_handle().unwrap();
+            handle
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS runtime_lifecycle (
+                        cycle INTEGER PRIMARY KEY
+                    )"
+                    .to_owned(),
+                )
+                .unwrap();
+            handle
+                .execute(statement(
+                    "INSERT INTO runtime_lifecycle (cycle) VALUES (?)",
+                    vec![MigrationSqlValue::Integer(cycle)],
+                ))
+                .unwrap();
+            let rows = handle
+                .query(
+                    statement("SELECT cycle FROM runtime_lifecycle ORDER BY cycle", vec![]),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+            assert_eq!(rows.rows.len(), usize::try_from(cycle + 1).unwrap());
+            assert_eq!(
+                rows.rows.last().unwrap().values,
+                vec![MigrationSqlValue::Integer(cycle)]
+            );
+
+            attachment.drain().unwrap();
+            attachment.close_and_join().unwrap();
+            {
+                let state = attachment.lock_state();
+                assert!(state.closed);
+                assert!(state.writer.is_none());
+                assert!(state.readers.is_none());
+            }
+            attachment.close_and_join().unwrap();
+
+            let write_error = handle
+                .execute(statement(
+                    "INSERT INTO runtime_lifecycle (cycle) VALUES (?)",
+                    vec![MigrationSqlValue::Integer(cycle + 10)],
+                ))
+                .unwrap_err();
+            assert_eq!(write_error, MigrationSqlError::WriterUnavailable);
+            let read_error = handle
+                .query(
+                    statement("SELECT cycle FROM runtime_lifecycle", vec![]),
+                    Duration::ZERO,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                read_error,
+                MigrationSqlError::ReaderUnavailable(_)
+            ));
+        }
+    }
 }

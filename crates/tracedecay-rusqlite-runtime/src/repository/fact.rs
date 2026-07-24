@@ -2,8 +2,8 @@ use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use serde::Serialize;
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
-    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
-    RetrievalAnchorRecordV2, UtcMicros,
+    FactIdentityMaterialV1, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
+    PayloadAccessState, RetrievalAnchorRecordV2, UtcMicros,
 };
 use tracedecay_store::{
     FactCurrentQuery, FactLineageQuery, FactReadOperationV1, FactReadResultV1, FactWriteBatch,
@@ -23,14 +23,6 @@ impl FactExecutor {
     ) -> rusqlite::Result<()> {
         let owner = OwnerColumns::new(batch.owner())?;
         let actual_last = current_last_event(savepoint, &owner, batch.fact_id())?;
-        if actual_last.as_ref() == batch.events().last().map(FactLineageEventV1::event_id)
-            && batch
-                .events()
-                .iter()
-                .all(|event| event_matches(savepoint, &owner, event).unwrap_or(false))
-        {
-            return Ok(());
-        }
         if actual_last.as_ref() != batch.expected_last_event_id() {
             return Err(invalid("fact lineage last-event conflict"));
         }
@@ -163,12 +155,27 @@ fn ensure_fact(
     owner: &OwnerColumns,
     batch: &FactWriteBatch,
 ) -> rusqlite::Result<()> {
-    let exists = savepoint.query_row(
-        "SELECT EXISTS(SELECT 1 FROM memory_v2_facts WHERE fact_id = ?1)",
-        [batch.fact_id().as_str()],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if exists {
+    let stored = savepoint
+        .query_row(
+            "SELECT owner_json, identity_json
+             FROM memory_v2_facts WHERE fact_id = ?1",
+            [batch.fact_id().as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((stored_owner, stored_identity)) = stored {
+        let stored_owner = decode::<FactOwnerV1>(stored_owner)?;
+        let stored_identity = decode::<FactIdentityMaterialV1>(stored_identity)?;
+        let derived = FactId::derive(&stored_identity).map_err(invalid)?;
+        if &stored_owner != batch.owner()
+            || stored_identity.owner() != batch.owner()
+            || &derived != batch.fact_id()
+            || batch
+                .identity_material()
+                .is_some_and(|candidate| candidate != &stored_identity)
+        {
+            return Err(invalid("fact identity collision"));
+        }
         return Ok(());
     }
     let identity = batch
@@ -414,36 +421,6 @@ fn publish_projection(
     Ok(())
 }
 
-fn event_matches(
-    connection: &rusqlite::Connection,
-    owner: &OwnerColumns,
-    event: &FactLineageEventV1,
-) -> rusqlite::Result<bool> {
-    let stored = connection
-        .query_row(
-            "SELECT fact_id, owner_kind, project_id, event_json, occurred_at
-             FROM memory_v2_lineage_events WHERE event_id = ?1",
-            [event.event_id().as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    Ok(stored.is_some_and(|stored| {
-        stored.0 == event.fact_id().as_str()
-            && stored.1 == owner.kind
-            && stored.2 == owner.project_id
-            && stored.3 == encode(event).unwrap_or_default()
-            && stored.4 == event.occurred_at().0
-    }))
-}
-
 fn read_current(
     connection: &rusqlite::Connection,
     query: &FactCurrentQuery,
@@ -530,7 +507,7 @@ fn read_lineage(
 ) -> rusqlite::Result<Vec<FactLineageEventV1>> {
     let owner = OwnerColumns::new(query.owner())?;
     let limit = usize_to_i64(query.limit(), "fact lineage limit")?;
-    let mut events = Vec::new();
+    let mut events: Vec<FactLineageEventV1> = Vec::new();
     if let Some(after) = query.after() {
         let mut statement = connection.prepare(
             "SELECT event_json FROM memory_v2_lineage_events
@@ -571,5 +548,229 @@ fn read_lineage(
             events.push(decode(row?)?);
         }
     }
+    if events
+        .iter()
+        .any(|event| event.fact_id() != query.fact_id() || event.owner() != query.owner())
+    {
+        return Err(invalid("stored lineage event identity mismatch"));
+    }
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_domain::{
+        FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, ProvenanceId,
+    };
+
+    fn profile_fact_id(operation: &str) -> FactId {
+        FactId::derive(
+            &FactIdentityMaterialV1::new(
+                FactOwnerV1::Profile,
+                FactIdentitySourceV1::Application {
+                    operation_id: ProvenanceId::new(operation).unwrap(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fact_write_rejects_stored_identity_mismatch() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_v2_current_facts (
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    last_event_id TEXT NOT NULL
+                 );
+                 CREATE TABLE memory_v2_facts (
+                    fact_id TEXT PRIMARY KEY,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    owner_json TEXT NOT NULL,
+                    identity_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+        let owner = FactOwnerV1::Profile;
+        let requested_identity = FactIdentityMaterialV1::new(
+            owner.clone(),
+            FactIdentitySourceV1::Application {
+                operation_id: ProvenanceId::new("operation.requested").unwrap(),
+            },
+        )
+        .unwrap();
+        let requested_fact_id = FactId::derive(&requested_identity).unwrap();
+        let stored_identity = FactIdentityMaterialV1::new(
+            owner.clone(),
+            FactIdentitySourceV1::Application {
+                operation_id: ProvenanceId::new("operation.other").unwrap(),
+            },
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO memory_v2_facts (
+                    fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+                 ) VALUES (?1, 'profile', '', ?2, ?3, 1)",
+                params![
+                    requested_fact_id.as_str(),
+                    serde_json::to_string(&owner).unwrap(),
+                    serde_json::to_string(&stored_identity).unwrap(),
+                ],
+            )
+            .unwrap();
+        let event = FactLineageEventV1::new(
+            requested_fact_id.clone(),
+            owner.clone(),
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Eligible,
+                current: PayloadAccessState::Deleted,
+            },
+            UtcMicros(2),
+            None,
+        )
+        .unwrap();
+        let batch = FactWriteBatch::new(
+            requested_fact_id,
+            owner,
+            None,
+            vec![event],
+            vec![],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap()
+        .with_identity_material(requested_identity)
+        .unwrap();
+        let savepoint = connection.savepoint().unwrap();
+
+        let error = FactExecutor.execute_write(&savepoint, &batch).unwrap_err();
+        assert!(error.to_string().contains("fact identity collision"));
+    }
+
+    #[test]
+    fn fact_executor_does_not_claim_replay_without_writer_ledger() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_v2_current_facts (
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    last_event_id TEXT NOT NULL
+                 );
+                 CREATE TABLE memory_v2_lineage_events (
+                    event_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL,
+                    occurred_at INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+        let owner = FactOwnerV1::Profile;
+        let fact_id = profile_fact_id("operation.writer-ledger");
+        let event = FactLineageEventV1::new(
+            fact_id.clone(),
+            owner.clone(),
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Eligible,
+                current: PayloadAccessState::Deleted,
+            },
+            UtcMicros(2),
+            None,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO memory_v2_current_facts
+                    (fact_id, owner_kind, project_id, last_event_id)
+                 VALUES (?1, 'profile', '', ?2)",
+                params![fact_id.as_str(), event.event_id().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO memory_v2_lineage_events
+                    (event_id, fact_id, owner_kind, project_id, event_json, occurred_at)
+                 VALUES (?1, ?2, 'profile', '', ?3, ?4)",
+                params![
+                    event.event_id().as_str(),
+                    fact_id.as_str(),
+                    serde_json::to_string(&event).unwrap(),
+                    event.occurred_at().0,
+                ],
+            )
+            .unwrap();
+        let batch = FactWriteBatch::new(
+            fact_id,
+            owner,
+            None,
+            vec![event],
+            vec![],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap();
+        let savepoint = connection.savepoint().unwrap();
+
+        let error = FactExecutor.execute_write(&savepoint, &batch).unwrap_err();
+        assert!(error.to_string().contains("last-event conflict"));
+    }
+
+    #[test]
+    fn lineage_read_rejects_stored_event_identity_mismatch() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_v2_lineage_events (
+                    event_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL,
+                    occurred_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        let requested_fact_id = profile_fact_id("operation.requested");
+        let stored_event = FactLineageEventV1::new(
+            profile_fact_id("operation.other"),
+            FactOwnerV1::Profile,
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Eligible,
+                current: PayloadAccessState::Deleted,
+            },
+            UtcMicros(7),
+            None,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO memory_v2_lineage_events (
+                    event_id, fact_id, owner_kind, project_id, event_json, occurred_at
+                 ) VALUES (?1, ?2, 'profile', '', ?3, ?4)",
+                params![
+                    stored_event.event_id().as_str(),
+                    requested_fact_id.as_str(),
+                    serde_json::to_string(&stored_event).unwrap(),
+                    stored_event.occurred_at().0,
+                ],
+            )
+            .unwrap();
+        let query =
+            FactLineageQuery::new(FactOwnerV1::Profile, requested_fact_id, None, 10).unwrap();
+
+        assert!(read_lineage(&connection, &query).is_err());
+    }
 }

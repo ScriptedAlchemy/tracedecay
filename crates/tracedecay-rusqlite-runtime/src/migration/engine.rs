@@ -241,10 +241,15 @@ impl<P: ConsolidatedMigrationPort> ConsolidatedMigrationEngine<P> {
                 let canonical = matches!(
                     (family, &binding.shard_id.scope),
                     (StoreFamily::Profile, StoreShardScopeV1::Profile)
+                        | (StoreFamily::Project, StoreShardScopeV1::ProfileMemory)
                         | (StoreFamily::Project, StoreShardScopeV1::Project { .. })
                         | (
                             StoreFamily::ProjectSessions,
                             StoreShardScopeV1::ProjectSessions { .. }
+                        )
+                        | (
+                            StoreFamily::ProjectSessions,
+                            StoreShardScopeV1::ProfileSessions
                         )
                         | (StoreFamily::Code, StoreShardScopeV1::Code { .. })
                 );

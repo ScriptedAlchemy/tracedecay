@@ -20,6 +20,9 @@ use super::{
     ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, ReaderWorkerError,
     unavailable_read, worker,
 };
+use crate::migration_sql::{
+    MigrationSqlError, MigrationSqlReadSnapshot, MigrationSqlRows, MigrationSqlStatement,
+};
 
 const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
@@ -218,6 +221,62 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         &self.inner.binding
     }
 
+    pub(crate) fn verified_locator(&self) -> &tracedecay_store::VerifiedStoreLocatorV1 {
+        self.inner.locator.verified_locator()
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.inner.locator.path()
+    }
+
+    pub(crate) fn execute_migration_query(
+        &self,
+        statement: MigrationSqlStatement,
+        max_wait: Duration,
+    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        let mut lease = self
+            .acquire_lane(ReaderLane::General, max_wait, || None)
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+        lease.execute_migration_query(statement)
+    }
+
+    pub(crate) fn begin_migration_snapshot(
+        &self,
+        max_wait: Duration,
+    ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
+        let mut lease = self
+            .acquire_lane(ReaderLane::General, max_wait, || None)
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+        lease.begin_migration_snapshot()?;
+        Ok(MigrationSqlReadSnapshot::new(move |statement| {
+            lease.execute_active_migration_query(statement)
+        }))
+    }
+
+    pub fn read_store_size<F>(
+        &self,
+        max_wait: Duration,
+        interrupted: F,
+    ) -> Result<worker::StoreSizeTelemetrySample, ReaderAcquireError>
+    where
+        F: FnMut() -> Option<UnavailableReasonV1>,
+    {
+        let mut lease = self.acquire_lane(ReaderLane::ReservedHealth, max_wait, interrupted)?;
+        lease.read_store_size()
+    }
+
+    pub fn read_table_sizes<F>(
+        &self,
+        max_wait: Duration,
+        interrupted: F,
+    ) -> Result<Vec<worker::TableSizeTelemetrySample>, ReaderAcquireError>
+    where
+        F: FnMut() -> Option<UnavailableReasonV1>,
+    {
+        let mut lease = self.acquire_lane(ReaderLane::ReservedHealth, max_wait, interrupted)?;
+        lease.read_table_sizes()
+    }
+
     pub fn snapshot(&self) -> ReaderPoolSnapshot {
         let state = self
             .inner
@@ -268,10 +327,22 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         }
         validate_probe(request, probe)?;
         let lane = ReaderLane::for_priority(request.priority());
+        self.acquire_lane(lane, max_wait, || interruption(probe))
+    }
+
+    fn acquire_lane<F>(
+        &self,
+        lane: ReaderLane,
+        max_wait: Duration,
+        mut interrupted: F,
+    ) -> Result<ReaderLease<E>, ReaderAcquireError>
+    where
+        F: FnMut() -> Option<UnavailableReasonV1>,
+    {
         let started = Instant::now();
 
         loop {
-            if let Some(reason) = interruption(probe) {
+            if let Some(reason) = interrupted() {
                 return Err(ReaderAcquireError::Interrupted { reason });
             }
             self.retire_idle_at(Instant::now());
@@ -552,6 +623,97 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .worker
             .client
             .execute(request, probe)
+            .map_err(map_worker_error)
+    }
+
+    fn execute_migration_query(
+        &mut self,
+        statement: MigrationSqlStatement,
+    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        if self.snapshot_active {
+            return Err(MigrationSqlError::ReaderUnavailable(
+                ReaderWorkerError::SnapshotAlreadyActive.to_string(),
+            ));
+        }
+        self.checkout
+            .worker
+            .client
+            .begin()
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+        self.snapshot_active = true;
+        self.checkout
+            .worker
+            .client
+            .execute_migration_query(statement)
+    }
+
+    fn begin_migration_snapshot(&mut self) -> Result<(), MigrationSqlError> {
+        if self.snapshot_active {
+            return Err(MigrationSqlError::ReaderUnavailable(
+                ReaderWorkerError::SnapshotAlreadyActive.to_string(),
+            ));
+        }
+        self.checkout
+            .worker
+            .client
+            .begin()
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+        self.snapshot_active = true;
+        self.checkout.worker.client.pin_migration()
+    }
+
+    fn execute_active_migration_query(
+        &mut self,
+        statement: MigrationSqlStatement,
+    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        if !self.snapshot_active {
+            return Err(MigrationSqlError::ReaderUnavailable(
+                ReaderWorkerError::SnapshotNotActive.to_string(),
+            ));
+        }
+        self.checkout
+            .worker
+            .client
+            .execute_migration_query(statement)
+    }
+
+    fn read_store_size(&mut self) -> Result<worker::StoreSizeTelemetrySample, ReaderAcquireError> {
+        if self.snapshot_active {
+            return Err(ReaderAcquireError::Worker(
+                ReaderWorkerError::SnapshotAlreadyActive,
+            ));
+        }
+        self.checkout
+            .worker
+            .client
+            .begin()
+            .map_err(ReaderAcquireError::Worker)?;
+        self.snapshot_active = true;
+        self.checkout
+            .worker
+            .client
+            .store_size()
+            .map_err(map_worker_error)
+    }
+
+    fn read_table_sizes(
+        &mut self,
+    ) -> Result<Vec<worker::TableSizeTelemetrySample>, ReaderAcquireError> {
+        if self.snapshot_active {
+            return Err(ReaderAcquireError::Worker(
+                ReaderWorkerError::SnapshotAlreadyActive,
+            ));
+        }
+        self.checkout
+            .worker
+            .client
+            .begin()
+            .map_err(ReaderAcquireError::Worker)?;
+        self.snapshot_active = true;
+        self.checkout
+            .worker
+            .client
+            .table_sizes()
             .map_err(map_worker_error)
     }
 

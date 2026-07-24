@@ -138,6 +138,14 @@ impl CodeShardPhysicalLocatorFactory {
             CodeShardScopeV1::Worktree { worktree_id } => base
                 .join("worktrees")
                 .join(component("worktree", worktree_id.as_str())),
+            CodeShardScopeV1::Branch {
+                worktree_id,
+                ref_id,
+            } => base
+                .join("worktrees")
+                .join(component("worktree", worktree_id.as_str()))
+                .join("refs")
+                .join(component("ref", ref_id.as_str())),
             CodeShardScopeV1::Snapshot {
                 worktree_id,
                 snapshot_id,
@@ -181,7 +189,7 @@ fn code_shard_access(
 ) -> Result<CodeShardAccessV1, CodeShardLocatorError> {
     match &shard_id.scope {
         StoreShardScopeV1::Code {
-            scope: CodeShardScopeV1::Worktree { .. },
+            scope: CodeShardScopeV1::Worktree { .. } | CodeShardScopeV1::Branch { .. },
             ..
         } => Ok(CodeShardAccessV1::MutableWorktree),
         StoreShardScopeV1::Code {

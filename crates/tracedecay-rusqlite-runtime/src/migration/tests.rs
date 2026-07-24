@@ -575,6 +575,25 @@ fn source_bindings_must_share_one_canonical_authority_root() {
 }
 
 #[test]
+fn profile_memory_is_a_canonical_project_family_binding() {
+    let mut request = request();
+    request
+        .source_bindings
+        .get_mut(&StoreFamily::Project)
+        .unwrap()
+        .first_mut()
+        .unwrap()
+        .shard_id
+        .scope = StoreShardScopeV1::ProfileMemory;
+    let port = FakePort::new(&request);
+
+    assert!(matches!(
+        engine(port).migrate(&request, &mut family_transforms()),
+        Ok(MigrationOutcome::Published(_))
+    ));
+}
+
+#[test]
 fn final_schema_is_idempotent() {
     let release_request = request();
     let mut port = FakePort::new(&release_request);

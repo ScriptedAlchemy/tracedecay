@@ -238,6 +238,36 @@ fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
 }
 
 #[test]
+fn reserved_health_reader_reports_exact_store_size_pragmas() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+
+    let sample = pool
+        .read_store_size(Duration::from_millis(100), || None)
+        .expect("store size sample");
+
+    assert!(sample.page_size_bytes > 0);
+    assert!(sample.page_count > 0);
+    assert!(sample.freelist_pages <= sample.page_count);
+    let table_sizes = pool
+        .read_table_sizes(Duration::from_millis(100), || None)
+        .expect("table size samples");
+    assert!(
+        table_sizes
+            .iter()
+            .any(|sample| sample.table_name == "markers" && sample.bytes > 0)
+    );
+    let snapshot = pool.snapshot();
+    assert_eq!(snapshot.leased_health, 0);
+    assert_eq!(snapshot.available_health, 1);
+}
+
+#[test]
 fn deferred_snapshot_excludes_uncommitted_and_later_committed_rows() {
     let store = TestStore::new();
     let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();

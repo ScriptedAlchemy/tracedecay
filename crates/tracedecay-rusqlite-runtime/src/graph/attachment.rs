@@ -14,12 +14,17 @@ use tracedecay_store::{
 };
 
 use crate::{
-    ExistingWriterLocator, PersistentWriter, WriterStartError, WriterState,
+    CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
+    PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
+    connection::OpenedDatabaseFile,
+    migration_sql::{MigrationSqlError, MigrationSqlHandle},
     reader::{ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderStartError},
     writer::WriterPersistence,
 };
 
-use super::{CodeShardPhysicalLocator, GraphMutationExecutor, GraphReaderExecutor};
+use super::{
+    CodeShardLocatorError, CodeShardPhysicalLocator, GraphMutationExecutor, GraphReaderExecutor,
+};
 
 /// Pre-open physical parts that a later daemon registry adapter can own.
 ///
@@ -117,9 +122,65 @@ impl GraphPhysicalAttachmentFactory {
         admission: AdmissionConfigV1,
     ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
         let database_path = physical.path().to_path_buf();
-        let parts = self
-            .prepare(physical)
-            .map_err(GraphPhysicalAttachmentStartError::Prepare)?;
+        let opened_database = OpenedDatabaseFile::pin(&database_path)
+            .map_err(GraphPhysicalAttachmentStartError::Identity)?;
+        self.attach_opened(physical, admission, opened_database, false)
+    }
+
+    pub fn initialize(
+        &self,
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+        database_path: PathBuf,
+        admission: AdmissionConfigV1,
+    ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
+        let opened_database = OpenedDatabaseFile::create_new(&database_path)
+            .map_err(GraphPhysicalAttachmentStartError::Identity)?;
+        let physical = match CodeShardPhysicalLocator::from_verified_existing(
+            binding,
+            locator,
+            database_path.clone(),
+        ) {
+            Ok(physical) if physical.is_mutable() => physical,
+            Ok(_) => {
+                return Err(graph_start_failure(
+                    opened_database,
+                    &database_path,
+                    true,
+                    GraphPhysicalAttachmentStartError::ImmutableInitialization,
+                ));
+            }
+            Err(error) => {
+                return Err(graph_start_failure(
+                    opened_database,
+                    &database_path,
+                    true,
+                    GraphPhysicalAttachmentStartError::Locator(error),
+                ));
+            }
+        };
+        self.attach_opened(&physical, admission, opened_database, true)
+    }
+
+    fn attach_opened(
+        &self,
+        physical: &CodeShardPhysicalLocator,
+        admission: AdmissionConfigV1,
+        opened_database: OpenedDatabaseFile,
+        created: bool,
+    ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
+        let database_path = physical.path().to_path_buf();
+        let parts = match self.prepare(physical) {
+            Ok(parts) => parts,
+            Err(error) => {
+                return Err(graph_start_failure(
+                    opened_database,
+                    &database_path,
+                    created,
+                    GraphPhysicalAttachmentStartError::Prepare(error),
+                ));
+            }
+        };
         let GraphPhysicalAttachmentParts {
             binding,
             reader_locator,
@@ -128,7 +189,7 @@ impl GraphPhysicalAttachmentFactory {
             ..
         } = parts;
         let reader_budget = admission.readers.clone();
-        let writer = writer_locator
+        let writer = match writer_locator
             .map(|locator| {
                 PersistentWriter::start_with_persistence(
                     locator,
@@ -138,20 +199,71 @@ impl GraphPhysicalAttachmentFactory {
                 .map(Arc::new)
             })
             .transpose()
-            .map_err(GraphPhysicalAttachmentStartError::Writer)?;
-        let readers = ReaderPool::start(reader_locator, reader_budget, reader_executor)
-            .map_err(GraphPhysicalAttachmentStartError::Reader)?;
+        {
+            Ok(writer) => writer,
+            Err(error) => {
+                return Err(graph_start_failure(
+                    opened_database,
+                    &database_path,
+                    created,
+                    GraphPhysicalAttachmentStartError::Writer(error),
+                ));
+            }
+        };
+        let readers = match ReaderPool::start(reader_locator, reader_budget, reader_executor) {
+            Ok(readers) => readers,
+            Err(error) => {
+                if let Some(writer) = writer.and_then(|writer| Arc::try_unwrap(writer).ok()) {
+                    let _ = writer.shutdown_and_join();
+                }
+                return Err(graph_start_failure(
+                    opened_database,
+                    &database_path,
+                    created,
+                    GraphPhysicalAttachmentStartError::Reader(error),
+                ));
+            }
+        };
+        if let Err(error) = opened_database.verify_current_path(&database_path) {
+            if let Some(writer) = writer.and_then(|writer| Arc::try_unwrap(writer).ok()) {
+                let _ = writer.shutdown_and_join();
+            }
+            drop(readers);
+            return Err(graph_start_failure(
+                opened_database,
+                &database_path,
+                created,
+                GraphPhysicalAttachmentStartError::Identity(error),
+            ));
+        }
+        let opened_file_identity = opened_database.identity();
+        let initialization_file = created.then_some(opened_database);
         Ok(GraphRuntimePhysicalAttachment {
             state: Mutex::new(GraphRuntimePhysicalState {
                 binding,
                 database_path,
+                opened_file_identity,
+                initialization_file,
                 writer,
                 readers: Some(readers),
                 admission_open: true,
                 closed: false,
+                close_failure: None,
             }),
         })
     }
+}
+
+fn graph_start_failure(
+    opened_database: OpenedDatabaseFile,
+    database_path: &std::path::Path,
+    created: bool,
+    failure: GraphPhysicalAttachmentStartError,
+) -> GraphPhysicalAttachmentStartError {
+    if created && let Err(error) = opened_database.discard_created(database_path) {
+        return GraphPhysicalAttachmentStartError::Identity(error);
+    }
+    failure
 }
 
 #[derive(Debug)]
@@ -196,15 +308,63 @@ pub struct GraphRuntimePhysicalAttachment {
 struct GraphRuntimePhysicalState {
     binding: StoreRuntimeBindingV1,
     database_path: PathBuf,
+    opened_file_identity: u64,
+    initialization_file: Option<OpenedDatabaseFile>,
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<GraphReaderExecutor>>,
     admission_open: bool,
     closed: bool,
+    close_failure: Option<String>,
 }
 
 impl GraphRuntimePhysicalAttachment {
     pub fn binding(&self) -> StoreRuntimeBindingV1 {
         self.lock_state().binding.clone()
+    }
+
+    pub fn opened_file_identity(&self) -> u64 {
+        self.lock_state().opened_file_identity
+    }
+
+    pub fn commit_initialization(&self) -> Result<(), String> {
+        let mut state = self.lock_state();
+        let opened = state
+            .initialization_file
+            .as_ref()
+            .ok_or_else(|| "graph attachment has no pending initialization".to_owned())?;
+        opened
+            .verify_current_path(&state.database_path)
+            .map_err(|error| error.to_string())?;
+        state.initialization_file.take();
+        Ok(())
+    }
+
+    pub fn abort_initialization(&self) -> Result<(), String> {
+        self.drain()?;
+        self.close_and_join()?;
+        let mut state = self.lock_state();
+        let Some(opened) = state.initialization_file.take() else {
+            return Ok(());
+        };
+        opened
+            .discard_created(&state.database_path)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn migration_sql_handle(&self) -> Result<MigrationSqlHandle, MigrationSqlError> {
+        let state = self.lock_state();
+        if !state.admission_open || state.closed {
+            return Err(MigrationSqlError::ReaderUnavailable(
+                "graph physical attachment is closed".to_owned(),
+            ));
+        }
+        let readers = state.readers.as_ref().ok_or_else(|| {
+            MigrationSqlError::ReaderUnavailable("graph readers are unavailable".to_owned())
+        })?;
+        match state.writer.as_deref() {
+            Some(writer) => MigrationSqlHandle::attach(writer, readers),
+            None => Ok(MigrationSqlHandle::attach_read_only(readers)),
+        }
     }
 
     pub fn snapshot(&self) -> GraphRuntimePhysicalSnapshot {
@@ -237,6 +397,7 @@ impl GraphRuntimePhysicalAttachment {
         &self,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<RuntimeSubmitOutcomeV1, GraphDispatchError> {
         let writer = self
             .lock_state()
@@ -244,7 +405,59 @@ impl GraphRuntimePhysicalAttachment {
             .clone()
             .ok_or(GraphDispatchError::Closed)?;
         writer
-            .submit(request, probe)
+            .submit_authorized(request, probe, authority)
+            .await
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))
+    }
+
+    pub async fn run_bounded_incremental_compaction(
+        &self,
+        max_pages: u32,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<(), GraphDispatchError> {
+        let writer = self
+            .lock_state()
+            .writer
+            .clone()
+            .ok_or(GraphDispatchError::Closed)?;
+        writer
+            .bounded_incremental_vacuum(max_pages, authority)
+            .await
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))
+    }
+
+    pub async fn run_checkpoint(
+        &self,
+        request: CheckpointRequest,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<CheckpointOutcome, GraphDispatchError> {
+        let checkpoint = self
+            .lock_state()
+            .writer
+            .as_ref()
+            .ok_or(GraphDispatchError::Closed)?
+            .checkpoint_handle();
+        let ticket = checkpoint
+            .trigger_authorized(request, authority)
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
+        ticket
+            .wait()
+            .await
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))
+    }
+
+    pub async fn snapshot_to(
+        &self,
+        destination: PathBuf,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<OnlineBackupReceipt, GraphDispatchError> {
+        let writer = self
+            .lock_state()
+            .writer
+            .clone()
+            .ok_or(GraphDispatchError::Closed)?;
+        writer
+            .snapshot_to(destination, authority)
             .await
             .map_err(|error| GraphDispatchError::Writer(error.to_string()))
     }
@@ -286,39 +499,48 @@ impl GraphRuntimePhysicalAttachment {
     }
 
     pub fn close_and_join(&self) -> Result<(), String> {
-        let (writer, readers) = {
-            let mut state = self.lock_state();
-            if state.closed {
-                return Ok(());
+        let mut state = self.lock_state();
+        if state.closed {
+            return match &state.close_failure {
+                Some(message) => Err(message.clone()),
+                None => Ok(()),
+            };
+        }
+        if state.admission_open {
+            return Err("graph physical attachment must drain before close".to_owned());
+        }
+        let leased_readers = state.readers.as_ref().map_or(0, |readers| {
+            let snapshot = readers.snapshot();
+            u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
+        });
+        let queued = state
+            .writer
+            .as_ref()
+            .map(|writer| writer.telemetry_snapshot())
+            .map_or(0, |snapshot| snapshot.queue.queued_operations);
+        if leased_readers != 0 || queued != 0 {
+            return Err(format!(
+                "graph physical attachment still has {leased_readers} readers and {queued} queued writes"
+            ));
+        }
+        let writer = match state.writer.take().map(Arc::try_unwrap).transpose() {
+            Ok(writer) => writer,
+            Err(writer) => {
+                state.writer = Some(writer);
+                return Err("graph writer is still serving a request".to_owned());
             }
-            if state.admission_open {
-                return Err("graph physical attachment must drain before close".to_owned());
-            }
-            let leased_readers = state.readers.as_ref().map_or(0, |readers| {
-                let snapshot = readers.snapshot();
-                u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)
-            });
-            let queued = state
-                .writer
-                .as_ref()
-                .map(|writer| writer.telemetry_snapshot())
-                .map_or(0, |snapshot| snapshot.queue.queued_operations);
-            if leased_readers != 0 || queued != 0 {
-                return Err(format!(
-                    "graph physical attachment still has {leased_readers} readers and {queued} queued writes"
-                ));
-            }
-            state.closed = true;
-            (state.writer.take(), state.readers.take())
         };
+        let readers = state.readers.take();
         drop(readers);
         if let Some(writer) = writer {
-            let writer = Arc::try_unwrap(writer)
-                .map_err(|_| "graph writer is still serving a request".to_owned())?;
-            writer
-                .shutdown_and_join()
-                .map_err(|error| format!("join graph writer: {error}"))?;
+            if let Err(error) = writer.shutdown_and_join() {
+                let message = format!("join graph writer: {error}");
+                state.closed = true;
+                state.close_failure = Some(message.clone());
+                return Err(message);
+            }
         }
+        state.closed = true;
         Ok(())
     }
 
@@ -326,6 +548,20 @@ impl GraphRuntimePhysicalAttachment {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Drop for GraphRuntimePhysicalAttachment {
+    fn drop(&mut self) {
+        let pending = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .initialization_file
+            .is_some();
+        if pending {
+            let _ = self.abort_initialization();
+        }
     }
 }
 
@@ -394,7 +630,10 @@ fn precutover_write_rejected() -> StorageRuntimeErrorV1 {
 
 #[derive(Debug)]
 pub enum GraphPhysicalAttachmentStartError {
+    ImmutableInitialization,
+    Locator(CodeShardLocatorError),
     Prepare(GraphPhysicalAttachmentPrepareError),
+    Identity(crate::connection::OpenedDatabaseFileError),
     Reader(ReaderStartError),
     Writer(WriterStartError),
 }
@@ -402,7 +641,12 @@ pub enum GraphPhysicalAttachmentStartError {
 impl fmt::Display for GraphPhysicalAttachmentStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ImmutableInitialization => {
+                formatter.write_str("immutable graph snapshots cannot be initialized")
+            }
+            Self::Locator(error) => write!(formatter, "prepare graph locator: {error}"),
             Self::Prepare(error) => write!(formatter, "prepare graph attachment: {error}"),
+            Self::Identity(error) => write!(formatter, "identify graph attachment: {error}"),
             Self::Reader(error) => write!(formatter, "start graph readers: {error}"),
             Self::Writer(error) => write!(formatter, "start graph writer: {error}"),
         }
@@ -412,9 +656,12 @@ impl fmt::Display for GraphPhysicalAttachmentStartError {
 impl Error for GraphPhysicalAttachmentStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Locator(error) => Some(error),
             Self::Prepare(error) => Some(error),
+            Self::Identity(error) => Some(error),
             Self::Reader(error) => Some(error),
             Self::Writer(error) => Some(error),
+            Self::ImmutableInitialization => None,
         }
     }
 }

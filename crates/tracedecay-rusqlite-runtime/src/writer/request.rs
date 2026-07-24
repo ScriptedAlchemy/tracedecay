@@ -7,6 +7,7 @@ use tracedecay_store::{
 };
 
 use crate::{
+    RuntimeWriteAuthority, RuntimeWriteAuthorityStage, WriterActorError,
     admission::{Permit, QueueItem},
     checkpoint::{
         CheckpointBlockers, CheckpointError, CheckpointResult, MaintenanceCheckpointMode,
@@ -20,6 +21,7 @@ pub(super) type RequestResult = Result<RuntimeSubmitOutcomeV1, StorageRuntimeErr
 pub(super) struct AcceptedRequest {
     pub(super) request: Arc<RuntimeSubmitRequestV1>,
     pub(super) probe: Arc<dyn RuntimeRequestProbeV1>,
+    pub(super) authority: Arc<dyn RuntimeWriteAuthority>,
     reply: oneshot::Sender<RequestResult>,
     pub(super) enqueued_at: Instant,
     _permit: Permit,
@@ -29,12 +31,14 @@ impl AcceptedRequest {
     pub(super) fn new(
         request: Arc<RuntimeSubmitRequestV1>,
         probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
         reply: oneshot::Sender<RequestResult>,
         permit: Permit,
     ) -> Self {
         Self {
             request,
             probe,
+            authority,
             reply,
             enqueued_at: Instant::now(),
             _permit: permit,
@@ -76,6 +80,7 @@ pub(super) type CheckpointRequestResult =
 pub(super) struct CheckpointCommand {
     pub(super) snapshot_blockers: CheckpointBlockers,
     pub(super) kind: CheckpointCommandKind,
+    authority: Arc<dyn RuntimeWriteAuthority>,
     reply: oneshot::Sender<CheckpointRequestResult>,
 }
 
@@ -93,11 +98,13 @@ impl CheckpointCommand {
     pub(super) fn new(
         snapshot_blockers: CheckpointBlockers,
         probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
         reply: oneshot::Sender<CheckpointRequestResult>,
     ) -> Self {
         Self {
             snapshot_blockers,
             kind: CheckpointCommandKind::Passive { probe },
+            authority,
             reply,
         }
     }
@@ -106,6 +113,7 @@ impl CheckpointCommand {
         snapshot_blockers: CheckpointBlockers,
         mode: MaintenanceCheckpointMode,
         permit: ExclusiveMaintenancePermit,
+        authority: Arc<dyn RuntimeWriteAuthority>,
         reply: oneshot::Sender<CheckpointRequestResult>,
     ) -> Self {
         Self {
@@ -114,14 +122,36 @@ impl CheckpointCommand {
                 mode,
                 permit: Box::new(permit),
             },
+            authority,
             reply,
         }
     }
 
-    pub(super) fn into_parts(self) -> (CheckpointBlockers, CheckpointCommandKind, CheckpointReply) {
+    pub(super) fn verify(
+        &self,
+        stage: RuntimeWriteAuthorityStage,
+    ) -> Result<(), CheckpointError<RusqliteCheckpointError>> {
+        self.authority
+            .verify(stage)
+            .map_err(|_| CheckpointError::AuthorityDenied(stage))
+    }
+
+    pub(super) fn settle(self, result: CheckpointRequestResult) {
+        let _ = self.reply.send(result);
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        CheckpointBlockers,
+        CheckpointCommandKind,
+        Arc<dyn RuntimeWriteAuthority>,
+        CheckpointReply,
+    ) {
         (
             self.snapshot_blockers,
             self.kind,
+            self.authority,
             CheckpointReply(self.reply),
         )
     }
@@ -132,5 +162,29 @@ pub(super) struct CheckpointReply(oneshot::Sender<CheckpointRequestResult>);
 impl CheckpointReply {
     pub(super) fn settle(self, result: CheckpointRequestResult) {
         let _ = self.0.send(result);
+    }
+}
+
+pub(super) struct IncrementalVacuumCommand {
+    pub(super) max_pages: u32,
+    pub(super) authority: Arc<dyn RuntimeWriteAuthority>,
+    reply: oneshot::Sender<Result<(), WriterActorError>>,
+}
+
+impl IncrementalVacuumCommand {
+    pub(super) fn new(
+        max_pages: u32,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+        reply: oneshot::Sender<Result<(), WriterActorError>>,
+    ) -> Self {
+        Self {
+            max_pages: max_pages.max(1),
+            authority,
+            reply,
+        }
+    }
+
+    pub(super) fn settle(self, result: Result<(), WriterActorError>) {
+        let _ = self.reply.send(result);
     }
 }

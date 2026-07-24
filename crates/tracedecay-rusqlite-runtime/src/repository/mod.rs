@@ -8,10 +8,12 @@
 mod attachment;
 mod configuration;
 mod diagnostics;
+pub(crate) mod evidence_assembly;
 mod fact;
 mod fixtures;
 mod observation;
 mod project;
+mod retrieval_anchor;
 mod session;
 mod support;
 
@@ -26,10 +28,12 @@ pub use attachment::{
 };
 pub use configuration::ConfigurationExecutor;
 pub use diagnostics::DiagnosticExecutor;
+pub use evidence_assembly::EvidenceAssemblyExecutor;
 pub use fact::FactExecutor;
 pub use fixtures::{AdapterParityFixtureV1, PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1};
 pub use observation::ObservationExecutor;
 pub use project::ProjectExecutor;
+pub use retrieval_anchor::RetrievalAnchorExecutor;
 pub use session::SessionExecutor;
 
 // The read operation/result contract now lives in `tracedecay-store`. Re-export
@@ -66,9 +70,21 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::Observation(write) => {
                 self.project.execute_observation_write(savepoint, write)
             }
+            RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => self
+                .project
+                .execute_observation_cursor_advance(savepoint, advance),
             RepositoryWritePayloadV1::Diagnostics(snapshot) => {
                 self.project.execute_diagnostic_write(savepoint, snapshot)
             }
+            RepositoryWritePayloadV1::EvidenceAssembly(write) => self
+                .project
+                .execute_evidence_assembly_write(savepoint, write),
+            RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) => self
+                .project
+                .execute_retrieval_anchor_disposition_write(savepoint, record),
+            RepositoryWritePayloadV1::RetrievalAnchorDerivative(derivative) => self
+                .project
+                .execute_retrieval_anchor_derivative_write(savepoint, derivative),
             RepositoryWritePayloadV1::SessionProjection(batch) => {
                 self.session.execute_projection_write(savepoint, batch)
             }

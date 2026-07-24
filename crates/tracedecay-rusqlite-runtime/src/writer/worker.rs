@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use rusqlite::TransactionBehavior;
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, watch},
@@ -24,6 +25,7 @@ use tracedecay_store::{
 };
 
 use crate::{
+    RuntimeWriteAuthorityStage,
     admission::{FairQueue, QueueItem},
     checkpoint::{
         CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
@@ -31,13 +33,20 @@ use crate::{
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
     connection::{self, ConnectionMode},
+    migration_sql::{
+        WriterCommand as MigrationSqlWriterCommand, reject_writer_command, run_writer_command,
+    },
     read_consistency::CommittedWatermarkPublisher,
     telemetry::WriterTelemetry,
 };
 
 use super::{
-    WriterPersistence, WriterStartError, WriterState,
-    request::{AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch},
+    WriterActorError, WriterPersistence, WriterStartError, WriterState,
+    backup::{OnlineBackupCommand, run_online_backup},
+    request::{
+        AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
+        IncrementalVacuumCommand,
+    },
     settlement::{infrastructure, interruption_outcome},
     transaction::process_batch,
 };
@@ -49,6 +58,9 @@ pub(super) struct Worker {
     pub(super) binding: StoreRuntimeBindingV1,
     pub(super) config: AdmissionConfigV1,
     pub(super) receiver: mpsc::Receiver<AcceptedRequest>,
+    pub(super) migration_sql_receiver: mpsc::Receiver<MigrationSqlWriterCommand>,
+    pub(super) incremental_vacuum_receiver: mpsc::Receiver<IncrementalVacuumCommand>,
+    pub(super) online_backup_receiver: mpsc::Receiver<OnlineBackupCommand>,
     pub(super) checkpoint_receiver: mpsc::Receiver<CheckpointCommand>,
     pub(super) shutdown_receiver: mpsc::UnboundedReceiver<()>,
     pub(super) persistence: Box<dyn WriterPersistence>,
@@ -112,9 +124,17 @@ impl Worker {
         runtime: Runtime,
     ) {
         let mut queue = FairQueue::default();
+        let mut migration_sql_queue = VecDeque::new();
+        let mut incremental_vacuum_queue = VecDeque::new();
+        let mut online_backup_queue = VecDeque::new();
         let mut checkpoint_queue = VecDeque::new();
         let mut input_closed = false;
+        let mut migration_sql_closed = false;
+        let mut incremental_vacuum_closed = false;
+        let mut online_backup_closed = false;
         let mut checkpoint_closed = false;
+        let mut prefer_auxiliary = true;
+        let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
         let mut latest_blockers = CheckpointBlockers::default();
         loop {
             drain_ingress(
@@ -128,30 +148,70 @@ impl Worker {
                 &mut checkpoint_queue,
                 &mut checkpoint_closed,
             );
-            if self.shutdown_requested.load(Ordering::Acquire) && queue.is_empty() {
+            drain_migration_sql_ingress(
+                &mut self.migration_sql_receiver,
+                &mut migration_sql_queue,
+                &mut migration_sql_closed,
+            );
+            drain_incremental_vacuum_ingress(
+                &mut self.incremental_vacuum_receiver,
+                &mut incremental_vacuum_queue,
+                &mut incremental_vacuum_closed,
+            );
+            drain_online_backup_ingress(
+                &mut self.online_backup_receiver,
+                &mut online_backup_queue,
+                &mut online_backup_closed,
+            );
+            if self.shutdown_requested.load(Ordering::Acquire)
+                && queue.is_empty()
+                && migration_sql_queue.is_empty()
+                && incremental_vacuum_queue.is_empty()
+                && online_backup_queue.is_empty()
+            {
                 checkpoint_queue.clear();
                 break;
             }
             if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                 reject_all(&mut queue, &self.telemetry);
+                reject_all_migration_sql(&mut migration_sql_queue);
+                reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
+                reject_all_online_backup(&mut online_backup_queue);
                 checkpoint_queue.clear();
-                if input_closed && checkpoint_closed {
+                if input_closed
+                    && migration_sql_closed
+                    && incremental_vacuum_closed
+                    && online_backup_closed
+                    && checkpoint_closed
+                {
                     break;
                 }
                 let wake = runtime.block_on(wait_for_work(
                     &mut self.receiver,
+                    &mut self.migration_sql_receiver,
+                    &mut self.incremental_vacuum_receiver,
+                    &mut self.online_backup_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
+                    migration_sql_closed,
+                    incremental_vacuum_closed,
+                    online_backup_closed,
                     checkpoint_closed,
                     false,
                 ));
                 apply_wake(
                     wake,
                     &mut queue,
+                    &mut migration_sql_queue,
+                    &mut incremental_vacuum_queue,
+                    &mut online_backup_queue,
                     &mut checkpoint_queue,
                     &self.telemetry,
                     &mut input_closed,
+                    &mut migration_sql_closed,
+                    &mut incremental_vacuum_closed,
+                    &mut online_backup_closed,
                     &mut checkpoint_closed,
                 );
                 continue;
@@ -161,15 +221,84 @@ impl Worker {
                 self.run_requested_checkpoint(&mut checkpoint, command);
                 continue;
             }
+            if let Some(auxiliary) = select_auxiliary_work(
+                !migration_sql_queue.is_empty(),
+                !incremental_vacuum_queue.is_empty(),
+                !online_backup_queue.is_empty(),
+                queue.is_empty(),
+                prefer_auxiliary,
+                next_auxiliary,
+            ) {
+                match auxiliary {
+                    AuxiliaryWork::MigrationSql => {
+                        let command = migration_sql_queue
+                            .pop_front()
+                            .expect("migration SQL queue checked non-empty");
+                        if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
+                            run_writer_command(
+                                checkpoint.connection_mut(),
+                                command,
+                                &self.shutdown_requested,
+                            );
+                        } else {
+                            reject_writer_command(command);
+                        }
+                        next_auxiliary = AuxiliaryWork::IncrementalVacuum;
+                    }
+                    AuxiliaryWork::IncrementalVacuum => {
+                        let command = incremental_vacuum_queue
+                            .pop_front()
+                            .expect("incremental vacuum queue checked non-empty");
+                        if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
+                            run_incremental_vacuum(checkpoint.connection_mut(), command);
+                        } else {
+                            reject_incremental_vacuum(command);
+                        }
+                        next_auxiliary = AuxiliaryWork::OnlineBackup;
+                    }
+                    AuxiliaryWork::OnlineBackup => {
+                        let command = online_backup_queue
+                            .pop_front()
+                            .expect("online backup queue checked non-empty");
+                        if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
+                            run_online_backup(
+                                checkpoint.connection_mut(),
+                                &self.binding,
+                                &self.watermark_publisher,
+                                &self.shutdown_requested,
+                                command,
+                            );
+                        } else {
+                            reject_online_backup(command);
+                        }
+                        next_auxiliary = AuxiliaryWork::MigrationSql;
+                    }
+                }
+                if !queue.is_empty() {
+                    prefer_auxiliary = false;
+                }
+                continue;
+            }
             if queue.is_empty() {
-                if input_closed && checkpoint_closed {
+                if input_closed
+                    && migration_sql_closed
+                    && incremental_vacuum_closed
+                    && online_backup_closed
+                    && checkpoint_closed
+                {
                     break;
                 }
                 let wake = runtime.block_on(wait_for_work(
                     &mut self.receiver,
+                    &mut self.migration_sql_receiver,
+                    &mut self.incremental_vacuum_receiver,
+                    &mut self.online_backup_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
+                    migration_sql_closed,
+                    incremental_vacuum_closed,
+                    online_backup_closed,
                     checkpoint_closed,
                     checkpoint.hard_drain_required(),
                 ));
@@ -179,15 +308,22 @@ impl Worker {
                     apply_wake(
                         wake,
                         &mut queue,
+                        &mut migration_sql_queue,
+                        &mut incremental_vacuum_queue,
+                        &mut online_backup_queue,
                         &mut checkpoint_queue,
                         &self.telemetry,
                         &mut input_closed,
+                        &mut migration_sql_closed,
+                        &mut incremental_vacuum_closed,
+                        &mut online_backup_closed,
                         &mut checkpoint_closed,
                     );
                 }
                 continue;
             }
             cancel_waiting(&mut queue, &self.telemetry);
+            reject_unauthorized(&mut queue, &self.telemetry);
             if queue.is_empty() {
                 continue;
             }
@@ -224,6 +360,7 @@ impl Worker {
                     break;
                 }
             }
+            prefer_auxiliary = true;
         }
         if self.state.load(Ordering::Acquire) != WriterState::Faulted as u8 {
             self.state
@@ -250,7 +387,11 @@ impl Worker {
         checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
         command: CheckpointCommand,
     ) {
-        let (snapshot_blockers, kind, reply) = command.into_parts();
+        if let Err(error) = command.verify(RuntimeWriteAuthorityStage::Dequeued) {
+            command.settle(Err(error));
+            return;
+        }
+        let (snapshot_blockers, kind, authority, reply) = command.into_parts();
         let result = match kind {
             CheckpointCommandKind::Passive { probe } => {
                 checkpoint.evaluate_interruptible(snapshot_blockers, move || {
@@ -276,6 +417,15 @@ impl Worker {
         };
         match result {
             Ok(result) => {
+                if authority
+                    .verify(RuntimeWriteAuthorityStage::BeforeCommit)
+                    .is_err()
+                {
+                    reply.settle(Err(crate::checkpoint::CheckpointError::AuthorityDenied(
+                        RuntimeWriteAuthorityStage::BeforeCommit,
+                    )));
+                    return;
+                }
                 self.publish_checkpoint_result(result.clone());
                 reply.settle(Ok(result));
             }
@@ -324,6 +474,9 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
 
 enum WorkerWake {
     Write(Option<AcceptedRequest>),
+    MigrationSql(Box<Option<MigrationSqlWriterCommand>>),
+    IncrementalVacuum(Box<Option<IncrementalVacuumCommand>>),
+    OnlineBackup(Box<Option<OnlineBackupCommand>>),
     Checkpoint(Box<Option<CheckpointCommand>>),
     Shutdown,
     CheckpointRetry,
@@ -331,9 +484,15 @@ enum WorkerWake {
 
 async fn wait_for_work(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
+    migration_sql_receiver: &mut mpsc::Receiver<MigrationSqlWriterCommand>,
+    incremental_vacuum_receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
+    online_backup_receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     input_closed: bool,
+    migration_sql_closed: bool,
+    incremental_vacuum_closed: bool,
+    online_backup_closed: bool,
     checkpoint_closed: bool,
     retry_checkpoint: bool,
 ) -> WorkerWake {
@@ -348,6 +507,22 @@ async fn wait_for_work(
             && let Poll::Ready(command) = Pin::new(&mut *checkpoint_receiver).poll_recv(context)
         {
             return Poll::Ready(WorkerWake::Checkpoint(Box::new(command)));
+        }
+        if !migration_sql_closed
+            && let Poll::Ready(command) = Pin::new(&mut *migration_sql_receiver).poll_recv(context)
+        {
+            return Poll::Ready(WorkerWake::MigrationSql(Box::new(command)));
+        }
+        if !incremental_vacuum_closed
+            && let Poll::Ready(command) =
+                Pin::new(&mut *incremental_vacuum_receiver).poll_recv(context)
+        {
+            return Poll::Ready(WorkerWake::IncrementalVacuum(Box::new(command)));
+        }
+        if !online_backup_closed
+            && let Poll::Ready(command) = Pin::new(&mut *online_backup_receiver).poll_recv(context)
+        {
+            return Poll::Ready(WorkerWake::OnlineBackup(Box::new(command)));
         }
         if !input_closed && let Poll::Ready(item) = Pin::new(&mut *receiver).poll_recv(context) {
             return Poll::Ready(WorkerWake::Write(item));
@@ -367,20 +542,261 @@ async fn wait_for_work(
 fn apply_wake(
     wake: WorkerWake,
     queue: &mut FairQueue<AcceptedRequest>,
+    migration_sql_queue: &mut VecDeque<MigrationSqlWriterCommand>,
+    incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
+    online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
     checkpoint_queue: &mut VecDeque<CheckpointCommand>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
+    migration_sql_closed: &mut bool,
+    incremental_vacuum_closed: &mut bool,
+    online_backup_closed: &mut bool,
     checkpoint_closed: &mut bool,
 ) {
     match wake {
         WorkerWake::Write(Some(item)) => enqueue(queue, item, telemetry),
         WorkerWake::Write(None) => *input_closed = true,
+        WorkerWake::MigrationSql(command) => match *command {
+            Some(command) => migration_sql_queue.push_back(command),
+            None => *migration_sql_closed = true,
+        },
+        WorkerWake::IncrementalVacuum(command) => match *command {
+            Some(command) => incremental_vacuum_queue.push_back(command),
+            None => *incremental_vacuum_closed = true,
+        },
+        WorkerWake::OnlineBackup(command) => match *command {
+            Some(command) => online_backup_queue.push_back(command),
+            None => *online_backup_closed = true,
+        },
         WorkerWake::Checkpoint(command) => match *command {
             Some(command) => checkpoint_queue.push_back(command),
             None => *checkpoint_closed = true,
         },
         WorkerWake::Shutdown => {}
         WorkerWake::CheckpointRetry => {}
+    }
+}
+
+fn drain_incremental_vacuum_ingress(
+    receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
+    queue: &mut VecDeque<IncrementalVacuumCommand>,
+    input_closed: &mut bool,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok(command) => queue.push_back(command),
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                *input_closed = true;
+                break;
+            }
+        }
+    }
+}
+
+fn drain_online_backup_ingress(
+    receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
+    queue: &mut VecDeque<OnlineBackupCommand>,
+    input_closed: &mut bool,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok(command) => queue.push_back(command),
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                *input_closed = true;
+                break;
+            }
+        }
+    }
+}
+
+fn drain_migration_sql_ingress(
+    receiver: &mut mpsc::Receiver<MigrationSqlWriterCommand>,
+    queue: &mut VecDeque<MigrationSqlWriterCommand>,
+    input_closed: &mut bool,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok(command) => queue.push_back(command),
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                *input_closed = true;
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuxiliaryWork {
+    MigrationSql,
+    IncrementalVacuum,
+    OnlineBackup,
+}
+
+fn select_auxiliary_work(
+    migration_waiting: bool,
+    incremental_vacuum_waiting: bool,
+    online_backup_waiting: bool,
+    product_queue_empty: bool,
+    prefer_auxiliary: bool,
+    next: AuxiliaryWork,
+) -> Option<AuxiliaryWork> {
+    if !product_queue_empty && !prefer_auxiliary {
+        return None;
+    }
+    let waiting = |work| match work {
+        AuxiliaryWork::MigrationSql => migration_waiting,
+        AuxiliaryWork::IncrementalVacuum => incremental_vacuum_waiting,
+        AuxiliaryWork::OnlineBackup => online_backup_waiting,
+    };
+    let order = match next {
+        AuxiliaryWork::MigrationSql => [
+            AuxiliaryWork::MigrationSql,
+            AuxiliaryWork::IncrementalVacuum,
+            AuxiliaryWork::OnlineBackup,
+        ],
+        AuxiliaryWork::IncrementalVacuum => [
+            AuxiliaryWork::IncrementalVacuum,
+            AuxiliaryWork::OnlineBackup,
+            AuxiliaryWork::MigrationSql,
+        ],
+        AuxiliaryWork::OnlineBackup => [
+            AuxiliaryWork::OnlineBackup,
+            AuxiliaryWork::MigrationSql,
+            AuxiliaryWork::IncrementalVacuum,
+        ],
+    };
+    order.into_iter().find(|work| waiting(*work))
+}
+
+#[cfg(test)]
+mod auxiliary_scheduling_tests {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::oneshot;
+
+    use crate::{RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage};
+
+    use super::{
+        AuxiliaryWork, IncrementalVacuumCommand, WriterActorError, run_incremental_vacuum,
+        select_auxiliary_work,
+    };
+
+    struct RecordingAuthority {
+        stages: Arc<Mutex<Vec<RuntimeWriteAuthorityStage>>>,
+        deny_before_commit: bool,
+    }
+
+    impl RuntimeWriteAuthority for RecordingAuthority {
+        fn verify(
+            &self,
+            stage: RuntimeWriteAuthorityStage,
+        ) -> Result<(), RuntimeWriteAuthorityError> {
+            self.stages.lock().unwrap().push(stage);
+            if self.deny_before_commit && stage == RuntimeWriteAuthorityStage::BeforeCommit {
+                Err(RuntimeWriteAuthorityError::denied("revoked before commit"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn auxiliary_work_cannot_starve_product_writes() {
+        assert_eq!(
+            select_auxiliary_work(
+                true,
+                true,
+                false,
+                false,
+                true,
+                AuxiliaryWork::IncrementalVacuum,
+            ),
+            Some(AuxiliaryWork::IncrementalVacuum)
+        );
+        assert_eq!(
+            select_auxiliary_work(true, true, false, false, false, AuxiliaryWork::MigrationSql,),
+            None
+        );
+    }
+
+    #[test]
+    fn auxiliary_work_alternates_when_product_queue_is_empty() {
+        assert_eq!(
+            select_auxiliary_work(
+                true,
+                true,
+                false,
+                true,
+                false,
+                AuxiliaryWork::IncrementalVacuum,
+            ),
+            Some(AuxiliaryWork::IncrementalVacuum)
+        );
+        assert_eq!(
+            select_auxiliary_work(true, true, false, true, false, AuxiliaryWork::MigrationSql,),
+            Some(AuxiliaryWork::MigrationSql)
+        );
+        assert_eq!(
+            select_auxiliary_work(true, true, true, true, false, AuxiliaryWork::OnlineBackup,),
+            Some(AuxiliaryWork::OnlineBackup)
+        );
+    }
+
+    #[test]
+    fn incremental_vacuum_samples_worker_authority_stages() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+            .unwrap();
+        let stages = Arc::new(Mutex::new(Vec::new()));
+        let authority = Arc::new(RecordingAuthority {
+            stages: Arc::clone(&stages),
+            deny_before_commit: false,
+        });
+        let (reply, mut response) = oneshot::channel();
+
+        run_incremental_vacuum(
+            &mut connection,
+            IncrementalVacuumCommand::new(0, authority, reply),
+        );
+
+        assert!(response.try_recv().unwrap().is_ok());
+        assert_eq!(
+            *stages.lock().unwrap(),
+            [
+                RuntimeWriteAuthorityStage::Dequeued,
+                RuntimeWriteAuthorityStage::BeforeCommit
+            ]
+        );
+    }
+
+    #[test]
+    fn incremental_vacuum_rolls_back_when_authority_is_revoked() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+            .unwrap();
+        let authority = Arc::new(RecordingAuthority {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            deny_before_commit: true,
+        });
+        let (reply, mut response) = oneshot::channel();
+
+        run_incremental_vacuum(
+            &mut connection,
+            IncrementalVacuumCommand::new(8, authority, reply),
+        );
+
+        assert!(matches!(
+            response.try_recv().unwrap(),
+            Err(WriterActorError::AuthorityDenied {
+                stage: RuntimeWriteAuthorityStage::BeforeCommit
+            })
+        ));
+        assert!(connection.is_autocommit());
     }
 }
 
@@ -450,6 +866,20 @@ fn cancel_waiting(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTele
     }
 }
 
+fn reject_unauthorized(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
+    for item in queue.drain_matching(|item| {
+        item.authority
+            .verify(RuntimeWriteAuthorityStage::Dequeued)
+            .is_err()
+    }) {
+        let bytes = item.admission_bytes();
+        let result = Ok(super::settlement::missing_authority());
+        telemetry.released(1, bytes);
+        telemetry.completed(&result);
+        item.settle(result);
+    }
+}
+
 fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
     for item in queue.drain_all() {
         let bytes = item.admission_bytes();
@@ -459,6 +889,89 @@ fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetr
         telemetry.released(1, bytes);
         telemetry.completed(&result);
         item.settle(result);
+    }
+}
+
+fn reject_all_migration_sql(queue: &mut VecDeque<MigrationSqlWriterCommand>) {
+    for command in queue.drain(..) {
+        reject_writer_command(command);
+    }
+}
+
+fn reject_online_backup(command: OnlineBackupCommand) {
+    command.settle(Err(WriterActorError::OnlineBackupFailed(
+        super::WriterOnlineBackupError::WriterShuttingDown,
+    )));
+}
+
+fn reject_all_online_backup(queue: &mut VecDeque<OnlineBackupCommand>) {
+    for command in queue.drain(..) {
+        reject_online_backup(command);
+    }
+}
+
+fn run_incremental_vacuum(
+    connection: &mut rusqlite::Connection,
+    command: IncrementalVacuumCommand,
+) {
+    if command
+        .authority
+        .verify(RuntimeWriteAuthorityStage::Dequeued)
+        .is_err()
+    {
+        command.settle(Err(WriterActorError::AuthorityDenied {
+            stage: RuntimeWriteAuthorityStage::Dequeued,
+        }));
+        return;
+    }
+    let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            command.settle(Err(WriterActorError::IncrementalVacuumFailed(
+                error.to_string(),
+            )));
+            return;
+        }
+    };
+    if let Err(error) =
+        transaction.pragma_update(None, "incremental_vacuum", command.max_pages.max(1))
+    {
+        command.settle(Err(WriterActorError::IncrementalVacuumFailed(
+            error.to_string(),
+        )));
+        return;
+    }
+    if command
+        .authority
+        .verify(RuntimeWriteAuthorityStage::BeforeCommit)
+        .is_err()
+    {
+        let result = match transaction.rollback() {
+            Ok(()) => Err(WriterActorError::AuthorityDenied {
+                stage: RuntimeWriteAuthorityStage::BeforeCommit,
+            }),
+            Err(error) => Err(WriterActorError::IncrementalVacuumFailed(format!(
+                "rollback after authority loss: {error}"
+            ))),
+        };
+        command.settle(result);
+        return;
+    }
+    let result = transaction
+        .commit()
+        .map_err(|error| WriterActorError::IncrementalVacuumFailed(error.to_string()));
+    command.settle(result);
+}
+
+fn reject_incremental_vacuum(command: IncrementalVacuumCommand) {
+    command.settle(Err(WriterActorError::IncrementalVacuumFailed(
+        "writer is unavailable".to_owned(),
+    )));
+}
+
+fn reject_all_incremental_vacuum(queue: &mut VecDeque<IncrementalVacuumCommand>) {
+    for command in queue.drain(..) {
+        reject_incremental_vacuum(command);
     }
 }
 

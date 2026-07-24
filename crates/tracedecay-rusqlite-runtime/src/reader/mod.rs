@@ -17,7 +17,9 @@ pub use pool::{
 };
 pub(crate) use retained::RetainedExecution;
 pub use retained::{RetainedSnapshotError, SqliteRetainedSnapshotRegistry};
-pub use worker::{ReaderQueryExecutor, ReaderWorkerError};
+pub use worker::{
+    ReaderQueryExecutor, ReaderWorkerError, StoreSizeTelemetrySample, TableSizeTelemetrySample,
+};
 
 #[cfg(test)]
 mod tests;

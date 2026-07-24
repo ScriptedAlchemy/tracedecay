@@ -1,7 +1,9 @@
 use std::{
     fmt,
+    fs::{File, OpenOptions},
+    io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -10,8 +12,207 @@ use rusqlite::{
     hooks::{AuthAction, AuthContext, Authorization},
     limits::Limit,
 };
+use sha2::{Digest, Sha256};
 
 const PROGRESS_INTERVAL_OPS: i32 = 1_000;
+
+/// Pins and identifies the exact regular file that an attachment is about to
+/// open. The descriptor stays alive until every SQLite worker has reported
+/// startup, after which `verify_current_path` proves the pathname still names
+/// that same physical file. Attachments retain the identity, never a later
+/// pathname stat.
+pub(crate) struct OpenedDatabaseFile {
+    file: File,
+    identity: u64,
+}
+
+impl OpenedDatabaseFile {
+    pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
+        let file = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| OpenedDatabaseFileError::Inspect)?;
+        if !metadata.is_file() {
+            return Err(OpenedDatabaseFileError::NotFile);
+        }
+        let identity = opened_file_identity(&file)?;
+        Ok(Self { file, identity })
+    }
+
+    pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| OpenedDatabaseFileError::Create)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| OpenedDatabaseFileError::Inspect)?;
+        if !metadata.is_file() {
+            return Err(OpenedDatabaseFileError::NotFile);
+        }
+        let identity = opened_file_identity(&file)?;
+        Ok(Self { file, identity })
+    }
+
+    pub(crate) const fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    pub(crate) fn clone_file(&self) -> Result<File, OpenedDatabaseFileError> {
+        self.file
+            .try_clone()
+            .map_err(|_| OpenedDatabaseFileError::Open)
+    }
+
+    pub(crate) fn sync_all(&self) -> Result<(), OpenedDatabaseFileError> {
+        self.file
+            .sync_all()
+            .map_err(|_| OpenedDatabaseFileError::Inspect)
+    }
+
+    pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
+        let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+        if opened_file_identity(&current)? != self.identity {
+            return Err(OpenedDatabaseFileError::Replaced);
+        }
+        let _ = &self.file;
+        Ok(())
+    }
+
+    pub(crate) fn discard_created(self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
+        self.verify_current_path(path)?;
+        let Self { file, .. } = self;
+        drop(file);
+        for candidate in [
+            sidecar_path(path, "-wal"),
+            sidecar_path(path, "-shm"),
+            sidecar_path(path, "-journal"),
+            path.to_path_buf(),
+        ] {
+            match std::fs::remove_file(candidate) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(OpenedDatabaseFileError::Remove),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OpenedDatabaseFileError {
+    Create,
+    Open,
+    Inspect,
+    NotFile,
+    Identify,
+    Replaced,
+    Remove,
+    Unsupported,
+}
+
+impl fmt::Display for OpenedDatabaseFileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Create => "could not create the canonical SQLite file",
+            Self::Open => "could not open the verified SQLite file",
+            Self::Inspect => "could not inspect the verified SQLite file descriptor",
+            Self::NotFile => "verified SQLite locator is not a regular file",
+            Self::Identify => "could not identify the verified SQLite file descriptor",
+            Self::Replaced => "verified SQLite file was replaced while opening workers",
+            Self::Remove => "could not remove an uncommitted canonical SQLite file",
+            Self::Unsupported => "SQLite file identity is unsupported on this platform",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for OpenedDatabaseFileError {}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    value.into()
+}
+
+#[cfg(unix)]
+fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file
+        .metadata()
+        .map_err(|_| OpenedDatabaseFileError::Inspect)?;
+    let mut hasher = Sha256::new();
+    hasher.update(metadata.dev().to_le_bytes());
+    hasher.update(metadata.ino().to_le_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Ok(u64::from_le_bytes(bytes).max(1))
+}
+
+#[cfg(windows)]
+fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+
+    let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+    // SAFETY: `file` owns a valid Windows file handle and `information` is
+    // writable storage for the API's complete output structure.
+    let succeeded =
+        unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(OpenedDatabaseFileError::Identify);
+    }
+    // SAFETY: A nonzero API result initializes every output field.
+    let information = unsafe { information.assume_init() };
+    let mut hasher = Sha256::new();
+    hasher.update(b"windows-file-id");
+    hasher.update(information.volume_serial_number.to_le_bytes());
+    hasher.update(
+        ((u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low))
+            .to_le_bytes(),
+    );
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Ok(u64::from_le_bytes(bytes).max(1))
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ByHandleFileInformation {
+    _file_attributes: u32,
+    _creation_time_low_date_time: u32,
+    _creation_time_high_date_time: u32,
+    _last_access_time_low_date_time: u32,
+    _last_access_time_high_date_time: u32,
+    _last_write_time_low_date_time: u32,
+    _last_write_time_high_date_time: u32,
+    volume_serial_number: u32,
+    _file_size_high: u32,
+    _file_size_low: u32,
+    _number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetFileInformationByHandle"]
+    fn get_file_information_by_handle(
+        file: *mut std::ffi::c_void,
+        information: *mut ByHandleFileInformation,
+    ) -> i32;
+}
+
+#[cfg(not(any(unix, windows)))]
+fn opened_file_identity(_file: &File) -> Result<u64, OpenedDatabaseFileError> {
+    Err(OpenedDatabaseFileError::Unsupported)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectionMode {
@@ -258,11 +459,11 @@ fn install_authorizer(
     result.map_err(|source| policy("authorizer", source))
 }
 
-fn authorize_writer(context: AuthContext<'_>) -> Authorization {
+pub(crate) fn authorize_writer(context: AuthContext<'_>) -> Authorization {
     authorize(ConnectionMode::Writer, context)
 }
 
-fn authorize_reader(context: AuthContext<'_>) -> Authorization {
+pub(crate) fn authorize_reader(context: AuthContext<'_>) -> Authorization {
     authorize(ConnectionMode::Reader, context)
 }
 

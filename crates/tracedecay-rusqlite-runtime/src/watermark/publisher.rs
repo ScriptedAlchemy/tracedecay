@@ -123,6 +123,13 @@ impl CommittedWatermarkPublisher {
         }
     }
 
+    pub(crate) fn current(&self, shard_id: &StoreShardIdV1) -> Option<ShardWatermarkV1> {
+        self.channels
+            .by_shard
+            .get(shard_id)
+            .map(|sender| sender.borrow().clone())
+    }
+
     pub fn publish_committed(
         &self,
         receipt: &StoreCommitReceiptV1,

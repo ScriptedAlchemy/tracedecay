@@ -16,10 +16,26 @@ use tracedecay_store::{
 };
 
 use crate::connection::{self, ConnectionMode};
+use crate::migration_sql::{
+    MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, execute_query,
+};
 
 use super::{ExistingReaderLocator, ReaderStartError};
 
 const REPLY_POLL_QUANTUM: Duration = Duration::from_millis(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreSizeTelemetrySample {
+    pub page_size_bytes: u32,
+    pub page_count: u64,
+    pub freelist_pages: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableSizeTelemetrySample {
+    pub table_name: String,
+    pub bytes: u64,
+}
 
 /// Closed typed query seam. Implementations may map the existing read-operation
 /// enum to owned SQL, but callers can never inject SQL, paths, pragmas, writes,
@@ -79,6 +95,16 @@ enum SnapshotCommand {
         request: Box<RuntimeReadRequestV1>,
         reply: SyncSender<Result<RuntimeReadOutcomeV1, ReaderWorkerError>>,
     },
+    MigrationQuery {
+        request: MigrationSqlStatement,
+        reply: SyncSender<Result<MigrationSqlRows, MigrationSqlError>>,
+    },
+    StoreSize {
+        reply: SyncSender<Result<StoreSizeTelemetrySample, ReaderWorkerError>>,
+    },
+    TableSizes {
+        reply: SyncSender<Result<Vec<TableSizeTelemetrySample>, ReaderWorkerError>>,
+    },
     End {
         reply: SyncSender<Result<(), ReaderWorkerError>>,
     },
@@ -126,6 +152,22 @@ impl WorkerClient {
         self.receive_with_probe(receive, probe)
     }
 
+    pub fn pin_migration(&self) -> Result<(), MigrationSqlError> {
+        let sender = self
+            .snapshot_sender()
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+        let (reply, receive) = mpsc::sync_channel(1);
+        sender.send(SnapshotCommand::Pin { reply }).map_err(|_| {
+            MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+        })?;
+        receive
+            .recv()
+            .map_err(|_| {
+                MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+            })?
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))
+    }
+
     pub fn execute(
         &self,
         request: RuntimeReadRequestV1,
@@ -140,6 +182,49 @@ impl WorkerClient {
             })
             .map_err(|_| ReaderWorkerError::WorkerClosed)?;
         self.receive_with_probe(receive, probe)
+    }
+
+    pub fn execute_migration_query(
+        &self,
+        request: MigrationSqlStatement,
+    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        let sender = self
+            .snapshot_sender()
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+        let (reply, receive) = mpsc::sync_channel(1);
+        sender
+            .send(SnapshotCommand::MigrationQuery { request, reply })
+            .map_err(|_| {
+                MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+            })?;
+        receive
+            .recv()
+            .map_err(|_| {
+                MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+            })
+            .and_then(std::convert::identity)
+    }
+
+    pub fn store_size(&self) -> Result<StoreSizeTelemetrySample, ReaderWorkerError> {
+        let sender = self.snapshot_sender()?;
+        let (reply, receive) = mpsc::sync_channel(1);
+        sender
+            .send(SnapshotCommand::StoreSize { reply })
+            .map_err(|_| ReaderWorkerError::WorkerClosed)?;
+        receive
+            .recv()
+            .map_err(|_| ReaderWorkerError::WorkerClosed)?
+    }
+
+    pub fn table_sizes(&self) -> Result<Vec<TableSizeTelemetrySample>, ReaderWorkerError> {
+        let sender = self.snapshot_sender()?;
+        let (reply, receive) = mpsc::sync_channel(1);
+        sender
+            .send(SnapshotCommand::TableSizes { reply })
+            .map_err(|_| ReaderWorkerError::WorkerClosed)?;
+        receive
+            .recv()
+            .map_err(|_| ReaderWorkerError::WorkerClosed)?
     }
 
     pub fn begin_end(&self) -> Result<Receiver<Result<(), ReaderWorkerError>>, ReaderWorkerError> {
@@ -307,6 +392,65 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let result = executor
                     .execute_read(&transaction, &request)
                     .map_err(ReaderWorkerError::Storage);
+                let _ = reply.send(result);
+            }
+            SnapshotCommand::MigrationQuery { request, reply } => {
+                let _ = reply.send(execute_query(&transaction, request));
+            }
+            SnapshotCommand::StoreSize { reply } => {
+                let read = || -> Result<StoreSizeTelemetrySample, rusqlite::Error> {
+                    let page_size = transaction
+                        .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))?;
+                    let page_count = transaction
+                        .pragma_query_value(None, "page_count", |row| row.get::<_, i64>(0))?;
+                    let freelist_pages =
+                        transaction.pragma_query_value(None, "freelist_count", |row| {
+                            row.get::<_, i64>(0)
+                        })?;
+                    let page_size_bytes = u32::try_from(page_size)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, page_size))?;
+                    let page_count = u64::try_from(page_count)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, page_count))?;
+                    let freelist_pages = u64::try_from(freelist_pages)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, freelist_pages))?;
+                    Ok(StoreSizeTelemetrySample {
+                        page_size_bytes,
+                        page_count,
+                        freelist_pages,
+                    })
+                };
+                let result = read().map_err(|error| {
+                    ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
+                        operation: format!("read store size telemetry: {error}"),
+                    })
+                });
+                let _ = reply.send(result);
+            }
+            SnapshotCommand::TableSizes { reply } => {
+                let read = || -> Result<Vec<TableSizeTelemetrySample>, rusqlite::Error> {
+                    let mut statement = transaction.prepare(
+                        "SELECT name, SUM(pgsize) \
+                         FROM dbstat \
+                         GROUP BY name \
+                         ORDER BY name",
+                    )?;
+                    statement
+                        .query_map([], |row| {
+                            let bytes = row.get::<_, i64>(1)?;
+                            Ok(TableSizeTelemetrySample {
+                                table_name: row.get(0)?,
+                                bytes: u64::try_from(bytes).map_err(|_| {
+                                    rusqlite::Error::IntegralValueOutOfRange(1, bytes)
+                                })?,
+                            })
+                        })?
+                        .collect()
+                };
+                let result = read().map_err(|error| {
+                    ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
+                        operation: format!("read table size telemetry: {error}"),
+                    })
+                });
                 let _ = reply.send(result);
             }
             SnapshotCommand::End { reply } => {

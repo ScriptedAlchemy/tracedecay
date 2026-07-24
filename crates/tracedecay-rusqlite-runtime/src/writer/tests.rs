@@ -1,18 +1,24 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, Savepoint, Transaction};
+use tracedecay_domain::{
+    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, PayloadAccessState, ProjectId, ProvenanceId, UtcMicros,
+};
 use tracedecay_store::{
-    AdmissionConfigV1, CommitSequenceV1, IdempotencyIdentityV1, LocatorDigest,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
-    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StorageRuntimeErrorV1, StoreCommitReceiptV1,
-    StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, AnchorDispositionReasonClassV1, AnchorDispositionStateV1, CommitSequenceV1,
+    FactWriteBatch, IdempotencyIdentityV1, LocatorDigest, RepositoryOperationEnvelopeV1,
+    RepositoryWritePayloadV1, RetrievalAnchorDispositionRecordV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
+    RuntimeSubmitRequestV1, StorageRuntimeErrorV1, StoreCommitReceiptV1, StoreRuntimeBindingV1,
+    VerifiedStoreLocatorV1,
 };
 
 use super::*;
@@ -23,7 +29,7 @@ use crate::{
         MaintenanceCheckpointMode, WalPressure, WalSample,
     },
     maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
-    test_support::{binding, metadata, request},
+    test_support::{binding, metadata, request, scope},
 };
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
@@ -57,6 +63,103 @@ impl Drop for TestDatabase {
 struct TestPersistence {
     applied: Arc<AtomicU64>,
     sequence: u64,
+}
+
+struct ToggleAuthority {
+    allowed: Arc<AtomicBool>,
+}
+
+impl RuntimeWriteAuthority for ToggleAuthority {
+    fn verify(&self, _stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
+        if self.allowed.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(RuntimeWriteAuthorityError::denied(
+                "test runtime write authority revoked",
+            ))
+        }
+    }
+}
+
+struct RevokeAfterAdmissionAuthority {
+    admitted: AtomicBool,
+}
+
+impl RuntimeWriteAuthority for RevokeAfterAdmissionAuthority {
+    fn verify(&self, stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
+        if stage == RuntimeWriteAuthorityStage::BeforeAdmission
+            && !self.admitted.swap(true, Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        Err(RuntimeWriteAuthorityError::denied(
+            "test runtime write authority revoked after admission",
+        ))
+    }
+}
+
+struct RecordingCheckpointAuthority {
+    stages: Arc<Mutex<Vec<RuntimeWriteAuthorityStage>>>,
+    denied_stage: Option<RuntimeWriteAuthorityStage>,
+}
+
+struct DenyThirdBeforeCommitAuthority {
+    before_commit_checks: AtomicU64,
+}
+
+impl RuntimeWriteAuthority for DenyThirdBeforeCommitAuthority {
+    fn verify(&self, stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
+        if stage == RuntimeWriteAuthorityStage::BeforeCommit
+            && self.before_commit_checks.fetch_add(1, Ordering::SeqCst) >= 2
+        {
+            Err(RuntimeWriteAuthorityError::denied(
+                "test backup authority denied before publication",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl RuntimeWriteAuthority for RecordingCheckpointAuthority {
+    fn verify(&self, stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
+        self.stages.lock().unwrap().push(stage);
+        if self.denied_stage == Some(stage) {
+            Err(RuntimeWriteAuthorityError::denied(
+                "test checkpoint authority denied",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct RevokingPersistence {
+    inner: TestPersistence,
+    allowed: Arc<AtomicBool>,
+}
+
+impl WriterPersistence for RevokingPersistence {
+    fn lookup_idempotency(
+        &mut self,
+        transaction: &Transaction<'_>,
+        binding: &StoreRuntimeBindingV1,
+        idempotency: &IdempotencyIdentityV1,
+    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
+        self.inner
+            .lookup_idempotency(transaction, binding, idempotency)
+    }
+
+    fn apply_and_record(
+        &mut self,
+        savepoint: &mut Savepoint<'_>,
+        binding: &StoreRuntimeBindingV1,
+        request: &RuntimeSubmitRequestV1,
+    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+        let receipt = self.inner.apply_and_record(savepoint, binding, request)?;
+        self.allowed.store(false, Ordering::SeqCst);
+        Ok(receipt)
+    }
 }
 
 impl WriterPersistence for TestPersistence {
@@ -100,6 +203,36 @@ struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     interruption: AtomicU8,
+}
+
+struct DelayedInterruptionProbe {
+    inner: Probe,
+    checks_before_interruption: AtomicU64,
+    interruption: RuntimeInterruptionV1,
+}
+
+impl RuntimeRequestProbeV1 for DelayedInterruptionProbe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        self.inner.cancellation_identity()
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        self.inner.deadline_identity()
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        if self
+            .checks_before_interruption
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            None
+        } else {
+            Some(self.interruption)
+        }
+    }
 }
 
 impl Probe {
@@ -151,6 +284,95 @@ fn start(
             applied,
             sequence: 0,
         }),
+    )
+    .unwrap()
+}
+
+fn start_with_persistence(
+    database: &TestDatabase,
+    request: &RuntimeSubmitRequestV1,
+    persistence: Box<dyn WriterPersistence>,
+) -> PersistentWriter {
+    let binding = binding(&request.envelope().metadata);
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+    );
+    PersistentWriter::start_with_persistence(
+        ExistingWriterLocator::new(binding, locator, database.0.clone()).unwrap(),
+        AdmissionConfigV1::default(),
+        persistence,
+    )
+    .unwrap()
+}
+
+fn fact_request(operation: &str, key: &str, digest_byte: char) -> RuntimeSubmitRequestV1 {
+    let metadata = metadata(operation, key, digest_byte);
+    let owner = FactOwnerV1::Project {
+        project_id: ProjectId::new("project.runtime").unwrap(),
+    };
+    let identity = FactIdentityMaterialV1::new(
+        owner.clone(),
+        FactIdentitySourceV1::Application {
+            operation_id: ProvenanceId::new(operation).unwrap(),
+        },
+    )
+    .unwrap();
+    let fact_id = FactId::derive(&identity).unwrap();
+    let event = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::PayloadAccessChanged {
+            previous: PayloadAccessState::Eligible,
+            current: PayloadAccessState::Deleted,
+        },
+        UtcMicros(1),
+        None,
+    )
+    .unwrap();
+    let batch = FactWriteBatch::new(
+        fact_id,
+        owner,
+        None,
+        vec![event],
+        vec![],
+        vec![],
+        None,
+        None,
+    )
+    .unwrap()
+    .with_identity_material(identity)
+    .unwrap();
+    let transaction_scope = scope(&metadata);
+    let control = request(metadata.clone()).control().clone();
+    RuntimeSubmitRequestV1::new(
+        RepositoryOperationEnvelopeV1 {
+            metadata,
+            payload: RepositoryWritePayloadV1::Fact(Box::new(batch)),
+        },
+        transaction_scope,
+        control,
+    )
+    .unwrap()
+}
+
+fn project_fixture_request(
+    operation: &str,
+    key: &str,
+    digest_byte: char,
+    payload: RepositoryWritePayloadV1,
+) -> RuntimeSubmitRequestV1 {
+    let mut metadata_value = serde_json::to_value(metadata(operation, key, digest_byte)).unwrap();
+    metadata_value["shard_id"]["profile_id"] = serde_json::json!("profile.fixture");
+    metadata_value["shard_id"]["scope"]["project_id"] = serde_json::json!("project.fixture");
+    let metadata = serde_json::from_value(metadata_value).unwrap();
+    let transaction_scope = scope(&metadata);
+    let control = request(metadata.clone()).control().clone();
+    RuntimeSubmitRequestV1::new(
+        RepositoryOperationEnvelopeV1 { metadata, payload },
+        transaction_scope,
+        control,
     )
     .unwrap()
 }
@@ -222,6 +444,297 @@ fn checkpoint_control_surfaces_typed_deadline_and_admission_signal() {
     ));
     assert_eq!(checkpoint.pressure(), CheckpointPressure::Open);
     writer.shutdown_and_join().unwrap();
+}
+
+#[test]
+fn checkpoint_rechecks_the_same_authority_before_publication() {
+    let database = TestDatabase::new();
+    let request = request(metadata(
+        "operation.checkpoint.authority",
+        "key.checkpoint.authority",
+        'a',
+    ));
+    let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+    let checkpoint = writer.checkpoint_handle();
+    let stages = Arc::new(Mutex::new(Vec::new()));
+    let authority = Arc::new(RecordingCheckpointAuthority {
+        stages: Arc::clone(&stages),
+        denied_stage: None,
+    });
+    let probe = Arc::new(Probe::new(&request, None));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    runtime
+        .block_on(
+            checkpoint
+                .trigger_authorized(
+                    CheckpointRequest::new(CheckpointBlockers::default(), probe),
+                    authority,
+                )
+                .unwrap()
+                .wait(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        *stages.lock().unwrap(),
+        [
+            RuntimeWriteAuthorityStage::BeforeAdmission,
+            RuntimeWriteAuthorityStage::Dequeued,
+            RuntimeWriteAuthorityStage::BeforeCommit,
+        ]
+    );
+    assert!(checkpoint.status().latest.is_some());
+    writer.shutdown_and_join().unwrap();
+}
+
+#[test]
+fn checkpoint_authority_loss_is_typed_and_never_published() {
+    for denied_stage in [
+        RuntimeWriteAuthorityStage::BeforeAdmission,
+        RuntimeWriteAuthorityStage::Dequeued,
+        RuntimeWriteAuthorityStage::BeforeCommit,
+    ] {
+        let database = TestDatabase::new();
+        let request = request(metadata(
+            "operation.checkpoint.revoked",
+            "key.checkpoint.revoked",
+            'r',
+        ));
+        let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+        let checkpoint = writer.checkpoint_handle();
+        let authority = Arc::new(RecordingCheckpointAuthority {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            denied_stage: Some(denied_stage),
+        });
+        let probe = Arc::new(Probe::new(&request, None));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let result = checkpoint.trigger_authorized(
+            CheckpointRequest::new(CheckpointBlockers::default(), probe),
+            authority,
+        );
+        let error = match result {
+            Ok(ticket) => runtime.block_on(ticket.wait()).unwrap_err(),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            CheckpointControlError::AuthorityDenied {
+                stage: denied_stage
+            }
+        );
+        assert_eq!(checkpoint.status(), CheckpointStatus::default());
+        writer.shutdown_and_join().unwrap();
+    }
+}
+
+#[test]
+fn online_backup_is_verified_and_leaves_the_source_writer_usable() {
+    let database = TestDatabase::new();
+    let first = request(metadata("operation.backup.first", "key.backup.first", 'b'));
+    let writer = start(&database, &first, Arc::new(AtomicU64::new(0)));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(writer.submit(first.clone(), Arc::new(Probe::new(&first, None))))
+        .unwrap();
+    let destination = database.0.with_extension("backup.sqlite3");
+    let allowed = Arc::new(AtomicBool::new(true));
+
+    let receipt = runtime
+        .block_on(writer.snapshot_to(
+            destination.clone(),
+            Arc::new(ToggleAuthority {
+                allowed: Arc::clone(&allowed),
+            }),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        receipt.source_watermark.commit_sequence,
+        CommitSequenceV1(1)
+    );
+    assert!(receipt.destination_bytes > 0);
+    assert_ne!(receipt.destination_sha256.0, [0; 32]);
+    let backup_rows: i64 = Connection::open(&destination)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM writer_test", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(backup_rows, 1);
+
+    let second = request(metadata(
+        "operation.backup.second",
+        "key.backup.second",
+        'c',
+    ));
+    runtime
+        .block_on(writer.submit(second.clone(), Arc::new(Probe::new(&second, None))))
+        .unwrap();
+    let source_rows: i64 = Connection::open(&database.0)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM writer_test", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(source_rows, 2);
+    writer.shutdown_and_join().unwrap();
+    std::fs::remove_file(destination).unwrap();
+}
+
+#[test]
+fn online_backup_rejects_revoked_authority_and_existing_destinations() {
+    let database = TestDatabase::new();
+    let request = request(metadata(
+        "operation.backup.reject",
+        "key.backup.reject",
+        'r',
+    ));
+    let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let destination = database.0.with_extension("backup-reject.sqlite3");
+
+    let error = runtime
+        .block_on(writer.snapshot_to(
+            destination.clone(),
+            Arc::new(RevokeAfterAdmissionAuthority {
+                admitted: AtomicBool::new(false),
+            }),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        WriterActorError::AuthorityDenied {
+            stage: RuntimeWriteAuthorityStage::Dequeued
+        }
+    ));
+    assert!(!destination.exists());
+
+    std::fs::write(&destination, b"existing").unwrap();
+    let error = runtime
+        .block_on(writer.snapshot_to(
+            destination.clone(),
+            Arc::new(ToggleAuthority {
+                allowed: Arc::new(AtomicBool::new(true)),
+            }),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::DestinationExists)
+    ));
+    assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+    writer.shutdown_and_join().unwrap();
+    std::fs::remove_file(destination).unwrap();
+}
+
+#[test]
+fn online_backup_authority_loss_before_publication_removes_staging() {
+    let database = TestDatabase::new();
+    let request = request(metadata(
+        "operation.backup.prepublish",
+        "key.backup.prepublish",
+        'p',
+    ));
+    let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let destination = database.0.with_extension("backup-prepublish.sqlite3");
+
+    let error = runtime
+        .block_on(writer.snapshot_to(
+            destination.clone(),
+            Arc::new(DenyThirdBeforeCommitAuthority {
+                before_commit_checks: AtomicU64::new(0),
+            }),
+        ))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        WriterActorError::AuthorityDenied {
+            stage: RuntimeWriteAuthorityStage::BeforeCommit
+        }
+    ));
+    assert!(!destination.exists());
+    assert!(
+        std::fs::read_dir(destination.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("backup-prepublish.sqlite3.tracedecay-backup"))
+    );
+    writer.shutdown_and_join().unwrap();
+}
+
+#[test]
+fn online_backup_cancellation_and_deadline_remove_private_staging() {
+    for interruption in [
+        RuntimeInterruptionV1::Cancelled,
+        RuntimeInterruptionV1::DeadlineExceeded,
+    ] {
+        let database = TestDatabase::new();
+        let request = request(metadata(
+            "operation.backup.interrupt",
+            "key.backup.interrupt",
+            'i',
+        ));
+        let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let destination = database.0.with_extension("backup-interrupted.sqlite3");
+        let probe = Arc::new(DelayedInterruptionProbe {
+            inner: Probe::new(&request, None),
+            checks_before_interruption: AtomicU64::new(3),
+            interruption,
+        });
+
+        let error = runtime
+            .block_on(writer.snapshot_to_interruptible(
+                destination.clone(),
+                probe,
+                Arc::new(ToggleAuthority {
+                    allowed: Arc::new(AtomicBool::new(true)),
+                }),
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            (interruption, error),
+            (
+                RuntimeInterruptionV1::Cancelled,
+                WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::Cancelled)
+            ) | (
+                RuntimeInterruptionV1::DeadlineExceeded,
+                WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::DeadlineExceeded)
+            )
+        ));
+        assert!(!destination.exists());
+        let staging_prefix = format!(
+            ".{}.tracedecay-backup-",
+            destination.file_name().unwrap().to_string_lossy()
+        );
+        assert!(
+            std::fs::read_dir(destination.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&staging_prefix))
+        );
+        writer.shutdown_and_join().unwrap();
+    }
 }
 
 #[test]
@@ -364,5 +877,158 @@ fn cancelled_before_admission_never_enters_the_queue() {
         }
     ));
     assert_eq!(applied.load(Ordering::SeqCst), 0);
+    writer.shutdown_and_join().unwrap();
+}
+
+#[test]
+fn queued_fact_write_rechecks_authority_before_opening_a_transaction() {
+    let database = TestDatabase::new();
+    let request = fact_request("operation.authority.queued", "key.authority.queued", 'q');
+    let applied = Arc::new(AtomicU64::new(0));
+    let writer = start(&database, &request, Arc::clone(&applied));
+    let authority = Arc::new(RevokeAfterAdmissionAuthority {
+        admitted: AtomicBool::new(false),
+    });
+    let probe = Arc::new(Probe::new(&request, None));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let queued_outcome = runtime
+        .block_on(writer.submit_authorized(request, probe, authority))
+        .unwrap();
+
+    assert_eq!(
+        queued_outcome,
+        RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::MissingAuthority,
+        }
+    );
+    assert_eq!(applied.load(Ordering::SeqCst), 0);
+    let table_count: i64 = Connection::open(&database.0)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'writer_test'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(table_count, 0);
+    writer.shutdown_and_join().unwrap();
+}
+
+#[test]
+fn queued_evidence_and_anchor_writes_recheck_authority_before_sql_dispatch() {
+    let evidence = RepositoryWritePayloadV1::EvidenceAssembly(Box::new(
+        crate::repository::evidence_assembly::tests::write_fixture("authority.test"),
+    ));
+    let anchor = RepositoryWritePayloadV1::RetrievalAnchorDisposition(Box::new(
+        RetrievalAnchorDispositionRecordV1::new(
+            "disposition.authority.fixture",
+            tracedecay_domain::RetrievalAnchorId::new("retrieval.source.fixture").unwrap(),
+            FactOwnerV1::Project {
+                project_id: ProjectId::new("project.fixture").unwrap(),
+            },
+            AnchorDispositionStateV1::Unavailable,
+            None,
+            AnchorDispositionReasonClassV1::SourceUnavailable,
+            UtcMicros(1),
+        )
+        .unwrap(),
+    ));
+
+    for (label, payload, digest_byte) in [
+        ("evidence", evidence, 'e'),
+        ("retrieval_anchor", anchor, 'r'),
+    ] {
+        let database = TestDatabase::new();
+        let request = project_fixture_request(
+            &format!("operation.authority.{label}"),
+            &format!("key.authority.{label}"),
+            digest_byte,
+            payload,
+        );
+        let applied = Arc::new(AtomicU64::new(0));
+        let writer = start(&database, &request, Arc::clone(&applied));
+        let authority = Arc::new(RevokeAfterAdmissionAuthority {
+            admitted: AtomicBool::new(false),
+        });
+        let probe = Arc::new(Probe::new(&request, None));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let outcome = runtime
+            .block_on(writer.submit_authorized(request, probe, authority))
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            RuntimeSubmitOutcomeV1::Unavailable {
+                reason: UnavailableReasonV1::MissingAuthority,
+            },
+            "{label} write bypassed the actor authority recheck"
+        );
+        assert_eq!(applied.load(Ordering::SeqCst), 0);
+        let table_count: i64 = Connection::open(&database.0)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'writer_test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+        writer.shutdown_and_join().unwrap();
+    }
+}
+
+#[test]
+fn fact_write_rechecks_authority_before_outer_commit_and_rolls_back() {
+    let database = TestDatabase::new();
+    let request = fact_request(
+        "operation.authority.precommit",
+        "key.authority.precommit",
+        'p',
+    );
+    let applied = Arc::new(AtomicU64::new(0));
+    let allowed = Arc::new(AtomicBool::new(true));
+    let writer = start_with_persistence(
+        &database,
+        &request,
+        Box::new(RevokingPersistence {
+            inner: TestPersistence {
+                applied: Arc::clone(&applied),
+                sequence: 0,
+            },
+            allowed: Arc::clone(&allowed),
+        }),
+    );
+    let authority = Arc::new(ToggleAuthority { allowed });
+    let probe = Arc::new(Probe::new(&request, None));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let outcome = runtime
+        .block_on(writer.submit_authorized(request, probe, authority))
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::MissingAuthority,
+        }
+    );
+    assert_eq!(applied.load(Ordering::SeqCst), 1);
+    let table_count: i64 = Connection::open(&database.0)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'writer_test'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(table_count, 0);
     writer.shutdown_and_join().unwrap();
 }

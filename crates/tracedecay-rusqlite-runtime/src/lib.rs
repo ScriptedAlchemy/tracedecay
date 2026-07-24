@@ -1,6 +1,7 @@
 //! Bundled SQLite storage runtime.
 
 mod admission;
+mod authority;
 pub mod backup;
 mod checkpoint;
 mod connection;
@@ -11,6 +12,8 @@ pub mod graph;
 mod ledger;
 pub mod maintenance;
 mod migration;
+#[doc(hidden)]
+pub mod migration_sql;
 mod operation;
 mod persistence;
 pub mod read_consistency;
@@ -26,6 +29,9 @@ mod test_support;
 pub mod watermark;
 mod writer;
 
+pub use authority::{
+    RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
+};
 pub use checkpoint::{
     CheckpointBlocker, CheckpointBlockers, CheckpointFrameReport, CheckpointInterruption,
     CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,
@@ -38,6 +44,6 @@ pub use telemetry::{
 };
 pub use writer::{
     CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,
-    ExistingWriterLocator, MaintenanceCheckpointRequest, PersistentWriter, WriterActorError,
-    WriterStartError, WriterState,
+    ExistingWriterLocator, MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter,
+    WriterActorError, WriterOnlineBackupError, WriterStartError, WriterState,
 };

@@ -10,6 +10,7 @@ use tracedecay_store::{
 };
 
 use crate::{
+    RuntimeWriteAuthorityStage,
     admission::QueueItem,
     read_consistency::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
     telemetry::{WriterBatchMetrics, WriterTelemetry},
@@ -94,6 +95,18 @@ pub(super) fn process_batch(
         return;
     }
 
+    if prepared.iter().any(|prepared| {
+        prepared
+            .item
+            .authority
+            .verify(RuntimeWriteAuthorityStage::BeforeCommit)
+            .is_err()
+    }) {
+        drop(transaction);
+        settle_authority_denied(prepared, telemetry);
+        return;
+    }
+
     let commit_failure = match transaction.commit() {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
@@ -134,6 +147,13 @@ fn process_request(
     item: AcceptedRequest,
     persistence: &mut dyn WriterPersistence,
 ) -> Processed {
+    if item
+        .authority
+        .verify(RuntimeWriteAuthorityStage::Dequeued)
+        .is_err()
+    {
+        return processed(item, Ok(super::settlement::missing_authority()), false);
+    }
     if let Some(outcome) = interruption_outcome(
         &item.request,
         item.probe.as_ref(),
@@ -195,6 +215,20 @@ fn apply_new(
             Err(error) => {
                 let result =
                     driver_failure(error, "rollback cancelled receipt").result(&item.request);
+                processed(item, result, false)
+            }
+        };
+    }
+    if item
+        .authority
+        .verify(RuntimeWriteAuthorityStage::BeforeCommit)
+        .is_err()
+    {
+        return match savepoint.rollback() {
+            Ok(()) => processed(item, Ok(super::settlement::missing_authority()), false),
+            Err(error) => {
+                let result =
+                    driver_failure(error, "rollback unauthorized receipt").result(&item.request);
                 processed(item, result, false)
             }
         };
@@ -292,6 +326,14 @@ fn settle_prepared(
         };
         telemetry.completed(&result);
         prepared.item.settle(result);
+    }
+}
+
+fn settle_authority_denied(prepared: Vec<PreparedRequest>, telemetry: &WriterTelemetry) {
+    let result = Ok(super::settlement::missing_authority());
+    for prepared in prepared {
+        telemetry.completed(&result);
+        prepared.item.settle(result.clone());
     }
 }
 

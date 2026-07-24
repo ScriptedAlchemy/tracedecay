@@ -3,7 +3,10 @@ use std::path::Path;
 use rusqlite::{Connection, ErrorCode, limits::Limit};
 use tempfile::NamedTempFile;
 
-use super::{ConnectionMode, open, open_immutable_reader, with_progress_cancellation};
+use super::{
+    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, open, open_immutable_reader,
+    with_progress_cancellation,
+};
 
 fn database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");
@@ -177,5 +180,28 @@ fn policy_requires_an_existing_database() {
         open(&missing, ConnectionMode::Writer)
             .unwrap_err()
             .is_open_failure()
+    );
+}
+
+#[test]
+fn create_new_pins_and_discards_the_exact_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fresh.db");
+
+    let created = OpenedDatabaseFile::create_new(&path).unwrap();
+    assert!(path.is_file());
+    assert_ne!(created.identity(), 0);
+    created.discard_created(&path).unwrap();
+
+    assert!(!path.exists());
+}
+
+#[test]
+fn create_new_refuses_to_replace_an_existing_database() {
+    let file = NamedTempFile::new().unwrap();
+
+    assert_eq!(
+        OpenedDatabaseFile::create_new(file.path()).unwrap_err(),
+        OpenedDatabaseFileError::Create
     );
 }

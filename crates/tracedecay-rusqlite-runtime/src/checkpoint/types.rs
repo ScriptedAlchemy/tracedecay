@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use tracedecay_store::SnapshotLeaseIdV1;
 
+use crate::RuntimeWriteAuthorityStage;
+
 pub(crate) const DEFAULT_SOFT_WAL_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const DEFAULT_HARD_WAL_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -311,6 +313,7 @@ pub(crate) enum CheckpointError<E> {
     InvalidConfig(CheckpointConfigError),
     Driver(E),
     MaintenanceStillDraining(CheckpointBlockers),
+    AuthorityDenied(RuntimeWriteAuthorityStage),
 }
 
 impl<E: fmt::Display> fmt::Display for CheckpointError<E> {
@@ -323,6 +326,9 @@ impl<E: fmt::Display> fmt::Display for CheckpointError<E> {
                 "exclusive checkpoint requested before snapshots drained ({} blockers)",
                 inventory.count()
             ),
+            Self::AuthorityDenied(stage) => {
+                write!(formatter, "runtime write authority denied at {stage:?}")
+            }
         }
     }
 }

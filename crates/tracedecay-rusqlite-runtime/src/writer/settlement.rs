@@ -60,6 +60,12 @@ pub(super) fn saturation(
     }
 }
 
+pub(super) fn missing_authority() -> RuntimeSubmitOutcomeV1 {
+    RuntimeSubmitOutcomeV1::Unavailable {
+        reason: UnavailableReasonV1::MissingAuthority,
+    }
+}
+
 pub(super) fn interruption_outcome(
     request: &RuntimeSubmitRequestV1,
     probe: &dyn RuntimeRequestProbeV1,
