@@ -5,6 +5,7 @@ pub mod anchor_resolution;
 pub mod code_index;
 pub mod configuration;
 pub mod context;
+pub mod edit;
 pub mod evidence_assembly;
 pub mod feedback;
 pub mod git_reads;

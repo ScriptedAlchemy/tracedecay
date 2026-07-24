@@ -87,6 +87,7 @@ fn nested_subcommands_accept_help() {
         &["automation", "facts", "list", "--help"],
         &["migrate", "plan", "--help"],
         &["migrate", "registry-gc", "--help"],
+        &["migrate", "storage-report", "--help"],
     ] {
         assert_help_succeeds(args, "Usage:");
     }

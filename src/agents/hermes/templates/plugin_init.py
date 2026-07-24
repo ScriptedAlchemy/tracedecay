@@ -199,11 +199,6 @@ LCM_NATIVE_SCHEMAS = [
                     "description": "Maximum content characters to include per message.",
                     "default": 4000,
                 },
-                "after_store_id": {
-                    "type": "integer",
-                    "description": "Deprecated unpinned first-page compatibility input. Continue with next_cursor.",
-                    "default": 0,
-                },
                 "cursor": {
                     "type": "string",
                     "description": "Authenticated opaque continuation cursor returned as next_cursor.",

@@ -16,6 +16,10 @@ use tracedecay_tool_catalog::{
     UseCaseId,
 };
 
+const APPLICATION_COMPACT_PROFILE_ID: &str = "profile.compact";
+const APPLICATION_ADMINISTRATIVE_PROFILE_ID: &str = "profile.administrative";
+const APPLICATION_HOST_LIMITED_PROFILE_ID: &str = "profile.host-limited";
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CatalogCompositionError {
     #[error("application catalog contribution is invalid: {0}")]
@@ -84,7 +88,7 @@ fn assemble_application_catalog()
     let handlers = application_handler_descriptors()?;
     contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
     validate_application_catalog(&contributions, &handlers)?;
-    let profile = application_default_profile(&contributions)?;
+    let profiles = application_profiles(&contributions)?;
     let mut builder = CatalogSnapshotBuilderV1::new();
 
     for contribution in contributions {
@@ -93,7 +97,9 @@ fn assemble_application_catalog()
     for handler in handlers.catalog_descriptors()? {
         builder.add_handler(handler);
     }
-    builder.add_profile(profile);
+    for profile in profiles {
+        builder.add_profile(profile);
+    }
 
     Ok((builder.build()?, handlers))
 }
@@ -112,18 +118,68 @@ pub fn validate_application_catalog(
     Ok(())
 }
 
-fn application_default_profile(
+fn application_profiles(
     contributions: &[CatalogContributionV1],
+) -> Result<Vec<ProfileDefinition>, CatalogCompositionError> {
+    [
+        (
+            APPLICATION_DEFAULT_PROFILE_ID,
+            ProfileKind::Default,
+            ProfileBudget::new(160, 32_000_000, 18_000)?,
+            true,
+        ),
+        (
+            APPLICATION_COMPACT_PROFILE_ID,
+            ProfileKind::Compact,
+            ProfileBudget::COMPACT,
+            false,
+        ),
+        (
+            APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+            ProfileKind::Administrative,
+            ProfileBudget::ADMINISTRATIVE,
+            false,
+        ),
+        (
+            APPLICATION_HOST_LIMITED_PROFILE_ID,
+            ProfileKind::HostLimited,
+            ProfileBudget::HOST_LIMITED,
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(profile_id, kind, budget, requires_cli_mcp_pairing)| {
+        application_profile(
+            contributions,
+            profile_id,
+            kind,
+            budget,
+            requires_cli_mcp_pairing,
+        )
+    })
+    .collect()
+}
+
+fn application_profile(
+    contributions: &[CatalogContributionV1],
+    profile_id: &str,
+    kind: ProfileKind,
+    budget: ProfileBudget,
+    requires_cli_mcp_pairing: bool,
 ) -> Result<ProfileDefinition, CatalogCompositionError> {
+    let profile_id = ProfileId::new(profile_id)?;
     let capabilities: Vec<_> = contributions
         .iter()
         .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
-        .filter(|capability| capability.availability().is_callable())
+        .filter(|capability| {
+            capability.availability().is_callable()
+                && capability.profile_eligibility().contains(&profile_id)
+        })
         .collect();
     let capability_ids = capabilities
         .iter()
         .map(|capability| capability.capability_id().clone())
-        .collect();
+        .collect::<Vec<_>>();
     let mut routing_fixtures = capabilities
         .iter()
         .map(|capability| {
@@ -141,22 +197,43 @@ fn application_default_profile(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    routing_fixtures.extend([
-        RoutingFixtureV1::new(
-            "Preview and apply these index changes",
-            RoutingFixtureExpectation::ambiguous(vec![
-                CapabilityId::new("capability.application.git.preview")?,
-                CapabilityId::new("capability.application.git.apply")?,
-            ])?,
-        )?,
-        RoutingFixtureV1::new("Explain the weather", RoutingFixtureExpectation::Reject)?,
-        RoutingFixtureV1::new(
-            "Stage these selected hunks",
-            RoutingFixtureExpectation::InsufficientCapability {
-                capability_id: CapabilityId::new("capability.git.stage-hunks")?,
-            },
-        )?,
-    ]);
+    if !capability_ids.is_empty() {
+        let git_preview = CapabilityId::new("capability.application.git.preview")?;
+        let git_apply = CapabilityId::new("capability.application.git.apply")?;
+        if capability_ids.contains(&git_preview) && capability_ids.contains(&git_apply) {
+            routing_fixtures.push(RoutingFixtureV1::new(
+                "Preview and apply these index changes",
+                RoutingFixtureExpectation::ambiguous(vec![git_preview, git_apply])?,
+            )?);
+        }
+        routing_fixtures.push(RoutingFixtureV1::new(
+            "Explain the weather",
+            RoutingFixtureExpectation::Reject,
+        )?);
+        let stage_hunks = CapabilityId::new("capability.git.stage-hunks")?;
+        let insufficient_capability_id = contributions
+            .iter()
+            .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
+            .map(|capability| capability.capability_id())
+            .find(|capability_id| {
+                *capability_id == &stage_hunks && !capability_ids.contains(*capability_id)
+            })
+            .or_else(|| {
+                contributions
+                    .iter()
+                    .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
+                    .map(|capability| capability.capability_id())
+                    .find(|capability_id| !capability_ids.contains(*capability_id))
+            });
+        if let Some(capability_id) = insufficient_capability_id {
+            routing_fixtures.push(RoutingFixtureV1::new(
+                "Stage these selected hunks",
+                RoutingFixtureExpectation::InsufficientCapability {
+                    capability_id: capability_id.clone(),
+                },
+            )?);
+        }
+    }
     let enabled_surfaces = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -169,16 +246,18 @@ fn application_default_profile(
         contributions
             .iter()
             .flat_map(tracedecay_tool_catalog::CatalogContributionV1::bindings)
-            .any(|binding| binding.surface() == *surface)
+            .any(|binding| {
+                binding.surface() == *surface && capability_ids.contains(binding.capability_id())
+            })
     })
     .collect();
     Ok(ProfileDefinition::new(ProfileDefinitionInputV1 {
-        profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?,
-        kind: ProfileKind::Default,
+        profile_id,
+        kind,
         capability_ids,
         enabled_surfaces,
-        requires_cli_mcp_pairing: true,
-        budget: ProfileBudget::new(160, 32_000_000, 18_000)?,
+        requires_cli_mcp_pairing,
+        budget,
         routing_fixtures,
     })?)
 }

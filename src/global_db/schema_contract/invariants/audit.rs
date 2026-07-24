@@ -10,7 +10,7 @@ use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db::global_db_operation_error;
 
 use super::rows::{authority_violation, decode_authority_json};
-use super::{OPERATION, projection_checkpoint};
+use super::{AUDIT_PAGE_ROWS, OPERATION, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
 
 const AUDIT_VERSION: i64 = 2;
@@ -762,6 +762,54 @@ async fn count_suffix_rows(
     ))
 }
 
+/// Pages one projection-authority table's rowid suffix, collecting the
+/// observation ids it references.
+async fn collect_projection_suffix_ids(
+    conn: &impl QueryExecutor,
+    table: &str,
+    after_rowid: i64,
+    observation_ids: &mut BTreeSet<String>,
+) -> crate::errors::Result<()> {
+    let query = format!(
+        "SELECT rowid, observation_id FROM {table}
+         WHERE rowid > ?1 AND projector_version = ?2
+         ORDER BY rowid LIMIT ?3"
+    );
+    let mut scan_cursor = after_rowid;
+    loop {
+        let mut rows = conn
+            .query(
+                &query,
+                params![
+                    scan_cursor,
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    AUDIT_PAGE_ROWS
+                ],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            page_rows += 1;
+            scan_cursor = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            observation_ids.insert(
+                row.get::<String>(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            );
+        }
+        drop(rows);
+        if page_rows < AUDIT_PAGE_ROWS {
+            return Ok(());
+        }
+    }
+}
+
 pub(super) async fn validate_projection_authority_suffix(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
@@ -790,42 +838,61 @@ pub(super) async fn validate_projection_authority_suffix(
     } else {
         checkpoint.projection_checkpoint
     };
-    let mut rows = conn
-        .query(
-            "SELECT observation_id FROM observations
-             WHERE sequence > ?1 AND sequence <= ?2
-             UNION
-             SELECT observation_id FROM observation_projection_provenance
-             WHERE rowid > ?3 AND projector_version = ?5
-             UNION
-             SELECT observation_id FROM observation_projection_dispositions
-             WHERE rowid > ?4 AND projector_version = ?5
-             UNION
-             SELECT observation_id FROM observation_projection_aliases
-             WHERE rowid > ?6 AND projector_version = ?5",
-            params![
-                coverage_start,
-                current_projection_checkpoint,
-                checkpoint.provenance_rowid,
-                checkpoint.disposition_rowid,
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                checkpoint.alias_rowid
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    // The four sources used to be one UNION, which the SQL channel had to
+    // materialize whole; each is now paged separately and unioned here.
     let mut observation_ids = BTreeSet::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        observation_ids.insert(
-            row.get::<String>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        );
+    let mut scan_cursor = coverage_start;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT sequence, observation_id FROM observations
+                 WHERE sequence > ?1 AND sequence <= ?2
+                 ORDER BY sequence LIMIT ?3",
+                params![scan_cursor, current_projection_checkpoint, AUDIT_PAGE_ROWS],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            page_rows += 1;
+            scan_cursor = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            observation_ids.insert(
+                row.get::<String>(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            );
+        }
+        drop(rows);
+        if page_rows < AUDIT_PAGE_ROWS {
+            break;
+        }
     }
-    drop(rows);
+    collect_projection_suffix_ids(
+        conn,
+        "observation_projection_provenance",
+        checkpoint.provenance_rowid,
+        &mut observation_ids,
+    )
+    .await?;
+    collect_projection_suffix_ids(
+        conn,
+        "observation_projection_dispositions",
+        checkpoint.disposition_rowid,
+        &mut observation_ids,
+    )
+    .await?;
+    collect_projection_suffix_ids(
+        conn,
+        "observation_projection_aliases",
+        checkpoint.alias_rowid,
+        &mut observation_ids,
+    )
+    .await?;
     for observation_id in observation_ids {
         let observation = observation_by_id(conn, &observation_id).await?;
         validate_projection_effect(conn, &observation).await?;

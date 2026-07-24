@@ -48,7 +48,9 @@ use std::{
 };
 
 use crate::global_db::{CodeProjectRecord, RegisteredGlobalDb};
-use crate::migrate::durability::{StoreDurabilityClass, StoreShardKind, shard_kind_durability_class};
+use crate::migrate::durability::{
+    StoreDurabilityClass, StoreShardKind, shard_kind_durability_class,
+};
 use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_code_projects};
 use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 

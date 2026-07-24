@@ -30,7 +30,8 @@ use crate::application::configuration::ConfigurationControlStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::{
-    GlobalDbConfigurationControlStore, migrate_legacy_configuration_inputs,
+    CanonicalGenesisConfigurationV1, GlobalDbConfigurationControlStore,
+    migrate_legacy_configuration_inputs_with_genesis,
 };
 
 pub mod registry;
@@ -1173,8 +1174,8 @@ async fn open_runtime_configuration_from_store(
                 config_error(format!("invalid initial configuration revision: {error}"))
             })?;
             let legacy_target = registry::legacy_decoder::LegacyConfigurationDecodeTargetV1 {
-                target_layer,
-                target_revision_id: initial_revision_id,
+                target_layer: target_layer.clone(),
+                target_revision_id: initial_revision_id.clone(),
             };
             let environment = std::env::vars().collect::<BTreeMap<_, _>>();
             let legacy = read_legacy_configuration_inputs(
@@ -1182,13 +1183,41 @@ async fn open_runtime_configuration_from_store(
                 &environment,
                 &legacy_target,
             )?;
-            migrate_legacy_configuration_inputs(&registry, &legacy, store, current_utc_micros())
-                .await
-                .map_err(|error| {
-                    config_error(format!(
-                        "configuration initial migration could not commit: {error}"
-                    ))
-                })?;
+            // The project's first durable revision states the one binding the
+            // daemon already owns for the project it just registered. Both
+            // components restate resolved identity the caller holds — the
+            // project's own id and its project-open locator digest — so this
+            // grants no authority that a later protected `BindSource` would be
+            // required to grant. Without it a fresh project has no binding at
+            // all and every source-authorized surface is unreachable.
+            let genesis = CanonicalGenesisConfigurationV1 {
+                target_layer,
+                target_revision_id: initial_revision_id,
+                source_bindings: vec![
+                    scope_control::daemon_owned_project_source_binding(
+                        &target.project_id,
+                        &target.project_root,
+                    )
+                    .map_err(|error| {
+                        config_error(format!(
+                            "daemon project source binding could not be derived: {error}"
+                        ))
+                    })?,
+                ],
+            };
+            migrate_legacy_configuration_inputs_with_genesis(
+                &registry,
+                &legacy,
+                &genesis,
+                store,
+                current_utc_micros(),
+            )
+            .await
+            .map_err(|error| {
+                config_error(format!(
+                    "configuration initial migration could not commit: {error}"
+                ))
+            })?;
             store.current().await.map_err(map_configuration_error)?
         }
     };
