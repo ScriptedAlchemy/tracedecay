@@ -1,5 +1,8 @@
 use std::{
-    sync::atomic::{AtomicU8, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     time::Instant,
 };
 
@@ -12,6 +15,7 @@ use tracedecay_store::{
 use crate::{
     RuntimeWriteAuthorityStage,
     admission::QueueItem,
+    connection,
     read_consistency::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
     telemetry::{WriterBatchMetrics, WriterTelemetry},
 };
@@ -68,7 +72,13 @@ pub(super) fn process_batch(
     let mut items = batch.items.into_iter();
     let mut fatal = None;
     for item in items.by_ref() {
-        let processed = process_request(&mut transaction, binding, item, persistence);
+        let probe = Arc::clone(&item.probe);
+        let processed = connection::with_transaction_progress_cancellation(
+            &mut transaction,
+            move || probe.interruption().is_some(),
+            |transaction| process_request(transaction, binding, item, persistence),
+        )
+        .expect("install request-local SQLite progress handler");
         fatal = processed.fatal;
         prepared.push(processed.prepared);
         if fatal.is_some() {
@@ -171,7 +181,16 @@ fn process_request(
             return processed(item, result, false);
         }
         Ok(None) => {}
-        Err(error) => return processed(item, Err(error.clone()), is_corrupt(&error)),
+        Err(error) => {
+            if let Some(outcome) = interruption_outcome(
+                &item.request,
+                item.probe.as_ref(),
+                RuntimeCancellationStageV1::BeforeCommit,
+            ) {
+                return processed(item, Ok(outcome), false);
+            }
+            return processed(item, Err(error.clone()), is_corrupt(&error));
+        }
     }
     apply_new(transaction, binding, item, persistence)
 }
@@ -192,6 +211,20 @@ fn apply_new(
     let receipt = match apply_and_record(persistence, &mut savepoint, binding, &item.request) {
         Ok(receipt) => receipt,
         Err(error) => {
+            if let Some(outcome) = interruption_outcome(
+                &item.request,
+                item.probe.as_ref(),
+                RuntimeCancellationStageV1::BeforeCommit,
+            ) {
+                return match savepoint.rollback() {
+                    Ok(()) => processed(item, Ok(outcome), false),
+                    Err(error) => {
+                        let result = driver_failure(error, "rollback interrupted request")
+                            .result(&item.request);
+                        processed(item, result, false)
+                    }
+                };
+            }
             let corrupt = is_corrupt(&error);
             let error = rollback_or(savepoint, error, "rollback receipt/checkpoint/outbox");
             return processed(item, Err(error.clone()), corrupt || is_corrupt(&error));

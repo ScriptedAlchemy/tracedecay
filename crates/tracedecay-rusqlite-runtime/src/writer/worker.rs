@@ -330,31 +330,19 @@ impl Worker {
             let selected = queue.drain_fair();
             debug_assert!(!selected.is_empty());
             for batch in build_batches(selected, &self.config) {
-                let probes = batch
-                    .items
-                    .iter()
-                    .map(|item| Arc::clone(&item.probe))
-                    .collect::<Vec<_>>();
                 self.telemetry.released(
                     u32::try_from(batch.items.len()).unwrap_or(u32::MAX),
                     batch.bytes,
                 );
-                connection::with_progress_cancellation(
+                process_execution_batch(
                     checkpoint.connection_mut(),
-                    move || probes.iter().any(|probe| probe.interruption().is_some()),
-                    |connection| {
-                        process_batch(
-                            connection,
-                            &self.binding,
-                            batch,
-                            self.persistence.as_mut(),
-                            &self.telemetry,
-                            &self.state,
-                            &self.watermark_publisher,
-                        );
-                    },
-                )
-                .expect("install worker-local SQLite progress handler");
+                    &self.binding,
+                    batch,
+                    self.persistence.as_mut(),
+                    &self.telemetry,
+                    &self.state,
+                    &self.watermark_publisher,
+                );
                 self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                     break;
@@ -470,6 +458,29 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
         CheckpointResult::Decision { .. } => Some(CheckpointPressure::Open),
         CheckpointResult::Interrupted { .. } => None,
     }
+}
+
+pub(super) fn process_execution_batch(
+    connection: &mut rusqlite::Connection,
+    binding: &StoreRuntimeBindingV1,
+    batch: ExecutionBatch,
+    persistence: &mut dyn WriterPersistence,
+    telemetry: &WriterTelemetry,
+    state: &AtomicU8,
+    watermark_publisher: &CommittedWatermarkPublisher,
+) {
+    // Cancellation is checked for each request before and after its savepoint
+    // work. Aggregating probes into one SQLite progress handler lets a
+    // cancelled request interrupt unrelated requests in the same transaction.
+    process_batch(
+        connection,
+        binding,
+        batch,
+        persistence,
+        telemetry,
+        state,
+        watermark_publisher,
+    );
 }
 
 enum WorkerWake {

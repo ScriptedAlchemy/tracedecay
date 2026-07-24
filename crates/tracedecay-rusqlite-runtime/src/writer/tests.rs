@@ -139,6 +139,99 @@ struct RevokingPersistence {
     allowed: Arc<AtomicBool>,
 }
 
+struct CancellingFirstRequestPersistence {
+    first_probe: Arc<Probe>,
+    sequence: u64,
+}
+
+struct LongRunningPersistence;
+
+impl WriterPersistence for LongRunningPersistence {
+    fn lookup_idempotency(
+        &mut self,
+        _transaction: &Transaction<'_>,
+        _binding: &StoreRuntimeBindingV1,
+        _idempotency: &IdempotencyIdentityV1,
+    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
+        Ok(None)
+    }
+
+    fn apply_and_record(
+        &mut self,
+        savepoint: &mut Savepoint<'_>,
+        _binding: &StoreRuntimeBindingV1,
+        request: &RuntimeSubmitRequestV1,
+    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+        savepoint
+            .query_row(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT sum(x) FROM n",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| settlement::infrastructure("run long cancellation query"))?;
+        let metadata = &request.envelope().metadata;
+        Ok(StoreCommitReceiptV1 {
+            operation_id: metadata.operation_id.clone(),
+            idempotency: metadata.idempotency.clone(),
+            shard_id: metadata.shard_id.clone(),
+            incarnation: metadata.incarnation,
+            authority_epoch: metadata.authority_epoch,
+            commit_sequence: CommitSequenceV1(1),
+            committed_at: metadata.admitted_at,
+        })
+    }
+}
+
+impl WriterPersistence for CancellingFirstRequestPersistence {
+    fn lookup_idempotency(
+        &mut self,
+        _transaction: &Transaction<'_>,
+        _binding: &StoreRuntimeBindingV1,
+        _idempotency: &IdempotencyIdentityV1,
+    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
+        Ok(None)
+    }
+
+    fn apply_and_record(
+        &mut self,
+        savepoint: &mut Savepoint<'_>,
+        _binding: &StoreRuntimeBindingV1,
+        request: &RuntimeSubmitRequestV1,
+    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+        savepoint
+            .execute_batch("CREATE TABLE IF NOT EXISTS cancellation_batch (value INTEGER NOT NULL)")
+            .map_err(|_| settlement::infrastructure("create cancellation batch table"))?;
+        self.sequence += 1;
+        if self.sequence == 1 {
+            self.first_probe.interruption.store(1, Ordering::SeqCst);
+        } else {
+            savepoint
+                .query_row(
+                    "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|_| settlement::infrastructure("run unrelated batch query"))?;
+        }
+        savepoint
+            .execute(
+                "INSERT INTO cancellation_batch(value) VALUES (?1)",
+                [self.sequence],
+            )
+            .map_err(|_| settlement::infrastructure("insert cancellation batch marker"))?;
+        let metadata = &request.envelope().metadata;
+        Ok(StoreCommitReceiptV1 {
+            operation_id: metadata.operation_id.clone(),
+            idempotency: metadata.idempotency.clone(),
+            shard_id: metadata.shard_id.clone(),
+            incarnation: metadata.incarnation,
+            authority_epoch: metadata.authority_epoch,
+            commit_sequence: CommitSequenceV1(self.sequence),
+            committed_at: metadata.admitted_at,
+        })
+    }
+}
+
 impl WriterPersistence for RevokingPersistence {
     fn lookup_idempotency(
         &mut self,
@@ -878,6 +971,159 @@ fn cancelled_before_admission_never_enters_the_queue() {
     ));
     assert_eq!(applied.load(Ordering::SeqCst), 0);
     writer.shutdown_and_join().unwrap();
+}
+
+#[test]
+fn cancelled_request_does_not_interrupt_an_unrelated_request_in_the_same_batch() {
+    let database = TestDatabase::new();
+    let first = request(metadata(
+        "operation.cancel.batch.first",
+        "key.cancel.batch.first",
+        'c',
+    ));
+    let second = request(metadata(
+        "operation.cancel.batch.second",
+        "key.cancel.batch.second",
+        'd',
+    ));
+    let binding = binding(&first.envelope().metadata);
+    let first_probe = Arc::new(Probe::new(&first, None));
+    let second_probe = Arc::new(Probe::new(&second, None));
+    let admission = Admission::new(
+        Limits::new(
+            Capacity {
+                operations: 2,
+                bytes: u64::MAX,
+            },
+            Capacity {
+                operations: 1,
+                bytes: u64::MAX,
+            },
+            u64::MAX,
+            u64::MAX,
+        )
+        .unwrap(),
+    );
+    let (first_reply, mut first_result) = tokio::sync::oneshot::channel();
+    let (second_reply, mut second_result) = tokio::sync::oneshot::channel();
+    let first = Arc::new(first);
+    let second = Arc::new(second);
+    let batch = request::ExecutionBatch {
+        bytes: first.envelope().metadata.admission_bytes
+            + second.envelope().metadata.admission_bytes,
+        items: vec![
+            AcceptedRequest::new(
+                Arc::clone(&first),
+                first_probe.clone(),
+                Arc::new(UnrestrictedRuntimeWriteAuthority),
+                first_reply,
+                admission.reserve(&first.envelope().metadata).unwrap(),
+            ),
+            AcceptedRequest::new(
+                Arc::clone(&second),
+                second_probe,
+                Arc::new(UnrestrictedRuntimeWriteAuthority),
+                second_reply,
+                admission.reserve(&second.envelope().metadata).unwrap(),
+            ),
+        ],
+    };
+    let mut connection = Connection::open(&database.0).unwrap();
+    let telemetry = WriterTelemetry::default();
+    let state = AtomicU8::new(WriterState::Ready as u8);
+    let watermark = CommittedWatermarkPublisher::new(binding.clone());
+    let mut persistence = CancellingFirstRequestPersistence {
+        first_probe,
+        sequence: 0,
+    };
+
+    worker::process_execution_batch(
+        &mut connection,
+        &binding,
+        batch,
+        &mut persistence,
+        &telemetry,
+        &state,
+        &watermark,
+    );
+
+    assert!(matches!(
+        first_result.try_recv().unwrap(),
+        Ok(RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. })
+    ));
+    assert!(matches!(
+        second_result.try_recv().unwrap(),
+        Ok(RuntimeSubmitOutcomeV1::Committed { .. })
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM cancellation_batch", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn active_long_running_request_remains_interruptible() {
+    let database = TestDatabase::new();
+    let request = request(metadata("operation.cancel.long", "key.cancel.long", 'e'));
+    let binding = binding(&request.envelope().metadata);
+    let probe = Arc::new(DelayedInterruptionProbe {
+        inner: Probe::new(&request, None),
+        checks_before_interruption: AtomicU64::new(1),
+        interruption: RuntimeInterruptionV1::Cancelled,
+    });
+    let admission = Admission::new(
+        Limits::new(
+            Capacity {
+                operations: 1,
+                bytes: u64::MAX,
+            },
+            Capacity {
+                operations: 1,
+                bytes: u64::MAX,
+            },
+            u64::MAX,
+            u64::MAX,
+        )
+        .unwrap(),
+    );
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    let request = Arc::new(request);
+    let batch = request::ExecutionBatch {
+        bytes: request.envelope().metadata.admission_bytes,
+        items: vec![AcceptedRequest::new(
+            Arc::clone(&request),
+            probe,
+            Arc::new(UnrestrictedRuntimeWriteAuthority),
+            reply,
+            admission.reserve(&request.envelope().metadata).unwrap(),
+        )],
+    };
+    let mut connection = Connection::open(&database.0).unwrap();
+    let telemetry = WriterTelemetry::default();
+    let state = AtomicU8::new(WriterState::Ready as u8);
+    let watermark = CommittedWatermarkPublisher::new(binding.clone());
+
+    worker::process_execution_batch(
+        &mut connection,
+        &binding,
+        batch,
+        &mut LongRunningPersistence,
+        &telemetry,
+        &state,
+        &watermark,
+    );
+
+    assert!(matches!(
+        result.try_recv().unwrap(),
+        Ok(RuntimeSubmitOutcomeV1::CancelledBeforeCommit {
+            stage: RuntimeCancellationStageV1::BeforeCommit,
+            ..
+        })
+    ));
+    assert_eq!(state.load(Ordering::SeqCst), WriterState::Ready as u8);
 }
 
 #[test]

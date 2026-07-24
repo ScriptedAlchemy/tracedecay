@@ -253,28 +253,53 @@ fn finish_online_backup(
         }
     };
 
-    match fs::hard_link(&completed.path, destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            completed.abandon();
-            return Err(WriterOnlineBackupError::DestinationExists);
-        }
-        Err(error) => {
-            completed.abandon();
-            return Err(WriterOnlineBackupError::Io(error.to_string()));
-        }
-    }
-    if completed.pinned.verify_current_path(destination).is_err() {
-        completed.abandon();
-        return Err(WriterOnlineBackupError::DestinationReplaced);
-    }
-    completed.abandon();
-    sync_parent(destination)?;
+    publish_staging(completed, destination, sync_parent)?;
     Ok(OnlineBackupReceipt {
         source_watermark,
         destination_bytes,
         destination_sha256,
     })
+}
+
+fn publish_staging(
+    completed: CompletedStaging,
+    destination: &Path,
+    mut sync_parent: impl FnMut(&Path) -> Result<(), WriterOnlineBackupError>,
+) -> Result<(), WriterOnlineBackupError> {
+    let publication = (|| {
+        match fs::hard_link(&completed.path, destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(WriterOnlineBackupError::DestinationExists);
+            }
+            Err(error) => return Err(WriterOnlineBackupError::Io(error.to_string())),
+        }
+        completed
+            .pinned
+            .verify_current_path(destination)
+            .map_err(|_| WriterOnlineBackupError::DestinationReplaced)?;
+        if let Err(sync_error) = sync_parent(destination) {
+            let rollback = completed
+                .pinned
+                .verify_current_path(destination)
+                .map_err(file_identity_error)
+                .and_then(|()| {
+                    fs::remove_file(destination)
+                        .map_err(|error| WriterOnlineBackupError::Io(error.to_string()))
+                })
+                .and_then(|()| sync_parent(destination));
+            return match rollback {
+                Ok(()) => Err(sync_error),
+                Err(rollback_error) => Err(WriterOnlineBackupError::Io(format!(
+                    "{sync_error}; failed to roll back uncommitted backup publication: \
+                     {rollback_error}"
+                ))),
+            };
+        }
+        Ok(())
+    })();
+    completed.abandon();
+    publication
 }
 
 #[derive(Clone, Copy)]
@@ -601,5 +626,45 @@ mod tests {
         completed.abandon();
         assert_eq!(fs::read(staging_path).unwrap(), b"replacement");
         assert!(displaced.exists());
+    }
+
+    #[test]
+    fn parent_sync_failure_rolls_back_publication_before_removing_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("backup.sqlite3");
+        let mut filesystem = StagedBackupDestination::new(destination.clone());
+        let (staged, connection) = filesystem.create_new_private_destination().unwrap();
+        let completed = filesystem
+            .close_and_sync_destination(staged, connection)
+            .unwrap();
+        let staging_path = completed.path.clone();
+        let mut sync_attempts = 0;
+
+        let error = publish_staging(completed, &destination, |_| {
+            sync_attempts += 1;
+            assert!(staging_path.exists());
+            match sync_attempts {
+                1 => {
+                    assert!(destination.exists());
+                    Err(WriterOnlineBackupError::Io(
+                        "injected parent sync failure".to_owned(),
+                    ))
+                }
+                2 => {
+                    assert!(!destination.exists());
+                    Ok(())
+                }
+                _ => panic!("unexpected parent sync attempt"),
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            WriterOnlineBackupError::Io("injected parent sync failure".to_owned())
+        );
+        assert_eq!(sync_attempts, 2);
+        assert!(!destination.exists());
+        assert!(!staging_path.exists());
     }
 }

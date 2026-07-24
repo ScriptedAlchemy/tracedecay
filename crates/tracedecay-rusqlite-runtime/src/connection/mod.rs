@@ -8,7 +8,7 @@ use std::{
 };
 
 use rusqlite::{
-    Connection, OpenFlags,
+    Connection, OpenFlags, Transaction,
     hooks::{AuthAction, AuthContext, Authorization},
     limits::Limit,
 };
@@ -21,6 +21,7 @@ const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 /// startup, after which `verify_current_path` proves the pathname still names
 /// that same physical file. Attachments retain the identity, never a later
 /// pathname stat.
+#[derive(Debug)]
 pub(crate) struct OpenedDatabaseFile {
     file: File,
     identity: u64,
@@ -554,6 +555,7 @@ fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn with_progress_cancellation<T, C, F>(
     connection: &mut Connection,
     should_cancel: C,
@@ -566,6 +568,27 @@ where
     connection.progress_handler(PROGRESS_INTERVAL_OPS, Some(should_cancel))?;
     let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
     let clear = connection.progress_handler(PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
+    match result {
+        Ok(value) => {
+            clear?;
+            Ok(value)
+        }
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+pub(crate) fn with_transaction_progress_cancellation<'connection, T, C, F>(
+    transaction: &mut Transaction<'connection>,
+    should_cancel: C,
+    operation: F,
+) -> rusqlite::Result<T>
+where
+    C: FnMut() -> bool + Send + 'static,
+    F: FnOnce(&mut Transaction<'connection>) -> T,
+{
+    transaction.progress_handler(PROGRESS_INTERVAL_OPS, Some(should_cancel))?;
+    let result = catch_unwind(AssertUnwindSafe(|| operation(transaction)));
+    let clear = transaction.progress_handler(PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
     match result {
         Ok(value) => {
             clear?;
