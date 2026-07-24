@@ -252,20 +252,26 @@ function ProjectRow({ project }: { project: ProjectRegistryEntry }) {
       onClick={() => selectProject(project.project_id, project.label)}
       aria-pressed={selected}
       className={cn(
-        'flex w-full items-center gap-3 border-b border-edge-subtle px-3 py-2 text-left last:border-b-0',
+        'flex w-full items-start gap-2 border-b border-edge-subtle px-3 py-2 text-left last:border-b-0',
         'hover:bg-surface-2',
         selected && 'bg-accent/10',
       )}
     >
-      <RecencyDot lastSeenAt={project.last_seen_at} />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-medium">
-          {project.label}
+      <RecencyDot lastSeenAt={project.last_seen_at} className="mt-1.5" />
+      {/* Stacked rather than columnar: the rail is ~320px, and the previous
+       * fixed-width metadata columns clipped every field at that measure.
+       * Each line truncates independently so nothing is ever cut mid-column. */}
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="flex items-baseline gap-2">
+          <span className="min-w-0 flex-1 truncate text-xs font-medium">{project.label}</span>
           {project.is_active ? (
-            <span className="ml-2 rounded-[var(--radius-chip)] bg-accent/15 px-1.5 text-2xs font-medium text-text-primary">
+            <span className="shrink-0 rounded-[var(--radius-chip)] bg-accent/15 px-1.5 text-2xs font-medium text-text-primary">
               active
             </span>
           ) : null}
+          <span className="tabular shrink-0 text-2xs text-text-muted">
+            {relativeTime(project.last_seen_at)}
+          </span>
         </span>
         <span
           className="block truncate font-mono text-2xs text-text-muted"
@@ -273,18 +279,17 @@ function ProjectRow({ project }: { project: ProjectRegistryEntry }) {
         >
           {project.project_root}
         </span>
-      </span>
-      {branch ? (
-        <span className="inline-flex shrink-0 items-center gap-1 text-2xs text-text-muted">
-          <GitBranch aria-hidden size={11} />
-          <span className="max-w-32 truncate">{branch}</span>
+        <span className="flex items-center gap-2 text-2xs text-text-muted">
+          {branch ? (
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <GitBranch aria-hidden size={11} className="shrink-0" />
+              <span className="truncate">{branch}</span>
+            </span>
+          ) : null}
+          <span className="tabular ml-auto shrink-0">
+            {project.store_count} stores · {project.artifact_count} artifacts
+          </span>
         </span>
-      ) : null}
-      <span className="tabular w-28 shrink-0 text-right text-2xs text-text-muted">
-        {project.store_count} stores · {project.artifact_count} artifacts
-      </span>
-      <span className="tabular w-20 shrink-0 text-right text-2xs text-text-muted">
-        {relativeTime(project.last_seen_at)}
       </span>
     </button>
   );
