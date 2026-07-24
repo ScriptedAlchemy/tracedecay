@@ -212,8 +212,21 @@ pub const fn whole_store_may_be_dropped(kind: StoreShardKind) -> bool {
 /// default -- so a newly added table is protected until someone
 /// deliberately proves it disposable.
 pub fn session_authority_table_class(table: &str) -> StoreDurabilityClass {
+    // FTS5 keeps its bytes in shadow tables (`<name>_data`, `_idx`,
+    // `_docsize`, `_config`, `_content`), not in the virtual table itself.
+    // Classifying only `session_messages_fts` matched the empty shell and
+    // silently left the ~600MB of measured shadow storage at the Durable
+    // default. A shadow inherits its base virtual table's class.
+    for suffix in ["_data", "_idx", "_docsize", "_config", "_content"] {
+        if let Some(base) = table.strip_suffix(suffix)
+            && base.ends_with("_fts")
+        {
+            return session_authority_table_class(base);
+        }
+    }
     match table {
         "lcm_raw_messages"
+        | "lcm_raw_messages_fts"
         | "session_messages"
         | "session_messages_fts"
         | "sessions"
@@ -221,7 +234,20 @@ pub fn session_authority_table_class(table: &str) -> StoreDurabilityClass {
         | "observations"
         | "observation_retrieval_anchors"
         | "observation_repository_provenance"
-        | "retrieval_anchors" => StoreDurabilityClass::Recoverable,
+        | "observation_projection_dispositions"
+        | "retrieval_anchors"
+        | "retrieval_anchor_aliases"
+        // Ingest cursor positions: rebuilt from scratch when the source
+        // JSONL is re-ingested, which is the definition of Recoverable.
+        | "source_cursor_advances"
+        // Receipts of the sanitization pass over raw messages; re-running
+        // sanitization over re-ingested raw content reproduces them.
+        | "sanitization_receipts" => StoreDurabilityClass::Recoverable,
+        // Deliberately NOT listed despite their measured size (129MB/62MB in
+        // the plan-38 profile): `lcm_summary_sources` and `lcm_summary_nodes`
+        // are LCM compaction output produced by paid model calls. They are
+        // expensive to regenerate, not mechanically re-derivable, so they
+        // stay Durable by the default arm.
         _ => StoreDurabilityClass::Durable,
     }
 }
@@ -392,6 +418,19 @@ mod tests {
             "observation_retrieval_anchors",
             "observation_repository_provenance",
             "retrieval_anchors",
+            "retrieval_anchor_aliases",
+            "observation_projection_dispositions",
+            "source_cursor_advances",
+            "sanitization_receipts",
+            "lcm_raw_messages_fts",
+            // FTS5 shadow tables, where the bytes actually live (the virtual
+            // table itself is an empty shell): must inherit the base class.
+            "session_messages_fts_data",
+            "session_messages_fts_idx",
+            "session_messages_fts_docsize",
+            "session_messages_fts_config",
+            "session_messages_fts_content",
+            "lcm_raw_messages_fts_data",
         ] {
             assert_eq!(
                 session_authority_table_class(table),
@@ -408,6 +447,14 @@ mod tests {
             "store_instances",
             "configuration_entries",
             "some_future_table_nobody_classified_yet",
+            // LCM summaries are paid-model output: expensive to regenerate,
+            // not mechanically re-derivable. Deliberately Durable.
+            "lcm_summary_sources",
+            "lcm_summary_nodes",
+            // A `_data` suffix without an `_fts` base is NOT an FTS shadow
+            // and must not sneak through the shadow rule.
+            "important_data",
+            "audit_config",
         ] {
             assert_eq!(
                 session_authority_table_class(table),
