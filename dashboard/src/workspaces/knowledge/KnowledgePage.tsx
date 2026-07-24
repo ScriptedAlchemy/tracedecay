@@ -10,12 +10,14 @@ import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
-import { splitCount } from '../../ui/format.ts';
+import { formatCount, splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   MemoryOverviewPayloadSchema,
+  type CategoryCount,
   type FactRow,
+  type GrowthPoint,
   type HrrCoverageRow,
 } from './contracts.ts';
 
@@ -49,6 +51,16 @@ export function KnowledgePage() {
               value: b.count,
               hint: 'facts',
             }));
+            // Ranked by count so the rail's length is a real ordering, not an
+            // accident of whatever order the producer emitted rows in.
+            const categories = [...(stats?.categories ?? [])].sort(
+              (a, b) => b.count - a.count,
+            );
+            const categoryCeiling = categories.reduce(
+              (max, row) => Math.max(max, row.count),
+              0,
+            );
+            const growth = stats?.growth ?? [];
             return (
               <div className="flex flex-col gap-3">
                 <form
@@ -144,6 +156,20 @@ export function KnowledgePage() {
                     </div>
                   </figure>
                 ) : null}
+                {categories.length > 0 ? (
+                  <figure className="flex flex-col gap-2">
+                    <figcaption className="td-legend">facts by category</figcaption>
+                    <div className="flex flex-col gap-2">
+                      {categories.map((row) => (
+                        <CategoryBar
+                          key={row.category}
+                          row={row}
+                          ceiling={categoryCeiling}
+                        />
+                      ))}
+                    </div>
+                  </figure>
+                ) : null}
                 {(stats?.hrr_coverage ?? []).length > 0 ? (
                   <figure className="flex flex-col gap-2">
                     <figcaption className="td-legend">HRR vector coverage</figcaption>
@@ -151,6 +177,60 @@ export function KnowledgePage() {
                       {(stats?.hrr_coverage ?? []).map((row) => (
                         <HrrCoverageBar key={row.category} row={row} />
                       ))}
+                    </div>
+                  </figure>
+                ) : null}
+                {growth.length > 0 ? (
+                  <figure className="flex flex-col gap-1.5">
+                    <figcaption className="td-legend">growth</figcaption>
+                    {/* Same axis-elision as trust distribution: twelve weekly
+                     * dates at 9px in a 224px rail is unreadable debris, so
+                     * the shape carries the trend and the two endpoints are
+                     * printed directly underneath instead of a rotated,
+                     * truncated axis. */}
+                    <Chart
+                      ariaLabel={`Cumulative facts recorded across ${growth.length} periods, from ${growth[0]!.date} (${growth[0]!.cumulative_facts.toLocaleString()} facts) to ${growth[growth.length - 1]!.date} (${growth[growth.length - 1]!.cumulative_facts.toLocaleString()} facts)`}
+                      height={70}
+                      option={{
+                        xAxis: {
+                          type: 'category',
+                          data: growth.map((point) => point.date),
+                          axisLabel: { show: false },
+                          axisTick: { show: false },
+                        },
+                        yAxis: { type: 'value', axisLabel: { show: false } },
+                        grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
+                        series: [
+                          {
+                            type: 'line',
+                            showSymbol: false,
+                            smooth: true,
+                            areaStyle: {},
+                            data: growth.map((point) => point.cumulative_facts),
+                          },
+                        ],
+                      }}
+                    />
+                    {/* Date-over-value, the same shape as every other
+                     * Readout on this page, rather than one cramped line —
+                     * "MAY 8 · 3,200" beside its mirror at the opposite edge
+                     * had nowhere to go in a 224px rail and truncated into
+                     * the gap between them. */}
+                    <div
+                      aria-hidden
+                      className="flex items-start justify-between gap-2 border-t border-edge-subtle pt-1.5"
+                    >
+                      <Readout
+                        label={formatShortDate(growth[0]!.date)}
+                        value={formatCount(growth[0]!.cumulative_facts)}
+                        size="sm"
+                      />
+                      <Readout
+                        label={formatShortDate(growth[growth.length - 1]!.date)}
+                        value={formatCount(growth[growth.length - 1]!.cumulative_facts)}
+                        size="sm"
+                        align="right"
+                      />
                     </div>
                   </figure>
                 ) : null}
@@ -305,6 +385,47 @@ function FactListRow({
         />
       </span>
     </DataRow>
+  );
+}
+
+/** "2026-05-08" -> "May 8". The growth caption prints a date beside a
+ * facts count in a 224px rail; the full ISO stamp alone (10 chars) leaves no
+ * room for the count next to it before the two end labels collide. The full
+ * date stays in the chart's `ariaLabel` — this is a display-only compaction,
+ * not a different value. */
+function formatShortDate(iso: string): string {
+  const date = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+/** One category's share of the loaded fact set, read the same way the fact
+ * list itself is: a printed count for precision, a rail scaled to the busiest
+ * category on screen for ranking. No fabricated denominator — the rail
+ * measures against the largest category actually present, not an assumed
+ * total. */
+function CategoryBar({ row, ceiling }: { row: CategoryCount; ceiling: number }) {
+  const fraction = ceiling > 0 ? row.count / ceiling : null;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline gap-2">
+        <span className="min-w-0 flex-1 truncate text-2xs text-text-secondary">
+          {row.category}
+        </span>
+        <span className="td-value text-2xs text-text-primary" data-cell="numeric">
+          {formatCount(row.count)}
+        </span>
+      </div>
+      <Meter
+        fraction={fraction}
+        className="h-1"
+        ariaLabel={`${row.category}: ${row.count.toLocaleString()} facts`}
+      />
+    </div>
   );
 }
 

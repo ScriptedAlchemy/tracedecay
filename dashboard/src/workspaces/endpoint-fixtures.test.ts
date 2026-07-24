@@ -158,6 +158,21 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(buckets.size).toBeGreaterThanOrEqual(6);
     expect((data.holographic.overview?.trust_histogram ?? []).length).toBe(10);
     expect((data.holographic.entities ?? []).length).toBeGreaterThanOrEqual(6);
+    // Category composition: more than one category, and counts that vary
+    // enough to make a ranked rail meaningful rather than a flat line.
+    const categories = data.holographic.overview?.categories ?? [];
+    expect(categories.length).toBeGreaterThanOrEqual(3);
+    const categoryCounts = new Set(categories.map((c) => c.count));
+    expect(categoryCounts.size).toBeGreaterThanOrEqual(2);
+    // Growth: enough periods to draw a trend, and a monotonically
+    // non-decreasing running total (it is a cumulative counter).
+    const growth = data.holographic.overview?.growth ?? [];
+    expect(growth.length).toBeGreaterThanOrEqual(6);
+    for (let i = 1; i < growth.length; i += 1) {
+      expect(growth[i]!.cumulative_facts).toBeGreaterThanOrEqual(
+        growth[i - 1]!.cumulative_facts,
+      );
+    }
   });
 
   it('GET /api/plugins/holographic/ — explorer (MemoryListPayload)', () => {
