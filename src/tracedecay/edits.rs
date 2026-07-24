@@ -1,9 +1,63 @@
 //! Anchored source-editing primitives (str-replace, insert, symbol
 //! replacement, ast-grep rewrites) plus the single-file re-index they
 //! trigger.
+//!
+//! Direct graph mutations are crate-internal adapters; external callers must
+//! use the canonical source-edit transaction.
+//!
+//! ```compile_fail
+//! async fn direct_str_replace_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//!     let _ = graph.str_replace("src/lib.rs", "old", "new", true).await;
+//! }
+//! ```
+//! ```compile_fail
+//! async fn direct_multi_str_replace_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//!     let _ = graph
+//!         .multi_str_replace("src/lib.rs", &[("old", "new")], true)
+//!         .await;
+//! }
+//! ```
+//! ```compile_fail
+//! async fn direct_insert_at_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//!     let _ = graph
+//!         .insert_at("src/lib.rs", "anchor", "content", true, true)
+//!         .await;
+//! }
+//! ```
+//! ```compile_fail
+//! async fn direct_replace_symbol_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//!     let _ = graph.replace_symbol("symbol", "fn symbol() {}", true).await;
+//! }
+//! ```
+//! ```compile_fail
+//! async fn direct_insert_at_symbol_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//!     let _ = graph
+//!         .insert_at_symbol("symbol", "content", "before", true)
+//!         .await;
+//! }
+//! ```
+//! ```compile_fail
+//! async fn direct_ast_grep_rewrite_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//!     let _ = graph
+//!         .ast_grep_rewrite("src/lib.rs", "$A", "$A", true)
+//!         .await;
+//! }
+//! ```
+//! ```compile_fail
+//! async fn direct_move_symbol_is_not_public(graph: &tracedecay::tracedecay::TraceDecay) {
+//!     let _ = graph
+//!         .move_symbol("symbol", "src/dest.rs", true, false)
+//!         .await;
+//! }
+//! ```
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use tracedecay_application::{DirectorySyncPolicy, with_owned_temp_publish};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sync;
@@ -11,6 +65,139 @@ use crate::types::*;
 
 use super::indexing::{accumulate_symbol_scope, safe_extract};
 use super::{TraceDecay, current_timestamp};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlannedSourceEditFile {
+    pub relative_path: String,
+    pub expected: Option<String>,
+    pub intended: Option<String>,
+}
+
+#[derive(Debug)]
+struct SourceEditApplyState {
+    files: Vec<PlannedSourceEditFile>,
+    consumed: BTreeSet<String>,
+}
+
+tokio::task_local! {
+    static SOURCE_EDIT_PLAN_CAPTURE: Arc<Mutex<Vec<PlannedSourceEditFile>>>;
+    static SOURCE_EDIT_APPLY_STATE: Arc<Mutex<SourceEditApplyState>>;
+}
+
+pub(crate) async fn capture_source_edit_plan<T>(
+    future: impl Future<Output = T>,
+) -> (T, Vec<PlannedSourceEditFile>) {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let result = SOURCE_EDIT_PLAN_CAPTURE
+        .scope(Arc::clone(&capture), future)
+        .await;
+    let files = capture.lock().expect("source edit plan lock").clone();
+    (result, files)
+}
+
+pub(crate) async fn apply_source_edit_plan<T>(
+    files: Vec<PlannedSourceEditFile>,
+    future: impl Future<Output = T>,
+) -> (T, bool) {
+    let expected_count = files.len();
+    let state = Arc::new(Mutex::new(SourceEditApplyState {
+        files,
+        consumed: BTreeSet::new(),
+    }));
+    let result = SOURCE_EDIT_APPLY_STATE
+        .scope(Arc::clone(&state), future)
+        .await;
+    let complete = state.lock().expect("source edit apply lock").consumed.len() == expected_count;
+    (result, complete)
+}
+
+pub(super) fn capture_planned_source_edit(
+    relative_path: &str,
+    expected: Option<&str>,
+    intended: Option<&str>,
+) {
+    let _ = SOURCE_EDIT_PLAN_CAPTURE.try_with(|capture| {
+        capture
+            .lock()
+            .expect("source edit plan lock")
+            .push(PlannedSourceEditFile {
+                relative_path: relative_path.to_owned(),
+                expected: expected.map(str::to_owned),
+                intended: intended.map(str::to_owned),
+            });
+    });
+}
+
+pub(super) fn validate_planned_source_edit(
+    relative_path: &str,
+    expected: Option<&str>,
+    intended: Option<&str>,
+) -> Result<()> {
+    SOURCE_EDIT_APPLY_STATE
+        .try_with(|state| {
+            let mut state = state.lock().expect("source edit apply lock");
+            let Some(planned) = state
+                .files
+                .iter()
+                .find(|file| file.relative_path == relative_path)
+            else {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "source edit apply produced unplanned candidate {relative_path}"
+                    ),
+                });
+            };
+            if planned.expected.as_deref() != expected || planned.intended.as_deref() != intended {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "source edit candidate {relative_path} drifted from its exact preview"
+                    ),
+                });
+            }
+            state.consumed.insert(relative_path.to_owned());
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
+}
+
+pub(super) fn publish_planned_source_edit(
+    path: &Path,
+    relative_path: &str,
+    expected: Option<&str>,
+    intended: &str,
+) -> Result<()> {
+    validate_planned_source_edit(relative_path, expected, Some(intended))?;
+    with_owned_temp_publish(
+        path,
+        "source-edit",
+        |temporary, destination| {
+            let current = match std::fs::read_to_string(destination) {
+                Ok(current) => Some(current),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            if current.as_deref() != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "source edit candidate {relative_path} changed before atomic publication"
+                    ),
+                ));
+            }
+            crate::db::DatabaseAuthority::replace_file_atomically(
+                temporary,
+                destination,
+                "source edit candidate",
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))
+        },
+        |output| output.write_all(intended.as_bytes()),
+        DirectorySyncPolicy::Strict,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("failed to publish source edit candidate {relative_path}: {error}"),
+    })
+}
 
 impl TraceDecay {
     /// Resolves a path to a relative path string.
@@ -101,6 +288,7 @@ impl TraceDecay {
         dry_run: bool,
     ) -> Result<Option<String>> {
         if dry_run {
+            capture_planned_source_edit(rel_path, Some(original), Some(modified));
             return Ok(Some(bounded_region_diff(
                 original,
                 modified,
@@ -108,18 +296,14 @@ impl TraceDecay {
                 MAX_PREVIEW_DIFF_LINES,
             )));
         }
-        tokio::fs::write(abs_path, modified)
-            .await
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to write {rel_path}: {e}"),
-            })?;
+        publish_planned_source_edit(abs_path, rel_path, Some(original), modified)?;
         self.reindex_file(rel_path).await?;
         Ok(None)
     }
 
     /// Performs a single string replacement.
     /// Fails if `old_str` is not found or matches more than once.
-    pub async fn str_replace(
+    pub(crate) async fn str_replace(
         &self,
         path: &str,
         old_str: &str,
@@ -186,7 +370,7 @@ impl TraceDecay {
 
     /// Applies multiple string replacements atomically.
     /// Fails if any `old_str` doesn't match exactly once.
-    pub async fn multi_str_replace(
+    pub(crate) async fn multi_str_replace(
         &self,
         path: &str,
         replacements: &[(&str, &str)],
@@ -294,7 +478,7 @@ impl TraceDecay {
 
     /// Inserts content before or after a unique anchor.
     /// Anchor can be a string or 1-indexed line number.
-    pub async fn insert_at(
+    pub(crate) async fn insert_at(
         &self,
         path: &str,
         anchor: &str,
@@ -407,7 +591,7 @@ impl TraceDecay {
     /// match — if the name is ambiguous, callable definitions win; if still
     /// ambiguous after that filter, the edit is refused so we don't clobber
     /// the wrong site.
-    pub async fn replace_symbol(
+    pub(crate) async fn replace_symbol(
         &self,
         symbol: &str,
         new_source: &str,
@@ -499,7 +683,7 @@ impl TraceDecay {
     /// Inserts `content` immediately before or after a named symbol. `position`
     /// is one of `"before"` or `"after"`. Uses the same resolution logic as
     /// `replace_symbol`.
-    pub async fn insert_at_symbol(
+    pub(crate) async fn insert_at_symbol(
         &self,
         symbol: &str,
         content: &str,
@@ -582,7 +766,7 @@ impl TraceDecay {
     }
 
     /// Performs structural rewrite using ast-grep CLI.
-    pub async fn ast_grep_rewrite(
+    pub(crate) async fn ast_grep_rewrite(
         &self,
         path: &str,
         pattern: &str,
@@ -643,14 +827,14 @@ impl TraceDecay {
             });
         }
 
-        // On a dry run, omit `-U` (`--update-all`): ast-grep then prints the
-        // planned changes to stdout and leaves the file untouched, which is
-        // exactly the preview we want. A real run keeps `-U` to apply in place.
+        let source = std::fs::read_to_string(&abs_path).map_err(TraceDecayError::Io)?;
+
+        // Always ask ast-grep for its read-only structured replacement plan.
+        // Reconstructing the exact post-edit bytes here keeps dry-run capture
+        // and real application behind the same write authority.
         let abs_path_arg = abs_path.to_string_lossy();
-        let mut ast_grep_args: Vec<&str> = vec!["run", "-p", pattern, "-r", rewrite];
-        if !dry_run {
-            ast_grep_args.push("-U");
-        }
+        let mut ast_grep_args: Vec<&str> =
+            vec!["run", "-p", pattern, "-r", rewrite, "--json=compact"];
         ast_grep_args.push(abs_path_arg.as_ref());
         let output = crate::external_tools::ast_grep_command()
             .args(&ast_grep_args)
@@ -691,33 +875,80 @@ impl TraceDecay {
             });
         }
 
-        if dry_run {
-            // ast-grep printed the would-be changes to stdout; surface them as
-            // the preview and leave the file (and index) untouched.
-            let preview = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Ok(AstGrepResult {
-                success: true,
-                file_path: rel_path,
-                pattern: pattern.to_string(),
-                rewrite: rewrite.to_string(),
-                dry_run: true,
-                diff: (!preview.is_empty()).then_some(preview),
-                message: edit_success_message(true, "ast-grep rewrite completed"),
-            });
-        }
-
-        self.reindex_file(&rel_path).await?;
+        let modified = reconstruct_ast_grep_rewrite(&source, &output.stdout)?;
+        let diff = self
+            .commit_or_preview_edit(&rel_path, &abs_path, &source, &modified, dry_run)
+            .await?;
 
         Ok(AstGrepResult {
             success: true,
             file_path: rel_path,
             pattern: pattern.to_string(),
             rewrite: rewrite.to_string(),
-            dry_run: false,
-            diff: None,
-            message: "ast-grep rewrite completed".to_string(),
+            dry_run,
+            diff,
+            message: edit_success_message(dry_run, "ast-grep rewrite completed"),
         })
     }
+}
+
+#[derive(serde::Deserialize)]
+struct AstGrepJsonReplacement {
+    text: String,
+    replacement: String,
+    #[serde(rename = "replacementOffsets")]
+    replacement_offsets: AstGrepJsonOffsets,
+}
+
+#[derive(serde::Deserialize)]
+struct AstGrepJsonOffsets {
+    start: usize,
+    end: usize,
+}
+
+fn reconstruct_ast_grep_rewrite(source: &str, output: &[u8]) -> Result<String> {
+    let mut replacements: Vec<AstGrepJsonReplacement> = if output.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_slice(output).map_err(|error| TraceDecayError::Config {
+            message: format!("ast-grep returned invalid replacement JSON: {error}"),
+        })?
+    };
+    replacements.sort_by_key(|candidate| {
+        (
+            candidate.replacement_offsets.start,
+            candidate.replacement_offsets.end,
+        )
+    });
+
+    let mut modified = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for candidate in replacements {
+        let start = candidate.replacement_offsets.start;
+        let end = candidate.replacement_offsets.end;
+        if start < cursor || end < start {
+            return Err(TraceDecayError::Config {
+                message: "ast-grep returned overlapping or reversed replacement offsets"
+                    .to_string(),
+            });
+        }
+        let Some(matched) = source.get(start..end) else {
+            return Err(TraceDecayError::Config {
+                message: "ast-grep returned replacement offsets outside UTF-8 source boundaries"
+                    .to_string(),
+            });
+        };
+        if matched != candidate.text {
+            return Err(TraceDecayError::Config {
+                message: "ast-grep replacement offsets did not match the source bytes".to_string(),
+            });
+        }
+        modified.push_str(&source[cursor..start]);
+        modified.push_str(&candidate.replacement);
+        cursor = end;
+    }
+    modified.push_str(&source[cursor..]);
+    Ok(modified)
 }
 
 /// Cheap heuristic: does `source`'s first non-blank line look like a leading
@@ -911,8 +1142,12 @@ fn is_callable_edit_kind(kind: &NodeKind) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{leading_doc_or_attr, narrow_symbol_for_edit};
+    use super::{
+        capture_planned_source_edit, capture_source_edit_plan, leading_doc_or_attr,
+        narrow_symbol_for_edit, publish_planned_source_edit, reconstruct_ast_grep_rewrite,
+    };
     use crate::types::{Node, NodeKind, Visibility};
+    use tempfile::tempdir;
 
     fn node(kind: NodeKind, name: &str) -> Node {
         Node {
@@ -940,6 +1175,49 @@ mod tests {
             updated_at: 0,
             parent_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn source_edit_plan_capture_retains_exact_pre_and_post_bytes() {
+        let (_, files) = capture_source_edit_plan(async {
+            capture_planned_source_edit("src/lib.rs", Some("before\n"), Some("after\n"));
+        })
+        .await;
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, "src/lib.rs");
+        assert_eq!(files[0].expected.as_deref(), Some("before\n"));
+        assert_eq!(files[0].intended.as_deref(), Some("after\n"));
+    }
+
+    #[test]
+    fn ast_grep_reconstruction_uses_exact_validated_offsets() {
+        let output =
+            br#"[{"text":"old","replacement":"new","replacementOffsets":{"start":3,"end":6}}]"#;
+        assert_eq!(
+            reconstruct_ast_grep_rewrite("fn old() {}\n", output).unwrap(),
+            "fn new() {}\n"
+        );
+    }
+
+    #[test]
+    fn ast_grep_reconstruction_rejects_mismatched_source() {
+        let output =
+            br#"[{"text":"not-old","replacement":"new","replacementOffsets":{"start":3,"end":6}}]"#;
+        assert!(reconstruct_ast_grep_rewrite("fn old() {}\n", output).is_err());
+    }
+
+    #[test]
+    fn atomic_publication_rejects_content_drift() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("lib.rs");
+        std::fs::write(&path, "changed\n").unwrap();
+
+        assert!(
+            publish_planned_source_edit(&path, "lib.rs", Some("previewed\n"), "intended\n")
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "changed\n");
     }
 
     #[test]

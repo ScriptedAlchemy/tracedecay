@@ -1,11 +1,23 @@
 //! Tests for the `TraceDecay` orchestrator methods that aren't fully exercised
 //! by the MCP handler tests.
 
-use std::{fs, process::Command, time::Duration};
+use std::{collections::BTreeSet, fs, process::Command, time::Duration};
 use tempfile::TempDir;
+use tracedecay::application::edit::{
+    SourceEditApplicationResult, execute_source_edit, preview_source_edit_expected_state,
+};
 use tracedecay::errors::TraceDecayError;
 use tracedecay::tracedecay::{TraceDecay, is_test_file};
 use tracedecay::types::{EdgeKind, NodeKind};
+use tracedecay_application::{
+    ApplicationOperation, AuthorityReceipt, CancellationContext, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
+    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
+    SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
+};
+use tracedecay_domain::{
+    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+};
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -68,6 +80,114 @@ fn run_git(project: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+const SOURCE_EDIT_SHA256_A: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SOURCE_EDIT_SHA256_B: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+fn source_edit_digest(value: &str) -> ManifestDigest {
+    ManifestDigest::new(value).unwrap()
+}
+
+#[derive(Clone)]
+struct FixtureSourceEditAuthorization(AuthorityReceipt);
+
+impl SourceEditAuthorizationPort for FixtureSourceEditAuthorization {
+    fn admit<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _operation: &'a ApplicationOperation,
+        _observed_at: UtcMicros,
+    ) -> SourceEditAuthorizationFuture<'a> {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+
+    fn recheck_effect<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _operation: &'a ApplicationOperation,
+        _admission: &'a AuthorityReceipt,
+        _observed_at: UtcMicros,
+    ) -> SourceEditAuthorizationFuture<'a> {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+}
+
+async fn run_authorized_source_edit(
+    graph: &TraceDecay,
+    edit: SourceEditRequest,
+    idempotency_key: &str,
+) -> SourceEditApplicationResult {
+    let operation = source_edit_operation(edit.kind()).unwrap();
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.core-cli-source-edit").unwrap(),
+        RepositoryId::new("repository.core-cli-source-edit").unwrap(),
+        WorktreeId::new("worktree.core-cli-source-edit").unwrap(),
+        None,
+    )
+    .unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        tracedecay_application::CapabilityGrantId::new("grant.core-cli-source-edit").unwrap(),
+        1,
+        source_edit_digest(SOURCE_EDIT_SHA256_A),
+        ActorId::new("actor.core-cli-source-edit-issuer").unwrap(),
+        UtcMicros(1),
+        UtcMicros(1_000),
+        scope.clone(),
+        BTreeSet::from([operation.capability_id().clone()]),
+        BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Sensitive,
+    )
+    .unwrap();
+    let context = RequestContext::new(
+        ActorId::new("actor.core-cli-source-edit-requester").unwrap(),
+        scope,
+        grant,
+        RequestId::new(format!("request.{idempotency_key}")).unwrap(),
+        Deadline::new(UtcMicros(900)).unwrap(),
+        CancellationContext::active(format!("cancel.{idempotency_key}")).unwrap(),
+    )
+    .unwrap();
+    let authority = AuthorityReceipt::from_context(
+        &context,
+        PolicyDecisionRef::new(
+            "policy.core-cli-source-edit",
+            1,
+            source_edit_digest(SOURCE_EDIT_SHA256_B),
+            ComponentVersion::new("policy.core-cli-source-edit.v1").unwrap(),
+        )
+        .unwrap(),
+        UtcMicros(2),
+    )
+    .unwrap();
+    let expected_state = preview_source_edit_expected_state(graph, edit.clone())
+        .await
+        .unwrap();
+    let request = SourceEditEffectRequestV1 {
+        context,
+        authority: authority.clone(),
+        edit,
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        expected_state,
+        proof: SourceEditEffectProofV1 {
+            policy_digest: source_edit_digest(SOURCE_EDIT_SHA256_B),
+            configuration_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
+            catalog_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
+            privacy_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
+            external_proof: None,
+        },
+        observed_at: UtcMicros(3),
+    };
+    execute_source_edit(
+        graph,
+        &operation,
+        request,
+        &FixtureSourceEditAuthorization(authority),
+    )
+    .await
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -687,15 +807,21 @@ async fn str_replace_reindex_resolves_new_cross_file_call() {
     let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
-    let edit = cg
-        .str_replace(
-            "src/caller.rs",
-            "pub fn caller() {}\n",
-            "pub fn caller() { target(); }\n",
-            false,
-        )
-        .await
-        .unwrap();
+    let result = run_authorized_source_edit(
+        &cg,
+        SourceEditRequest::StrReplace {
+            path: "src/caller.rs".to_owned(),
+            old_str: "pub fn caller() {}\n".to_owned(),
+            new_str: "pub fn caller() { target(); }\n".to_owned(),
+            dry_run: false,
+            verify: false,
+        },
+        "source-edit.core-cli.reindex",
+    )
+    .await;
+    let tracedecay::application::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+        panic!("str_replace returned the wrong outcome");
+    };
     assert!(edit.success, "edit should succeed: {edit:?}");
     // A real (non-dry-run) edit writes and carries no preview diff.
     assert!(
@@ -737,15 +863,21 @@ async fn str_replace_dry_run_writes_nothing_but_returns_diff() {
     let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
-    let edit = cg
-        .str_replace(
-            "src/caller.rs",
-            "pub fn caller() {}\n",
-            "pub fn caller() { target(); }\n",
-            true, // dry_run
-        )
-        .await
-        .unwrap();
+    let result = run_authorized_source_edit(
+        &cg,
+        SourceEditRequest::StrReplace {
+            path: "src/caller.rs".to_owned(),
+            old_str: "pub fn caller() {}\n".to_owned(),
+            new_str: "pub fn caller() { target(); }\n".to_owned(),
+            dry_run: true,
+            verify: false,
+        },
+        "source-edit.core-cli.dry-run",
+    )
+    .await;
+    let tracedecay::application::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+        panic!("str_replace returned the wrong outcome");
+    };
 
     assert!(edit.success, "dry run should still validate: {edit:?}");
     assert!(
@@ -934,10 +1066,20 @@ async fn replace_symbol_dry_run_previews_without_writing() {
     let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
-    let edit = cg
-        .replace_symbol("greet", "pub fn greet() -> u32 { 2 }", true)
-        .await
-        .unwrap();
+    let result = run_authorized_source_edit(
+        &cg,
+        SourceEditRequest::ReplaceSymbol {
+            symbol: "greet".to_owned(),
+            new_source: "pub fn greet() -> u32 { 2 }".to_owned(),
+            dry_run: true,
+            verify: false,
+        },
+        "source-edit.core-cli.replace-preview",
+    )
+    .await;
+    let tracedecay::application::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+        panic!("replace_symbol returned the wrong outcome");
+    };
 
     assert!(edit.success, "dry run should validate: {edit:?}");
     assert!(edit.dry_run, "result should be flagged dry_run: {edit:?}");
@@ -1096,10 +1238,21 @@ async fn attrs_start_line_zero_survives_indexing_round_trip() {
 async fn replace_symbol_preserves_first_in_file_doc_comment() {
     let (dir, cg) = setup_first_in_file_doc().await;
 
-    let result = cg
-        .replace_symbol("src/lib.rs::foo", "fn foo() { let _x = 1; }", false)
-        .await
-        .unwrap();
+    let application_result = run_authorized_source_edit(
+        &cg,
+        SourceEditRequest::ReplaceSymbol {
+            symbol: "src/lib.rs::foo".to_owned(),
+            new_source: "fn foo() { let _x = 1; }".to_owned(),
+            dry_run: false,
+            verify: false,
+        },
+        "source-edit.core-cli.preserve-doc",
+    )
+    .await;
+    let tracedecay::application::edit::SourceEditOutcome::Edit(result) = application_result.outcome
+    else {
+        panic!("replace_symbol returned the wrong outcome");
+    };
     assert!(result.success, "replace failed: {}", result.message);
 
     let content = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
@@ -1116,15 +1269,23 @@ async fn replace_symbol_preserves_first_in_file_doc_comment() {
 async fn insert_before_first_in_file_documented_fn_goes_above_doc_block() {
     let (dir, cg) = setup_first_in_file_doc().await;
 
-    let result = cg
-        .insert_at_symbol(
-            "src/lib.rs::foo",
-            "// SPDX-License-Identifier: MIT",
-            "before",
-            false,
-        )
-        .await
-        .unwrap();
+    let application_result = run_authorized_source_edit(
+        &cg,
+        SourceEditRequest::InsertAtSymbol {
+            symbol: "src/lib.rs::foo".to_owned(),
+            content: "// SPDX-License-Identifier: MIT".to_owned(),
+            position: "before".to_owned(),
+            dry_run: false,
+            verify: false,
+        },
+        "source-edit.core-cli.insert-before-doc",
+    )
+    .await;
+    let tracedecay::application::edit::SourceEditOutcome::Insert(result) =
+        application_result.outcome
+    else {
+        panic!("insert_at_symbol returned the wrong outcome");
+    };
     assert!(result.success, "insert failed: {}", result.message);
 
     let content = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();

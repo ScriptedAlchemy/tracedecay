@@ -16,8 +16,9 @@ use crate::types::{MoveHint, MoveResult, Node, NodeKind, Visibility};
 
 use super::TraceDecay;
 use super::edits::{
-    MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
-    resolve_symbol_for_edit,
+    MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, capture_planned_source_edit,
+    edit_success_message, publish_planned_source_edit, resolve_symbol_for_edit,
+    validate_planned_source_edit,
 };
 
 impl TraceDecay {
@@ -33,7 +34,7 @@ impl TraceDecay {
     ///
     /// `update_references` is reserved for a future version; in v1 caller
     /// references are never auto-edited — the exact change rides in the hints.
-    pub async fn move_symbol(
+    pub(crate) async fn move_symbol(
         &self,
         symbol: &str,
         dest_file: &str,
@@ -198,6 +199,16 @@ impl TraceDecay {
         ));
 
         if dry_run {
+            capture_planned_source_edit(
+                &source_rel,
+                Some(source.as_str()),
+                Some(source_modified.as_str()),
+            );
+            capture_planned_source_edit(
+                &dest_rel,
+                dest_existed.then_some(dest_original.as_str()),
+                Some(dest_modified.as_str()),
+            );
             let diff = combined_diff(
                 &source_rel,
                 &source,
@@ -224,6 +235,16 @@ impl TraceDecay {
         // move. Dependency analysis can take long enough for another agent or
         // editor to change either file; blindly writing those stale snapshots
         // would discard unrelated work.
+        validate_planned_source_edit(
+            &source_rel,
+            Some(source.as_str()),
+            Some(source_modified.as_str()),
+        )?;
+        validate_planned_source_edit(
+            &dest_rel,
+            dest_existed.then_some(dest_original.as_str()),
+            Some(dest_modified.as_str()),
+        )?;
         ensure_text_unchanged(&source_abs, Some(&source), &source_rel)?;
         ensure_text_unchanged(
             &dest_abs,
@@ -234,11 +255,21 @@ impl TraceDecay {
         // Write each file through an atomic sibling rename. Destination first
         // deliberately leaves a duplicate symbol (recoverable) rather than a
         // missing one if the process stops between the two commits.
-        crate::agents::safe_write_text_file(&dest_write_abs, &dest_modified, None)?;
+        publish_planned_source_edit(
+            &dest_write_abs,
+            &dest_rel,
+            dest_existed.then_some(dest_original.as_str()),
+            &dest_modified,
+        )?;
         if let Err(e) = ensure_text_unchanged(&source_abs, Some(&source), &source_rel)
             .and_then(|()| ensure_text_unchanged(&dest_abs, Some(&dest_modified), &dest_rel))
             .and_then(|()| {
-                crate::agents::safe_write_text_file(&source_write_abs, &source_modified, None)
+                publish_planned_source_edit(
+                    &source_write_abs,
+                    &source_rel,
+                    Some(source.as_str()),
+                    &source_modified,
+                )
             })
         {
             // Roll back so a half-applied move leaves no trace. If the
