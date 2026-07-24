@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 #[cfg(test)]
 use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, Value as SqlValue, params};
+use crate::db::engine::{Executor, Value as SqlValue, WalCheckpointExecutor, params};
 use crate::tracedecay::current_timestamp;
 
 use super::{
@@ -38,7 +38,9 @@ pub(crate) fn request_mutates(request: &DoctorRequest<'_>) -> bool {
     request.apply && matches!(request.mode, "repair" | "clean" | "gc")
 }
 
-pub(crate) async fn prepare_apply(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
+pub(crate) async fn prepare_apply(
+    conn: &(impl WalCheckpointExecutor + ?Sized),
+) -> Result<(), LcmError> {
     maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Clean).await
 }
 

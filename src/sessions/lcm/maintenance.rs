@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::db::engine::{QueryExecutor, params};
+use crate::db::engine::{QueryExecutor, WalCheckpointExecutor, params};
 
 use super::LcmError;
 
@@ -157,10 +157,10 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 pub(super) async fn checkpoint_wal_for_backup(
-    conn: &(impl QueryExecutor + ?Sized),
+    conn: &(impl WalCheckpointExecutor + ?Sized),
     kind: BackupKind,
 ) -> Result<(), LcmError> {
-    let mut rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE);", ()).await?;
+    let mut rows = conn.checkpoint_wal_truncate().await?;
     let row = rows
         .next()
         .await?

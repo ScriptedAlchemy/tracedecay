@@ -7,7 +7,7 @@ use serde_json::Value;
 
 #[cfg(test)]
 use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, QueryExecutor, params};
+use crate::db::engine::{Executor, QueryExecutor, WalCheckpointExecutor, params};
 
 use super::{LcmError, LcmGcConfig, maintenance, payload, schema};
 
@@ -448,7 +448,7 @@ pub async fn run_payload_gc_with_apply(
 }
 
 pub(crate) async fn prepare_payload_gc_backup(
-    conn: &(impl QueryExecutor + ?Sized),
+    conn: &(impl WalCheckpointExecutor + ?Sized),
     storage_root: &Path,
     cfg: &LcmGcConfig,
 ) -> Result<(), LcmError> {
