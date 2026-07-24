@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
 use super::{DashboardState, build_selected_project_state, config_error};
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::global_db::ProjectRegistryContext;
 use crate::project_registry::{
     PublicCodeProject, PublicProjectRegistryContext, build_project_registry_view,
@@ -71,12 +71,7 @@ impl DashboardRuntime {
             .ok_or_else(|| config_error("tracedecay project registry is unavailable"))?;
         let context = db
             .project_registry_context_by_id(project_id)
-            .await
-            .map_err(|error| {
-                config_error(format!(
-                    "registered project registry is unavailable: {error}"
-                ))
-            })?
+            .await?
             .ok_or_else(|| config_error(format!("registered project not found: {project_id}")))?;
         if let Some(cached) = self.project_states.read().await.get(project_id).cloned()
             && cached.registry_context == context
@@ -206,6 +201,30 @@ pub(crate) async fn list(
     }))
 }
 
+pub(crate) fn is_registry_unavailable_error(error: &TraceDecayError) -> bool {
+    matches!(
+        error,
+        TraceDecayError::Database { .. } | TraceDecayError::Sqlite(_)
+    ) || matches!(
+        error,
+        TraceDecayError::Config { message }
+            if message == "tracedecay project registry is unavailable"
+    )
+}
+
+pub(crate) fn registry_unavailable_response(error: &TraceDecayError) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "status": "registry_unavailable",
+            "error": error.to_string(),
+            "project": null,
+            "aliases": [],
+            "stores": [],
+        })),
+    )
+}
+
 pub(crate) async fn context(
     State(runtime): State<DashboardRuntime>,
     AxumPath(project_id): AxumPath<String>,
@@ -223,18 +242,7 @@ pub(crate) async fn context(
     };
     let context = match db.project_registry_context_by_id(&project_id).await {
         Ok(context) => context,
-        Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "registry_unavailable",
-                    "error": error.to_string(),
-                    "project": null,
-                    "aliases": [],
-                    "stores": [],
-                })),
-            );
-        }
+        Err(error) => return registry_unavailable_response(&error),
     };
     let Some(context) = context else {
         return (

@@ -1089,6 +1089,9 @@ async fn project_scoped_api_gateway(
 
     let selected = match runtime.selected_project_state(&project_id).await {
         Ok(selected) => selected,
+        Err(err) if projects::is_registry_unavailable_error(&err) => {
+            return projects::registry_unavailable_response(&err).into_response();
+        }
         Err(err) => {
             return (
                 StatusCode::NOT_FOUND,

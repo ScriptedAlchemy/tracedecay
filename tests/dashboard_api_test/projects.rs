@@ -199,6 +199,42 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
 }
 
 #[test]
+fn project_scoped_gateway_reports_registry_read_failures_as_unavailable() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
+        let (_target_root, target_cg) = setup_target_project(&fixture).await;
+        let target_project_id = project_id(&target_cg);
+        drop(target_cg);
+        rusqlite::Connection::open(fixture._tmp.path().join("global/global.db"))
+            .expect("open dashboard registry fixture")
+            .execute_batch("DROP TABLE project_aliases")
+            .expect("break dashboard registry reads");
+
+        let (context_status, context) = get_json(
+            &agent,
+            &format!("{}/api/projects/{target_project_id}", fixture.base_url),
+        );
+        assert_eq!(context_status, 503);
+        assert_eq!(context["status"], "registry_unavailable");
+
+        let (gateway_status, gateway) = get_json(
+            &agent,
+            &format!(
+                "{}/api/projects/{target_project_id}/plugins/holographic/",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(gateway_status, 503);
+        assert_eq!(gateway["status"], "registry_unavailable");
+    });
+}
+
+#[test]
 fn project_scoped_mutations_are_rejected_for_non_active_projects() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
