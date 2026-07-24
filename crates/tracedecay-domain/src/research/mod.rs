@@ -677,6 +677,19 @@ mod tests {
     }
 
     #[test]
+    fn manifest_parent_plan_requires_plan_kind() {
+        let mut envelope = valid_envelope();
+        envelope.manifest.parent_plan.kind = EntityKind::Artifact;
+
+        assert_eq!(
+            envelope.manifest.validate_structure(),
+            Err(DomainError::UnknownReference {
+                field: "parent_plan.kind",
+            })
+        );
+    }
+
+    #[test]
     fn retrieval_anchor_rejects_incoherent_query_target_kind() {
         let mut record = valid_retrieval_anchor_record();
         record.target = RetrievalAnchorTargetV1::Query(id("query.fixture"));

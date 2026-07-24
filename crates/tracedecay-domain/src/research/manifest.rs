@@ -466,6 +466,11 @@ impl ResearchBundleManifestV1 {
         }
         self.created_by.actor_id.validate()?;
         self.parent_plan.validate()?;
+        if self.parent_plan.kind != super::subjects::EntityKind::Plan {
+            return Err(DomainError::UnknownReference {
+                field: "parent_plan.kind",
+            });
+        }
         self.repository.validate()?;
         self.base_commit.validate()?;
         self.catalog_snapshot.validate()?;

@@ -228,9 +228,14 @@ impl ResearchAnchorSubjectV1 {
             }
             Self::Document(value) => {
                 value.document.validate()?;
+                if value.document.kind != EntityKind::Document {
+                    return Err(DomainError::UnknownReference {
+                        field: "document subject kind",
+                    });
+                }
                 if let Some(version) = &value.version {
                     version.entity.validate()?;
-                    if version.entity.id != value.document.id {
+                    if version.entity != value.document {
                         return Err(DomainError::UnknownReference {
                             field: "document version",
                         });
@@ -246,5 +251,51 @@ impl ResearchAnchorSubjectV1 {
             Self::Activity(value) => Some(value),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entity(id: &str, kind: EntityKind) -> EntityRef {
+        EntityRef {
+            id: EntityId::new(id).unwrap(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn document_subject_requires_document_kind() {
+        let subject = ResearchAnchorSubjectV1::Document(DocumentResearchSubjectV1 {
+            document: entity("document.fixture", EntityKind::Artifact),
+            version: None,
+        });
+
+        assert_eq!(
+            subject.validate(),
+            Err(DomainError::UnknownReference {
+                field: "document subject kind",
+            })
+        );
+    }
+
+    #[test]
+    fn document_version_requires_exact_entity_ref() {
+        let document = entity("document.fixture", EntityKind::Document);
+        let subject = ResearchAnchorSubjectV1::Document(DocumentResearchSubjectV1 {
+            document: document.clone(),
+            version: Some(EntityVersionRef {
+                entity: entity(document.id.as_str(), EntityKind::Artifact),
+                version: Some(EntityVersionId::new("document.version.fixture").unwrap()),
+            }),
+        });
+
+        assert_eq!(
+            subject.validate(),
+            Err(DomainError::UnknownReference {
+                field: "document version",
+            })
+        );
     }
 }

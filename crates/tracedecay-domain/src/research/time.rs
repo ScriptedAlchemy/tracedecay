@@ -17,9 +17,26 @@ pub struct TimeInterval {
 
 impl TimeInterval {
     pub fn validate(&self) -> Result<(), DomainError> {
-        if self.start > self.end {
+        if self.start >= self.end {
             return Err(DomainError::InvalidTimeInterval);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn half_open_interval_rejects_zero_width() {
+        assert_eq!(
+            TimeInterval {
+                start: UtcMicros(7),
+                end: UtcMicros(7),
+            }
+            .validate(),
+            Err(DomainError::InvalidTimeInterval)
+        );
     }
 }

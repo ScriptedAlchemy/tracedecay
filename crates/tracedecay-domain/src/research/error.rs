@@ -23,7 +23,7 @@ pub enum DomainError {
     SelfSupersession,
     #[error("direct authorship requires provider-linked activity evidence")]
     AuthorshipWithoutProviderLinkage,
-    #[error("time interval start must not be after its end")]
+    #[error("time interval start must be before its end")]
     InvalidTimeInterval,
     #[error("redacted and rejected counts cannot exceed scanned count")]
     InvalidRedactionCounts,
