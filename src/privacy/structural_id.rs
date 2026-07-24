@@ -13,8 +13,17 @@ pub(crate) struct StructuralIdProtectionError;
 /// True when `value` is already a protected structural-ID token or an opaque
 /// Claude observation source digest that must not be re-hashed.
 pub(crate) fn is_already_protected_structural_id(value: &str) -> bool {
-    value.starts_with(PROTECTION_PREFIX_V1)
-        || value.starts_with(CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1)
+    has_canonical_sha256_suffix(value, PROTECTION_PREFIX_V1)
+        || has_canonical_sha256_suffix(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1)
+}
+
+fn has_canonical_sha256_suffix(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 /// Replaces credential-shaped structural identifiers with a stable,
@@ -56,7 +65,8 @@ pub(crate) fn protect_optional_sensitive_structural_id(
 #[cfg(test)]
 mod tests {
     use super::{
-        PROTECTION_PREFIX_V1, protect_optional_sensitive_structural_id,
+        CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1, PROTECTION_PREFIX_V1,
+        is_already_protected_structural_id, protect_optional_sensitive_structural_id,
         protect_sensitive_structural_id,
     };
 
@@ -90,5 +100,18 @@ mod tests {
             protect_sensitive_structural_id(opaque_source).unwrap(),
             opaque_source
         );
+    }
+
+    #[test]
+    fn forged_protection_prefixes_do_not_bypass_secret_scanning() {
+        for forged in [
+            format!("{PROTECTION_PREFIX_V1}sk-test-123456"),
+            format!("{CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1}sk-test-123456"),
+        ] {
+            assert!(!is_already_protected_structural_id(&forged));
+            let protected = protect_sensitive_structural_id(&forged).unwrap();
+            assert!(is_already_protected_structural_id(&protected));
+            assert!(!protected.contains("sk-test-123456"));
+        }
     }
 }
