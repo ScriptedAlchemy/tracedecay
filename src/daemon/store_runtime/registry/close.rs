@@ -56,38 +56,50 @@ impl StoreRuntimeRegistry {
         authority: &DatabaseAuthority,
     ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
         let reservation = self.reserve_exact_close(expected, authority)?;
-        let physical = reservation.handle.clone();
-        let mut outcome = tokio::task::spawn_blocking(move || drain_and_close_physical(&physical))
-            .await
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "join exact registered runtime close",
-                message: error.to_string(),
-            })
-            .and_then(|result| result);
-
-        if outcome.is_ok() {
-            outcome = reservation
-                .handle
-                .validate_opened_file_identity("complete exact registered runtime close")
-                .map(|_| ());
-        }
-        if outcome.is_ok() {
-            outcome = reservation
-                .handle
-                .runtime()
-                .transition(RuntimeMaintenanceStateV1::Closed)
-                .map_err(
-                    |error| StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+        let registry = self.clone();
+        // The completion task owns the reservation. Dropping this caller's
+        // join handle detaches the task, so physical close still reaches the
+        // matching lifecycle transition and `finish_exact_close`.
+        tokio::spawn(async move {
+            let physical = reservation.handle.clone();
+            let mut outcome =
+                tokio::task::spawn_blocking(move || drain_and_close_physical(&physical))
+                    .await
+                    .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "join exact registered runtime close",
                         message: error.to_string(),
-                    },
-                );
-        } else {
-            let _ = reservation
-                .handle
-                .runtime()
-                .transition(RuntimeMaintenanceStateV1::Faulted);
-        }
-        self.finish_exact_close(reservation, outcome)
+                    })
+                    .and_then(|result| result);
+
+            if outcome.is_ok() {
+                outcome = reservation
+                    .handle
+                    .validate_opened_file_identity("complete exact registered runtime close")
+                    .map(|_| ());
+            }
+            if outcome.is_ok() {
+                outcome = reservation
+                    .handle
+                    .runtime()
+                    .transition(RuntimeMaintenanceStateV1::Closed)
+                    .map_err(
+                        |error| StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+                            message: error.to_string(),
+                        },
+                    );
+            } else {
+                let _ = reservation
+                    .handle
+                    .runtime()
+                    .transition(RuntimeMaintenanceStateV1::Faulted);
+            }
+            registry.finish_exact_close(reservation, outcome)
+        })
+        .await
+        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "join cancellation-safe exact registered runtime close",
+            message: error.to_string(),
+        })?
     }
 
     fn reserve_exact_close(
@@ -264,26 +276,27 @@ impl StoreRuntimeRegistry {
 mod tests {
     use std::fmt::Debug;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
 
     use tracedecay_domain::{
         BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
     };
     use tracedecay_rusqlite_runtime::graph::fixtures::create_graph_fixture_database_v1;
     use tracedecay_store::{
-        AdmissionConfigV1, CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1,
-        RuntimeMaintenanceStateV1, StoreClientIdV1, StoreIncarnationV1, StoreShardIdV1,
-        StoreShardScopeV1, VerifiedStoreLocatorV1,
+        CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1,
+        StoreClientIdV1, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
+        VerifiedStoreLocatorV1,
     };
 
     use super::*;
-    use crate::daemon::store_runtime::registry::rusqlite_graph::ExplicitPrecutoverRusqliteGraphPublisher;
     use crate::daemon::store_runtime::registry::{
-        PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, ProfileAuthorityPinResult,
-        PublishedShardRuntime, ResolvedStoreLocator, ShardRuntimeBuildRequest,
-        ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
-        StoreRuntimeOpenResult, StoreRuntimeRegistryConfig, StoreRuntimeRegistryFuture,
-        StoreRuntimeResolver,
+        LifecycleShardRuntimePublisher, PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot,
+        ProfileAuthorityPinResult, PublishedShardRuntime, ResolvedStoreLocator,
+        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenMode,
+        StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistryConfig,
+        StoreRuntimeRegistryFuture, StoreRuntimeResolver,
     };
     use crate::daemon::store_runtime::shard::ShardRuntime;
 
@@ -347,11 +360,7 @@ mod tests {
         let authority = DatabaseAuthority::for_runtime(&path, "mount exact-close graph").unwrap();
         let registry = StoreRuntimeRegistry::new(
             Arc::new(FixtureResolver { path }),
-            Arc::new(
-                ExplicitPrecutoverRusqliteGraphPublisher::for_test_integration(
-                    AdmissionConfigV1::default(),
-                ),
-            ),
+            Arc::new(LifecycleShardRuntimePublisher),
         );
         let incarnation = StoreIncarnationV1::new(1).unwrap();
         let profile = match registry
@@ -449,6 +458,168 @@ mod tests {
             registry.lookup(&binding),
             StoreRuntimeLookup::Missing { .. }
         ));
+        drop(profile);
+    }
+
+    struct BlockingCloseAttachment {
+        opened_file_identity: u64,
+        drained: AtomicBool,
+        close_started: tokio::sync::Notify,
+        close_released: Mutex<bool>,
+        close_wake: Condvar,
+        closed: AtomicBool,
+    }
+
+    impl BlockingCloseAttachment {
+        fn release_close(&self) {
+            *self.close_released.lock().unwrap() = true;
+            self.close_wake.notify_all();
+        }
+    }
+
+    impl PhysicalRuntimeAttachment for BlockingCloseAttachment {
+        fn snapshot(&self) -> PhysicalRuntimeSnapshot {
+            PhysicalRuntimeSnapshot {
+                healthy: true,
+                writer_present: !self.drained.load(Ordering::SeqCst),
+                ..PhysicalRuntimeSnapshot::default()
+            }
+        }
+
+        fn opened_file_identity(&self) -> Result<u64, String> {
+            Ok(self.opened_file_identity)
+        }
+
+        fn drain(&self) -> Result<(), String> {
+            self.drained.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn close_and_join(&self) -> Result<(), String> {
+            self.close_started.notify_one();
+            let mut released = self.close_released.lock().unwrap();
+            while !*released {
+                released = self.close_wake.wait(released).unwrap();
+            }
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct BlockingClosePublisher {
+        attachment: Arc<BlockingCloseAttachment>,
+    }
+
+    impl ShardRuntimePublisher for BlockingClosePublisher {
+        fn publish(
+            &self,
+            request: ShardRuntimeBuildRequest,
+        ) -> StoreRuntimeRegistryFuture<
+            '_,
+            Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>,
+        > {
+            let attachment = Arc::clone(&self.attachment);
+            Box::pin(async move {
+                let runtime = Arc::new(ShardRuntime::new(
+                    request.binding().clone(),
+                    matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
+                ));
+                runtime
+                    .transition(RuntimeMaintenanceStateV1::Opening)
+                    .and_then(|()| runtime.transition(RuntimeMaintenanceStateV1::Ready))
+                    .unwrap();
+                Ok(PublishedShardRuntime::new(runtime, attachment))
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_exact_close_still_finishes_reserved_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("graph.db");
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let opened_file_identity =
+            crate::sessions::source::sqlite_generation_identity(&path).unwrap();
+        let attachment = Arc::new(BlockingCloseAttachment {
+            opened_file_identity,
+            drained: AtomicBool::new(false),
+            close_started: tokio::sync::Notify::new(),
+            close_released: Mutex::new(false),
+            close_wake: Condvar::new(),
+            closed: AtomicBool::new(false),
+        });
+        let authority =
+            DatabaseAuthority::for_runtime(&path, "mount cancellation-safe exact-close").unwrap();
+        let registry = StoreRuntimeRegistry::new(
+            Arc::new(FixtureResolver { path }),
+            Arc::new(BlockingClosePublisher {
+                attachment: Arc::clone(&attachment),
+            }),
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let profile = match registry
+            .open(StoreRuntimeOpenRequest::new(
+                profile_shard(),
+                incarnation,
+                None,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            other => panic!("profile publication failed: {other:?}"),
+        };
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let code = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority.clone(),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            other => panic!("code publication failed: {other:?}"),
+        };
+        let binding = code.binding().clone();
+        drop(code);
+
+        let close_registry = registry.clone();
+        let close_binding = binding.clone();
+        let close =
+            tokio::spawn(
+                async move { close_registry.close_exact(&close_binding, &authority).await },
+            );
+        if tokio::time::timeout(Duration::from_secs(2), attachment.close_started.notified())
+            .await
+            .is_err()
+        {
+            attachment.release_close();
+            panic!("exact close did not enter the blocking physical close");
+        }
+        close.abort();
+        assert!(close.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Evicting { .. }
+        ));
+
+        attachment.release_close();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(
+                registry.lookup(&binding),
+                StoreRuntimeLookup::Missing { .. }
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(attachment.closed.load(Ordering::SeqCst));
         drop(profile);
     }
 
