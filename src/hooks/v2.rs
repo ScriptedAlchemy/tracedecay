@@ -3,7 +3,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::UtcMicros;
+use tracedecay_application::ResolvedScope;
+use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_hooks::{
     AsyncHookAdmissionPortV1, HookAdmissionFutureV1, HookConfigurationFileReaderV1,
     HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
@@ -48,11 +49,22 @@ pub(crate) fn publish_daemon_bindings(
             message: "cannot publish Hook V2 binding without typed project identity".to_owned(),
         }
     })?;
-    let project_id =
-        project_id_for_layout(layout).ok_or_else(|| crate::errors::TraceDecayError::Config {
-            message: "cannot derive Hook V2 typed project identity".to_owned(),
-        })?;
+    let typed_project_id = ProjectId::new(project_key.to_owned()).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: format!("cannot validate Hook V2 project identity: {error}"),
+        }
+    })?;
+    let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+        &layout.project_root,
+        &typed_project_id,
+    )
+    .map_err(|error| crate::errors::TraceDecayError::Config {
+        message: format!("cannot resolve Hook V2 repository/worktree scope: {error}"),
+    })?;
     let now = now_utc();
+    let revision = now.0.max(1) as u64;
+    let (project_id, repository_id, worktree_id, worktree_epoch) =
+        binding_identity_from_scope(&scope, revision);
     for host in HOSTS {
         let capabilities = [
             tracedecay_hooks::HookEventFamily::SessionBoundary,
@@ -69,15 +81,15 @@ pub(crate) fn publish_daemon_bindings(
         .collect();
         let snapshot = tracedecay_hooks::HookConfigurationSnapshotV1 {
             schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
-            revision: now.0.max(1) as u64,
+            revision,
             published_at: now,
             expires_at: UtcMicros(now.0.saturating_add(24 * 60 * 60 * 1_000_000)),
             binding: HookScopeBindingV1 {
                 host: *host,
                 project_id,
-                repository_id: domain_hash16(project_key, "repository"),
-                worktree_id: domain_hash16(project_key, "worktree"),
-                worktree_epoch: 1,
+                repository_id,
+                worktree_id,
+                worktree_epoch,
                 binding_token: domain_hash32(project_key, host.as_key()),
                 capabilities,
             },
@@ -95,6 +107,18 @@ pub(crate) fn publish_daemon_bindings(
             })?;
     }
     Ok(())
+}
+
+fn binding_identity_from_scope(
+    scope: &ResolvedScope,
+    binding_revision: u64,
+) -> ([u8; 16], [u8; 16], [u8; 16], u64) {
+    (
+        domain_hash16(scope.project_id.as_str(), "project"),
+        domain_hash16(scope.repository_id.as_str(), "repository"),
+        domain_hash16(scope.worktree_id.as_str(), "worktree"),
+        binding_revision.max(1),
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -473,6 +497,29 @@ fn unavailable() -> HookV2Dispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_domain::{RepositoryId, WorktreeId};
+
+    fn scope(worktree: &str) -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new("project.hook-v2-test").unwrap(),
+            RepositoryId::new("repository.hook-v2-test").unwrap(),
+            WorktreeId::new(worktree).unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn hook_binding_uses_exact_resolved_worktree_and_revision_epoch() {
+        let first = binding_identity_from_scope(&scope("worktree.first"), 17);
+        let second = binding_identity_from_scope(&scope("worktree.second"), 19);
+
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.1, second.1);
+        assert_ne!(first.2, second.2);
+        assert_eq!(first.3, 17);
+        assert_eq!(second.3, 19);
+    }
 
     #[test]
     fn opencode_event_uses_nested_properties_identity() {
