@@ -98,8 +98,12 @@ export function StatTile({
   /** Narrow-rail variant: smaller numerals that never clip. */
   dense?: boolean;
 }) {
+  // A readout is something you look AT, so the tile sits on the raised plane
+  // rather than flush with the panel behind it. The values these carry are
+  // small counts, not brain-scale magnitudes, so they stay off the display
+  // tier -- a repository count set at 34px would be shouting a three.
   return (
-    <div className="min-w-0 border border-edge-subtle bg-surface-1 px-3 py-2">
+    <div className="td-raised min-w-0 border border-edge-subtle px-3 py-2">
       <Readout label={label} value={value} note={hint} size={dense ? 'sm' : 'lg'} />
     </div>
   );

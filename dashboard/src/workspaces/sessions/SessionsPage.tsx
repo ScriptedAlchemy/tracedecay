@@ -141,7 +141,9 @@ export function SessionsPage() {
                         selected={selected === hit}
                         onSelect={() => setSelected(hit)}
                       >
-                        <span className="td-legend w-14 shrink-0 truncate">{provider}</span>
+                        <span className="td-legend w-14 shrink-0 truncate max-md:hidden">
+                          {provider}
+                        </span>
                         <span className="td-legend w-14 shrink-0 border border-edge-subtle px-1 py-1 text-center">
                           {role}
                         </span>
@@ -149,7 +151,7 @@ export function SessionsPage() {
                           {snippet}
                         </span>
                         <span
-                          className="td-value w-28 shrink-0 text-right text-2xs text-text-muted"
+                          className="td-value w-28 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted max-md:hidden"
                           data-cell="numeric"
                         >
                           {when}
@@ -194,8 +196,14 @@ export function SessionsPage() {
                       selected={selected === row}
                       onSelect={() => setSelected(row)}
                     >
+                      {/* The session id carries the provider as its own prefix,
+                       * so under 768px the separate provider column and the
+                       * wall-clock stamp both go: keeping them collapsed the
+                       * id -- the only unique thing on the row -- to nothing. */}
                       {provider ? (
-                        <span className="td-legend w-14 shrink-0 truncate">{provider}</span>
+                        <span className="td-legend w-14 shrink-0 truncate max-md:hidden">
+                          {provider}
+                        </span>
                       ) : null}
                       <span className="td-value min-w-0 flex-1 truncate text-text-primary">
                         {id}
@@ -219,7 +227,7 @@ export function SessionsPage() {
                         </span>
                       ) : null}
                       <span
-                        className="td-value w-28 shrink-0 text-right text-2xs text-text-muted"
+                        className="td-value w-28 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted max-md:hidden"
                         data-cell="numeric"
                       >
                         {when}
