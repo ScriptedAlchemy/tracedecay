@@ -2,9 +2,8 @@
 //!
 //! Builds one published code generation from checked-in sanitized corpus
 //! fixtures, then runs the shared `CompositionKernel` over the real exact,
-//! lexical, and graph production lanes (plus the production semantic runtime
-//! composition path, which returns the typed PR9 fallback while semantic is
-//! offline/indexing). No duplicate mock retriever exists here.
+//! lexical, and graph production lanes. Optional semantic and rerank stages
+//! remain explicitly pending until their real runtimes and generations run.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
 //! plus current/10x resource samples, cancellation, offline, and fallback
@@ -22,7 +21,6 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::application::code_index::open_production_code_index_owner_v1;
-use crate::application::semantic_runtime::compose_project_application_semantic_search;
 use crate::code_index::chunks::content_digest;
 use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use crate::code_index::production::{
@@ -49,28 +47,27 @@ use crate::query::retrieval::lexical::{
     LexicalLaneRequest, LexicalLaneRetriever,
 };
 use crate::query::retrieval::ports::CodeCandidateBindingV1;
-use crate::query::retrieval::semantic::{
-    SemanticExecutionControl, SemanticQueryModeV1, SemanticQueryServiceOutcomeV1,
-    SemanticRetrievalRequestV1,
-};
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision,
     DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
     ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId, LanguageId, ManifestDigest,
     PolicyRevisionId, Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryDigest, QueryMac,
-    QueryNormalizationRevision, RelationEdgeKindV1, RepositoryId, RetrievalAnchorId,
-    RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
-    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark,
+    ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryNormalizationRevision,
+    RelationEdgeKindV1, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrievalFailure,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SnapshotFileDispositionV1,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 
 const WORKLOAD_RELATIVE: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
-const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
+pub(super) const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
 const REQUIRED_CANCELLATION: &str = "bounded_typed_cancelled";
 const REQUIRED_OFFLINE: &str = "no_network_and_pr9_fallback_available";
+pub(super) const EVALUATION_SEED: &str = "not_applicable_deterministic_no_rng";
+pub(super) const EVALUATION_CACHE_STATE: &str = "cold_empty_in_memory_publication";
+const CORPUS_DIGEST_DOMAIN: &str = "tracedecay.search-eval.corpus-content.v1";
 
 #[derive(Debug, Error)]
 pub enum CandidateOutputError {
@@ -115,6 +112,16 @@ pub struct CorpusDocumentV1 {
     pub scope: String,
     pub language: String,
     pub eligibility: String,
+}
+
+#[derive(Serialize)]
+struct CorpusContentBindingV1<'a> {
+    document_id: &'a str,
+    path: &'a str,
+    scope: &'a str,
+    language: &'a str,
+    eligibility: &'a str,
+    content_digest: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,16 +183,37 @@ pub struct RankedCandidateRowV1 {
 pub struct QueryCandidateRowV1 {
     pub query_id: String,
     pub ranked: Vec<RankedCandidateRowV1>,
-    pub confidence_ppm: u32,
     pub abstained: bool,
+}
+
+/// Truthful execution state for an optional evaluated retrieval stage.
+///
+/// Candidate generation records optional stages only when a real stage ran.
+/// A configured profile without such a run remains `Pending`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionalStageMeasurementV1 {
+    NotRequested,
+    Pending,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OptionalStageMeasurementsV1 {
+    pub semantic: OptionalStageMeasurementV1,
+    pub rerank: OptionalStageMeasurementV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceSampleV1 {
-    pub peak_rss_bytes: u64,
-    pub p99_latency_us: u64,
+    pub status: OptionalStageMeasurementV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+    pub latency_samples_us: Vec<u64>,
     pub measured_queries: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,13 +224,18 @@ pub struct ProductionCandidateOutputV1 {
     pub profile_id: String,
     pub partition: String,
     pub production_boundary: String,
-    pub source_commit: String,
+    pub fixture_source_commit: String,
+    pub fixture_source_tree: String,
+    pub corpus_digest: String,
+    pub seed: String,
+    pub cache_state: String,
     pub toolchain: String,
     pub hardware: String,
     pub fallback_digest: String,
     pub pr9_fallback_digest: String,
     pub cancellation: String,
     pub offline: String,
+    pub optional_stages: OptionalStageMeasurementsV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }
@@ -314,18 +347,6 @@ impl CodeIndexExecutionControlV1 for CancelledControl {
     }
 }
 
-struct ActiveSemanticControl;
-
-impl SemanticExecutionControl for ActiveSemanticControl {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn elapsed_micros(&self) -> u64 {
-        0
-    }
-}
-
 #[derive(Clone)]
 struct OccurrenceMapEntry {
     document_id: String,
@@ -336,6 +357,7 @@ struct OccurrenceMapEntry {
 struct PublishedCorpus {
     generation: CodeIndexPublishedGenerationV1,
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
+    corpus_digest: String,
 }
 
 /// Load the checked-in PR9/PR10 direct-evaluation workload.
@@ -359,6 +381,33 @@ pub fn compute_workload_digest(
     canonical_sha256(workload)
 }
 
+/// Hash the declared corpus and every byte-exact checked-in document.
+///
+/// Including document metadata prevents ambiguous concatenation while each
+/// content digest binds the bytes actually read from `repo_root`.
+pub fn compute_corpus_digest(
+    repo_root: &Path,
+    workload: &CandidateWorkloadV1,
+) -> Result<String, CandidateOutputError> {
+    let mut bindings = Vec::with_capacity(workload.corpus.len());
+    for document in &workload.corpus {
+        let absolute = repo_root.join(&document.path);
+        let bytes = fs::read(&absolute).map_err(|source| CandidateOutputError::Read {
+            path: absolute,
+            source,
+        })?;
+        bindings.push(CorpusContentBindingV1 {
+            document_id: &document.document_id,
+            path: &document.path,
+            scope: &document.scope,
+            language: &document.language,
+            eligibility: &document.eligibility,
+            content_digest: content_digest(&bytes).as_str().to_owned(),
+        });
+    }
+    canonical_sha256(&(CORPUS_DIGEST_DOMAIN, bindings))
+}
+
 pub fn validate_workload_for_tuning(
     workload: &CandidateWorkloadV1,
 ) -> Result<(), CandidateOutputError> {
@@ -367,17 +416,99 @@ pub fn validate_workload_for_tuning(
             "candidate workload schema_version must be 1".to_owned(),
         ));
     }
+    if workload.source_repository_commit.trim().is_empty()
+        || workload.source_repository_tree.trim().is_empty()
+    {
+        return Err(CandidateOutputError::Contract(
+            "fixture source commit/tree must not be empty".to_owned(),
+        ));
+    }
+    let mut document_ids = BTreeSet::new();
+    let mut document_paths = BTreeSet::new();
+    for document in &workload.corpus {
+        if [
+            document.document_id.as_str(),
+            document.path.as_str(),
+            document.scope.as_str(),
+            document.language.as_str(),
+            document.eligibility.as_str(),
+        ]
+        .into_iter()
+        .any(str::is_empty)
+        {
+            return Err(CandidateOutputError::Contract(
+                "corpus document fields must not be empty".to_owned(),
+            ));
+        }
+        if !document_ids.insert(document.document_id.as_str()) {
+            return Err(CandidateOutputError::Contract(format!(
+                "duplicate corpus document_id {}",
+                document.document_id
+            )));
+        }
+        if !document_paths.insert(document.path.as_str()) {
+            return Err(CandidateOutputError::Contract(format!(
+                "duplicate corpus path {}",
+                document.path
+            )));
+        }
+    }
+    if document_ids.is_empty() {
+        return Err(CandidateOutputError::Contract(
+            "corpus must not be empty".to_owned(),
+        ));
+    }
+    let mut profile_ids = BTreeSet::new();
+    for profile in &workload.profile_matrix {
+        if profile.profile_id.trim().is_empty() {
+            return Err(CandidateOutputError::Contract(
+                "profile_id must not be empty".to_owned(),
+            ));
+        }
+        if !profile_ids.insert(profile.profile_id.as_str()) {
+            return Err(CandidateOutputError::Contract(format!(
+                "duplicate profile_id {}",
+                profile.profile_id
+            )));
+        }
+    }
+    if profile_ids.is_empty() {
+        return Err(CandidateOutputError::Contract(
+            "profile_matrix must not be empty".to_owned(),
+        ));
+    }
+    let mut query_ids = BTreeSet::new();
+    let mut partitions = BTreeSet::new();
     for query in &workload.queries {
+        if query.query_id.trim().is_empty() {
+            return Err(CandidateOutputError::Contract(
+                "query_id must not be empty".to_owned(),
+            ));
+        }
+        if !query_ids.insert(query.query_id.as_str()) {
+            return Err(CandidateOutputError::Contract(format!(
+                "duplicate query_id {}",
+                query.query_id
+            )));
+        }
         if query.partition != "train" && query.partition != "validation" {
             return Err(CandidateOutputError::Contract(format!(
                 "unknown partition {}",
                 query.partition
             )));
         }
+        partitions.insert(query.partition.as_str());
         if query.label.is_none() {
             return Err(CandidateOutputError::Contract(format!(
                 "query {} is missing its checked-in label",
                 query.query_id
+            )));
+        }
+    }
+    for partition in ["train", "validation"] {
+        if !partitions.contains(partition) {
+            return Err(CandidateOutputError::Contract(format!(
+                "partition {partition} has no queries"
             )));
         }
     }
@@ -395,13 +526,32 @@ pub fn generate_candidate_outputs(
     );
     let workload = load_candidate_workload(&workload_path)?;
     let workload_digest = compute_workload_digest(&workload)?;
-    let published = publish_corpus(options.repo_root, &workload)?;
     let profiles: Vec<&ProfileSpecV1> = match options.profile_ids {
-        Some(ids) => workload
-            .profile_matrix
-            .iter()
-            .filter(|profile| ids.iter().any(|id| id == &profile.profile_id))
-            .collect(),
+        Some(ids) => {
+            let known: BTreeSet<_> = workload
+                .profile_matrix
+                .iter()
+                .map(|profile| profile.profile_id.as_str())
+                .collect();
+            let mut requested = BTreeSet::new();
+            for id in ids {
+                if !requested.insert(id.as_str()) {
+                    return Err(CandidateOutputError::Contract(format!(
+                        "duplicate requested profile_id {id}"
+                    )));
+                }
+                if !known.contains(id.as_str()) {
+                    return Err(CandidateOutputError::Contract(format!(
+                        "unknown requested profile_id {id}"
+                    )));
+                }
+            }
+            workload
+                .profile_matrix
+                .iter()
+                .filter(|profile| requested.contains(profile.profile_id.as_str()))
+                .collect()
+        }
         None => workload.profile_matrix.iter().collect(),
     };
     if profiles.is_empty() {
@@ -409,12 +559,12 @@ pub fn generate_candidate_outputs(
             "no profiles selected for candidate generation".to_owned(),
         ));
     }
+    let published = publish_corpus(options.repo_root, &workload)?;
 
     let mut outputs = Vec::new();
     for profile in profiles {
         for partition in ["train", "validation"] {
             let output = generate_partition_output(
-                options.repo_root,
                 &workload,
                 &workload_digest,
                 &published,
@@ -454,7 +604,7 @@ pub fn retrieve_partition_query_bytes(
         .find(|query| query.query_id == query_id)
         .ok_or_else(|| CandidateOutputError::Contract(format!("unknown query {query_id}")))?;
     let published = publish_corpus(repo_root, workload)?;
-    let row = retrieve_one_query(repo_root, &published, profile, query)?;
+    let row = retrieve_one_query(&published, profile, query)?;
     canonical_json_bytes(&row)
 }
 
@@ -491,7 +641,6 @@ pub fn write_generate_outputs(
 }
 
 fn generate_partition_output(
-    repo_root: &Path,
     workload: &CandidateWorkloadV1,
     workload_digest: &str,
     published: &PublishedCorpus,
@@ -513,86 +662,101 @@ fn generate_partition_output(
     let peak_before = peak_rss_bytes();
     for query in &queries {
         let started = Instant::now();
-        let row = retrieve_one_query(repo_root, published, profile, query)?;
+        let row = retrieve_one_query(published, profile, query)?;
         latencies_us.push(started.elapsed().as_micros() as u64);
         rows.push(row);
     }
     let peak_after = peak_rss_bytes().max(peak_before);
     let current = ResourceSampleV1 {
+        status: OptionalStageMeasurementV1::Pending,
         peak_rss_bytes: peak_after,
-        p99_latency_us: percentile_us(&latencies_us, 99),
+        latency_samples_us: latencies_us,
         measured_queries: rows.len() as u64,
+        pending_reason: Some(
+            "raw current-corpus samples recorded; p99 requires the declared Linux evaluation"
+                .to_owned(),
+        ),
     };
-    // 10x resource sample: re-run the same production path ten times and
-    // retain peak RSS / p99 over the expanded sample. No synthetic scaling.
-    let mut ten_x_latencies = Vec::new();
-    let ten_x_before = peak_rss_bytes();
-    for _ in 0..10 {
-        for query in &queries {
-            let started = Instant::now();
-            let _ = retrieve_one_query(repo_root, published, profile, query)?;
-            ten_x_latencies.push(started.elapsed().as_micros() as u64);
-        }
-    }
     let ten_x = ResourceSampleV1 {
-        peak_rss_bytes: peak_rss_bytes().max(ten_x_before),
-        p99_latency_us: percentile_us(&ten_x_latencies, 99),
-        measured_queries: ten_x_latencies.len() as u64,
+        status: OptionalStageMeasurementV1::Pending,
+        peak_rss_bytes: None,
+        latency_samples_us: Vec::new(),
+        measured_queries: 0,
+        pending_reason: Some(
+            "requires a distinct corpus with exactly 10x the eligible chunks".to_owned(),
+        ),
     };
 
-    let pr9_digest = if let Some(probe) = queries.first().copied() {
-        pr9_fallback_digest_for_query(repo_root, published, profile, probe)?
-    } else {
-        format!("sha256:{}", "0".repeat(64))
-    };
+    let probe = queries.first().copied().ok_or_else(|| {
+        CandidateOutputError::Contract(format!("partition {partition} has no queries"))
+    })?;
+    let fallback_digest = fallback_digest_for_query(published, profile, probe)?;
+    let pr9_digest = pr9_fallback_digest_for_query(published, profile, probe)?;
 
     let mut resources = BTreeMap::new();
     resources.insert("current".to_owned(), current);
     resources.insert("10x".to_owned(), ten_x);
 
     Ok(ProductionCandidateOutputV1 {
-        schema_version: 1,
+        schema_version: 2,
         workload_digest: workload_digest.to_owned(),
         profile_id: profile.profile_id.clone(),
         partition: partition.to_owned(),
         production_boundary: PRODUCTION_BOUNDARY.to_owned(),
-        source_commit: workload.source_repository_commit.clone(),
+        fixture_source_commit: workload.source_repository_commit.clone(),
+        fixture_source_tree: workload.source_repository_tree.clone(),
+        corpus_digest: published.corpus_digest.clone(),
+        seed: EVALUATION_SEED.to_owned(),
+        cache_state: EVALUATION_CACHE_STATE.to_owned(),
         toolchain: toolchain_fingerprint(),
         hardware: hardware_fingerprint(),
-        fallback_digest: pr9_digest.clone(),
+        fallback_digest,
         pr9_fallback_digest: pr9_digest,
         cancellation: REQUIRED_CANCELLATION.to_owned(),
         offline: REQUIRED_OFFLINE.to_owned(),
+        optional_stages: optional_stage_measurements(profile),
         resources,
         queries: rows,
     })
 }
 
 fn retrieve_one_query(
-    repo_root: &Path,
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<QueryCandidateRowV1, CandidateOutputError> {
-    let composed = compose_production_query(repo_root, published, profile, query)?;
+    let composed = compose_production_query(published, profile, query)?;
     let ranked = map_ranked_candidates(published, &composed)?;
     let abstained = ranked.is_empty();
     Ok(QueryCandidateRowV1 {
         query_id: query.query_id.clone(),
         ranked,
-        confidence_ppm: if abstained { 0 } else { 1_000_000 },
         abstained,
     })
 }
 
+fn optional_stage_measurements(profile: &ProfileSpecV1) -> OptionalStageMeasurementsV1 {
+    OptionalStageMeasurementsV1 {
+        semantic: if profile.semantic_weight_ppm == 0 {
+            OptionalStageMeasurementV1::NotRequested
+        } else {
+            OptionalStageMeasurementV1::Pending
+        },
+        rerank: if profile.rerank_weight_ppm == 0 {
+            OptionalStageMeasurementV1::NotRequested
+        } else {
+            OptionalStageMeasurementV1::Pending
+        },
+    }
+}
+
 fn compose_production_query(
-    repo_root: &Path,
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<CompositionOutputV1, CandidateOutputError> {
     let generation_id = published.generation.manifest().generation_id.clone();
-    let request = retrieval_request(&profile.profile_id)?;
+    let request = retrieval_request(&profile.profile_id, published)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
         &query.query,
         id::<SanitizerRevision>("query-sanitizer.candidate.v1")?,
@@ -700,116 +864,18 @@ fn compose_production_query(
         CompositionLaneInput::new(RetrieverKind::Graph, graph_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
     ];
-    let pr9_output = kernel
+    kernel
         .compose(
             &FusionStageInput {
-                profile: fusion_profile.clone(),
+                profile: fusion_profile,
                 lanes: pr9_lanes,
             },
             &no_caps()?,
         )
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-
-    if profile.semantic_weight_ppm == 0 {
-        return Ok(pr9_output);
-    }
-
-    // Production semantic composition path: when no project semantic runtime /
-    // complete vector generation is available, compose_project returns the
-    // frozen PR9 fallback without constructing a duplicate mock retriever.
-    let fallback = Arc::new(pr9_fallback_from_composition(&pr9_output)?);
-    let projection = offline_embedding_projection()?;
-    let privacy_domain = id::<PrivacyDomainId>("privacy.candidate.fixture")?;
-    let query_mac = QueryMac::new(format!(
-        "hmac-sha256:{}",
-        hex::encode(Sha256::digest(query.query.as_bytes()))
-    ))
-    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let query_digest = QueryDigest::new(privacy_domain, 1, query_mac);
-    let capability_manifest_digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let semantic_request = SemanticRetrievalRequestV1 {
-        base: request.clone(),
-        query_digest,
-        query_view: &query_view,
-        projection: &projection,
-        capability_manifest_digest,
-        vector_generation: tracedecay_domain::VectorGenerationIdV1::new(
-            ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
-                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        ),
-        code_generation: generation_id.clone(),
-        budget,
-    };
-    let semantic_outcome = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
-        .block_on(compose_project_application_semantic_search(
-            repo_root,
-            &published.generation,
-            &semantic_request,
-            None,
-            &ActiveSemanticControl,
-            SemanticQueryModeV1::FallbackAllowed,
-            fallback.clone(),
-        ));
-    match semantic_outcome {
-        Ok(SemanticQueryServiceOutcomeV1::Fallback {
-            fallback: returned, ..
-        }) => {
-            if returned.digest != fallback.digest {
-                return Err(CandidateOutputError::Contract(
-                    "semantic offline fallback digest drifted from PR9 subpayload".to_owned(),
-                ));
-            }
-            Ok(pr9_output)
-        }
-        Ok(SemanticQueryServiceOutcomeV1::Augmented { .. }) => {
-            // Fixture generation never mounts a ready project semantic runtime;
-            // if one appears, keep the frozen PR9 composition bytes so tuning
-            // outputs stay deterministic and production-bound to the PR9 kernel.
-            Ok(pr9_output)
-        }
-        Err(error) => Err(CandidateOutputError::Contract(format!("{error:?}"))),
-    }
-}
-
-fn offline_embedding_projection()
--> Result<tracedecay_domain::AdmittedEmbeddingProjectionKeyV1, CandidateOutputError> {
-    use tracedecay_domain::{
-        EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
-        EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
-    };
-    let digest = ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let key = EmbeddingProjectionKeyV1 {
-        model_artifact_digest: digest.clone(),
-        tokenizer_digest: digest.clone(),
-        config_digest: digest.clone(),
-        query_instruction_digest: None,
-        document_instruction_digest: None,
-        pooling: EmbeddingPoolingV1::Mean,
-        truncation_side: EmbeddingTruncationSideV1::Right,
-        truncation_length: 512,
-        runtime_backend: "fastembed-ort".to_owned(),
-        runtime_build_revision: "candidate-offline.v1".to_owned(),
-        device_class: EmbeddingDeviceClassV1::Cpu,
-        dimensions: 8,
-        metric: EmbeddingMetricV1::Cosine,
-        normalization: EmbeddingNormalizationV1::L2,
-        precision: EmbeddingPrecisionV1::Fp32,
-        chunk_schema_revision: "chunk.schema.v1".to_owned(),
-        chunker_revision: id::<ChunkerRevision>("chunker.candidate.v1")?,
-        privacy_domain: id::<PrivacyDomainId>("privacy.candidate.fixture")?,
-        privacy_key_epoch: 1,
-    };
-    key.admit()
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))
 }
 
 fn pr9_fallback_digest_for_query(
-    repo_root: &Path,
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
@@ -818,7 +884,15 @@ fn pr9_fallback_digest_for_query(
     let mut pr9_profile = profile.clone();
     pr9_profile.semantic_weight_ppm = 0;
     pr9_profile.rerank_weight_ppm = 0;
-    let composed = compose_production_query(repo_root, published, &pr9_profile, query)?;
+    fallback_digest_for_query(published, &pr9_profile, query)
+}
+
+fn fallback_digest_for_query(
+    published: &PublishedCorpus,
+    profile: &ProfileSpecV1,
+    query: &WorkloadQueryV1,
+) -> Result<String, CandidateOutputError> {
+    let composed = compose_production_query(published, profile, query)?;
     let fallback = pr9_fallback_from_composition(&composed)?;
     Ok(fallback.digest.as_str().to_owned())
 }
@@ -837,17 +911,21 @@ fn pr9_fallback_from_composition(
                 .unwrap_or(PublicRetrieverStatus::Unavailable),
         );
     }
+    let bootstrap_digest = canonical_sha256(&(
+        "tracedecay.search-eval.pr9-fallback-bootstrap.v1",
+        &output.profile_id,
+        &output.ranked_candidates,
+        &coverage,
+        &output.freshness,
+    ))?;
     let mut fallback = Pr9FallbackSubpayload {
         profile_id: output.profile_id.clone(),
         ordered_candidates: output.ranked_candidates.clone(),
         public_pr9_lane_coverage: coverage,
         freshness: output.freshness.clone(),
         cursor: None,
-        digest: tracedecay_domain::FallbackSubpayloadDigest::new(format!(
-            "sha256:{}",
-            "0".repeat(64)
-        ))
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        digest: tracedecay_domain::FallbackSubpayloadDigest::new(bootstrap_digest)
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
     };
     fallback.digest = fallback
         .compute_digest()
@@ -885,23 +963,21 @@ fn map_ranked_candidates(
                     })
                     .cloned()
             });
-        let (document_id, scope, anchor) = match mapped {
-            Some(entry) => (entry.document_id, entry.scope, entry.display_anchor),
-            None => (
-                "unknown".to_owned(),
-                "research".to_owned(),
-                ranked.candidate.anchor_id.as_str().to_owned(),
-            ),
-        };
+        let entry = mapped.ok_or_else(|| {
+            CandidateOutputError::Contract(format!(
+                "ranked candidate {} has no corpus occurrence binding",
+                ranked.candidate.anchor_id
+            ))
+        })?;
         let tier = if ranked.candidate.exact_class != ExactClass::Approximate {
             "exact"
         } else {
             "approximate"
         };
         rows.push(RankedCandidateRowV1 {
-            anchor,
-            scope,
-            document_id,
+            anchor: entry.display_anchor,
+            scope: entry.scope,
+            document_id: entry.document_id,
             tier: tier.to_owned(),
         });
     }
@@ -912,6 +988,7 @@ fn publish_corpus(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
 ) -> Result<PublishedCorpus, CandidateOutputError> {
+    let corpus_digest = compute_corpus_digest(repo_root, workload)?;
     let language_registry = StaticLanguageRegistry::new();
     let mut files = Vec::new();
     let mut captured = Vec::new();
@@ -949,16 +1026,6 @@ fn publish_corpus(
             .cmp(&(&right.logical_path, &right.file_occurrence_id))
     });
     captured.sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
-    let mut identity_bytes = Vec::new();
-    for document in &workload.corpus {
-        let absolute = repo_root.join(&document.path);
-        identity_bytes.extend(fs::read(&absolute).map_err(|source| {
-            CandidateOutputError::Read {
-                path: absolute,
-                source,
-            }
-        })?);
-    }
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: id::<RepositoryId>("repository.candidate.fixture")?,
         worktree: None,
@@ -966,7 +1033,7 @@ fn publish_corpus(
         source_revision: None,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.candidate.v1")?],
-        content_identity: content_digest(&identity_bytes),
+        content_identity: id(&corpus_digest)?,
         captured_at: UtcMicros(1_000_000),
         files,
     };
@@ -979,7 +1046,7 @@ fn publish_corpus(
         target_projection_key: ProjectionKeyV1 {
             kind: ProjectionKindV1::Lexical,
             schema_revision: "lexical.candidate.v1".to_owned(),
-            profile_digest: id::<ManifestDigest>(&format!("sha256:{}", "e".repeat(64)))?,
+            profile_digest: lexical_projection_profile_digest()?,
         },
     };
     let config = CodeIndexProductionConfigV1 {
@@ -1029,6 +1096,7 @@ fn publish_corpus(
     Ok(PublishedCorpus {
         generation,
         occurrence_map,
+        corpus_digest,
     })
 }
 
@@ -1101,7 +1169,7 @@ fn prove_cancellation(
         target_projection_key: ProjectionKeyV1 {
             kind: ProjectionKindV1::Lexical,
             schema_revision: "lexical.candidate.v1".to_owned(),
-            profile_digest: id::<ManifestDigest>(&format!("sha256:{}", "c".repeat(64)))?,
+            profile_digest: lexical_projection_profile_digest()?,
         },
     };
     let config = CodeIndexProductionConfigV1 {
@@ -1256,7 +1324,17 @@ fn fusion_profile(
     })
 }
 
-fn retrieval_request(profile_id: &str) -> Result<RetrievalRequest, CandidateOutputError> {
+fn retrieval_request(
+    profile_id: &str,
+    published: &PublishedCorpus,
+) -> Result<RetrievalRequest, CandidateOutputError> {
+    let manifest = published.generation.manifest();
+    let freshness_digest = canonical_sha256(&(
+        "tracedecay.search-eval.freshness.v1",
+        &manifest.generation_id,
+        &manifest.seal.expected_digest,
+        manifest.seal.sealed_at,
+    ))?;
     Ok(RetrievalRequest {
         principal: id::<PrincipalId>("principal.candidate")?,
         scope: RetrievalScope {
@@ -1270,13 +1348,24 @@ fn retrieval_request(profile_id: &str) -> Result<RetrievalRequest, CandidateOutp
         temporal_mode: TemporalModeV1::Current,
         snapshot: RetrievalSnapshot {
             watermarks: VectorWatermark::default(),
-            freshness_digest: id(&format!("sha256:{}", "f".repeat(64)))?,
+            freshness_digest: id(&freshness_digest)?,
             authorization_revision: id("authorization.candidate.v1")?,
-            captured_at: UtcMicros(7),
+            captured_at: manifest.seal.sealed_at,
         },
         profile_id: id(&format!("profile.{profile_id}"))?,
         budget: retrieval_budget(),
     })
+}
+
+fn lexical_projection_profile_digest() -> Result<ManifestDigest, CandidateOutputError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.search-eval.lexical-projection-profile.v1",
+        "lexical.candidate.v1",
+        "sanitizer.candidate.v1",
+        "chunker.candidate.v1",
+        "policy.candidate.v1",
+    ))?;
+    id(&digest)
 }
 
 fn retrieval_budget() -> RetrievalBudget {
@@ -1397,31 +1486,20 @@ fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<(), Candidat
     })
 }
 
-fn percentile_us(samples: &[u64], percentile: u8) -> u64 {
-    if samples.is_empty() {
-        return 0;
-    }
-    let mut ordered = samples.to_vec();
-    ordered.sort_unstable();
-    let rank = ((percentile as usize).saturating_mul(ordered.len().saturating_sub(1))) / 100;
-    ordered[rank]
-}
-
-fn peak_rss_bytes() -> u64 {
+fn peak_rss_bytes() -> Option<u64> {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
-        return 0;
+        return None;
     };
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             let kb: u64 = rest
                 .split_whitespace()
                 .next()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0);
-            return kb.saturating_mul(1024);
+                .and_then(|value| value.parse().ok())?;
+            return Some(kb.saturating_mul(1024));
         }
     }
-    0
+    None
 }
 
 fn toolchain_fingerprint() -> String {
@@ -1456,6 +1534,60 @@ mod tests {
     }
 
     #[test]
+    fn direct_workload_rejects_ambiguous_corpus_identity() {
+        let mut workload = workload();
+        workload.corpus[1].document_id = workload.corpus[0].document_id.clone();
+        let error = validate_workload_for_tuning(&workload).expect_err("duplicate document id");
+        assert!(error.to_string().contains("duplicate corpus document_id"));
+
+        let mut workload = workload();
+        workload.corpus[1].path = workload.corpus[0].path.clone();
+        let error = validate_workload_for_tuning(&workload).expect_err("duplicate corpus path");
+        assert!(error.to_string().contains("duplicate corpus path"));
+    }
+
+    #[test]
+    fn direct_workload_rejects_empty_and_duplicate_query_ids() {
+        let mut empty = workload();
+        empty.queries[0].query_id.clear();
+        let error = validate_workload_for_tuning(&empty).expect_err("empty query id");
+        assert!(error.to_string().contains("query_id must not be empty"));
+
+        let mut duplicate = workload();
+        duplicate.queries[1].query_id = duplicate.queries[0].query_id.clone();
+        let error = validate_workload_for_tuning(&duplicate).expect_err("duplicate query id");
+        assert!(error.to_string().contains("duplicate query_id"));
+    }
+
+    #[test]
+    fn direct_workload_rejects_duplicate_profile_ids_and_empty_partitions() {
+        let mut duplicate = workload();
+        duplicate.profile_matrix[1].profile_id = duplicate.profile_matrix[0].profile_id.clone();
+        let error = validate_workload_for_tuning(&duplicate).expect_err("duplicate profile id");
+        assert!(error.to_string().contains("duplicate profile_id"));
+
+        let mut missing = workload();
+        missing.queries.retain(|query| query.partition == "train");
+        let error = validate_workload_for_tuning(&missing).expect_err("empty validation partition");
+        assert!(
+            error
+                .to_string()
+                .contains("partition validation has no queries")
+        );
+    }
+
+    #[test]
+    fn candidate_generation_rejects_partially_unknown_profile_selection() {
+        let error = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+            repo_root: &repo_root(),
+            workload_path: None,
+            profile_ids: Some(&["pr9-fallback".to_owned(), "unknown-profile".to_owned()]),
+        })
+        .expect_err("unknown profile");
+        assert!(error.to_string().contains("unknown requested profile_id"));
+    }
+
+    #[test]
     fn direct_outputs_cover_train_and_validation() {
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &repo_root(),
@@ -1464,15 +1596,151 @@ mod tests {
         })
         .expect("generate");
         assert_eq!(result.outputs.len(), 2);
+        let expected_corpus_digest =
+            compute_corpus_digest(&repo_root(), &workload()).expect("corpus digest");
         for output in &result.outputs {
+            assert_eq!(output.schema_version, 2);
             assert!(output.partition == "train" || output.partition == "validation");
             assert_eq!(output.production_boundary, PRODUCTION_BOUNDARY);
             assert_eq!(output.cancellation, REQUIRED_CANCELLATION);
             assert_eq!(output.offline, REQUIRED_OFFLINE);
             assert_eq!(output.fallback_digest, output.pr9_fallback_digest);
-            assert!(output.resources.contains_key("current"));
-            assert!(output.resources.contains_key("10x"));
+            assert_eq!(output.corpus_digest, expected_corpus_digest);
+            assert_eq!(output.seed, EVALUATION_SEED);
+            assert_eq!(output.cache_state, EVALUATION_CACHE_STATE);
+            let current = output.resources.get("current").expect("current samples");
+            assert_eq!(current.status, OptionalStageMeasurementV1::Pending);
+            assert_eq!(
+                current.measured_queries,
+                current.latency_samples_us.len() as u64
+            );
+            assert!(
+                serde_json::to_value(current)
+                    .expect("resource sample serializes")
+                    .get("p99_latency_us")
+                    .is_none(),
+                "small raw samples must not manufacture p99"
+            );
+            let ten_x = output.resources.get("10x").expect("10x status");
+            assert_eq!(ten_x.status, OptionalStageMeasurementV1::Pending);
+            assert_eq!(ten_x.measured_queries, 0);
+            assert!(ten_x.latency_samples_us.is_empty());
+            assert!(ten_x.peak_rss_bytes.is_none());
+            assert!(
+                output.queries.iter().all(|query| {
+                    serde_json::to_value(query)
+                        .expect("query serializes")
+                        .get("confidence_ppm")
+                        .is_none()
+                }),
+                "candidate rows must not manufacture confidence"
+            );
         }
+    }
+
+    #[test]
+    fn unsupported_complete_optional_stage_claim_is_rejected() {
+        let error = serde_json::from_value::<OptionalStageMeasurementsV1>(serde_json::json!({
+            "semantic": "complete",
+            "rerank": "not_requested"
+        }))
+        .expect_err("complete requires an evidence-bearing schema");
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn repeated_queries_do_not_claim_a_ten_x_resource_measurement() {
+        let workload = workload();
+        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+            repo_root: &repo_root(),
+            workload_path: None,
+            profile_ids: Some(&["pr9-fallback".to_owned()]),
+        })
+        .expect("generate");
+        let report =
+            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &result)
+                .expect("evaluate");
+
+        assert_eq!(
+            report.status,
+            crate::search_eval::DirectEvaluationStatusV1::Pending
+        );
+        assert!(report.profiles.iter().all(|profile| {
+            profile.resource_status == crate::search_eval::DirectEvaluationStatusV1::Pending
+        }));
+
+        let mut missing_resource = result.clone();
+        missing_resource.outputs[0].resources.remove("10x");
+        let report = crate::search_eval::evaluate_generated_outputs(
+            &repo_root(),
+            &workload,
+            &missing_resource,
+        )
+        .expect("evaluate");
+        assert_eq!(
+            report.status,
+            crate::search_eval::DirectEvaluationStatusV1::Fail
+        );
+        assert_eq!(
+            report.profiles[0].resource_status,
+            crate::search_eval::DirectEvaluationStatusV1::Fail
+        );
+
+        let mut duplicate_query = result.clone();
+        duplicate_query.outputs[0].queries[1] = duplicate_query.outputs[0].queries[0].clone();
+        let error = crate::search_eval::evaluate_generated_outputs(
+            &repo_root(),
+            &workload,
+            &duplicate_query,
+        )
+        .expect_err("duplicate query row");
+        assert!(error.to_string().contains("duplicate query row"));
+
+        let mut duplicate_profile_partition = result.clone();
+        duplicate_profile_partition.outputs[1] = duplicate_profile_partition.outputs[0].clone();
+        let error = crate::search_eval::evaluate_generated_outputs(
+            &repo_root(),
+            &workload,
+            &duplicate_profile_partition,
+        )
+        .expect_err("duplicate profile partition");
+        assert!(error.to_string().contains("duplicate profile/partition"));
+
+        let mut forged = result;
+        forged.outputs[0].production_boundary = "lookalike".to_owned();
+        let error =
+            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+                .expect_err("forged production boundary");
+        assert!(error.to_string().contains("production boundary"));
+
+        forged.outputs[0].production_boundary = PRODUCTION_BOUNDARY.to_owned();
+        forged.outputs[0].fixture_source_commit = "forged".to_owned();
+        let error =
+            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+                .expect_err("forged source commit");
+        assert!(error.to_string().contains("source commit"));
+
+        forged.outputs[0].fixture_source_commit = workload.source_repository_commit.clone();
+        forged.outputs[0].corpus_digest = canonical_sha256(&"forged corpus").expect("digest");
+        let error =
+            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+                .expect_err("forged corpus digest");
+        assert!(error.to_string().contains("byte-exact corpus"));
+
+        forged.outputs[0].corpus_digest =
+            compute_corpus_digest(&repo_root(), &workload).expect("corpus digest");
+        forged.outputs[0].toolchain.clear();
+        let error =
+            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+                .expect_err("missing environment");
+        assert!(error.to_string().contains("environment summary"));
+
+        forged.outputs[0].toolchain = "rustc:test".to_owned();
+        forged.outputs[0].queries[0].abstained = !forged.outputs[0].queries[0].ranked.is_empty();
+        let error =
+            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+                .expect_err("inconsistent abstention");
+        assert!(error.to_string().contains("inconsistent abstention"));
     }
 
     #[test]
@@ -1502,5 +1770,47 @@ mod tests {
             generated, direct,
             "generator row must match direct production call bytes"
         );
+    }
+
+    #[test]
+    fn semantic_profiles_do_not_claim_a_comparison_when_only_fallback_ran() {
+        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+            repo_root: &repo_root(),
+            workload_path: None,
+            profile_ids: Some(&["hybrid-conservative".to_owned()]),
+        })
+        .expect("generate");
+
+        for output in result.outputs {
+            assert_eq!(
+                output.optional_stages.semantic,
+                OptionalStageMeasurementV1::Pending
+            );
+            assert_eq!(
+                output.optional_stages.rerank,
+                OptionalStageMeasurementV1::NotRequested
+            );
+        }
+    }
+
+    #[test]
+    fn rerank_profiles_remain_pending_when_no_rerank_measurement_ran() {
+        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+            repo_root: &repo_root(),
+            workload_path: None,
+            profile_ids: Some(&["hybrid-reranked".to_owned()]),
+        })
+        .expect("generate");
+
+        for output in result.outputs {
+            assert_eq!(
+                output.optional_stages.semantic,
+                OptionalStageMeasurementV1::Pending
+            );
+            assert_eq!(
+                output.optional_stages.rerank,
+                OptionalStageMeasurementV1::Pending
+            );
+        }
     }
 }
