@@ -951,14 +951,20 @@ fn contract_error(error: impl std::fmt::Display) -> RetrievalProfileActivationEr
 mod tests {
     use super::*;
     use crate::search_eval::{
-        DirectProfileEvaluationV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
+        DirectProfileEvaluationV1, DirectQualityMetricsV1, DirectRatioMetricV1,
+        OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
     };
 
     fn report(status: DirectEvaluationStatusV1) -> DirectEvaluationReportV1 {
+        let empty_ratio = || DirectRatioMetricV1 {
+            numerator: 0,
+            denominator: 0,
+            ppm: 0,
+        };
         let row = |partition: &str| DirectProfileEvaluationV1 {
             profile_id: "profile-v1".to_owned(),
             partition: partition.to_owned(),
-            query_count: 1,
+            query_count: 0,
             failed_queries: 0,
             fallback_stable: true,
             cancellation_bounded: true,
@@ -967,6 +973,17 @@ mod tests {
             optional_stages: OptionalStageMeasurementsV1 {
                 semantic: OptionalStageMeasurementV1::NotRequested,
                 rerank: OptionalStageMeasurementV1::NotRequested,
+            },
+            quality: DirectQualityMetricsV1 {
+                relevant_query_count: 0,
+                recall_at_10: empty_ratio(),
+                precision_at_10: empty_ratio(),
+                mean_reciprocal_rank_ppm: 0,
+                ndcg_at_10_ppm: 0,
+                duplicate_rate: empty_ratio(),
+                protected_recall_at_10: empty_ratio(),
+                strata: Vec::new(),
+                worst_stratum: None,
             },
             status,
             queries: Vec::new(),
