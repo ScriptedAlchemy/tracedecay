@@ -475,22 +475,36 @@ fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortEr
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum TemporalSessionScopeFilterV1 {
-    #[default]
+    #[serde(rename = "all")]
     All,
+    #[serde(rename = "parents_only")]
     ParentsOnly,
+    #[serde(rename = "subagents_only")]
     SubagentsOnly,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+impl Default for TemporalSessionScopeFilterV1 {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum TemporalMessageTypeFilterV1 {
-    #[default]
+    #[serde(rename = "all")]
     All,
+    #[serde(rename = "direct_user")]
     DirectUser,
+    #[serde(rename = "tool_result")]
     ToolResult,
+}
+
+impl Default for TemporalMessageTypeFilterV1 {
+    fn default() -> Self {
+        Self::All
+    }
 }
 
 /// Canonical semantic eligibility applied by the read port before candidates
