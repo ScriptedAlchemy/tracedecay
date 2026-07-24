@@ -1,22 +1,14 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { buildAdjacency, neighborsOf } from '../../viz/graph/adjacency.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
-import type { LiveActivityPulse, SseConnectionState } from '../../data/sse/connect.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
-import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
-import { Meter, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
-import {
-  ageTickIntervalMs,
-  formatDuration,
-  summarizeActivity,
-  RATE_WINDOW_MS,
-} from './activitySummary.ts';
+import { SignalPanel } from './SignalPanel.tsx';
 import {
   ProjectsPayloadSchema,
   type ProjectRegistryEntry,
