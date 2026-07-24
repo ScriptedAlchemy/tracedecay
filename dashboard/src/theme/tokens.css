@@ -293,6 +293,12 @@
     animation: none;
     opacity: 1;
   }
+  /* The one Tailwind-owned animation the chrome uses: the loading state's
+   * spinner. A state indicator has to keep indicating without moving, so it
+   * stops where it is rather than disappearing. */
+  .animate-spin {
+    animation: none;
+  }
   .td-scanlines::after {
     display: none;
   }

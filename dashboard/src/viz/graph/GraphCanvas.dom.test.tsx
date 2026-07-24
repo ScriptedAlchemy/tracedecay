@@ -15,6 +15,10 @@ vi.mock('./activation.ts', () => ({
       return 0;
     }
 
+    subscribe() {
+      return () => {};
+    }
+
     get warm() {
       return false;
     }
