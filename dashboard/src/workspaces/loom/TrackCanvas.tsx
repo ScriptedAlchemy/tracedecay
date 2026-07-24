@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Minus, Plus, Maximize2 } from 'lucide-react';
+import { ChevronRight, Minus, Plus, Maximize2 } from 'lucide-react';
 import { cn } from '../../ui/cn';
 import {
   AXIS_HEIGHT,
@@ -60,7 +60,9 @@ type Selection = { track: LoomTrack; span: LoomSpan } | null;
  * same pure layout the renderer draws. */
 export function TrackCanvas({ tracks }: { tracks: LoomTrack[] }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const paneRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
+  const [paneHeight, setPaneHeight] = useState(0);
   const [hover, setHover] = useState<Selection>(null);
   const [pinned, setPinned] = useState<Selection>(null);
   const [cursorTime, setCursorTime] = useState<number | null>(null);
@@ -77,8 +79,8 @@ export function TrackCanvas({ tracks }: { tracks: LoomTrack[] }) {
 
   const activeView = view ?? (extent ? fittedWindow(extent) : null);
   const layouts = useMemo(
-    () => (activeView ? layoutTracks(tracks, activeView, width) : []),
-    [tracks, activeView?.start, activeView?.end, width],
+    () => (activeView ? layoutTracks(tracks, activeView, width, paneHeight) : []),
+    [tracks, activeView?.start, activeView?.end, width, paneHeight],
   );
   const plotHeight = layoutHeight(layouts);
   const height = AXIS_HEIGHT + plotHeight;
@@ -185,14 +187,17 @@ export function TrackCanvas({ tracks }: { tracks: LoomTrack[] }) {
         }
         layout.lanes.forEach((lane, laneIndex) => {
           const laneTop =
-            AXIS_HEIGHT + layout.top + TRACK_PAD + laneIndex * (LANE_HEIGHT + LANE_GAP);
+            AXIS_HEIGHT +
+            layout.top +
+            TRACK_PAD +
+            laneIndex * (layout.laneHeight + LANE_GAP);
           for (const span of lane) {
             const x0 = xFor(span.start, activeView, width);
             const x1 = Math.max(xFor(span.end, activeView, width), x0 + MIN_MARK_PX);
             if (x1 < -8 || x0 > width + 8) continue;
             const magnitude = Math.sqrt(Math.min(span.weight / maxWeight, 1));
-            const barHeight = Math.max(5, (LANE_HEIGHT - 2) * magnitude);
-            const top = laneTop + (LANE_HEIGHT - barHeight) / 2;
+            const barHeight = Math.max(5, (layout.laneHeight - 3) * magnitude);
+            const top = laneTop + (layout.laneHeight - barHeight) / 2;
             const isFocus = focus?.span.id === span.id;
             const dimmed = focus != null && !isFocus;
             context.fillStyle = isFocus ? palette.markHot : palette.mark;
@@ -259,14 +264,22 @@ export function TrackCanvas({ tracks }: { tracks: LoomTrack[] }) {
     return () => observer.disconnect();
   }, [layouts, activeView?.start, activeView?.end, width, height, focus?.span.id, cursorTime, maxWeight]);
 
-  /* ---------------- measurement ---------------- */
+  /* ---------------- measurement ----------------
+   * Width comes from the canvas; height comes from the scrolling pane that
+   * *contains* it, so growing the canvas can never feed back into the
+   * measurement that sized it. */
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const measure = () => setWidth(canvas.clientWidth);
+    const pane = paneRef.current;
+    if (!canvas || !pane) return;
+    const measure = () => {
+      setWidth(canvas.clientWidth);
+      setPaneHeight(pane.clientHeight);
+    };
     measure();
     const resize = new ResizeObserver(measure);
     resize.observe(canvas);
+    resize.observe(pane);
     return () => resize.disconnect();
   }, []);
 
@@ -296,7 +309,7 @@ export function TrackCanvas({ tracks }: { tracks: LoomTrack[] }) {
   };
 
   return (
-    <figure className="flex min-w-0 flex-col gap-2">
+    <figure className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
       <ViewportToolbar
         view={activeView}
         fitted={!extent || !activeView || isFitted(activeView, extent)}
@@ -305,9 +318,12 @@ export function TrackCanvas({ tracks }: { tracks: LoomTrack[] }) {
         onFit={() => setView(extent ? fittedWindow(extent) : null)}
       />
 
-      <div className="flex min-w-0 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1">
+      <div
+        ref={paneRef}
+        className="flex min-h-52 min-w-0 flex-1 overflow-auto rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1"
+      >
         <TrackGutter layouts={layouts} />
-        <div className="min-w-0 flex-1 overflow-hidden">
+        <div className="min-w-0 flex-1">
           <canvas
             ref={canvasRef}
             className="block w-full cursor-crosshair touch-none select-none"
@@ -447,24 +463,28 @@ function ToolbarButton({
 function TrackGutter({ layouts }: { layouts: TrackLayout[] }) {
   return (
     <div
-      className="w-24 shrink-0 border-r border-edge-subtle sm:w-32"
+      className="sticky left-0 z-10 w-24 shrink-0 border-r border-edge-subtle bg-surface-1 sm:w-32"
       style={{ paddingTop: AXIS_HEIGHT }}
       aria-hidden
     >
-      {layouts.map((layout) => (
-        <div
-          key={layout.track.id}
-          className="flex flex-col justify-center overflow-hidden px-2"
-          style={{ height: layout.height }}
-        >
-          <span className="truncate text-2xs font-medium text-text-secondary">
-            {layout.track.label}
-          </span>
-          <span className="tabular truncate text-2xs text-text-muted">
-            {layout.track.spans.length} · ×{peakConcurrency(layout.track)}
-          </span>
-        </div>
-      ))}
+      {layouts.map((layout) => {
+        const overlap = peakConcurrency(layout.track);
+        return (
+          <div
+            key={layout.track.id}
+            className="flex flex-col justify-center overflow-hidden border-t border-edge-subtle px-2 first:border-t-0"
+            style={{ height: layout.height }}
+          >
+            <span className="truncate text-2xs font-medium text-text-secondary">
+              {layout.track.label}
+            </span>
+            <span className="tabular truncate text-2xs text-text-muted">
+              {layout.track.spans.length} sessions
+              {overlap > 1 ? ` · ×${overlap} deep` : ''}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -549,8 +569,8 @@ function Minimap({
         className="absolute inset-y-0 border-x border-accent bg-accent/12"
         style={{ left: `${x0}%`, width: `${Math.max(x1 - x0, 0.6)}%` }}
       />
-      <span className="pointer-events-none absolute bottom-0.5 left-2 text-2xs uppercase tracking-wider text-text-muted">
-        overview
+      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-2xs uppercase tracking-wider text-text-muted">
+        full extent
       </span>
     </div>
   );
@@ -571,42 +591,37 @@ function InspectorStrip({
   const rate =
     focus && duration > 0 ? (focus.span.weight / (duration / 3600)).toFixed(1) : null;
   return (
-    // The grid lives on the wrapper, not on the <dl>: the strip also carries a
-    // timestamp caption and an instruction line, and neither is a term with a
-    // definition. `display: contents` keeps the list a real <dl> holding only
-    // dt/dd groups while its readouts stay direct children of the same grid.
     <div
       aria-live="polite"
-      className="grid min-h-14 grid-cols-2 gap-x-4 gap-y-1 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2 sm:grid-cols-4"
+      className="min-h-16 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2"
     >
       {focus ? (
         <>
-          <dl className="contents">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
             <Readout label={pinned ? 'session · pinned' : 'session'}>
               <span className="truncate font-mono">{focus.span.label}</span>
             </Readout>
             <Readout label="provider">{focus.track.label}</Readout>
             <Readout label="span">
               {formatDuration(duration)}
-              {rate ? (
-                <span className="ml-1 text-text-muted">· {rate}/h</span>
-              ) : null}
+              {rate ? <span className="ml-1 text-text-muted">· {rate}/h</span> : null}
             </Readout>
             <Readout label="messages">{focus.span.weight.toLocaleString()}</Readout>
           </dl>
-          <p className="tabular col-span-2 text-2xs text-text-muted sm:col-span-4">
+          <p className="tabular mt-1 text-2xs text-text-muted">
             {formatMoment(focus.span.start)} → {formatMoment(focus.span.end)}
           </p>
         </>
       ) : (
         <>
-          <dl className="contents">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
             <Readout label="pointer">
               {cursorTime != null ? formatMoment(cursorTime) : 'off the weave'}
             </Readout>
           </dl>
-          <p className="col-span-2 flex items-center text-2xs text-text-muted sm:col-span-3">
-            Hover a mark to read it here; click to pin. Drag the weave to pan.
+          <p className="mt-1 text-2xs text-text-muted">
+            Hover a mark to read it here; click to pin. Drag the weave to pan, or drag
+            the overview strip to choose a window.
           </p>
         </>
       )}
@@ -638,8 +653,13 @@ function SpanLedger({
     .flatMap((track) => track.spans.map((span) => ({ track, span })))
     .sort((a, b) => b.span.end - a.span.end);
   return (
-    <details className="group rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1">
-      <summary className="cursor-pointer list-none px-3 py-2 text-2xs uppercase tracking-wider text-text-muted marker:content-none hover:text-text-secondary">
+    <details className="group shrink-0 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-2xs uppercase tracking-wider text-text-muted marker:content-none hover:text-text-secondary">
+        <ChevronRight
+          aria-hidden
+          size={12}
+          className="transition-transform duration-[var(--dur-state)] group-open:rotate-90"
+        />
         Session ledger · {rows.length} rows
       </summary>
       <div className="max-h-72 overflow-auto border-t border-edge-subtle">
