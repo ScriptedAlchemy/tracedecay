@@ -124,7 +124,13 @@
   --raw-text-muted: oklch(0.45 0.005 260);
   --raw-edge-subtle: oklch(0.855 0.003 260);
   --raw-edge-strong: oklch(0.7 0.005 260);
-  --raw-accent: oklch(0.5 0.14 220);
+  /* Dark enough that the accent survives as INK, not just as fill: the nav
+   * rail's channel numbers are 10px, and at oklch L 0.5 this token measured
+   * 4.44:1 on surface-2 — a hair under AA. L 0.47 clears 4.5:1 on every light
+   * surface (≈5.1:1 on the rail, ≈4.5:1 on surface-3) with the hue and chroma
+   * untouched, so nothing about the signal colour changes except that small
+   * type can now wear it. */
+  --raw-accent: oklch(0.47 0.14 220);
   --raw-accent-emphasis: oklch(0.43 0.15 220);
   --raw-grid: oklch(0.895 0.002 260);
   --raw-grid-minor: oklch(0.945 0.001 260);
