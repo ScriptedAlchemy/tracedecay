@@ -6,12 +6,14 @@
 use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{canonical_json_bytes, host_integration_catalog_v1};
+use tracedecay_domain::{
+    TraceDecayProfileBindingV1, canonical_json_bytes, host_integration_catalog_v1,
+};
 
 use super::host_bundle_v2::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
     HostBundleManifestV1, HostBundleVerificationAdapterV1, HostComponentSetEntryV1,
-    HostComponentSetV1, HostKindV1,
+    HostComponentSetV1, HostKindV1, validate_identifier,
 };
 
 pub const FIRST_PARTY_COMPONENT_CATALOG_VERSION: u64 = 1;
@@ -121,20 +123,38 @@ pub fn verified_embedded_project_host_component_set(
     agent_id: &str,
     now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
+    validate_identifier(agent_id).map_err(|_| HostBundleRegistryError::Incompatible)?;
     let mut component_set = verified_embedded_default_host_component_set(host, now_unix)?;
     let mut manifest_digests = BTreeSet::new();
     for entry in &mut component_set.component_set.components {
         let component = component_name(entry.manifest.component);
         let relative_path = format!(".tracedecay/host-components/{agent_id}/{component}.v1.json");
-        let bytes = format!(
-            "{{\"agent\":\"{agent_id}\",\"component\":\"{component}\",\"scope\":\"project\"}}\n"
-        )
-        .into_bytes();
+        let bytes = canonical_json_bytes(&EmbeddedProjectRegistrationMarkerV1 {
+            schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
+            registry_version: FIRST_PARTY_COMPONENT_CATALOG_VERSION,
+            agent: agent_id,
+            component,
+            scope: "project",
+            profile_binding: TraceDecayProfileBindingV1::User,
+        })
+        .map_err(|_| HostBundleRegistryError::Incompatible)?;
         entry.manifest.artifacts = vec![HostBundleArtifactV1 {
             relative_path: relative_path.clone(),
             artifact_digest: Sha256::digest(&bytes).into(),
             ownership_marker: format!("tracedecay.{}.{}.v1", host_name(host), component),
         }];
+        entry.manifest.effective_behavior_digest = embedded_bundle_identity(
+            "project_effective_behavior",
+            host,
+            entry.manifest.component,
+            &entry.manifest.artifacts,
+        )?;
+        entry.manifest.resolution_provenance_digest = embedded_bundle_identity(
+            "project_resolution_provenance",
+            host,
+            entry.manifest.component,
+            &entry.manifest.artifacts,
+        )?;
         entry.contents = vec![HostBundleArtifactContentV1 {
             relative_path,
             bytes,
@@ -148,6 +168,16 @@ pub fn verified_embedded_project_host_component_set(
     }
     component_set.manifest_digests = manifest_digests;
     Ok(component_set)
+}
+
+#[derive(serde::Serialize)]
+struct EmbeddedProjectRegistrationMarkerV1<'a> {
+    schema_version: u16,
+    registry_version: u64,
+    agent: &'a str,
+    component: &'a str,
+    scope: &'static str,
+    profile_binding: TraceDecayProfileBindingV1,
 }
 
 /// Build a canonical one-or-more component set. A caller selecting
@@ -828,6 +858,41 @@ mod tests {
         );
         for component in &component_set.component_set.components {
             component_set.verify_manifest(&component.manifest).unwrap();
+            let marker: serde_json::Value =
+                serde_json::from_slice(&component.contents[0].bytes).unwrap();
+            assert_eq!(marker["schema_version"], 1);
+            assert_eq!(marker["registry_version"], 1);
+            assert_eq!(marker["profile_binding"], "user");
+            assert_eq!(
+                component.manifest.effective_behavior_digest,
+                embedded_bundle_identity(
+                    "project_effective_behavior",
+                    component.manifest.host,
+                    component.manifest.component,
+                    &component.manifest.artifacts,
+                )
+                .unwrap()
+            );
+            assert_eq!(
+                component.manifest.resolution_provenance_digest,
+                embedded_bundle_identity(
+                    "project_resolution_provenance",
+                    component.manifest.host,
+                    component.manifest.component,
+                    &component.manifest.artifacts,
+                )
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn project_local_sets_reject_unsafe_agent_ids() {
+        for agent_id in ["", "../opencode", "opencode/other", "opencode\""] {
+            assert_eq!(
+                verified_embedded_project_host_component_set(HostKindV1::OpenCode, agent_id, 0),
+                Err(HostBundleRegistryError::Incompatible)
+            );
         }
     }
 }
