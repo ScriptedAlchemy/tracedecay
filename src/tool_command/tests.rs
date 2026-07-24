@@ -631,11 +631,33 @@ fn missing_required_error_includes_usage_example() {
 }
 
 #[test]
-fn dry_run_flag_is_reserved() {
+fn dry_run_flag_remains_reserved_when_the_tool_does_not_declare_it() {
     let d = def("search");
     let parsed = parse_invocation(&d, &["foo".to_string(), "--dry-run".to_string()]).unwrap();
     assert!(parsed.dry_run);
     assert_eq!(parsed.tool_args, json!({ "query": "foo" }));
+}
+
+#[test]
+fn dry_run_flag_is_forwarded_when_the_tool_declares_it() {
+    let d = def("str_replace");
+    let parsed = parse_invocation(
+        &d,
+        &[
+            "--path".to_string(),
+            "src/lib.rs".to_string(),
+            "--old-str".to_string(),
+            "old".to_string(),
+            "--new-str".to_string(),
+            "new".to_string(),
+            "--dry-run".to_string(),
+            "true".to_string(),
+        ],
+    )
+    .unwrap();
+
+    assert!(!parsed.dry_run);
+    assert_eq!(parsed.tool_args["dry_run"], json!(true));
 }
 
 #[test]

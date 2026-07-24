@@ -102,7 +102,7 @@ pub(super) fn parse_invocation_with_stdin(
                 return Ok(out);
             }
             "--json" => out.raw_json = true,
-            "--dry-run" => out.dry_run = true,
+            "--dry-run" if !schema_properties.contains_key("dry_run") => out.dry_run = true,
             "--project" => {
                 out.project = Some(take_flag_value(&mut iter, "--project", inline_value)?);
             }

@@ -10,8 +10,10 @@
 //! - `-h` / `--help` — print the tool's parameters and exit.
 //! - `--json` — print the raw JSON-RPC `result.value`; default is the
 //!   human-readable text inside `content[0].text`.
-//! - `--dry-run` — parse and validate the arguments, print the resolved
-//!   arguments object as pretty JSON, and exit without dispatching the tool.
+//! - `--dry-run` — for tools without their own `dry_run` property, parse and
+//!   validate the arguments, print the resolved arguments object as pretty
+//!   JSON, and exit without dispatching the tool. Otherwise it is forwarded as
+//!   the tool's boolean argument.
 //! - `--project <path>` — project root to target. Defaults to the nearest
 //!   initialised project walking up from cwd (falling back to cwd). We use
 //!   `--project` (not `-p`) because several MCP tools have a `path` argument
