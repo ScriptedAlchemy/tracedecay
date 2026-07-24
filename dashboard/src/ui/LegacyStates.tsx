@@ -27,6 +27,29 @@ export function LegacyBoundary<T>({
   return <CenteredState title={title} kind={kind} detail={detail} />;
 }
 
+/** Crafted truthful states (plan 11a): one sentence of what this state means
+ * here plus the next action, not a bare chip. Workspace-specific sentences
+ * come from the caller; these are the designed defaults per state. */
+const STATE_GUIDANCE: Partial<Record<DomainStateKind, { sentence: string; action: string }>> = {
+  loading: { sentence: 'Reading from the daemon.', action: 'This resolves on its own.' },
+  offline: {
+    sentence: 'The daemon is not reachable from this browser.',
+    action: 'Start it with `tracedecay daemon run`, then refresh.',
+  },
+  error: {
+    sentence: 'The read failed and nothing is being invented in its place.',
+    action: 'Retry, or check the daemon log if it persists.',
+  },
+  unknown: {
+    sentence: 'No response has been recorded for this surface yet.',
+    action: 'Refresh once the daemon is serving.',
+  },
+  unsupported_schema: {
+    sentence: 'The daemon answered with a shape this build does not understand.',
+    action: 'Update the dashboard build to match the daemon.',
+  },
+};
+
 export function CenteredState({
   title,
   kind,
@@ -36,10 +59,17 @@ export function CenteredState({
   kind: DomainStateKind;
   detail?: string | undefined;
 }) {
+  const guidance = STATE_GUIDANCE[kind];
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 p-8">
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
       <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
       <StateChip kind={kind} detail={detail} />
+      {guidance ? (
+        <p className="max-w-sm text-xs leading-relaxed text-text-muted">
+          {guidance.sentence}{' '}
+          <span className="text-text-secondary">{guidance.action}</span>
+        </p>
+      ) : null}
     </div>
   );
 }
