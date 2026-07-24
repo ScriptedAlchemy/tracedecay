@@ -97,6 +97,7 @@ pub(crate) struct GraphQlPullRequestV1 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlReviewThreadConnectionV1 {
     pub(crate) nodes: Vec<GraphQlReviewThreadV1>,
+    #[serde(default)]
     pub(crate) page_info: GraphQlPageInfoV1,
 }
 
@@ -118,10 +119,11 @@ pub(crate) struct GraphQlReviewThreadV1 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlReviewCommentConnectionV1 {
     pub(crate) nodes: Vec<GraphQlReviewCommentV1>,
+    #[serde(default)]
     pub(crate) page_info: GraphQlPageInfoV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlPageInfoV1 {
     pub(crate) has_next_page: bool,
