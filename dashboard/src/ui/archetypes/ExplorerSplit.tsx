@@ -236,12 +236,16 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
       {entries.slice(0, 60).map(([k, v]) => (
         <div
           key={k}
-          // minmax(...) lets the label column give way under pressure (deep
-          // nesting, a 320px viewport) instead of reserving a hard 8rem no
-          // matter what — a fixed track never shrinks, so a narrow container
-          // forced the value column to negative space and every value
-          // wrapped one character per line.
-          className="grid grid-cols-[minmax(5rem,9rem)_1fr] gap-2 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0"
+          // Side-by-side columns compound: each nesting level reserves its
+          // own label track, so three or four levels deep — ordinary for a
+          // settings payload — the reservations alone exceed a 320px
+          // viewport. CSS Grid sizes non-flexible tracks (the label's
+          // minmax) before flexible ones, so the value's `1fr` track was
+          // starving to a *measured* 0px and every value wrapped one
+          // character per line. Stacking label-above-value below `sm` gives
+          // each its own full row width regardless of depth; the ruled
+          // side-by-side layout returns once there is room to share.
+          className="grid grid-cols-1 gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0 sm:grid-cols-[minmax(5rem,9rem)_1fr] sm:gap-y-0"
         >
           <dt className="td-legend truncate pt-px" title={k}>
             {k}
