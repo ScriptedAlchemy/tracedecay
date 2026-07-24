@@ -33,6 +33,7 @@ use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicCloc
 mod artifact_store;
 mod evaluation;
 mod fastembed_adapter;
+pub(crate) mod legacy_migration;
 mod manifest;
 mod model_catalog;
 mod model_lifecycle;
