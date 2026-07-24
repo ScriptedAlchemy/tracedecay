@@ -460,7 +460,7 @@ pub async fn collect_orphan_store_findings(
     profile_root: &Path,
     retention_secs: i64,
     now: i64,
-) -> Vec<DoctorStorageFindingV1> {
+) -> DoctorStorageFamilyReadV1 {
     let report = crate::retention::orphan_stores::sweep_orphan_stores(
         global_db,
         profile_root,
@@ -469,14 +469,17 @@ pub async fn collect_orphan_store_findings(
         false,
     )
     .await;
-    report
+    let Ok(report) = report else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    storage_family_read(report
         .plan
         .collect
         .iter()
         .chain(report.plan.retained_immature.iter())
         .chain(report.plan.relink.iter())
         .filter_map(crate::doctor::registry_drift::orphan_store_doctor_finding)
-        .collect()
+        .collect())
 }
 
 /// Adapter over storage retention/size findings (Storage family).
