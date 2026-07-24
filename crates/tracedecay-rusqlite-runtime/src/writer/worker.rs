@@ -715,135 +715,6 @@ fn select_auxiliary_work(
     order.into_iter().find(|work| waiting(*work))
 }
 
-#[cfg(test)]
-mod auxiliary_scheduling_tests {
-    use std::sync::{Arc, Mutex};
-
-    use tokio::sync::oneshot;
-
-    use crate::{RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage};
-
-    use super::{
-        AuxiliaryWork, IncrementalVacuumCommand, WriterActorError, run_incremental_vacuum,
-        select_auxiliary_work,
-    };
-
-    struct RecordingAuthority {
-        stages: Arc<Mutex<Vec<RuntimeWriteAuthorityStage>>>,
-        deny_before_commit: bool,
-    }
-
-    impl RuntimeWriteAuthority for RecordingAuthority {
-        fn verify(
-            &self,
-            stage: RuntimeWriteAuthorityStage,
-        ) -> Result<(), RuntimeWriteAuthorityError> {
-            self.stages.lock().unwrap().push(stage);
-            if self.deny_before_commit && stage == RuntimeWriteAuthorityStage::BeforeCommit {
-                Err(RuntimeWriteAuthorityError::denied("revoked before commit"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    #[test]
-    fn auxiliary_work_cannot_starve_product_writes() {
-        assert_eq!(
-            select_auxiliary_work(
-                true,
-                true,
-                false,
-                false,
-                true,
-                AuxiliaryWork::IncrementalVacuum,
-            ),
-            Some(AuxiliaryWork::IncrementalVacuum)
-        );
-        assert_eq!(
-            select_auxiliary_work(true, true, false, false, false, AuxiliaryWork::MigrationSql,),
-            None
-        );
-    }
-
-    #[test]
-    fn auxiliary_work_alternates_when_product_queue_is_empty() {
-        assert_eq!(
-            select_auxiliary_work(
-                true,
-                true,
-                false,
-                true,
-                false,
-                AuxiliaryWork::IncrementalVacuum,
-            ),
-            Some(AuxiliaryWork::IncrementalVacuum)
-        );
-        assert_eq!(
-            select_auxiliary_work(true, true, false, true, false, AuxiliaryWork::MigrationSql,),
-            Some(AuxiliaryWork::MigrationSql)
-        );
-        assert_eq!(
-            select_auxiliary_work(true, true, true, true, false, AuxiliaryWork::OnlineBackup,),
-            Some(AuxiliaryWork::OnlineBackup)
-        );
-    }
-
-    #[test]
-    fn incremental_vacuum_samples_worker_authority_stages() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
-            .unwrap();
-        let stages = Arc::new(Mutex::new(Vec::new()));
-        let authority = Arc::new(RecordingAuthority {
-            stages: Arc::clone(&stages),
-            deny_before_commit: false,
-        });
-        let (reply, mut response) = oneshot::channel();
-
-        run_incremental_vacuum(
-            &mut connection,
-            IncrementalVacuumCommand::new(0, authority, reply),
-        );
-
-        assert!(response.try_recv().unwrap().is_ok());
-        assert_eq!(
-            *stages.lock().unwrap(),
-            [
-                RuntimeWriteAuthorityStage::Dequeued,
-                RuntimeWriteAuthorityStage::BeforeCommit
-            ]
-        );
-    }
-
-    #[test]
-    fn incremental_vacuum_rolls_back_when_authority_is_revoked() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
-            .unwrap();
-        let authority = Arc::new(RecordingAuthority {
-            stages: Arc::new(Mutex::new(Vec::new())),
-            deny_before_commit: true,
-        });
-        let (reply, mut response) = oneshot::channel();
-
-        run_incremental_vacuum(
-            &mut connection,
-            IncrementalVacuumCommand::new(8, authority, reply),
-        );
-
-        assert!(matches!(
-            response.try_recv().unwrap(),
-            Err(WriterActorError::AuthorityDenied {
-                stage: RuntimeWriteAuthorityStage::BeforeCommit
-            })
-        ));
-        assert!(connection.is_autocommit());
-    }
-}
-
 fn drain_checkpoint_ingress(
     receiver: &mut mpsc::Receiver<CheckpointCommand>,
     queue: &mut VecDeque<CheckpointCommand>,
@@ -1069,4 +940,133 @@ fn build_batches(
         batches.push(batch);
     }
     batches
+}
+
+#[cfg(test)]
+mod auxiliary_scheduling_tests {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::oneshot;
+
+    use crate::{RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage};
+
+    use super::{
+        AuxiliaryWork, IncrementalVacuumCommand, WriterActorError, run_incremental_vacuum,
+        select_auxiliary_work,
+    };
+
+    struct RecordingAuthority {
+        stages: Arc<Mutex<Vec<RuntimeWriteAuthorityStage>>>,
+        deny_before_commit: bool,
+    }
+
+    impl RuntimeWriteAuthority for RecordingAuthority {
+        fn verify(
+            &self,
+            stage: RuntimeWriteAuthorityStage,
+        ) -> Result<(), RuntimeWriteAuthorityError> {
+            self.stages.lock().unwrap().push(stage);
+            if self.deny_before_commit && stage == RuntimeWriteAuthorityStage::BeforeCommit {
+                Err(RuntimeWriteAuthorityError::denied("revoked before commit"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn auxiliary_work_cannot_starve_product_writes() {
+        assert_eq!(
+            select_auxiliary_work(
+                true,
+                true,
+                false,
+                false,
+                true,
+                AuxiliaryWork::IncrementalVacuum,
+            ),
+            Some(AuxiliaryWork::IncrementalVacuum)
+        );
+        assert_eq!(
+            select_auxiliary_work(true, true, false, false, false, AuxiliaryWork::MigrationSql,),
+            None
+        );
+    }
+
+    #[test]
+    fn auxiliary_work_alternates_when_product_queue_is_empty() {
+        assert_eq!(
+            select_auxiliary_work(
+                true,
+                true,
+                false,
+                true,
+                false,
+                AuxiliaryWork::IncrementalVacuum,
+            ),
+            Some(AuxiliaryWork::IncrementalVacuum)
+        );
+        assert_eq!(
+            select_auxiliary_work(true, true, false, true, false, AuxiliaryWork::MigrationSql,),
+            Some(AuxiliaryWork::MigrationSql)
+        );
+        assert_eq!(
+            select_auxiliary_work(true, true, true, true, false, AuxiliaryWork::OnlineBackup,),
+            Some(AuxiliaryWork::OnlineBackup)
+        );
+    }
+
+    #[test]
+    fn incremental_vacuum_samples_worker_authority_stages() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+            .unwrap();
+        let stages = Arc::new(Mutex::new(Vec::new()));
+        let authority = Arc::new(RecordingAuthority {
+            stages: Arc::clone(&stages),
+            deny_before_commit: false,
+        });
+        let (reply, mut response) = oneshot::channel();
+
+        run_incremental_vacuum(
+            &mut connection,
+            IncrementalVacuumCommand::new(0, authority, reply),
+        );
+
+        assert!(response.try_recv().unwrap().is_ok());
+        assert_eq!(
+            *stages.lock().unwrap(),
+            [
+                RuntimeWriteAuthorityStage::Dequeued,
+                RuntimeWriteAuthorityStage::BeforeCommit
+            ]
+        );
+    }
+
+    #[test]
+    fn incremental_vacuum_rolls_back_when_authority_is_revoked() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+            .unwrap();
+        let authority = Arc::new(RecordingAuthority {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            deny_before_commit: true,
+        });
+        let (reply, mut response) = oneshot::channel();
+
+        run_incremental_vacuum(
+            &mut connection,
+            IncrementalVacuumCommand::new(8, authority, reply),
+        );
+
+        assert!(matches!(
+            response.try_recv().unwrap(),
+            Err(WriterActorError::AuthorityDenied {
+                stage: RuntimeWriteAuthorityStage::BeforeCommit
+            })
+        ));
+        assert!(connection.is_autocommit());
+    }
 }

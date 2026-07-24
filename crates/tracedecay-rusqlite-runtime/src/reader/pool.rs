@@ -935,29 +935,6 @@ fn spawn_or_run_deferred_return(
     }
 }
 
-#[cfg(test)]
-mod deferred_return_spawn_tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use super::*;
-
-    #[test]
-    fn spawn_failure_runs_deferred_return_inline() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let observed = Arc::clone(&ran);
-
-        spawn_or_run_deferred_return(
-            Box::new(move || observed.store(true, Ordering::Release)),
-            |task| {
-                drop(task);
-                Err(std::io::Error::other("injected spawn failure"))
-            },
-        );
-
-        assert!(ran.load(Ordering::Acquire));
-    }
-}
-
 fn map_worker_error(error: ReaderWorkerError) -> ReaderAcquireError {
     match error {
         ReaderWorkerError::Interrupted { reason } => ReaderAcquireError::Interrupted { reason },
@@ -989,5 +966,28 @@ fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1
             Some(UnavailableReasonV1::DeadlineExceeded)
         }
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod deferred_return_spawn_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn spawn_failure_runs_deferred_return_inline() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&ran);
+
+        spawn_or_run_deferred_return(
+            Box::new(move || observed.store(true, Ordering::Release)),
+            |task| {
+                drop(task);
+                Err(std::io::Error::other("injected spawn failure"))
+            },
+        );
+
+        assert!(ran.load(Ordering::Acquire));
     }
 }
