@@ -27,6 +27,11 @@ use tracedecay_domain::configuration::{
     SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
     safe_work_topology_policy_v1,
 };
+use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+
+/// Canonical Plan 20 default for configured-tier proximity warnings.
+pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
+pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Read-only cutover contract; production readers remain intentionally
 /// unwired until the configuration-control-plane migration boundary lands.
@@ -36,7 +41,7 @@ pub(crate) mod legacy_decoder;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 1;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 2;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -51,6 +56,13 @@ pub enum ConfigurationRegistryError {
         key: SettingKey,
         expected: ConfigurationValueKindV1,
         actual: ConfigurationValueKindV1,
+    },
+    #[error("setting {key} value {actual} is outside [{minimum}, {maximum}]")]
+    UnsignedValueOutOfRange {
+        key: SettingKey,
+        minimum: u64,
+        maximum: u64,
+        actual: u64,
     },
     #[error("setting {key} cannot be written in layer {layer:?}")]
     InvalidLayer {
@@ -137,6 +149,18 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::Unsigned,
+            default_value: ConfigurationValueV1::Unsigned(
+                DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1,
+            ),
+            sensitivity: SettingSensitivityV1::Public,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
         register_legacy_project_settings(&mut registry)?;
         let expected = CONFIGURATION_SETTING_KEYS_V1
             .iter()
@@ -197,6 +221,23 @@ impl ConfigurationRegistry {
             });
         }
         value.validate()?;
+        if key.as_str() == PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1 {
+            let ConfigurationValueV1::Unsigned(actual) = value else {
+                return Err(ConfigurationRegistryError::ValueKindMismatch {
+                    key: key.clone(),
+                    expected: ConfigurationValueKindV1::Unsigned,
+                    actual: value.kind(),
+                });
+            };
+            if *actual > MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 {
+                return Err(ConfigurationRegistryError::UnsignedValueOutOfRange {
+                    key: key.clone(),
+                    minimum: 0,
+                    maximum: MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1,
+                    actual: *actual,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -407,6 +448,47 @@ fn register_legacy_project_settings(
 
 fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
     Ok(SettingKey::new(value)?)
+}
+
+#[cfg(test)]
+mod proximity_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn proximity_threshold_has_one_bounded_project_default() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1).expect("key");
+        let definition = registry.definition(&key).expect("definition");
+
+        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Unsigned);
+        assert_eq!(
+            definition.default_value,
+            ConfigurationValueV1::Unsigned(DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1)
+        );
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+        assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
+        assert!(
+            registry
+                .validate_value(&key, &ConfigurationValueV1::Unsigned(0))
+                .is_ok()
+        );
+        assert!(
+            registry
+                .validate_value(
+                    &key,
+                    &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1),
+                )
+                .is_ok()
+        );
+        assert!(matches!(
+            registry.validate_value(
+                &key,
+                &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 + 1),
+            ),
+            Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
+        ));
+    }
 }
 
 #[cfg(test)]

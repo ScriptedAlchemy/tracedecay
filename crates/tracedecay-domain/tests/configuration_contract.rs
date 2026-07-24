@@ -10,6 +10,7 @@ use tracedecay_domain::configuration::{
     SourceBindingId, SourceKindV1, UserProfileId, WorktreePlacementModeV1,
     resolve_restrictive_capabilities, safe_work_topology_policy_v1,
 };
+use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, CapabilityId, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
 };
@@ -138,10 +139,14 @@ fn credential_metadata_has_no_plaintext_value_surface() {
 
 #[test]
 fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
-    assert_eq!(CONFIGURATION_SETTING_KEYS_V1.len(), 29);
+    assert_eq!(CONFIGURATION_SETTING_KEYS_V1.len(), 30);
     assert_eq!(
         LEGACY_CONFIG_JSON_SETTING_KEYS_V1.len(),
-        CONFIGURATION_SETTING_KEYS_V1.len() - 5
+        CONFIGURATION_SETTING_KEYS_V1.len() - 6
+    );
+    assert!(
+        CONFIGURATION_SETTING_KEYS_V1.contains(&PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1),
+        "the Plan 20 proximity threshold must be part of the closed registry inventory"
     );
     let mut unique = BTreeSet::new();
     for key in CONFIGURATION_SETTING_KEYS_V1 {

@@ -61,7 +61,7 @@ pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_br
 pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
 pub const TELEMETRY_TIMINGS_SETTING_KEY: &str = "telemetry.timings.v1";
 
-/// Exact PR11 registry inventory. Keeping this closed list in the domain
+/// Exact Plan 20 registry inventory. Keeping this closed list in the domain
 /// contract prevents adapters and migrations from silently inventing keys.
 pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SOURCE_BINDINGS_SETTING_KEY,
@@ -70,6 +70,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     ANALYZER_SETTINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+    crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
     INDEX_EXCLUDE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY,
