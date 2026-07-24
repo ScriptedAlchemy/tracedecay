@@ -571,42 +571,46 @@ function InspectorStrip({
   const rate =
     focus && duration > 0 ? (focus.span.weight / (duration / 3600)).toFixed(1) : null;
   return (
-    <dl
+    // The grid lives on the wrapper, not on the <dl>: the strip also carries a
+    // timestamp caption and an instruction line, and neither is a term with a
+    // definition. `display: contents` keeps the list a real <dl> holding only
+    // dt/dd groups while its readouts stay direct children of the same grid.
+    <div
       aria-live="polite"
       className="grid min-h-14 grid-cols-2 gap-x-4 gap-y-1 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-3 py-2 sm:grid-cols-4"
     >
       {focus ? (
         <>
-          <Readout label={pinned ? 'session · pinned' : 'session'}>
-            <span className="truncate font-mono">{focus.span.label}</span>
-          </Readout>
-          <Readout label="provider">{focus.track.label}</Readout>
-          <Readout label="span">
-            {formatDuration(duration)}
-            {rate ? (
-              <span className="ml-1 text-text-muted">· {rate}/h</span>
-            ) : null}
-          </Readout>
-          <Readout label="messages">{focus.span.weight.toLocaleString()}</Readout>
-          <div className="col-span-2 sm:col-span-4">
-            <span className="tabular text-2xs text-text-muted">
-              {formatMoment(focus.span.start)} → {formatMoment(focus.span.end)}
-            </span>
-          </div>
+          <dl className="contents">
+            <Readout label={pinned ? 'session · pinned' : 'session'}>
+              <span className="truncate font-mono">{focus.span.label}</span>
+            </Readout>
+            <Readout label="provider">{focus.track.label}</Readout>
+            <Readout label="span">
+              {formatDuration(duration)}
+              {rate ? (
+                <span className="ml-1 text-text-muted">· {rate}/h</span>
+              ) : null}
+            </Readout>
+            <Readout label="messages">{focus.span.weight.toLocaleString()}</Readout>
+          </dl>
+          <p className="tabular col-span-2 text-2xs text-text-muted sm:col-span-4">
+            {formatMoment(focus.span.start)} → {formatMoment(focus.span.end)}
+          </p>
         </>
       ) : (
         <>
-          <Readout label="pointer">
-            {cursorTime != null ? formatMoment(cursorTime) : 'off the weave'}
-          </Readout>
-          <div className="col-span-2 sm:col-span-3 flex items-center">
-            <p className="text-2xs text-text-muted">
-              Hover a mark to read it here; click to pin. Drag the weave to pan.
-            </p>
-          </div>
+          <dl className="contents">
+            <Readout label="pointer">
+              {cursorTime != null ? formatMoment(cursorTime) : 'off the weave'}
+            </Readout>
+          </dl>
+          <p className="col-span-2 flex items-center text-2xs text-text-muted sm:col-span-3">
+            Hover a mark to read it here; click to pin. Drag the weave to pan.
+          </p>
         </>
       )}
-    </dl>
+    </div>
   );
 }
 

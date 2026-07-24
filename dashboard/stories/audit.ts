@@ -97,10 +97,15 @@ async function waitForServer(baseURL: string, timeoutMs = 90_000): Promise<void>
 }
 
 function startServer(): { child: ChildProcess; baseURL: string } {
+  // Detached so the whole process group can be signalled at the end: `npx` is a
+  // shim that does not forward SIGTERM to the rsbuild it spawns, so killing the
+  // direct child alone left the dev server alive and the audit hung after
+  // printing its summary.
   const child = spawn('npx', ['rsbuild', 'dev', '--port', String(PORT)], {
     cwd: ROOT,
     env: { ...process.env, NO_COLOR: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
   child.stdout?.on('data', () => {});
   child.stderr?.on('data', () => {});
@@ -273,7 +278,13 @@ async function main(): Promise<void> {
     for (const s of STORY_SURFACES) surfaces.push(surfaceMap.get(s.id)!);
   } finally {
     if (browser) await browser.close();
-    if (server) server.child.kill('SIGTERM');
+    if (server?.child.pid) {
+      try {
+        process.kill(-server.child.pid, 'SIGTERM');
+      } catch {
+        /* group already gone */
+      }
+    }
   }
 
   const manifest = {
