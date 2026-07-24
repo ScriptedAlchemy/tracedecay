@@ -18,7 +18,8 @@ use super::super::projection::{
 use super::super::proposals::compatibility_proposal_category;
 use super::{
     compatibility_curated_correction_batch, compatibility_curation_evidence_ids_tx,
-    compatibility_curation_mappings_from_ids_tx, compatibility_relation_label,
+    compatibility_curation_mappings_from_ids_tx,
+    compatibility_record_curated_correction_provenance_tx, compatibility_relation_label,
 };
 use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -350,6 +351,29 @@ pub(super) async fn compatibility_merge_entities_tx(
             now,
         )?;
         compatibility_commit_batch_tx(transaction, &batch).await?;
+        // The evidence facts are themselves linked to the merged entities, so
+        // they are always members of `fact_ids`. Recording one as derived from
+        // itself trips the self-reference guard and would roll back the whole
+        // merge, so correct each fact against the remaining evidence only and
+        // skip the relation entirely when it was the sole evidence fact.
+        let fact_evidence = evidence
+            .iter()
+            .filter(|evidence_fact_id| *evidence_fact_id != fact_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !fact_evidence.is_empty() {
+            compatibility_record_curated_correction_provenance_tx(
+                transaction,
+                owner,
+                fact_id,
+                &fact_evidence,
+                operation.confidence(),
+                "merge_entities",
+                actor,
+                now,
+            )
+            .await?;
+        }
         compatibility_mirror_update_tx(
             db,
             transaction,

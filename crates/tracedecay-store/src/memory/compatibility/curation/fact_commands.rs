@@ -541,11 +541,7 @@ impl CompatibilityFactFeedbackOutcomeV1 {
                 field: "compatibility legacy feedback event id",
             }));
         }
-        if !(-1_000_000..=1_000_000).contains(&trust_delta_millionths) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility fact feedback trust delta",
-            }));
-        }
+        validate_feedback_trust_delta(old_trust, new_trust, trust_delta_millionths)?;
         Ok(Self {
             fact,
             event_id,
@@ -581,5 +577,34 @@ impl CompatibilityFactFeedbackOutcomeV1 {
     }
     pub fn unhelpful_count(&self) -> u64 {
         self.unhelpful_count
+    }
+}
+
+fn validate_feedback_trust_delta(
+    old_trust: Confidence,
+    new_trust: Confidence,
+    trust_delta_millionths: i32,
+) -> FactStoreResult<()> {
+    let expected = ((new_trust.as_f64() - old_trust.as_f64()) * 1_000_000.0).round() as i32;
+    if !(-1_000_000..=1_000_000).contains(&trust_delta_millionths)
+        || trust_delta_millionths != expected
+    {
+        return Err(FactStoreError::Contract(DomainError::NonCanonical {
+            field: "compatibility fact feedback trust delta",
+        }));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feedback_trust_delta_must_match_the_bound_transition() {
+        let old = Confidence::new(0.5).unwrap();
+        let new = Confidence::new(0.6).unwrap();
+        assert!(validate_feedback_trust_delta(old, new, 100_000).is_ok());
+        assert!(validate_feedback_trust_delta(old, new, -100_000).is_err());
     }
 }

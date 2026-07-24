@@ -6,6 +6,8 @@
 mod apply;
 mod entities;
 mod relations;
+#[cfg(test)]
+mod tests;
 
 pub(super) use self::apply::*;
 use self::entities::*;
