@@ -39,10 +39,8 @@ mod code_index_freshness_api;
 mod doctor_findings_api;
 mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
-    DoctorRemediationAuthorityScopeV1, DoctorRemediationDispatchCommandV1,
-    DoctorRemediationDispatchErrorV1, DoctorRemediationDispatcherV1,
-    DoctorRemediationEffectReceiptV1, DoctorRemediationOperationPhaseV1,
-    DoctorRemediationOperationV1,
+    DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
+    DoctorRemediationDispatcherV1, DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1,
 };
 mod events_api;
 mod graph_api;
@@ -64,6 +62,7 @@ pub(crate) use read_model::DashboardLegalActionKindV1;
 mod savings_api;
 mod savings_pricing;
 mod settings_api;
+mod storage_findings_api;
 mod storage_telemetry_api;
 mod token_count;
 mod util;
@@ -1053,7 +1052,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route(
             "/api/storage/findings",
-            get(doctor_findings_api::storage_findings),
+            get(storage_findings_api::findings),
         )
         .route(
             "/api/code-index/freshness",
