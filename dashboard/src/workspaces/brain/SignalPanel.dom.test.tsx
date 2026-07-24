@@ -1,6 +1,6 @@
 import { render, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SignalPanel } from './BrainPage.tsx';
+import { SignalPanel } from './SignalPanel.tsx';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 
 /**
