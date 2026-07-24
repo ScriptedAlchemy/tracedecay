@@ -221,13 +221,13 @@ pub enum MigrationSqlWriteIntent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MigrationSqlTransactionPolicy {
+pub(crate) enum MigrationSqlTransactionPolicy {
     Ordinary,
     SchemaMigration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MigrationSqlStepPolicy {
+pub(crate) enum MigrationSqlStepPolicy {
     Bounded,
     AuthorizedLongSchema,
 }

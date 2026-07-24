@@ -1,13 +1,16 @@
-use std::fmt::Debug;
+use std::{error::Error, fmt::Debug};
 
 use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{
     BrainId, CodeGenerationId, LocatorDigest, ProjectId, UserProfileId, UtcMicros,
 };
-use tracedecay_rusqlite_runtime::StorageOperationExecutor;
 use tracedecay_rusqlite_runtime::repository::{
-    ConcreteRepositoryWriteExecutor, RepositoryPhysicalAttachmentFactory,
+    ConcreteRepositoryWriteExecutor, RepositoryAttachmentStartError,
+    RepositoryPhysicalAttachmentFactory,
+};
+use tracedecay_rusqlite_runtime::{
+    OpenedDatabaseFileError, StorageOperationExecutor, graph::GraphPhysicalAttachmentStartError,
 };
 use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
@@ -125,6 +128,16 @@ fn health_request(binding: StoreRuntimeBindingV1) -> (RuntimeReadRequestV1, Prob
             deadline,
         },
     )
+}
+
+#[test]
+fn attachment_identity_errors_preserve_the_public_source() {
+    let source = OpenedDatabaseFileError::Open;
+    let graph = GraphPhysicalAttachmentStartError::Identity(source);
+    let repository = RepositoryAttachmentStartError::Identity(source);
+
+    assert!(graph.source().is_some());
+    assert!(repository.source().is_some());
 }
 
 #[test]

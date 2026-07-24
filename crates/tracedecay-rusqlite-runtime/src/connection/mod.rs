@@ -102,14 +102,16 @@ impl OpenedDatabaseFile {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OpenedDatabaseFileError {
+pub enum OpenedDatabaseFileError {
     Create,
     Open,
     Inspect,
     NotFile,
+    #[cfg(windows)]
     Identify,
     Replaced,
     Remove,
+    #[cfg(not(any(unix, windows)))]
     Unsupported,
 }
 
@@ -120,9 +122,11 @@ impl fmt::Display for OpenedDatabaseFileError {
             Self::Open => "could not open the verified SQLite file",
             Self::Inspect => "could not inspect the verified SQLite file descriptor",
             Self::NotFile => "verified SQLite locator is not a regular file",
+            #[cfg(windows)]
             Self::Identify => "could not identify the verified SQLite file descriptor",
             Self::Replaced => "verified SQLite file was replaced while opening workers",
             Self::Remove => "could not remove an uncommitted canonical SQLite file",
+            #[cfg(not(any(unix, windows)))]
             Self::Unsupported => "SQLite file identity is unsupported on this platform",
         };
         formatter.write_str(message)

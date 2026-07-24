@@ -5,7 +5,10 @@ mod authority;
 pub mod backup;
 mod checkpoint;
 mod connection;
-pub use connection::{ConnectionPolicyError, open_immutable_health_reader, open_immutable_reader};
+pub use connection::{
+    ConnectionPolicyError, OpenedDatabaseFileError, open_immutable_health_reader,
+    open_immutable_reader,
+};
 pub mod effects;
 pub mod evidence;
 pub mod graph;
