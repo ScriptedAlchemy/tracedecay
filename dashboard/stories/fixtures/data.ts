@@ -1075,78 +1075,39 @@ const storageTelemetry = envelope({
 
 /** GET /api/storage/findings — observatory doctor (StorageFindingsPayloadSchema). */
 const storageFindings = envelope({
-  family_filter: 'storage',
-  entries: [
+  kinds: [
     {
-      finding: {
-        family: 'storage',
-        state: 'healthy_complete_coverage',
-        evidence: [{ family: 'storage', reference: 'evidence.over_budget_store.latest' }],
-        coverage: { completeness: 'complete', statement: 'All stores are within advisory budgets.' },
-        remediation: null,
-      },
-      storage_kind: 'over_budget_store',
+      kind: 'over_budget_store',
+      state: 'unsupported',
+      required_source: 'store_budget_observation',
+      reason: 'the store budget read source is not wired daemon-side yet',
     },
     {
-      finding: {
-        family: 'storage',
-        state: 'healthy_complete_coverage',
-        evidence: [{ family: 'storage', reference: 'evidence.orphan_store.latest' }],
-        coverage: { completeness: 'complete', statement: 'No orphaned stores detected.' },
-        remediation: null,
-      },
-      storage_kind: 'orphan_store',
+      kind: 'orphan_store',
+      state: 'unsupported',
+      required_source: 'orphan_store_census',
+      reason: 'the orphan store census read source is not wired daemon-side yet',
     },
     {
-      finding: {
-        family: 'storage',
-        state: 'partial',
-        evidence: [{ family: 'storage', reference: 'evidence.stale_branch_dbs.latest' }],
-        coverage: { completeness: 'partial', statement: 'Two branch databases have not been observed in 30 days.' },
-        remediation: { owning_operation: 'storage.retention.sweep', kind: "preview" },
-      },
-      storage_kind: 'stale_branch_dbs',
+      kind: 'stale_branch_dbs',
+      state: 'unsupported',
+      required_source: 'branch_store_inventory',
+      reason: 'the branch store inventory read source is not wired daemon-side yet',
     },
     {
-      finding: {
-        family: 'storage',
-        state: 'absent',
-        evidence: [{ family: 'storage', reference: 'evidence.incident_debris_present.latest' }],
-        coverage: { completeness: 'complete', statement: 'No incident debris.' },
-        remediation: null,
-      },
-      storage_kind: 'incident_debris_present',
+      kind: 'incident_debris_present',
+      state: 'unsupported',
+      required_source: 'incident_debris_quarantine',
+      reason: 'the incident debris quarantine read source is not wired daemon-side yet',
     },
     {
-      finding: {
-        family: 'storage',
-        state: 'healthy_complete_coverage',
-        evidence: [{ family: 'storage', reference: 'evidence.retention_backlog.latest' }],
-        coverage: { completeness: 'complete', statement: 'Retention is caught up.' },
-        remediation: null,
-      },
-      storage_kind: 'retention_backlog',
+      kind: 'retention_backlog',
+      state: 'unsupported',
+      required_source: 'retention_backlog_scan',
+      reason: 'the retention backlog scan read source is not wired daemon-side yet',
     },
   ],
-  report_coverage: {
-    families: [{ family: 'storage', consultation: { status: 'consulted' } }],
-    completeness: 'complete',
-    statement: {
-      completeness: 'complete',
-      statement: 'All storage evidence sources were consulted.',
-    },
-  },
-  remediations: [
-    {
-      operation: 'storage.retention.sweep',
-      surface: 'storage_runtime',
-      preview_available: true,
-      action_confirmation: 'required',
-      summary: 'Sweep stale branch databases after preview confirmation.',
-    },
-  ],
-  known_families: ['storage'],
-  note: 'Findings reflect the most recent doctor sweep.',
+  note: 'the five plan-38 storage finding producers are landed, but their input read sources are not yet wired daemon-side; each kind is typed unsupported until its source is available',
 });
 
 /* ==========================================================================

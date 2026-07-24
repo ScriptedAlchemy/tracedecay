@@ -860,6 +860,15 @@ impl RawJsonlBatchScanner {
                 }
                 log_jsonl_oversized_skip(path, self.offset, byte_len);
                 self.offset = next_offset;
+                // Having consumed the tail of the record this scan resumed
+                // inside, restore the real record budget. Without this the
+                // reader keeps the zero limit it was resumed with and reports
+                // every subsequent valid record as oversized, skipping them and
+                // advancing the durable cursor past them for good.
+                if terminated && self.continuing_oversized {
+                    self.reader.set_max_record_bytes(self.max_record_bytes);
+                    self.continuing_oversized = false;
+                }
                 JsonlScanStep::Continue
             }
             (MalformedJsonlPolicy::Skip, false) => {

@@ -182,40 +182,38 @@ pub(super) async fn handle_search(
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .map_or(10, |v| v.min(500) as usize);
-    let outcome = if scope_prefix.is_some() {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-            crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                code_generation: None,
-                reason:
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                    reason: "scope_unavailable",
-                },
-            },
-        )
-    } else {
-        execute_code_index_search(
-            search_executor,
-            crate::mcp::server::CodeIndexSearchRequestV1 {
-                project_root: cg.project_root().to_path_buf(),
-                query: query.to_owned(),
-                limit,
-                mode: semantic_mode,
-                authority: search_authority.cloned(),
-                deadline,
-                cancellation,
-            },
-        )
-        .await
-    };
+    // A scope prefix cannot be applied as a post-filter here the way the
+    // sibling handlers do it: the retrieval pipeline returns anchor-keyed
+    // candidates that carry no file path. Refusing to search at all would make
+    // the tool return nothing for the whole session (any serve launched from a
+    // subdirectory sets a scope), so run the search and report below that the
+    // scope was not honored rather than silently implying it was.
+    let outcome = execute_code_index_search(
+        search_executor,
+        crate::mcp::server::CodeIndexSearchRequestV1 {
+            project_root: cg.project_root().to_path_buf(),
+            query: query.to_owned(),
+            limit,
+            mode: semantic_mode,
+            authority: search_authority.cloned(),
+            deadline,
+            cancellation,
+        },
+    )
+    .await;
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let output = json!({
+            let mut output = json!({
                 "results": &complete.ordered_candidates,
                 "code_generation": complete.code_generation,
                 "pr9_fallback_digest": &complete.pr9_fallback.digest,
                 "semantic": semantic_status_value(semantic_mode, &complete.semantic),
             });
+            if let Some(scope) = scope_prefix {
+                output["scope_prefix"] = json!(scope);
+                output["scope_prefix_applied"] = json!(false);
+            }
+            let output = output;
             Ok(rendered_tool_result(cg, &args, &output, Vec::new(), || {
                 render_search_md(&output)
             }))

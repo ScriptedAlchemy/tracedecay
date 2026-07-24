@@ -78,7 +78,11 @@ impl TraceDecay {
                 Vec::new(),
             ));
         }
-        let source_write_abs = write_path_preserving_final_symlink(&source_abs, "source")?;
+        // The source write now goes through the project-root-scoped source edit
+        // authority, so only the resolver's validation is still needed here (it
+        // errors when the path cannot be inspected). The destination path is
+        // still used directly by the rollback below.
+        write_path_preserving_final_symlink(&source_abs, "source")?;
         let dest_write_abs = write_path_preserving_final_symlink(&dest_abs, "destination")?;
         let source = std::fs::read_to_string(&source_abs).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {source_rel}: {e}"),
@@ -256,7 +260,7 @@ impl TraceDecay {
         // deliberately leaves a duplicate symbol (recoverable) rather than a
         // missing one if the process stops between the two commits.
         publish_planned_source_edit(
-            &dest_write_abs,
+            &self.project_root,
             &dest_rel,
             dest_existed.then_some(dest_original.as_str()),
             &dest_modified,
@@ -265,7 +269,7 @@ impl TraceDecay {
             .and_then(|()| ensure_text_unchanged(&dest_abs, Some(&dest_modified), &dest_rel))
             .and_then(|()| {
                 publish_planned_source_edit(
-                    &source_write_abs,
+                    &self.project_root,
                     &source_rel,
                     Some(source.as_str()),
                     &source_modified,

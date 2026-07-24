@@ -280,7 +280,9 @@ fn generate_plugin_bundle() {
 /// The single-app dashboard (dashboard/app-dist, built by rsbuild). The build
 /// keeps a content stamp over the frontend sources; when stale (or app-dist is
 /// missing) it shells out to `npm run build` (npm ci first when node_modules
-/// is absent) and fails fast on error. The dist is then embedded via a
+/// is absent) and fails fast on error. In a packaged crate the frontend
+/// sources are absent, so the committed app-dist is used as-is and npm is
+/// never invoked. The dist is then embedded via a
 /// generated manifest in OUT_DIR so the installed binary serves the UI with
 /// zero filesystem dependency.
 fn build_and_embed_dashboard_app() {
@@ -318,7 +320,19 @@ fn build_and_embed_dashboard_app() {
         .unwrap_or(false)
         && app_dist.join("index.html").exists();
 
-    if !fresh {
+    // A packaged crate ships the prebuilt app-dist but none of the frontend
+    // sources the stamp is computed from, so the stamp can never match there
+    // and `fresh` is always false. Rebuilding is impossible in that tree — npm
+    // would run in a directory with no package.json — so treat the committed
+    // dist as authoritative whenever the sources are absent.
+    let sources_present = Path::new("dashboard/package.json").exists();
+    if !fresh && !sources_present {
+        assert!(
+            app_dist.join("index.html").exists(),
+            "dashboard/app-dist/index.html is missing and dashboard sources are not packaged; \
+             the published crate must ship a prebuilt dashboard/app-dist"
+        );
+    } else if !fresh {
         if std::env::var_os("TRACEDECAY_SKIP_DASHBOARD_BUILD").is_some() {
             println!(
                 "cargo::warning=dashboard app-dist is stale but TRACEDECAY_SKIP_DASHBOARD_BUILD is set; embedding existing dist"

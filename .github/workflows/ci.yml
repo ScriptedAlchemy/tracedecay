@@ -741,9 +741,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # The legacy npm dashboard pipeline was removed; committed placeholder
-    # dist assets are embedded directly, so this job only exercises the
-    # Rust-side dashboard API surface.
+    # Covers both halves of the dashboard: the frontend sources under
+    # dashboard/src (typecheck, unit tests, production build) and the Rust API
+    # surface they talk to. Without the frontend steps, dashboard/src is never
+    # compiled or tested anywhere in CI and wire-contract drift between
+    # dashboard/src/contracts/generated.ts and the Rust handlers ships silently.
     steps:
       - uses: actions/checkout@v7
 
@@ -764,6 +766,32 @@ jobs:
         with:
           shared-key: ci-dashboard-full-${{ runner.os }}
           cache-on-failure: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Typecheck dashboard
+        working-directory: dashboard
+        run: npm run typecheck
+
+      - name: Check generated wire contracts are current
+        working-directory: dashboard
+        run: npm run contracts:check
+
+      - name: Run dashboard unit tests
+        working-directory: dashboard
+        run: npm test
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
 
       - name: Run dashboard integration tests
         run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked

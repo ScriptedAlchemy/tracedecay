@@ -105,15 +105,19 @@ pub(super) fn process_batch(
         return;
     }
 
-    if prepared.iter().any(|prepared| {
-        prepared
-            .item
-            .authority
-            .verify(RuntimeWriteAuthorityStage::BeforeCommit)
-            .is_err()
-    }) {
+    let authority_denied = prepared
+        .iter()
+        .map(|prepared| {
+            prepared
+                .item
+                .authority
+                .verify(RuntimeWriteAuthorityStage::BeforeCommit)
+                .is_err()
+        })
+        .collect::<Vec<_>>();
+    if authority_denied.iter().any(|denied| *denied) {
         drop(transaction);
-        settle_authority_denied(prepared, telemetry);
+        settle_authority_denied(prepared, authority_denied, telemetry);
         return;
     }
 
@@ -362,11 +366,38 @@ fn settle_prepared(
     }
 }
 
-fn settle_authority_denied(prepared: Vec<PreparedRequest>, telemetry: &WriterTelemetry) {
-    let result = Ok(super::settlement::missing_authority());
-    for prepared in prepared {
-        telemetry.completed(&result);
-        prepared.item.settle(result.clone());
+/// Settles a batch discarded because at least one member lost write authority
+/// before the commit.
+///
+/// Only the members that actually failed the recheck are told their authority
+/// is missing. Their peers were fully authorized and merely had their work
+/// rolled back with the shared transaction, so reporting `MissingAuthority` to
+/// them blames them for an unrelated request's revocation and reads as a
+/// non-retryable outcome. They get `Faulted` instead — the same "rolled back,
+/// safe to resubmit" shape the fatal path above uses — and a member that had
+/// already reached a `Final` outcome keeps it.
+fn settle_authority_denied(
+    prepared: Vec<PreparedRequest>,
+    authority_denied: Vec<bool>,
+    telemetry: &WriterTelemetry,
+) {
+    debug_assert_eq!(prepared.len(), authority_denied.len());
+    for (prepared, authority_denied) in prepared.into_iter().zip(authority_denied) {
+        let PreparedRequest { item, result } = prepared;
+        let settled = if authority_denied {
+            Ok(super::settlement::missing_authority())
+        } else {
+            match result {
+                PreparedResult::Final(result) => result,
+                PreparedResult::AwaitingTransactionCommit(_) => {
+                    Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                        reason: UnavailableReasonV1::Faulted,
+                    })
+                }
+            }
+        };
+        telemetry.completed(&settled);
+        item.settle(settled);
     }
 }
 

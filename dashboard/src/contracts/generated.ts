@@ -383,10 +383,24 @@ export const DoctorFindingsPayloadSchema = z.object({
 });
 export type DoctorFindingsPayload = z.infer<typeof DoctorFindingsPayloadSchema>;
 
-/** Deprecated `/api/storage/findings` compatibility name.
- * The route returns the canonical Doctor storage-family projection. */
-export const StorageFindingsPayloadSchema = DoctorFindingsPayloadSchema;
-export type StorageFindingsPayload = DoctorFindingsPayload;
+/** `/api/storage/findings` — per-kind support status for the plan-38 storage
+ * finding producers. This is NOT the Doctor storage-family projection: the
+ * route serializes `StorageFindingsPayloadV1 { kinds, note }`
+ * (src/dashboard/storage_findings_api.rs). Aliasing it to
+ * `DoctorFindingsPayloadSchema` makes every response fail to parse. */
+export const StorageFindingKindStatusSchema = z.object({
+  kind: DoctorStorageFindingKindSchema,
+  state: DoctorEvidenceStateSchema,
+  required_source: z.string(),
+  reason: z.string(),
+});
+export type StorageFindingKindStatus = z.infer<typeof StorageFindingKindStatusSchema>;
+
+export const StorageFindingsPayloadSchema = z.object({
+  kinds: z.array(StorageFindingKindStatusSchema),
+  note: z.string(),
+});
+export type StorageFindingsPayload = z.infer<typeof StorageFindingsPayloadSchema>;
 
 export const DoctorRemediationPreviewRequestSchema = z.object({
   operation: z.string(),

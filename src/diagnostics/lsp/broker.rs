@@ -300,10 +300,18 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             let result = client
                                 .semantic_request(request, &cancellation, inner.timeouts)
                                 .await;
+                            // Cancellation drops `read_message_until` wherever
+                            // it was suspended, so any bytes it had already
+                            // consumed into its local header/body buffers are
+                            // gone and the stream may be parked mid-frame.
+                            // Reusing the client would make every later request
+                            // parse from the middle of a message, so retire it
+                            // alongside the transport failures.
                             if !matches!(
                                 &result,
                                 Err(LspSemanticRequestError::Transport { .. }
-                                    | LspSemanticRequestError::InvalidResponse { .. })
+                                    | LspSemanticRequestError::InvalidResponse { .. }
+                                    | LspSemanticRequestError::Cancelled)
                             ) {
                                 *slot = Some(client);
                             }

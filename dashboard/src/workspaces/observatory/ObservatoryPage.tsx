@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import {
   StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
-  type DoctorReportEntry,
+  type StorageFindingKindStatus,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
   type WireCoverage,
@@ -163,15 +163,12 @@ function FindingsReadModel({
         refreshing={refreshing}
         onRefresh={onRefresh}
       />
-      {envelope.payload.entries.length === 0 ? (
-        <ReadModelState kind="unknown" detail="doctor report contained no findings" />
+      {envelope.payload.kinds.length === 0 ? (
+        <ReadModelState kind="unknown" detail="storage report contained no finding kinds" />
       ) : (
         <OverviewGrid>
-          {envelope.payload.entries.map((entry, index) => (
-            <FindingCard
-              key={`${entry.storage_kind ?? entry.finding.family}#${index}`}
-              entry={entry}
-            />
+          {envelope.payload.kinds.map((kind) => (
+            <StorageKindCard key={kind.kind} status={kind} />
           ))}
         </OverviewGrid>
       )}
@@ -272,35 +269,25 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
   );
 }
 
-function FindingCard({ entry }: { entry: DoctorReportEntry }) {
-  const { finding } = entry;
-  const presentation = doctorEvidencePresentation(finding.state);
-  const title = entry.storage_kind
-    ? storageFindingLabel(entry.storage_kind)
-    : finding.family.replaceAll('_', ' ');
+/** `/api/storage/findings` reports per-kind producer support, not Doctor report
+ * entries: each kind carries its own evidence state plus the input source it
+ * still needs. */
+function StorageKindCard({ status }: { status: StorageFindingKindStatus }) {
+  const presentation = doctorEvidencePresentation(status.state);
   return (
-    <OverviewCard title={title}>
+    <OverviewCard title={storageFindingLabel(status.kind)}>
       <div className="flex flex-col gap-2">
         <span
           className="inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium text-text-secondary"
-          data-evidence-state={finding.state}
+          data-evidence-state={status.state}
         >
-          {/* Evidence-state hue rides the dot; the label stays AA-contrast. */}
           <span aria-hidden className={`size-1.5 rounded-full ${presentation.dotClass}`} />
           {presentation.label}
         </span>
-        <p className="text-xs text-text-secondary">{finding.coverage.statement}</p>
+        <p className="text-xs text-text-secondary">{status.reason}</p>
         <p className="tabular text-2xs text-text-muted">
-          {finding.evidence.length} evidence{' '}
-          {finding.evidence.length === 1 ? 'reference' : 'references'}
-          {finding.remediation ? (
-            <>
-              {' · remediation: '}
-              <span className="font-mono text-text-secondary">
-                {finding.remediation.owning_operation}
-              </span>
-            </>
-          ) : null}
+          {'requires: '}
+          <span className="font-mono text-text-secondary">{status.required_source}</span>
         </p>
       </div>
     </OverviewCard>
