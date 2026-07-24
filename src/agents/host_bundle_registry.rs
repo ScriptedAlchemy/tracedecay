@@ -89,7 +89,9 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
             HostBundleComponentV1::Agent,
             HostBundleComponentV1::ContextMcp,
         ],
-        HostKindV1::Hermes | HostKindV1::KimiCode => vec![HostBundleComponentV1::Core],
+        HostKindV1::Hermes | HostKindV1::Kiro | HostKindV1::KimiCode => {
+            vec![HostBundleComponentV1::Core]
+        }
         HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
             vec![HostBundleComponentV1::Core]
         }
@@ -405,6 +407,13 @@ fn component_assets(
             ".kimi-code/plugins/managed/tracedecay",
             super::plugin_bundle::kimi_files(),
         ),
+        (HostKindV1::Kiro, HostBundleComponentV1::Core) => (
+            ".kiro/tracedecay",
+            vec![(
+                "component.json",
+                r#"{"host":"kiro","registration":"settings/mcp.json+agents/tracedecay.json","route":"hook+mcp","native_events":"userPromptSubmit,preToolUse,postToolUse","version_disposition":"session_workspace_prompt_boundaries_only"}"#,
+            )],
+        ),
         (
             HostKindV1::KimiCode,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
@@ -643,6 +652,7 @@ mod tests {
             HostKindV1::CursorDesktop,
             HostKindV1::Codex,
             HostKindV1::Hermes,
+            HostKindV1::Kiro,
             HostKindV1::KimiCode,
             HostKindV1::OpenCode,
         ] {
@@ -731,6 +741,39 @@ mod tests {
                     )
             }));
         }
+    }
+
+    #[test]
+    fn kiro_default_set_packages_its_evidence_backed_hook_and_mcp_route() {
+        let component_set =
+            verified_embedded_default_host_component_set(HostKindV1::Kiro, 0).unwrap();
+        assert_eq!(component_set.component_set.components.len(), 1);
+        let component = &component_set.component_set.components[0];
+        assert_eq!(component.manifest.component, HostBundleComponentV1::Core);
+        assert_eq!(
+            component.manifest.artifacts[0].relative_path,
+            ".kiro/tracedecay/component.json"
+        );
+        let declaration: serde_json::Value =
+            serde_json::from_slice(&component.contents[0].bytes).unwrap();
+        assert_eq!(declaration["route"], "hook+mcp");
+        assert_eq!(
+            declaration["native_events"],
+            "userPromptSubmit,preToolUse,postToolUse"
+        );
+        let evidence =
+            crate::agents::host_bundle_v2::stock_host_registration_evidence(HostKindV1::Kiro);
+        assert!(evidence.iter().any(|record| {
+            record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Mcp
+                && record.state == crate::agents::host_bundle_v2::HostCapabilityStateV1::Supported
+        }));
+        assert!(evidence.iter().any(|record| {
+            record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Hook
+                && record.state
+                    == crate::agents::host_bundle_v2::HostCapabilityStateV1::Degraded(
+                        crate::agents::host_bundle_v2::HostCapabilityUnavailableReasonV1::NativeFixtureLimited,
+                    )
+        }));
     }
 
     #[test]

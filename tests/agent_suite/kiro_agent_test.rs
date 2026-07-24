@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::common::EnvVarGuard;
 use tempfile::TempDir;
+use tracedecay::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use tracedecay::agents::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, KiroIntegration,
 };
@@ -582,6 +583,54 @@ fn test_has_tracedecay_tracks_global_mcp_entry() {
 
     KiroIntegration.uninstall(&ctx).unwrap();
     assert!(!KiroIntegration.has_tracedecay(home));
+}
+
+#[test]
+fn test_core_component_registration_tracks_install_repair_conflict_and_uninstall() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let ctx = make_ctx(home);
+    let health = HealthcheckContext {
+        home: home.to_path_buf(),
+        project_path: home.to_path_buf(),
+    };
+
+    assert_eq!(
+        KiroIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        HostBundleRegistrationStateV1::Missing
+    );
+    KiroIntegration.install(&ctx).unwrap();
+    assert_eq!(
+        KiroIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        HostBundleRegistrationStateV1::Current
+    );
+
+    std::fs::write(
+        home.join(".kiro/steering/tracedecay.md"),
+        "stale tracedecay steering",
+    )
+    .unwrap();
+    assert_eq!(
+        KiroIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        HostBundleRegistrationStateV1::Repairable
+    );
+    KiroIntegration.install(&ctx).unwrap();
+    assert_eq!(
+        KiroIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        HostBundleRegistrationStateV1::Current
+    );
+
+    std::fs::write(home.join(".kiro/agents/tracedecay.json"), "{}").unwrap();
+    assert_eq!(
+        KiroIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        HostBundleRegistrationStateV1::Corrupt
+    );
+    KiroIntegration.uninstall(&ctx).unwrap();
+    assert_eq!(
+        KiroIntegration.host_component_registration(HostBundleComponentV1::Core, &health),
+        HostBundleRegistrationStateV1::Missing
+    );
 }
 
 #[test]

@@ -270,12 +270,37 @@ impl AgentIntegration for KiroIntegration {
         doctor_check_default_agent(dc, &ctx.home);
     }
 
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::{
+            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
+        };
+
+        if component != HostBundleComponentV1::Core {
+            return State::Missing;
+        }
+        kiro_core_registration_state(&ctx.home)
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
         kiro_home(home).is_dir()
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
         Some(mcp_config_path(home))
+    }
+
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        vec![
+            mcp_config_path(home),
+            cli_config_path(home),
+            managed_agent_path(home),
+            steering_path(home),
+            managed_skill_index_path(home),
+        ]
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -810,6 +835,83 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
             .get("description")
             .and_then(serde_json::Value::as_str)
             == Some(OWNED_AGENT_DESCRIPTION)
+}
+
+fn kiro_core_registration_state(
+    home: &Path,
+) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+    let Ok(mcp_bytes) = std::fs::read(mcp_config_path(home)) else {
+        return State::Missing;
+    };
+    let Ok(mcp_config) = serde_json::from_slice::<serde_json::Value>(&mcp_bytes) else {
+        return State::Corrupt;
+    };
+    let Some(server) = mcp_config
+        .pointer("/mcpServers/tracedecay")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return State::Missing;
+    };
+    let mcp_current = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| !command.is_empty())
+        && server
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+        && server.get("disabled").and_then(serde_json::Value::as_bool) != Some(true);
+    if !mcp_current {
+        return State::Repairable;
+    }
+
+    let Ok(steering) = std::fs::read_to_string(steering_path(home)) else {
+        return State::Repairable;
+    };
+    if !steering.contains(&prompt_rules_text()) {
+        return State::Repairable;
+    }
+
+    let Ok(agent_bytes) = std::fs::read(managed_agent_path(home)) else {
+        return State::Repairable;
+    };
+    let Ok(agent) = serde_json::from_slice::<serde_json::Value>(&agent_bytes) else {
+        return State::Corrupt;
+    };
+    if !is_owned_agent_config(&agent) {
+        return State::Corrupt;
+    }
+    let steering_resource = file_resource_uri(&steering_path(home));
+    let agent_current = agent
+        .get("includeMcpJson")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && agent
+            .get("resources")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|resources| {
+                resources
+                    .iter()
+                    .any(|resource| resource.as_str() == Some(steering_resource.as_str()))
+            })
+        && json_array_contains_str(&agent, "tools", KIRO_AGENT_ALL_TOOLS)
+        && json_array_contains_str(&agent, "allowedTools", KIRO_ALLOWED_BUILTIN_TOOLS)
+        && json_array_contains_str(&agent, "allowedTools", KIRO_ALLOWED_TRACEDECAY_TOOLS)
+        && KIRO_MANAGED_HOOKS.iter().all(|hook| {
+            find_agent_hook(&agent, hook.event, hook.matcher, hook.subcommand).is_some_and(
+                |entry| {
+                    entry.get("timeout_ms").and_then(serde_json::Value::as_u64)
+                        == Some(hook.timeout_ms)
+                },
+            )
+        });
+    if agent_current {
+        State::Current
+    } else {
+        State::Repairable
+    }
 }
 
 /// True when the steering file carries either the current or the legacy

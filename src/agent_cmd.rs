@@ -299,6 +299,7 @@ struct CompatibilityAgentRegistrationDelegate {
     health_context: tracedecay::agents::HealthcheckContext,
     lifecycle_root: PathBuf,
     registration_path: Option<PathBuf>,
+    registration_paths: Vec<PathBuf>,
     project_path: Option<PathBuf>,
     operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     should_apply: bool,
@@ -316,6 +317,9 @@ impl CompatibilityAgentRegistrationDelegate {
         let project_path = std::env::current_dir().unwrap_or_else(|_| home.to_path_buf());
         let integration = tracedecay::agents::get_integration(agent_id)?;
         let registration_path = integration.primary_config_path(home);
+        let mut registration_paths = integration.host_registration_paths(home);
+        registration_paths.sort();
+        registration_paths.dedup();
         Ok(Self {
             integration,
             context: tracedecay::agents::InstallContext {
@@ -332,6 +336,7 @@ impl CompatibilityAgentRegistrationDelegate {
             },
             lifecycle_root: lifecycle_root.to_path_buf(),
             registration_path,
+            registration_paths,
             project_path: None,
             operation,
             should_apply: false,
@@ -349,6 +354,7 @@ impl CompatibilityAgentRegistrationDelegate {
     ) -> tracedecay::errors::Result<Self> {
         let integration = tracedecay::agents::get_integration(agent_id)?;
         let registration_path = project_local_registration_path(agent_id, home, project_path);
+        let registration_paths = registration_path.iter().cloned().collect();
         Ok(Self {
             integration,
             context: tracedecay::agents::InstallContext {
@@ -365,6 +371,7 @@ impl CompatibilityAgentRegistrationDelegate {
             },
             lifecycle_root: lifecycle_root.to_path_buf(),
             registration_path,
+            registration_paths,
             project_path: Some(project_path.to_path_buf()),
             operation,
             should_apply: false,
@@ -392,12 +399,14 @@ impl CompatibilityAgentRegistrationDelegate {
             .join(self.integration.id())
     }
 
-    fn backup_path(&self, operation_id: [u8; 16]) -> PathBuf {
-        self.backup_dir(operation_id).join("primary-config")
+    fn backup_path(&self, operation_id: [u8; 16], index: usize) -> PathBuf {
+        self.backup_dir(operation_id)
+            .join(format!("registration-{index}"))
     }
 
-    fn missing_marker_path(&self, operation_id: [u8; 16]) -> PathBuf {
-        self.backup_dir(operation_id).join("primary-config.missing")
+    fn missing_marker_path(&self, operation_id: [u8; 16], index: usize) -> PathBuf {
+        self.backup_dir(operation_id)
+            .join(format!("registration-{index}.missing"))
     }
 
     fn apply_marker_path(&self, operation_id: [u8; 16]) -> PathBuf {
@@ -466,28 +475,33 @@ impl CompatibilityAgentRegistrationDelegate {
         digest.update(b"tracedecay.host-registration.revision.v1");
         digest.update((self.integration.id().len() as u64).to_be_bytes());
         digest.update(self.integration.id().as_bytes());
-        if let Some(path) = &self.registration_path {
-            match fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err(
-                        tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
-                    );
-                }
-                Ok(_) => {
-                    let bytes = fs::read(path).map_err(|_| {
-                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
-                    digest.update(b"file");
-                    digest.update((bytes.len() as u64).to_be_bytes());
-                    digest.update(bytes);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    digest.update(b"missing");
-                }
-                Err(_) => {
-                    return Err(
-                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                    );
+        if !self.registration_paths.is_empty() {
+            for (index, path) in self.registration_paths.iter().enumerate() {
+                digest.update((index as u64).to_be_bytes());
+                digest.update((path.as_os_str().len() as u64).to_be_bytes());
+                digest.update(path.as_os_str().as_encoded_bytes());
+                match fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                        return Err(
+                            tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
+                        );
+                    }
+                    Ok(_) => {
+                        let bytes = fs::read(path).map_err(|_| {
+                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
+                        })?;
+                        digest.update(b"file");
+                        digest.update((bytes.len() as u64).to_be_bytes());
+                        digest.update(bytes);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        digest.update(b"missing");
+                    }
+                    Err(_) => {
+                        return Err(
+                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
+                        );
+                    }
                 }
             }
         } else {
@@ -522,58 +536,63 @@ impl CompatibilityAgentRegistrationDelegate {
             if self.should_apply { b"1" } else { b"0" },
         )
         .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-        let Some(path) = &self.registration_path else {
-            return Ok(());
-        };
-        match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                Err(tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath)
+        for (index, path) in self.registration_paths.iter().enumerate() {
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err(
+                        tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
+                    );
+                }
+                Ok(_) => {
+                    let bytes = fs::read(path).map_err(|_| {
+                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?;
+                    write_registration_backup(&self.backup_path(operation_id, index), &bytes)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::write(self.missing_marker_path(operation_id, index), b"missing").map_err(
+                        |_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
+                    )?;
+                }
+                Err(_) => {
+                    return Err(
+                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
+                    );
+                }
             }
-            Ok(_) => {
-                let bytes = fs::read(path).map_err(|_| {
-                    tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                })?;
-                write_registration_backup(&self.backup_path(operation_id), &bytes)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::write(self.missing_marker_path(operation_id), b"missing").map_err(|_| {
-                    tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                })
-            }
-            Err(_) => Err(tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure),
         }
+        Ok(())
     }
 
     fn restore_registration(
         &self,
         operation_id: [u8; 16],
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        let Some(path) = &self.registration_path else {
-            return Ok(());
-        };
-        let backup = self.backup_path(operation_id);
-        let missing = self.missing_marker_path(operation_id);
-        if backup.is_file() {
-            let bytes = fs::read(&backup)
-                .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-            write_registration_backup(path, &bytes)?;
-        } else if missing.is_file() {
-            match fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_file() => {
-                    fs::remove_file(path).map_err(|_| {
-                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?
-                }
-                Ok(_) => {
-                    return Err(
-                        tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
-                    );
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => {
-                    return Err(
-                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                    );
+        for (index, path) in self.registration_paths.iter().enumerate() {
+            let backup = self.backup_path(operation_id, index);
+            let missing = self.missing_marker_path(operation_id, index);
+            if backup.is_file() {
+                let bytes = fs::read(&backup).map_err(|_| {
+                    tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
+                })?;
+                write_registration_backup(path, &bytes)?;
+            } else if missing.is_file() {
+                match fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.file_type().is_file() => fs::remove_file(path)
+                        .map_err(|_| {
+                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
+                        })?,
+                    Ok(_) => {
+                        return Err(
+                            tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => {
+                        return Err(
+                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
+                        );
+                    }
                 }
             }
         }
@@ -2305,8 +2324,8 @@ mod tests {
 
     use super::{
         CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
-        broker_codex_daemon_automation_project, canonical_host_component_set,
-        component_set_request, finish_legacy_hermes_migration,
+        apply_canonical_component_set, broker_codex_daemon_automation_project,
+        canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
     };
 
     #[tokio::test]
@@ -2414,6 +2433,98 @@ mod tests {
             hermes.component_set.components[0].manifest.component,
             tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
         );
+        let kiro = canonical_host_component_set("kiro", None, 0)
+            .unwrap()
+            .expect("Kiro has a first-party default Core set");
+        assert_eq!(kiro.component_set.components.len(), 1);
+        assert_eq!(
+            kiro.component_set.components[0].manifest.component,
+            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
+        );
+    }
+
+    #[test]
+    fn kiro_canonical_component_set_runs_full_lifecycle() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let mcp_path = home.path().join(".kiro/settings/mcp.json");
+        std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mcp_path,
+            r#"{"mcpServers":{"other":{"command":"other"}},"unrelated":true}"#,
+        )
+        .unwrap();
+        let component_set = canonical_host_component_set("kiro", None, 0)
+            .unwrap()
+            .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+        };
+
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Update,
+        ] {
+            apply_canonical_component_set(
+                "kiro",
+                operation,
+                &component_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            home.path().join(".kiro/steering/tracedecay.md"),
+            "stale tracedecay steering",
+        )
+        .unwrap();
+        apply_canonical_component_set(
+            "kiro",
+            HostBundleCliOperation::Repair,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+
+        let mcp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(mcp["unrelated"], true);
+        assert_eq!(mcp["mcpServers"]["other"]["command"], "other");
+        assert!(mcp["mcpServers"]["tracedecay"].is_object());
+        assert!(
+            home.path()
+                .join(".kiro/tracedecay/component.json")
+                .is_file()
+        );
+        assert!(home.path().join(".kiro/agents/tracedecay.json").is_file());
+        assert!(
+            std::fs::read_to_string(home.path().join(".kiro/steering/tracedecay.md"))
+                .unwrap()
+                .contains("## TraceDecay: mandatory tool routing")
+        );
+
+        apply_canonical_component_set(
+            "kiro",
+            HostBundleCliOperation::Uninstall,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+        let mcp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(mcp["unrelated"], true);
+        assert_eq!(mcp["mcpServers"]["other"]["command"], "other");
+        assert!(mcp["mcpServers"].get("tracedecay").is_none());
+        assert!(!home.path().join(".kiro/tracedecay/component.json").exists());
+        assert!(!home.path().join(".kiro/agents/tracedecay.json").exists());
     }
 
     #[test]
