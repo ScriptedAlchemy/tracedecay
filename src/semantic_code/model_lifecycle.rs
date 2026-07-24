@@ -1,10 +1,9 @@
 //! Daemon-owned `FastEmbed` model acquisition lifecycle.
 //!
 //! Settings select a cataloged model (default [`DEFAULT_FASTEMBED_MODEL_ID`]).
-//! Install stays offline-safe: first daemon startup (or a settings change)
-//! queues bounded background download via maintained hf-hub/FastEmbed
-//! capability, verifies immutable length+SHA-256 pins, and atomically installs
-//! into a TraceDecay-owned store. Search never downloads or waits.
+//! Acquisition is a separate explicit local-path or configured-HTTPS action
+//! backed by the verified artifact store. Startup and search stay offline:
+//! neither discovers an ambient hub/cache nor downloads model bytes.
 #![allow(dead_code)] // fastembed model lifecycle; Plan 31 — staged
 
 use std::fs::{self, File};
@@ -20,6 +19,12 @@ use thiserror::Error;
 
 use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
 
+use super::artifact_store::{
+    ArtifactImportErrorV1, ArtifactInventoryRecordV1, ArtifactLeaseKindV1, ArtifactLeaseV1,
+    ConfiguredHttpsArtifactSourceV1, ExplicitHttpsArtifactTransportV1, ModelArtifactStore,
+    RetentionPolicyV1,
+};
+use super::manifest::{ArtifactMemberRoleV1, ModelArtifactManifestV1};
 use super::model_catalog::{
     CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
 };
@@ -216,11 +221,14 @@ pub enum ModelLifecycleErrorV1 {
     VerificationFailed,
     #[error("semantic model install failed")]
     InstallFailed,
+    #[error(transparent)]
+    ArtifactImport(#[from] ArtifactImportErrorV1),
 }
 
 /// Supplies package member bytes for a cataloged model.
 ///
-/// Production uses hf-hub/FastEmbed; tests inject local fixture bytes.
+/// Retained for injected test sources and compatibility. Production explicit
+/// import uses the verified-store local/HTTPS APIs below.
 pub trait ModelMemberSourceV1: Send + Sync {
     fn fetch_member(
         &self,
@@ -230,7 +238,8 @@ pub trait ModelMemberSourceV1: Send + Sync {
     ) -> Result<(), ModelLifecycleErrorV1>;
 }
 
-/// hf-hub backed source that downloads into a caller-owned staging cache.
+/// Compatibility source retained for existing constructors. Production no
+/// longer performs ambient hf-hub discovery or download through this type.
 #[derive(Debug, Default)]
 pub struct HfHubModelMemberSourceV1;
 
@@ -241,49 +250,17 @@ impl ModelMemberSourceV1 for HfHubModelMemberSourceV1 {
         upstream_path: &str,
         destination: &Path,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        fetch_member_with_hf_hub(model, upstream_path, destination)
+        reject_ambient_hub_fetch(model, upstream_path, destination)
     }
 }
 
-fn fetch_member_with_hf_hub(
+fn reject_ambient_hub_fetch(
     model: &CatalogedFastEmbedModelV1,
     upstream_path: &str,
     destination: &Path,
 ) -> Result<(), ModelLifecycleErrorV1> {
-    #[cfg(feature = "semantic-fastembed")]
-    {
-        use hf_hub::api::sync::ApiBuilder;
-        use hf_hub::{Repo, RepoType};
-
-        let cache_dir = destination
-            .parent()
-            .ok_or(ModelLifecycleErrorV1::DownloadFailed)?
-            .join(".hf-cache");
-        fs::create_dir_all(&cache_dir).map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
-        let api = ApiBuilder::new()
-            .with_cache_dir(cache_dir)
-            .with_progress(false)
-            .build()
-            .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
-        let repo = api.repo(Repo::with_revision(
-            model.model_code.clone(),
-            RepoType::Model,
-            model.source.revision.clone(),
-        ));
-        let fetched = repo
-            .get(upstream_path)
-            .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
-        }
-        fs::copy(&fetched, destination).map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
-        Ok(())
-    }
-    #[cfg(not(feature = "semantic-fastembed"))]
-    {
-        let _ = (model, upstream_path, destination);
-        Err(ModelLifecycleErrorV1::DownloadFailed)
-    }
+    let _ = (model, upstream_path, destination);
+    Err(ModelLifecycleErrorV1::Rejected)
 }
 
 /// Owns selection, background acquisition, and remediation for one data root.
@@ -291,6 +268,7 @@ pub struct SemanticModelLifecycleOwnerV1 {
     root: PathBuf,
     catalog: FastEmbedModelCatalogV1,
     source: Arc<dyn ModelMemberSourceV1>,
+    artifact_store: ModelArtifactStore,
     inner: Arc<Mutex<LifecycleInner>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     cancel: Arc<AtomicBool>,
@@ -312,11 +290,18 @@ impl SemanticModelLifecycleOwnerV1 {
             .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
         fs::create_dir_all(root.join("installs"))
             .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
+        let artifact_store = ModelArtifactStore::open(
+            root.join("verified-artifacts"),
+            RetentionPolicyV1 {
+                grace_seconds: 7 * 24 * 60 * 60,
+            },
+        )?;
         let durable = load_or_default_durable(&root, &catalog)?;
         Ok(Self {
             root,
             catalog,
             source,
+            artifact_store,
             inner: Arc::new(Mutex::new(LifecycleInner { durable })),
             worker: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -333,6 +318,103 @@ impl SemanticModelLifecycleOwnerV1 {
 
     pub fn catalog(&self) -> &FastEmbedModelCatalogV1 {
         &self.catalog
+    }
+
+    /// Explicitly import a complete local package through the verified store.
+    /// Selection alone never invokes this operation.
+    pub fn import_local_artifact(
+        &self,
+        model_id: &str,
+        manifest: &ModelArtifactManifestV1,
+        source: &Path,
+        now_unix: u64,
+    ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
+        let model = self
+            .catalog
+            .get(model_id)
+            .ok_or(CatalogErrorV1::UnknownModel)?;
+        verify_catalog_manifest(model, manifest)?;
+        let record = self
+            .artifact_store
+            .import_local_directory(manifest, source, now_unix)?;
+        self.publish_explicit_import(model, record, now_unix)
+    }
+
+    /// Explicitly import or resume from a configured immutable HTTPS source.
+    /// The typed transport is supplied by the user-action boundary and is not
+    /// retained by startup, query, or runtime paths.
+    pub fn import_configured_https_artifact(
+        &self,
+        model_id: &str,
+        manifest: &ModelArtifactManifestV1,
+        source: &ConfiguredHttpsArtifactSourceV1,
+        transport: &dyn ExplicitHttpsArtifactTransportV1,
+        resume_staging_id: Option<&str>,
+        now_unix: u64,
+    ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
+        let model = self
+            .catalog
+            .get(model_id)
+            .ok_or(CatalogErrorV1::UnknownModel)?;
+        verify_catalog_manifest(model, manifest)?;
+        let record = self.artifact_store.import_configured_https(
+            manifest,
+            source,
+            transport,
+            resume_staging_id,
+            now_unix,
+        )?;
+        self.publish_explicit_import(model, record, now_unix)
+    }
+
+    fn publish_explicit_import(
+        &self,
+        model: &CatalogedFastEmbedModelV1,
+        record: ArtifactInventoryRecordV1,
+        now_unix: u64,
+    ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
+        let lease_id = format!("active:{}:{}", model.model_id, model.source.revision);
+        self.artifact_store.acquire_artifact_lease(
+            &record.artifact_digest,
+            ArtifactLeaseV1 {
+                lease_id,
+                kind: ArtifactLeaseKindV1::Active,
+                expires_at_unix: u64::MAX,
+            },
+            now_unix,
+        )?;
+        let install_path = self
+            .artifact_store
+            .installed_directory(&record.artifact_digest);
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(previous @ SemanticModelLifecycleStateV1::Ready { .. }) =
+            guard.durable.state.clone()
+        {
+            if let Ok(previous_digest) =
+                super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
+            {
+                let _ = self.artifact_store.acquire_artifact_lease(
+                    &previous_digest,
+                    ArtifactLeaseV1 {
+                        lease_id: format!("rollback:{}", previous.model_id()),
+                        kind: ArtifactLeaseKindV1::Rollback,
+                        expires_at_unix: u64::MAX,
+                    },
+                    now_unix,
+                );
+            }
+            guard.durable.previous_ready = Some(previous);
+        }
+        guard.durable.selected_model = Some(model.model_id.clone());
+        guard.durable.state = Some(SemanticModelLifecycleStateV1::Installed {
+            model_id: model.model_id.clone(),
+            revision: model.source.revision.clone(),
+            artifact_digest: record.artifact_digest.to_string(),
+            install_path,
+        });
+        persist_durable(&self.root, &guard.durable)?;
+        drop(guard);
+        Ok(self.status())
     }
 
     pub fn status(&self) -> SemanticModelLifecycleStatusV1 {
@@ -451,9 +533,24 @@ impl SemanticModelLifecycleOwnerV1 {
         }
         self.cancel.store(true, Ordering::SeqCst);
         if let Some(state) = &status.state
+            && let Ok(digest) =
+                super::manifest::Sha256DigestHex::new(state.artifact_digest().to_owned())
+        {
+            let _ = self.artifact_store.release_artifact_lease(
+                &digest,
+                &format!("active:{}:{}", state.model_id(), state_revision(state)),
+                ArtifactLeaseKindV1::Active,
+            );
+        }
+        if let Some(state) = &status.state
             && let Some(path) = install_path_of(state)
         {
-            let _ = fs::remove_dir_all(path);
+            if path.starts_with(self.root.join("verified-artifacts").join("artifacts")) {
+                // Store bytes remain inventory-owned and become eligible only
+                // under a later daemon GC lease.
+            } else {
+                let _ = fs::remove_dir_all(path);
+            }
         }
         let model_id = status.selected_model.clone();
         self.select_model(model_id.as_deref(), status.auto_download)
@@ -470,6 +567,38 @@ impl SemanticModelLifecycleOwnerV1 {
             .ok_or(ModelLifecycleErrorV1::Rejected)?;
         if !matches!(previous, SemanticModelLifecycleStateV1::Ready { .. }) {
             return Err(ModelLifecycleErrorV1::Rejected);
+        }
+        if let Some(current) = &guard.durable.state
+            && let Ok(digest) =
+                super::manifest::Sha256DigestHex::new(current.artifact_digest().to_owned())
+        {
+            let _ = self.artifact_store.release_artifact_lease(
+                &digest,
+                &format!("active:{}:{}", current.model_id(), state_revision(current)),
+                ArtifactLeaseKindV1::Active,
+            );
+        }
+        if let Ok(digest) =
+            super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
+        {
+            self.artifact_store.acquire_artifact_lease(
+                &digest,
+                ArtifactLeaseV1 {
+                    lease_id: format!(
+                        "active:{}:{}",
+                        previous.model_id(),
+                        state_revision(&previous)
+                    ),
+                    kind: ArtifactLeaseKindV1::Active,
+                    expires_at_unix: u64::MAX,
+                },
+                0,
+            )?;
+            let _ = self.artifact_store.release_artifact_lease(
+                &digest,
+                &format!("rollback:{}", previous.model_id()),
+                ArtifactLeaseKindV1::Rollback,
+            );
         }
         if let Some(SemanticModelLifecycleStateV1::Ready { .. }) = &guard.durable.state {
             let ready_state = guard.durable.state.clone();
@@ -857,6 +986,43 @@ fn fail_state(
     })
 }
 
+fn verify_catalog_manifest(
+    model: &CatalogedFastEmbedModelV1,
+    manifest: &ModelArtifactManifestV1,
+) -> Result<(), ModelLifecycleErrorV1> {
+    manifest
+        .validate()
+        .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+    if manifest.payload.artifact_id != model.model_id
+        || manifest.payload.dimensions != model.expected_dimensions
+        || manifest.payload.truncation.max_length != model.max_length
+        || manifest.payload.spdx_license != model.source.license
+        || manifest.payload.upstream.revision != model.source.revision
+    {
+        return Err(ModelLifecycleErrorV1::VerificationFailed);
+    }
+    for (role_name, catalog_member) in &model.members {
+        let role = match role_name.as_str() {
+            "model" => ArtifactMemberRoleV1::Model,
+            "tokenizer" => ArtifactMemberRoleV1::Tokenizer,
+            "config" => ArtifactMemberRoleV1::Config,
+            "special_tokens_map" => ArtifactMemberRoleV1::SpecialTokensMap,
+            "tokenizer_config" => ArtifactMemberRoleV1::TokenizerConfig,
+            _ => return Err(ModelLifecycleErrorV1::VerificationFailed),
+        };
+        let member = manifest
+            .package_member(role)
+            .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
+        if member.path != catalog_member.path
+            || member.byte_length != catalog_member.length
+            || member.digest.as_str() != catalog_member.sha256
+        {
+            return Err(ModelLifecycleErrorV1::VerificationFailed);
+        }
+    }
+    Ok(())
+}
+
 fn load_or_default_durable(
     root: &Path,
     catalog: &FastEmbedModelCatalogV1,
@@ -891,7 +1057,7 @@ fn load_or_default_durable(
     let durable = DurableLifecycleV1 {
         schema: LIFECYCLE_SCHEMA_V1.to_owned(),
         selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
-        auto_download: true,
+        auto_download: false,
         state,
         previous_ready: None,
     };
@@ -961,6 +1127,19 @@ fn install_path_of(state: &SemanticModelLifecycleStateV1) -> Option<&Path> {
         | SemanticModelLifecycleStateV1::Indexing { install_path, .. }
         | SemanticModelLifecycleStateV1::Ready { install_path, .. } => Some(install_path),
         _ => None,
+    }
+}
+
+fn state_revision(state: &SemanticModelLifecycleStateV1) -> &str {
+    match state {
+        SemanticModelLifecycleStateV1::SelectedNotDownloaded { revision, .. }
+        | SemanticModelLifecycleStateV1::Downloading { revision, .. }
+        | SemanticModelLifecycleStateV1::Verifying { revision, .. }
+        | SemanticModelLifecycleStateV1::Installed { revision, .. }
+        | SemanticModelLifecycleStateV1::Loading { revision, .. }
+        | SemanticModelLifecycleStateV1::Indexing { revision, .. }
+        | SemanticModelLifecycleStateV1::Ready { revision, .. }
+        | SemanticModelLifecycleStateV1::Failed { revision, .. } => revision,
     }
 }
 
@@ -1104,6 +1283,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
 
+    use super::super::manifest::{
+        ArtifactMemberPinV1, ArtifactPackageMemberV1, ArtifactProfileKindV1, DeviceClassV1,
+        EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, PlatformTargetV1,
+        ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1, Sha256DigestHex,
+        TruncationPolicyV1, TruncationSideV1, UpstreamSourceV1,
+    };
     use super::super::model_catalog::{CatalogMemberPinV1, CatalogSourceV1};
 
     struct FixtureSource {
@@ -1182,6 +1368,78 @@ mod tests {
         (catalog, model.model_id)
     }
 
+    fn tiny_manifest(model: &CatalogedFastEmbedModelV1) -> ModelArtifactManifestV1 {
+        let role = |name: &str| match name {
+            "model" => ArtifactMemberRoleV1::Model,
+            "tokenizer" => ArtifactMemberRoleV1::Tokenizer,
+            "config" => ArtifactMemberRoleV1::Config,
+            "special_tokens_map" => ArtifactMemberRoleV1::SpecialTokensMap,
+            "tokenizer_config" => ArtifactMemberRoleV1::TokenizerConfig,
+            _ => unreachable!(),
+        };
+        let members: Vec<_> = model
+            .members
+            .iter()
+            .map(|(name, pin)| ArtifactPackageMemberV1 {
+                role: role(name),
+                path: pin.path.clone(),
+                digest: Sha256DigestHex::new(pin.sha256.clone()).unwrap(),
+                byte_length: pin.length,
+            })
+            .collect();
+        let member = |role| members.iter().find(|member| member.role == role).unwrap();
+        let model_member = member(ArtifactMemberRoleV1::Model);
+        ModelArtifactManifestV1 {
+            payload: ModelArtifactManifestPayloadV1 {
+                schema: MODEL_ARTIFACT_MANIFEST_SCHEMA_V1.to_owned(),
+                artifact_id: model.model_id.clone(),
+                profile_kind: ArtifactProfileKindV1::Embedding,
+                spdx_license: model.source.license.clone(),
+                model_member: ArtifactMemberPinV1 {
+                    digest: model_member.digest.clone(),
+                    byte_length: model_member.byte_length,
+                },
+                tokenizer_digest: member(ArtifactMemberRoleV1::Tokenizer).digest.clone(),
+                config_digest: member(ArtifactMemberRoleV1::Config).digest.clone(),
+                query_instruction_digest: None,
+                document_instruction_digest: None,
+                members,
+                dimensions: model.expected_dimensions,
+                metric: SemanticMetricV1::Cosine,
+                normalization: EmbeddingNormalizationV1::L2,
+                pooling: EmbeddingPoolingV1::Mean,
+                truncation: TruncationPolicyV1 {
+                    side: TruncationSideV1::Right,
+                    max_length: model.max_length,
+                },
+                precision: EmbeddingPrecisionV1::Fp32,
+                runtime: RuntimeCompatibilityV1 {
+                    runtime: "fastembed-ort".to_owned(),
+                    build_revision: "fixture".to_owned(),
+                    platforms: vec![PlatformTargetV1 {
+                        os: "linux".to_owned(),
+                        arch: "x86_64".to_owned(),
+                    }],
+                },
+                device: DeviceClassV1::Cpu,
+                resource_ceiling: ResourceCeilingV1 {
+                    max_model_bytes: 1_024,
+                    max_tokenizer_bytes: 1_024,
+                    max_resident_bytes: 4_096,
+                    max_threads: 1,
+                    max_batch_size: 1,
+                    max_sequence_length: model.max_length,
+                    load_deadline_ms: 1_000,
+                },
+                upstream: UpstreamSourceV1 {
+                    name: model.model_code.clone(),
+                    version: "fixture".to_owned(),
+                    revision: model.source.revision.clone(),
+                },
+            },
+        }
+    }
+
     #[test]
     fn default_selection_is_selected_not_downloaded_and_offline_safe() {
         let root = tempfile::tempdir().unwrap();
@@ -1191,13 +1449,35 @@ mod tests {
             status.selected_model.as_deref(),
             Some(DEFAULT_FASTEMBED_MODEL_ID)
         );
-        assert!(status.auto_download);
+        assert!(!status.auto_download);
         assert!(status.semantics_omitted);
         assert!(matches!(
             status.state,
             Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
         ));
         assert!(status.remediation.retry);
+        assert!(!owner.enqueue_startup_acquisition_if_needed());
+    }
+
+    #[test]
+    fn explicit_local_import_is_verified_before_lifecycle_installation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap();
+        let status = owner
+            .import_local_artifact(&model_id, &tiny_manifest(&model), fixture.path(), 10)
+            .unwrap();
+        assert!(matches!(
+            status.state,
+            Some(SemanticModelLifecycleStateV1::Installed { .. })
+        ));
     }
 
     #[test]

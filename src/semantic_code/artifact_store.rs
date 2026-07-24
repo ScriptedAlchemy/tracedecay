@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -85,6 +85,9 @@ pub enum QuarantineReasonV1 {
     MemberLengthMismatch,
     MemberDigestMismatch,
     SizeExpansion,
+    UnsafePackage,
+    UndeclaredMember,
+    SourceInterrupted,
     RecoveryFailure,
 }
 
@@ -93,6 +96,8 @@ pub enum QuarantineReasonV1 {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactInventoryV1 {
     pub records: BTreeMap<String, ArtifactInventoryRecordV1>,
+    #[serde(default)]
+    pub leases: BTreeMap<String, Vec<ArtifactLeaseV1>>,
 }
 
 /// Host runtime evidence checked against the manifest's compatibility pins at
@@ -121,6 +126,18 @@ pub enum ArtifactImportErrorV1 {
     DigestMismatch,
     #[error("artifact package member set is incomplete or inconsistent")]
     MemberMismatch,
+    #[error("artifact package contains an unsafe filesystem entry")]
+    UnsafePackageEntry,
+    #[error("artifact package contains an undeclared member")]
+    UndeclaredMember,
+    #[error("configured artifact source must be an explicit HTTPS URL")]
+    InvalidHttpsSource,
+    #[error("configured HTTPS response does not match the immutable range contract")]
+    ImmutableRangeMismatch,
+    #[error("artifact import was interrupted and may be resumed")]
+    InterruptedResumable { staging_id: String },
+    #[error("artifact source was interrupted and cannot be resumed safely")]
+    SourceInterrupted,
     #[error("artifact import session is unavailable")]
     StagingUnavailable,
     #[error("staging session identity does not match the manifest pins")]
@@ -133,6 +150,74 @@ pub enum ArtifactImportErrorV1 {
     StoreBusy,
     #[error("artifact store operation failed")]
     StorageFailure,
+}
+
+/// Explicit immutable HTTPS source. Construction rejects ambient hub/model
+/// identifiers, mutable URLs, query parameters, and fragments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfiguredHttpsArtifactSourceV1 {
+    base_url: String,
+    immutable_revision: String,
+}
+
+impl ConfiguredHttpsArtifactSourceV1 {
+    pub fn new(
+        base_url: impl Into<String>,
+        immutable_revision: impl Into<String>,
+    ) -> Result<Self, ArtifactImportErrorV1> {
+        let base_url = base_url.into();
+        let immutable_revision = immutable_revision.into();
+        let parsed =
+            url::Url::parse(&base_url).map_err(|_| ArtifactImportErrorV1::InvalidHttpsSource)?;
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || immutable_revision.trim().is_empty()
+        {
+            return Err(ArtifactImportErrorV1::InvalidHttpsSource);
+        }
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            immutable_revision,
+        })
+    }
+
+    fn member_url(&self, member: &ArtifactPackageMemberV1) -> String {
+        format!("{}/{}", self.base_url, member.path)
+    }
+}
+
+/// One immutable byte-range request. The transport must not redirect to a
+/// mutable identity or consult an ambient model cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpsArtifactRangeRequestV1 {
+    pub url: String,
+    pub offset: u64,
+    pub max_bytes: u64,
+    pub expected_total_length: u64,
+    pub expected_sha256: Sha256DigestHex,
+    pub immutable_revision: String,
+}
+
+/// One response from the explicitly configured HTTPS transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpsArtifactRangeResponseV1 {
+    pub offset: u64,
+    pub total_length: u64,
+    pub immutable_revision: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Typed production port for explicit HTTPS artifact import. Query and
+/// runtime code receive no reference to this port.
+pub trait ExplicitHttpsArtifactTransportV1: Send + Sync {
+    fn fetch_range(
+        &self,
+        request: &HttpsArtifactRangeRequestV1,
+    ) -> Result<HttpsArtifactRangeResponseV1, ArtifactImportErrorV1>;
 }
 
 impl From<io::Error> for ArtifactImportErrorV1 {
@@ -321,6 +406,29 @@ pub struct RetentionPolicyV1 {
     pub grace_seconds: u64,
 }
 
+/// Runtime references that protect installed artifacts from collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactLeaseKindV1 {
+    Active,
+    Rollback,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactLeaseV1 {
+    pub lease_id: String,
+    pub kind: ArtifactLeaseKindV1,
+    pub expires_at_unix: u64,
+}
+
+/// Opaque proof that the daemon exclusively owns one bounded GC pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaemonArtifactGcLeaseV1 {
+    lease_id: String,
+    expires_at_unix: u64,
+}
+
 /// Append-only GC receipt (one JSON line per removed artifact).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReceiptV1 {
@@ -338,6 +446,8 @@ struct StagingMetaV1 {
     manifest: ModelArtifactManifestV1,
     manifest_identity_digest: Sha256DigestHex,
     verified_at_unix: u64,
+    #[serde(default)]
+    immutable_source_revision: Option<String>,
     members: Vec<StagedMemberV1>,
 }
 
@@ -475,6 +585,10 @@ impl ModelArtifactStore {
         self.artifacts_root().join(digest.as_str())
     }
 
+    pub(super) fn installed_directory(&self, digest: &Sha256DigestHex) -> PathBuf {
+        self.artifact_dir(digest)
+    }
+
     fn artifact_path(&self, digest: &Sha256DigestHex) -> PathBuf {
         self.member_path(digest, ArtifactMemberRoleV1::Model)
     }
@@ -596,6 +710,7 @@ impl ModelArtifactStore {
             manifest: manifest.clone(),
             manifest_identity_digest: manifest.artifact_identity_digest(),
             verified_at_unix: now_unix,
+            immutable_source_revision: None,
             members: manifest
                 .payload
                 .members
@@ -735,6 +850,142 @@ impl ModelArtifactStore {
         Ok(())
     }
 
+    /// Import one explicit local directory. The directory must contain exactly
+    /// the manifest members and only regular, single-link files. Paths are
+    /// validated before any package bytes become runtime-discoverable.
+    pub fn import_local_directory(
+        &self,
+        manifest: &ModelArtifactManifestV1,
+        source: &Path,
+        now_unix: u64,
+    ) -> Result<ArtifactInventoryRecordV1, ArtifactImportErrorV1> {
+        let mut session = self.begin_import(manifest, now_unix)?;
+        let files = match inspect_local_package(source) {
+            Ok(files) => files,
+            Err(error) => {
+                self.quarantine_and_discard(
+                    &session,
+                    quarantine_reason_for_import_error(&error),
+                    now_unix,
+                )?;
+                return Err(error);
+            }
+        };
+        let declared: BTreeMap<&str, &ArtifactPackageMemberV1> = manifest
+            .payload
+            .members
+            .iter()
+            .map(|member| (member.path.as_str(), member))
+            .collect();
+        if files
+            .keys()
+            .any(|path| !declared.contains_key(path.as_str()))
+        {
+            self.quarantine_and_discard(&session, QuarantineReasonV1::UndeclaredMember, now_unix)?;
+            return Err(ArtifactImportErrorV1::UndeclaredMember);
+        }
+        if files.len() != declared.len() {
+            self.quarantine_and_discard(&session, QuarantineReasonV1::IdentityMismatch, now_unix)?;
+            return Err(ArtifactImportErrorV1::MemberMismatch);
+        }
+
+        for member in &manifest.payload.members {
+            let path = files
+                .get(&member.path)
+                .ok_or(ArtifactImportErrorV1::MemberMismatch)?;
+            let result = stream_local_member(self, &mut session, member, path, now_unix);
+            if let Err(error) = result {
+                self.quarantine_and_discard(
+                    &session,
+                    quarantine_reason_for_import_error(&error),
+                    now_unix,
+                )?;
+                return Err(error);
+            }
+        }
+        self.finalize_import(session, manifest, now_unix)
+    }
+
+    /// Import from an explicit immutable HTTPS source. Callers may pass a
+    /// prior opaque staging handle only after an `InterruptedResumable`
+    /// result. Each response must repeat the configured immutable revision,
+    /// exact offset, and declared total length.
+    pub fn import_configured_https(
+        &self,
+        manifest: &ModelArtifactManifestV1,
+        source: &ConfiguredHttpsArtifactSourceV1,
+        transport: &dyn ExplicitHttpsArtifactTransportV1,
+        resume_staging_id: Option<&str>,
+        now_unix: u64,
+    ) -> Result<ArtifactInventoryRecordV1, ArtifactImportErrorV1> {
+        let mut session = match resume_staging_id {
+            Some(staging_id) => self.resume_import(manifest, staging_id, now_unix)?,
+            None => self.begin_import(manifest, now_unix)?,
+        };
+        if let Some(pinned) = &session.meta.immutable_source_revision {
+            if pinned != &source.immutable_revision {
+                self.quarantine_and_discard(
+                    &session,
+                    QuarantineReasonV1::IdentityMismatch,
+                    now_unix,
+                )?;
+                return Err(ArtifactImportErrorV1::ResumeIdentityMismatch);
+            }
+        } else {
+            session.meta.immutable_source_revision = Some(source.immutable_revision.clone());
+            write_staging_meta(&session.staging_dir, &session.staging_path, &session.meta)?;
+        }
+
+        for member_index in 0..session.meta.members.len() {
+            let member = session.meta.members[member_index].member.clone();
+            while session.meta.members[member_index].bytes_written < member.byte_length {
+                let offset = session.meta.members[member_index].bytes_written;
+                let request = HttpsArtifactRangeRequestV1 {
+                    url: source.member_url(&member),
+                    offset,
+                    max_bytes: (member.byte_length - offset).min(64 * 1024),
+                    expected_total_length: member.byte_length,
+                    expected_sha256: member.digest.clone(),
+                    immutable_revision: source.immutable_revision.clone(),
+                };
+                let response = match transport.fetch_range(&request) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        return Err(ArtifactImportErrorV1::InterruptedResumable {
+                            staging_id: session.staging_id(),
+                        });
+                    }
+                };
+                let response_len = u64::try_from(response.bytes.len())
+                    .map_err(|_| ArtifactImportErrorV1::SizeExpansionBeyondDeclared)?;
+                if response.offset != offset
+                    || response.total_length != member.byte_length
+                    || response.immutable_revision != source.immutable_revision
+                    || response.bytes.is_empty()
+                    || response_len > request.max_bytes
+                {
+                    self.quarantine_and_discard(
+                        &session,
+                        QuarantineReasonV1::IdentityMismatch,
+                        now_unix,
+                    )?;
+                    return Err(ArtifactImportErrorV1::ImmutableRangeMismatch);
+                }
+                if let Err(error) =
+                    self.stage_member_chunk(&mut session, member.role, &response.bytes, now_unix)
+                {
+                    self.quarantine_and_discard(
+                        &session,
+                        quarantine_reason_for_import_error(&error),
+                        now_unix,
+                    )?;
+                    return Err(error);
+                }
+            }
+        }
+        self.finalize_import(session, manifest, now_unix)
+    }
+
     /// Finalize: stream length + SHA-256 verification of the staged bytes,
     /// fsync, atomic rename into the digest-addressed layout, fsync the
     /// directory, then publish the `Installed` inventory record. Digest or
@@ -856,6 +1107,20 @@ impl ModelArtifactStore {
         self.save_inventory_locked(&inventory)
     }
 
+    fn quarantine_and_discard(
+        &self,
+        session: &ImportSession,
+        reason: QuarantineReasonV1,
+        now_unix: u64,
+    ) -> Result<(), ArtifactImportErrorV1> {
+        {
+            let _lock = self.acquire_lock()?;
+            self.recover_locked()?;
+            self.quarantine_staging_locked(session, reason, now_unix)?;
+        }
+        self.remove_staging_dir_path(&session.staging_id)
+    }
+
     /// Mark an installed artifact revoked. Revoked artifacts are never
     /// admitted and are protected from GC (revocation evidence is retained).
     pub fn revoke_artifact(
@@ -890,6 +1155,74 @@ impl ModelArtifactStore {
             record.recorded_at_unix = now_unix;
         }
         self.save_inventory_locked(&inventory)
+    }
+
+    /// Acquire or renew an active/rollback reference. Rollback leases also
+    /// transition the record to the durable rollback-retained state.
+    pub fn acquire_artifact_lease(
+        &self,
+        digest: &Sha256DigestHex,
+        lease: ArtifactLeaseV1,
+        now_unix: u64,
+    ) -> Result<(), ArtifactImportErrorV1> {
+        if lease.lease_id.trim().is_empty() || lease.expires_at_unix <= now_unix {
+            return Err(ArtifactImportErrorV1::StagingUnavailable);
+        }
+        let _lock = self.acquire_lock()?;
+        self.recover_locked()?;
+        let mut inventory = self.load_inventory_locked()?;
+        let record = inventory
+            .records
+            .get_mut(&digest.to_string())
+            .ok_or(ArtifactImportErrorV1::StagingUnavailable)?;
+        if !matches!(
+            record.state,
+            ArtifactInventoryStateV1::Installed | ArtifactInventoryStateV1::RetainedForRollback
+        ) {
+            return Err(ArtifactImportErrorV1::StagingUnavailable);
+        }
+        if lease.kind == ArtifactLeaseKindV1::Rollback {
+            record.state = ArtifactInventoryStateV1::RetainedForRollback;
+        }
+        let leases = inventory.leases.entry(digest.to_string()).or_default();
+        leases
+            .retain(|existing| existing.lease_id != lease.lease_id || existing.kind != lease.kind);
+        leases.push(lease);
+        self.save_inventory_locked(&inventory)
+    }
+
+    pub fn release_artifact_lease(
+        &self,
+        digest: &Sha256DigestHex,
+        lease_id: &str,
+        kind: ArtifactLeaseKindV1,
+    ) -> Result<(), ArtifactImportErrorV1> {
+        let _lock = self.acquire_lock()?;
+        self.recover_locked()?;
+        let mut inventory = self.load_inventory_locked()?;
+        if let Some(leases) = inventory.leases.get_mut(&digest.to_string()) {
+            leases.retain(|lease| lease.lease_id != lease_id || lease.kind != kind);
+            if leases.is_empty() {
+                inventory.leases.remove(&digest.to_string());
+            }
+        }
+        self.save_inventory_locked(&inventory)
+    }
+
+    pub fn acquire_daemon_gc_lease(
+        &self,
+        lease_id: impl Into<String>,
+        expires_at_unix: u64,
+        now_unix: u64,
+    ) -> Result<DaemonArtifactGcLeaseV1, ArtifactImportErrorV1> {
+        let lease_id = lease_id.into();
+        if lease_id.trim().is_empty() || expires_at_unix <= now_unix {
+            return Err(ArtifactImportErrorV1::StoreBusy);
+        }
+        Ok(DaemonArtifactGcLeaseV1 {
+            lease_id,
+            expires_at_unix,
+        })
     }
 
     /// Admit an installed artifact for runtime use against host evidence.
@@ -957,6 +1290,27 @@ impl ModelArtifactStore {
     /// collected here; each removal appends one receipt to
     /// `receipts/gc.jsonl`.
     pub fn gc(&self, now_unix: u64) -> Result<Vec<GcReceiptV1>, ArtifactImportErrorV1> {
+        self.gc_locked_by_policy(now_unix, false)
+    }
+
+    /// Collect installed artifacts only during an explicit daemon lease and
+    /// only when no unexpired active/rollback reference protects them.
+    pub fn gc_with_daemon_lease(
+        &self,
+        lease: &DaemonArtifactGcLeaseV1,
+        now_unix: u64,
+    ) -> Result<Vec<GcReceiptV1>, ArtifactImportErrorV1> {
+        if lease.lease_id.trim().is_empty() || lease.expires_at_unix <= now_unix {
+            return Err(ArtifactImportErrorV1::StoreBusy);
+        }
+        self.gc_locked_by_policy(now_unix, true)
+    }
+
+    fn gc_locked_by_policy(
+        &self,
+        now_unix: u64,
+        include_unleased_installed: bool,
+    ) -> Result<Vec<GcReceiptV1>, ArtifactImportErrorV1> {
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
         let mut inventory = self.load_inventory_locked()?;
@@ -967,8 +1321,16 @@ impl ModelArtifactStore {
                 let collectible_state = matches!(
                     r.state,
                     ArtifactInventoryStateV1::Verified | ArtifactInventoryStateV1::Quarantined
-                );
+                ) || (include_unleased_installed
+                    && r.state == ArtifactInventoryStateV1::Installed);
+                let has_live_reference = inventory
+                    .leases
+                    .get(&r.artifact_digest.to_string())
+                    .is_some_and(|leases| {
+                        leases.iter().any(|lease| lease.expires_at_unix > now_unix)
+                    });
                 collectible_state
+                    && !has_live_reference
                     && now_unix.saturating_sub(r.recorded_at_unix) >= self.retention.grace_seconds
             })
             .cloned()
@@ -988,6 +1350,7 @@ impl ModelArtifactStore {
             inventory
                 .records
                 .remove(&record.artifact_digest.to_string());
+            inventory.leases.remove(&record.artifact_digest.to_string());
         }
         self.save_inventory_locked(&inventory)?;
         let receipts: Vec<GcReceiptV1> = records
@@ -1430,6 +1793,113 @@ fn check_resource_ceiling(
     Ok(())
 }
 
+fn quarantine_reason_for_import_error(error: &ArtifactImportErrorV1) -> QuarantineReasonV1 {
+    match error {
+        ArtifactImportErrorV1::SizeExpansionBeyondDeclared => QuarantineReasonV1::SizeExpansion,
+        ArtifactImportErrorV1::LengthMismatch => QuarantineReasonV1::MemberLengthMismatch,
+        ArtifactImportErrorV1::DigestMismatch => QuarantineReasonV1::MemberDigestMismatch,
+        ArtifactImportErrorV1::UndeclaredMember => QuarantineReasonV1::UndeclaredMember,
+        ArtifactImportErrorV1::UnsafePackageEntry | ArtifactImportErrorV1::UnsafeStorePath => {
+            QuarantineReasonV1::UnsafePackage
+        }
+        ArtifactImportErrorV1::SourceInterrupted => QuarantineReasonV1::SourceInterrupted,
+        _ => QuarantineReasonV1::IdentityMismatch,
+    }
+}
+
+fn inspect_local_package(
+    source: &Path,
+) -> Result<BTreeMap<String, PathBuf>, ArtifactImportErrorV1> {
+    let source_meta =
+        fs::symlink_metadata(source).map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?;
+    if !source_meta.is_dir() || source_meta.file_type().is_symlink() {
+        return Err(ArtifactImportErrorV1::UnsafePackageEntry);
+    }
+    let mut files = BTreeMap::new();
+    let mut pending = vec![(source.to_path_buf(), String::new())];
+    while let Some((directory, prefix)) = pending.pop() {
+        for entry in
+            fs::read_dir(&directory).map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?
+        {
+            let entry = entry.map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?;
+            if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+                return Err(ArtifactImportErrorV1::UnsafePackageEntry);
+            }
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?;
+            if metadata.file_type().is_symlink() {
+                return Err(ArtifactImportErrorV1::UnsafePackageEntry);
+            }
+            if metadata.is_dir() {
+                pending.push((entry.path(), relative));
+                continue;
+            }
+            if !metadata.is_file() || metadata_has_multiple_links(&metadata) {
+                return Err(ArtifactImportErrorV1::UnsafePackageEntry);
+            }
+            if files.insert(relative, entry.path()).is_some() {
+                return Err(ArtifactImportErrorV1::UnsafePackageEntry);
+            }
+        }
+    }
+    Ok(files)
+}
+
+#[cfg(unix)]
+fn metadata_has_multiple_links(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() != 1
+}
+
+#[cfg(not(unix))]
+fn metadata_has_multiple_links(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn stream_local_member(
+    store: &ModelArtifactStore,
+    session: &mut ImportSession,
+    member: &ArtifactPackageMemberV1,
+    path: &Path,
+    now_unix: u64,
+) -> Result<(), ArtifactImportErrorV1> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata_has_multiple_links(&metadata)
+    {
+        return Err(ArtifactImportErrorV1::UnsafePackageEntry);
+    }
+    if metadata.len() > member.byte_length {
+        return Err(ArtifactImportErrorV1::SizeExpansionBeyondDeclared);
+    }
+    if metadata.len() != member.byte_length {
+        return Err(ArtifactImportErrorV1::LengthMismatch);
+    }
+    let mut file = File::open(path).map_err(|_| ArtifactImportErrorV1::SourceInterrupted)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| ArtifactImportErrorV1::SourceInterrupted)?;
+        if read == 0 {
+            break;
+        }
+        store.stage_member_chunk(session, member.role, &buffer[..read], now_unix)?;
+    }
+    Ok(())
+}
+
 fn sha256_open_file(mut file: impl Read) -> Result<Sha256DigestHex, ArtifactImportErrorV1> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
@@ -1641,13 +2111,13 @@ fn open_or_create_component_dir(parent: &Dir, name: &str) -> Result<Dir, Artifac
 
 fn member_file_name(role: ArtifactMemberRoleV1) -> &'static str {
     match role {
-        ArtifactMemberRoleV1::Model => "model",
-        ArtifactMemberRoleV1::Tokenizer => "tokenizer",
-        ArtifactMemberRoleV1::Config => "config",
-        ArtifactMemberRoleV1::SpecialTokensMap => "special-tokens-map",
-        ArtifactMemberRoleV1::TokenizerConfig => "tokenizer-config",
-        ArtifactMemberRoleV1::QueryInstruction => "query-instruction",
-        ArtifactMemberRoleV1::DocumentInstruction => "document-instruction",
+        ArtifactMemberRoleV1::Model => "model.onnx",
+        ArtifactMemberRoleV1::Tokenizer => "tokenizer.json",
+        ArtifactMemberRoleV1::Config => "config.json",
+        ArtifactMemberRoleV1::SpecialTokensMap => "special_tokens_map.json",
+        ArtifactMemberRoleV1::TokenizerConfig => "tokenizer_config.json",
+        ArtifactMemberRoleV1::QueryInstruction => "query_instruction.txt",
+        ArtifactMemberRoleV1::DocumentInstruction => "document_instruction.txt",
     }
 }
 
@@ -1804,6 +2274,43 @@ mod tests {
         (manifest, record.artifact_digest)
     }
 
+    fn write_local_package(root: &Path, manifest: &ModelArtifactManifestV1, model: &[u8]) {
+        for member in &manifest.payload.members {
+            let path = root.join(&member.path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, member_bytes(member.role, model)).unwrap();
+        }
+    }
+
+    struct FixtureHttpsTransport {
+        members: BTreeMap<String, Vec<u8>>,
+        revision: String,
+    }
+
+    impl ExplicitHttpsArtifactTransportV1 for FixtureHttpsTransport {
+        fn fetch_range(
+            &self,
+            request: &HttpsArtifactRangeRequestV1,
+        ) -> Result<HttpsArtifactRangeResponseV1, ArtifactImportErrorV1> {
+            let bytes = self
+                .members
+                .iter()
+                .find_map(|(path, bytes)| request.url.ends_with(path).then_some(bytes))
+                .ok_or(ArtifactImportErrorV1::MemberMismatch)?;
+            let start = usize::try_from(request.offset)
+                .map_err(|_| ArtifactImportErrorV1::ImmutableRangeMismatch)?;
+            let count = usize::try_from(request.max_bytes)
+                .map_err(|_| ArtifactImportErrorV1::ImmutableRangeMismatch)?;
+            let end = start.saturating_add(count).min(bytes.len());
+            Ok(HttpsArtifactRangeResponseV1 {
+                offset: request.offset,
+                total_length: bytes.len() as u64,
+                immutable_revision: self.revision.clone(),
+                bytes: bytes[start..end].to_vec(),
+            })
+        }
+    }
+
     #[test]
     fn verified_manifest_import_places_atomically_and_admits() {
         let (_dir, store) = store();
@@ -1823,6 +2330,101 @@ mod tests {
         assert_eq!(
             std::fs::read(store.artifact_path(&digest)).unwrap(),
             model_bytes()
+        );
+    }
+
+    #[test]
+    fn explicit_local_directory_import_rejects_undeclared_members() {
+        let (root, store) = store();
+        let model = model_bytes();
+        let manifest = manifest_for(&model);
+        let package = root.path().join("package");
+        write_local_package(&package, &manifest, &model);
+        fs::write(package.join("undeclared.bin"), b"no").unwrap();
+        assert_eq!(
+            store
+                .import_local_directory(&manifest, &package, NOW)
+                .unwrap_err(),
+            ArtifactImportErrorV1::UndeclaredMember
+        );
+        assert_eq!(
+            store
+                .inventory()
+                .unwrap()
+                .records
+                .get(&manifest.artifact_identity_digest().to_string())
+                .unwrap()
+                .state,
+            ArtifactInventoryStateV1::Quarantined
+        );
+    }
+
+    #[test]
+    fn explicit_https_import_uses_only_pinned_ranges() {
+        let (_root, store) = store();
+        let model = model_bytes();
+        let manifest = manifest_for(&model);
+        assert_eq!(
+            ConfiguredHttpsArtifactSourceV1::new("http://models.example/rev", "immutable-r1")
+                .unwrap_err(),
+            ArtifactImportErrorV1::InvalidHttpsSource
+        );
+        let source =
+            ConfiguredHttpsArtifactSourceV1::new("https://models.example/rev", "immutable-r1")
+                .unwrap();
+        let transport = FixtureHttpsTransport {
+            members: manifest
+                .payload
+                .members
+                .iter()
+                .map(|member| {
+                    (
+                        member.path.clone(),
+                        member_bytes(member.role, &model).to_vec(),
+                    )
+                })
+                .collect(),
+            revision: "immutable-r1".to_owned(),
+        };
+        let record = store
+            .import_configured_https(&manifest, &source, &transport, None, NOW)
+            .unwrap();
+        assert_eq!(record.state, ArtifactInventoryStateV1::Installed);
+    }
+
+    #[test]
+    fn daemon_gc_lease_never_collects_active_artifacts() {
+        let (_root, store) = store();
+        let (_manifest, digest) = import_ok(&store, &model_bytes());
+        store
+            .acquire_artifact_lease(
+                &digest,
+                ArtifactLeaseV1 {
+                    lease_id: "active".to_owned(),
+                    kind: ArtifactLeaseKindV1::Active,
+                    expires_at_unix: NOW + 1_000,
+                },
+                NOW,
+            )
+            .unwrap();
+        let daemon = store
+            .acquire_daemon_gc_lease("daemon", NOW + 1_000, NOW)
+            .unwrap();
+        assert!(
+            store
+                .gc_with_daemon_lease(&daemon, NOW + 101)
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .release_artifact_lease(&digest, "active", ArtifactLeaseKindV1::Active)
+            .unwrap();
+        assert_eq!(
+            store
+                .gc_with_daemon_lease(&daemon, NOW + 102)
+                .unwrap()
+                .len(),
+            1
         );
     }
 
@@ -2179,16 +2781,16 @@ mod tests {
         let outside = store.root.join("outside-session");
         std::fs::rename(&ambient, &held).unwrap();
         std::fs::create_dir_all(outside.join("members")).unwrap();
-        std::fs::write(outside.join("members").join("model"), b"outside").unwrap();
+        std::fs::write(outside.join("members").join("model.onnx"), b"outside").unwrap();
         std::os::unix::fs::symlink(&outside, &ambient).unwrap();
 
         store.stage_chunk(&mut session, &bytes, NOW).unwrap();
         assert_eq!(
-            std::fs::read(outside.join("members").join("model")).unwrap(),
+            std::fs::read(outside.join("members").join("model.onnx")).unwrap(),
             b"outside"
         );
         assert_eq!(
-            std::fs::read(held.join("members").join("model")).unwrap(),
+            std::fs::read(held.join("members").join("model.onnx")).unwrap(),
             bytes
         );
     }
