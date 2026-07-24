@@ -10,6 +10,7 @@ mod files;
 mod finalize;
 mod preflight;
 mod prepare;
+mod runtime;
 mod sqlite;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,10 +20,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use libsql::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::RefId;
+use tracedecay_store::{CodeShardScopeV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
+use crate::db::engine::{Executor as _, QueryExecutor as _, params};
 use evidence::{GraphStoreEvidence, InputReadEvidence, capture_input_evidence};
 #[cfg(test)]
 use files::sqlite_sidecar;
@@ -34,15 +37,21 @@ use files::{
 use finalize::{cut_over_markers, register_destination, verify_destination};
 use preflight::{acquire_store_locks, ensure_profile_offline, preflight_disk_space};
 use prepare::prepare_destination;
+use runtime::{
+    ConsolidationArtifactAuthorityV1, ConsolidationArtifactRecordV1, ConsolidationArtifactRoleV1,
+    ConsolidationRuntimeOwnerV1, FrozenInputRuntimeSetV1,
+};
 
 use crate::branch_meta::{self, BranchEntry, BranchMeta};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use crate::global_db::{
+    GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
+};
 use crate::storage::{
     self, EnrollmentMarker, PrivateStoreIo, StorageMode, StoreKind, StoreLayout, StoreManifest,
 };
 
-const LEDGER_SCHEMA_VERSION: u32 = 2;
+const LEDGER_SCHEMA_VERSION: u32 = 3;
 const BACKUP_DIR: &str = "migration-backups";
 const LEDGER_DIR: &str = "migration-inventory";
 const PRESERVED_DIR: &str = "consolidation-preserved";
@@ -136,6 +145,8 @@ struct ConsolidationLedger {
     graph_offsets: Vec<sqlite::GraphMergeOffsets>,
     session_offsets: Option<sqlite::SessionMergeOffsets>,
     preserved_collisions: Vec<PathBuf>,
+    #[serde(default)]
+    artifact_records: Vec<ConsolidationArtifactRecordV1>,
 }
 
 #[derive(Debug, Default)]
@@ -237,7 +248,7 @@ async fn apply_with_faults(
         &options.profile_root,
         "profile shard consolidation",
     )?;
-    let _database_scope = crate::db::enter_maintenance_database_scope(
+    let database_scope = crate::db::enter_maintenance_database_scope(
         &lifecycle,
         &options.profile_root,
         "profile shard consolidation",
@@ -251,7 +262,6 @@ async fn apply_with_faults(
     }
     preflight_disk_space(&resolved)?;
     let _store_locks = acquire_store_locks(&resolved.source_layout, &resolved.target_layout)?;
-    let guarded_paths = input_database_paths(&resolved)?;
     let source_graphs = graph_db_paths(&resolved.source_layout, &resolved.source_meta)?;
     let target_graphs = graph_db_paths(&resolved.target_layout, &resolved.target_meta)?;
     let session_paths = vec![
@@ -261,51 +271,70 @@ async fn apply_with_faults(
     resolved
         .evidence
         .validate(&source_graphs, &target_graphs, &session_paths)?;
-    let _database_guards = sqlite::acquire_offline_guards(&guarded_paths).await?;
-    // Advisory store locks do not cover old or direct MCP writers. Recompute
-    // under SQLite write reservations so the token and backups describe the
-    // exact frozen inputs used below.
-    let locked = resolve_plan_inner(options, true, Some(Arc::clone(&resolved.evidence))).await?;
-    if locked.report.confirmation_token != confirmation_token {
-        return Err(config_error(format!(
-            "input stores changed after the dry-run; rerun it and pass --confirm-token {}",
-            locked.report.confirmation_token
-        )));
-    }
-    let resolved = locked;
-    preflight_disk_space(&resolved)?;
-    let ledger_path = resolved.report.ledger_path.clone();
-    let mut ledger = load_or_create_ledger(&resolved, &ledger_path)?;
-    validate_ledger(&ledger, &resolved)?;
-    if ledger.state == ConsolidationState::Applied {
-        finalize_applied_consolidation(&options.profile_root, &ledger).await?;
-        let mut report = resolved.report;
-        report.state = ConsolidationState::Applied;
-        report.dry_run = false;
-        return Ok(report);
-    }
-
-    if ledger.state == ConsolidationState::Planned {
-        backup_store(&resolved.source_layout, &resolved.report.backup_root)?;
-        backup_store(&resolved.target_layout, &resolved.report.backup_root)?;
-        ledger.state = ConsolidationState::BackupsReady;
-        save_ledger(&ledger_path, &ledger)?;
-        maybe_stop(&ledger.state, stop_after.as_ref())?;
-    }
-
-    if ledger.state == ConsolidationState::BackupsReady {
-        if prepare_stop.is_some() {
-            prepare::prepare_destination_with_stop(&resolved, prepare_stop)?;
-        } else {
-            prepare_destination(&resolved)?;
+    let frozen_records = frozen_input_records(&resolved)?;
+    let profile = crate::daemon::profile_identity::load_or_create(&options.profile_root)?;
+    let profile_shard =
+        StoreShardIdV1::profile(profile.brain_id().clone(), profile.profile_id().clone());
+    let frozen = FrozenInputRuntimeSetV1::acquire(
+        &options.profile_root,
+        &lifecycle,
+        &database_scope,
+        profile_shard,
+        &frozen_records,
+    )
+    .await?;
+    // Advisory file locks do not cover old or direct MCP writers. Recompute
+    // and copy every source while exact brokered writer reservations are held.
+    let frozen_result = async {
+        let locked =
+            resolve_plan_inner(options, true, Some(Arc::clone(&resolved.evidence))).await?;
+        if locked.report.confirmation_token != confirmation_token {
+            return Err(config_error(format!(
+                "input stores changed after the dry-run; rerun it and pass --confirm-token {}",
+                locked.report.confirmation_token
+            )));
         }
-        ledger.state = ConsolidationState::DestinationReady;
-        save_ledger(&ledger_path, &ledger)?;
-        maybe_stop(&ledger.state, stop_after.as_ref())?;
+        preflight_disk_space(&locked)?;
+        let ledger_path = locked.report.ledger_path.clone();
+        let mut ledger = load_or_create_ledger(&locked, &ledger_path)?;
+        validate_ledger(&ledger, &locked)?;
+        if ledger.state == ConsolidationState::Planned {
+            backup_store(&locked.source_layout, &locked.report.backup_root)?;
+            backup_store(&locked.target_layout, &locked.report.backup_root)?;
+            ledger.state = ConsolidationState::BackupsReady;
+            save_ledger(&ledger_path, &ledger)?;
+            maybe_stop(&ledger.state, stop_after.as_ref())?;
+        }
+        if ledger.state == ConsolidationState::BackupsReady {
+            if prepare_stop.is_some() {
+                prepare::prepare_destination_with_stop(&locked, prepare_stop)?;
+            } else {
+                prepare_destination(&locked)?;
+            }
+            prepare_database_artifacts(&locked)?;
+            ledger.artifact_records = capture_artifact_records(&locked)?;
+            ledger.state = ConsolidationState::DestinationReady;
+            save_ledger(&ledger_path, &ledger)?;
+            maybe_stop(&ledger.state, stop_after.as_ref())?;
+        }
+        Ok((locked, ledger_path, ledger))
     }
+    .await;
+    let cleanup = frozen.release_and_join().await;
+    let (resolved, ledger_path, mut ledger) = match (frozen_result, cleanup) {
+        (Ok(value), Ok(())) => value,
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(error)) => return Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            return Err(config_error(format!(
+                "{error}; frozen-input cleanup also failed: {cleanup_error}"
+            )));
+        }
+    };
 
     if ledger.state == ConsolidationState::DestinationReady {
-        merge_databases(&resolved, &mut ledger).await?;
+        validate_artifact_records(&resolved, &ledger.artifact_records)?;
+        merge_databases(&resolved, &mut ledger, &lifecycle, &database_scope).await?;
         ledger.state = ConsolidationState::DatabasesMerged;
         save_ledger(&ledger_path, &ledger)?;
         maybe_stop(&ledger.state, stop_after.as_ref())?;
@@ -326,7 +355,9 @@ async fn apply_with_faults(
 
     if ledger.state == ConsolidationState::ArtifactsMerged {
         remove_verification_inputs(&resolved)?;
-        register_destination(&resolved).await?;
+        let (_runtime_registry, global_db) =
+            mount_registered_profile_database(&options.profile_root).await?;
+        register_destination(&resolved, global_db.as_ref()).await?;
         ledger.state = ConsolidationState::Registered;
         save_ledger(&ledger_path, &ledger)?;
         maybe_stop(&ledger.state, stop_after.as_ref())?;
@@ -339,13 +370,31 @@ async fn apply_with_faults(
     }
 
     if ledger.state == ConsolidationState::Applied {
-        finalize_applied_consolidation(&options.profile_root, &ledger).await?;
+        let (_runtime_registry, global_db) =
+            mount_registered_profile_database(&options.profile_root).await?;
+        finalize_applied_consolidation(&options.profile_root, &global_db, &ledger).await?;
     }
 
     let mut report = resolved.report;
     report.state = ledger.state;
     report.dry_run = false;
     Ok(report)
+}
+
+async fn mount_registered_profile_database(
+    profile_root: &Path,
+) -> Result<(
+    crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    Arc<RegisteredGlobalDb>,
+)> {
+    let identity = crate::daemon::profile_identity::load_or_create(profile_root)?;
+    let runtime_registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity,
+        )
+        .await?;
+    let database = runtime_registry.profile_database().await?;
+    Ok((runtime_registry, database))
 }
 
 fn maybe_stop(state: &ConsolidationState, stop_after: Option<&ConsolidationState>) -> Result<()> {
@@ -981,13 +1030,11 @@ fn load_or_create_ledger(resolved: &ResolvedPlan, path: &Path) -> Result<Consoli
         if ledger.schema_version == 1 {
             if !matches!(
                 ledger.state,
-                ConsolidationState::Planned
-                    | ConsolidationState::BackupsReady
-                    | ConsolidationState::DestinationReady
+                ConsolidationState::Planned | ConsolidationState::BackupsReady
             ) {
                 return Err(config_error(format!(
-                    "consolidation ledger v1 cannot be migrated safely after database merge state {:?}",
-                    ledger.state
+                    "consolidation ledger v{} cannot be migrated safely after destination authority publication state {:?}",
+                    ledger.schema_version, ledger.state
                 )));
             }
             ledger.schema_version = LEDGER_SCHEMA_VERSION;
@@ -1015,6 +1062,7 @@ fn load_or_create_ledger(resolved: &ResolvedPlan, path: &Path) -> Result<Consoli
         graph_offsets: Vec::new(),
         session_offsets: None,
         preserved_collisions: Vec::new(),
+        artifact_records: Vec::new(),
     };
     save_ledger(path, &ledger)?;
     Ok(ledger)
@@ -1071,6 +1119,7 @@ fn save_ledger(path: &Path, ledger: &ConsolidationLedger) -> Result<()> {
 
 pub(crate) async fn retire_applied_input_manifests(
     profile_root: &Path,
+    global_db: &RegisteredGlobalDb,
 ) -> ManifestRetirementReport {
     let mut report = ManifestRetirementReport::default();
     let ledger_root = profile_root.join(LEDGER_DIR);
@@ -1167,7 +1216,7 @@ pub(crate) async fn retire_applied_input_manifests(
             );
             continue;
         }
-        match finalize_applied_consolidation(profile_root, ledger).await {
+        match finalize_applied_consolidation(profile_root, global_db, ledger).await {
             Ok((retired, registry_projects)) => {
                 report.retired.extend(retired);
                 report.retired_registry_projects = report
@@ -1182,6 +1231,7 @@ pub(crate) async fn retire_applied_input_manifests(
 
 async fn finalize_applied_consolidation(
     profile_root: &Path,
+    global_db: &RegisteredGlobalDb,
     ledger: &ConsolidationLedger,
 ) -> Result<(Vec<PathBuf>, usize)> {
     validate_applied_retirement_authority(profile_root, ledger)?;
@@ -1212,7 +1262,8 @@ async fn finalize_applied_consolidation(
     // manifests while the registry still advertises legacy owners. The file
     // operations below contain no suspension point, making the transition
     // cancellation-atomic from the caller's perspective.
-    let retired_registry_projects = retire_legacy_registry_owners(profile_root, ledger).await?;
+    let retired_registry_projects =
+        retire_legacy_registry_owners(global_db, profile_root, ledger).await?;
     let mut retired = Vec::new();
     for plan in plans {
         let parent = plan
@@ -1295,19 +1346,10 @@ fn validate_applied_retirement_authority(
 }
 
 async fn retire_legacy_registry_owners(
+    db: &RegisteredGlobalDb,
     profile_root: &Path,
     ledger: &ConsolidationLedger,
 ) -> Result<usize> {
-    let global_path = profile_root.join("global.db");
-    if !global_path.is_file() {
-        return Err(config_error(format!(
-            "global registry '{}' is missing for applied consolidation",
-            global_path.display()
-        )));
-    }
-    let db = GlobalDb::open_at(&global_path)
-        .await
-        .ok_or_else(|| config_error("could not open global registry for consolidation cleanup"))?;
     let transaction = db
         .begin_write_transaction()
         .await
@@ -1333,8 +1375,8 @@ async fn retire_legacy_registry_owners(
     }
 
     let result = async {
-        let canonical_root = GlobalDb::canonical_project_key(&ledger.project_root);
-        let root_alias = GlobalDb::project_path_alias_key(&ledger.project_root);
+        let canonical_root = RegisteredGlobalDb::canonical_project_key(&ledger.project_root);
+        let root_alias = RegisteredGlobalDb::project_path_alias_key(&ledger.project_root);
         let mut rows = conn
             .query(
                 "SELECT canonical_root, COALESCE(git_common_dir, '')
@@ -1435,7 +1477,7 @@ async fn retire_legacy_registry_owners(
         // driven from a linked worktree must retire and verify owners by
         // repository identity. Rows outside this consolidation's trio (e.g.
         // further legacy shards awaiting their own pass) are left untouched.
-        let canonical_common = GlobalDb::canonical_project_key(&ledger.git_common_dir);
+        let canonical_common = RegisteredGlobalDb::canonical_project_key(&ledger.git_common_dir);
         let mut rows = conn
             .query(
                 "SELECT project_id FROM code_projects
@@ -1607,52 +1649,494 @@ fn backup_store(layout: &StoreLayout, backup_root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn merge_databases(resolved: &ResolvedPlan, ledger: &mut ConsolidationLedger) -> Result<()> {
+fn prepare_database_artifacts(resolved: &ResolvedPlan) -> Result<()> {
     let destination = &resolved.report.destination_data_root;
-    let meta = load_required_branch_meta(&layout_for_id(
-        &resolved.report.project_root,
-        destination
-            .parent()
-            .and_then(Path::parent)
-            .unwrap_or(Path::new("")),
-        &resolved.report.destination_project_id,
-    )?)?;
-    let graph_paths = graph_db_paths_for_root(destination, &meta)?;
-    if ledger.graph_offsets.is_empty() {
-        ledger.graph_offsets = sqlite::plan_graph_offsets(&graph_paths).await?;
-        save_ledger(&resolved.report.ledger_path, ledger)?;
-    }
-    sqlite::merge_graph_facts(&graph_paths, &ledger.graph_offsets).await?;
-
     let input_root = destination.join(INPUT_DIR);
     fs::create_dir_all(&input_root).map_err(io_error)?;
     let source_sessions = input_root.join("source-sessions.db");
     if !source_sessions.is_file() {
         copy_sqlite_family_exact(&resolved.source_layout.sessions_db_path, &source_sessions)?;
     }
-    let target_sessions = destination.join(storage::SESSIONS_DB_FILENAME);
-    if ledger.session_offsets.is_none() {
-        ledger.session_offsets =
-            Some(sqlite::plan_session_offsets(&target_sessions, &source_sessions).await?);
-        save_ledger(&resolved.report.ledger_path, ledger)?;
-    }
     let target_input = input_root.join("target-sessions.db");
     if !target_input.is_file() {
-        copy_sqlite_family_exact(&target_sessions, &target_input)?;
+        copy_sqlite_family_exact(
+            &destination.join(storage::SESSIONS_DB_FILENAME),
+            &target_input,
+        )?;
     }
-    let offsets = ledger
-        .session_offsets
-        .as_ref()
-        .ok_or_else(|| config_error("session merge offsets are missing from the ledger"))?;
-    sqlite::merge_sessions(
-        &target_sessions,
-        &source_sessions,
-        &target_input,
-        &resolved.report.source.project_id,
-        offsets,
+    Ok(())
+}
+
+fn artifact_authorities(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArtifactAuthorityV1>> {
+    let destination = &resolved.report.destination_data_root;
+    let layout = layout_for_id(
+        &resolved.report.project_root,
+        destination
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| config_error("destination shard has no profile root"))?,
+        &resolved.report.destination_project_id,
+    )?;
+    let meta = load_required_branch_meta(&layout)?;
+    let profile_root = destination
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| config_error("destination shard has no profile root"))?;
+    let profile = crate::daemon::profile_identity::load_or_create(profile_root)?;
+    let indexing = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
+        &resolved.report.project_root,
+    )
+    .map_err(|error| config_error(error.to_string()))?;
+    let destination_project = canonical_project_id(&resolved.report.destination_project_id)?;
+    let mut branches = meta.branches.iter().collect::<Vec<_>>();
+    branches.sort_by(|(left_name, left), (right_name, right)| {
+        let left_default = *left_name == &meta.default_branch;
+        let right_default = *right_name == &meta.default_branch;
+        right_default
+            .cmp(&left_default)
+            .then_with(|| left.db_file.cmp(&right.db_file))
+    });
+    let graph_incarnation =
+        StoreIncarnationV1::new(1).map_err(|error| config_error(error.to_string()))?;
+    let mut authorities = Vec::with_capacity(branches.len() + 3);
+    for (branch, entry) in branches {
+        let (role, scope) = if branch == &meta.default_branch {
+            (
+                ConsolidationArtifactRoleV1::DestinationCodeGraph,
+                CodeShardScopeV1::Worktree {
+                    worktree_id: indexing.worktree_id().clone(),
+                },
+            )
+        } else {
+            let ref_name = if branch.starts_with("refs/heads/") {
+                branch.clone()
+            } else {
+                format!("refs/heads/{branch}")
+            };
+            let ref_id = RefId::new(ref_name).map_err(|error| config_error(error.to_string()))?;
+            (
+                ConsolidationArtifactRoleV1::SourceCodeGraphInput,
+                CodeShardScopeV1::Branch {
+                    worktree_id: indexing.worktree_id().clone(),
+                    ref_id,
+                },
+            )
+        };
+        let shard_id = StoreShardIdV1::code(
+            profile.brain_id().clone(),
+            profile.profile_id().clone(),
+            destination_project.clone(),
+            indexing.repository_id().clone(),
+            scope,
+        );
+        authorities.push(ConsolidationArtifactAuthorityV1::new(
+            role,
+            shard_id,
+            graph_incarnation,
+            PathBuf::from(&entry.db_file),
+        )?);
+    }
+    let session_incarnation =
+        |value| StoreIncarnationV1::new(value).map_err(|error| config_error(error.to_string()));
+    for (role, project, incarnation, relative) in [
+        (
+            ConsolidationArtifactRoleV1::DestinationSessions,
+            canonical_project_id(&resolved.report.destination_project_id)?,
+            session_incarnation(1)?,
+            PathBuf::from(storage::SESSIONS_DB_FILENAME),
+        ),
+        (
+            ConsolidationArtifactRoleV1::SourceSessionsInput,
+            canonical_project_id(&resolved.report.source.project_id)?,
+            session_incarnation(2)?,
+            PathBuf::from(INPUT_DIR).join("source-sessions.db"),
+        ),
+        (
+            ConsolidationArtifactRoleV1::TargetSessionsInput,
+            canonical_project_id(&resolved.report.target.project_id)?,
+            session_incarnation(3)?,
+            PathBuf::from(INPUT_DIR).join("target-sessions.db"),
+        ),
+    ] {
+        authorities.push(ConsolidationArtifactAuthorityV1::new(
+            role,
+            StoreShardIdV1::project_sessions(
+                profile.brain_id().clone(),
+                profile.profile_id().clone(),
+                project,
+            ),
+            incarnation,
+            relative,
+        )?);
+    }
+    Ok(authorities)
+}
+
+fn frozen_input_records(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArtifactRecordV1>> {
+    let profile_root = resolved
+        .report
+        .destination_data_root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| config_error("destination shard has no profile root"))?
+        .canonicalize()
+        .map_err(io_error)?;
+    let profile = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+    let indexing = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
+        &resolved.report.project_root,
+    )
+    .map_err(|error| config_error(error.to_string()))?;
+    let incarnation =
+        StoreIncarnationV1::new(1).map_err(|error| config_error(error.to_string()))?;
+    let mut authorities = BTreeMap::new();
+    let mut physical_owners = BTreeMap::new();
+    for (project_id, layout, meta) in [
+        (
+            resolved.report.source.project_id.as_str(),
+            &resolved.source_layout,
+            &resolved.source_meta,
+        ),
+        (
+            resolved.report.target.project_id.as_str(),
+            &resolved.target_layout,
+            &resolved.target_meta,
+        ),
+    ] {
+        let project_id = canonical_project_id(project_id)?;
+        let mut branches = meta.branches.iter().collect::<Vec<_>>();
+        branches.sort_by(|(left_name, left), (right_name, right)| {
+            let left_default = *left_name == &meta.default_branch;
+            let right_default = *right_name == &meta.default_branch;
+            right_default
+                .cmp(&left_default)
+                .then_with(|| left.db_file.cmp(&right.db_file))
+        });
+        for (branch, entry) in branches {
+            let path = confined_branch_graph_path(&layout.data_root, &entry.db_file)?;
+            let relative = canonical_relative_locator(&profile_root, &path)?;
+            if physical_owners
+                .insert(relative.clone(), project_id.clone())
+                .is_some_and(|owner| owner != project_id)
+            {
+                return Err(config_error(
+                    "consolidation projects alias the same physical graph database",
+                ));
+            }
+            let scope = if branch == &meta.default_branch {
+                CodeShardScopeV1::Worktree {
+                    worktree_id: indexing.worktree_id().clone(),
+                }
+            } else {
+                let ref_name = if branch.starts_with("refs/heads/") {
+                    branch.clone()
+                } else {
+                    format!("refs/heads/{branch}")
+                };
+                CodeShardScopeV1::Branch {
+                    worktree_id: indexing.worktree_id().clone(),
+                    ref_id: RefId::new(ref_name)
+                        .map_err(|error| config_error(error.to_string()))?,
+                }
+            };
+            let authority = ConsolidationArtifactAuthorityV1::new(
+                ConsolidationArtifactRoleV1::FrozenInputCodeGraph,
+                StoreShardIdV1::code(
+                    profile.brain_id().clone(),
+                    profile.profile_id().clone(),
+                    project_id.clone(),
+                    indexing.repository_id().clone(),
+                    scope,
+                ),
+                incarnation,
+                relative.clone(),
+            )?;
+            authorities.entry(relative).or_insert(authority);
+        }
+        let relative = canonical_relative_locator(&profile_root, &layout.sessions_db_path)?;
+        if physical_owners
+            .insert(relative.clone(), project_id.clone())
+            .is_some()
+        {
+            return Err(config_error(
+                "session input aliases another consolidation database",
+            ));
+        }
+        let authority = ConsolidationArtifactAuthorityV1::new(
+            ConsolidationArtifactRoleV1::FrozenInputSessions,
+            StoreShardIdV1::project_sessions(
+                profile.brain_id().clone(),
+                profile.profile_id().clone(),
+                project_id,
+            ),
+            incarnation,
+            relative.clone(),
+        )?;
+        authorities.insert(relative, authority);
+    }
+    authorities
+        .into_iter()
+        .map(|(_, authority)| ConsolidationArtifactRecordV1::capture(&profile_root, authority))
+        .collect()
+}
+
+fn canonical_relative_locator(root: &Path, path: &Path) -> Result<PathBuf> {
+    let path = path.canonicalize().map_err(io_error)?;
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .map_err(|_| config_error("consolidation input database escapes its profile root"))
+}
+
+fn capture_artifact_records(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArtifactRecordV1>> {
+    artifact_authorities(resolved)?
+        .into_iter()
+        .map(|authority| {
+            ConsolidationArtifactRecordV1::capture(
+                &resolved.report.destination_data_root,
+                authority,
+            )
+        })
+        .collect()
+}
+
+fn validate_artifact_records(
+    resolved: &ResolvedPlan,
+    records: &[ConsolidationArtifactRecordV1],
+) -> Result<()> {
+    let expected = artifact_authorities(resolved)?;
+    if records.len() != expected.len() {
+        return Err(config_error(
+            "consolidation ledger artifact inventory is incomplete",
+        ));
+    }
+    for expected in expected {
+        let mut matching = records.iter().filter(|record| record.authority == expected);
+        let Some(record) = matching.next() else {
+            return Err(config_error(
+                "consolidation artifact ledger authority does not match the requested artifact",
+            ));
+        };
+        if matching.next().is_some() {
+            return Err(config_error(
+                "consolidation ledger contains duplicate artifact authority",
+            ));
+        }
+        let current = ConsolidationArtifactRecordV1::capture(
+            &resolved.report.destination_data_root,
+            expected,
+        )?;
+        if current.file_identity != record.file_identity {
+            return Err(config_error(
+                "consolidation artifact file identity changed since DestinationReady",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_project_id(value: &str) -> Result<ProjectId> {
+    ProjectId::try_from(value.to_owned()).map_err(|error| config_error(error.to_string()))
+}
+
+async fn merge_databases(
+    resolved: &ResolvedPlan,
+    ledger: &mut ConsolidationLedger,
+    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    maintenance: &crate::db::MaintenanceDatabaseScope<'_>,
+) -> Result<()> {
+    let destination = &resolved.report.destination_data_root;
+    let profile_root = destination
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| config_error("destination shard has no profile root"))?;
+    let profile = crate::daemon::profile_identity::load_or_create(profile_root)?;
+    let profile_shard =
+        StoreShardIdV1::profile(profile.brain_id().clone(), profile.profile_id().clone());
+    let authorities = artifact_authorities(resolved)?;
+    let owner = ConsolidationRuntimeOwnerV1::new(
+        profile_root,
+        destination,
+        lifecycle,
+        maintenance,
+        profile_shard,
+        &ledger.artifact_records,
     )
     .await?;
-    Ok(())
+
+    let operation = async {
+        let graph_authorities = authorities
+            .iter()
+            .filter(|authority| {
+                matches!(
+                    authority.role,
+                    ConsolidationArtifactRoleV1::DestinationCodeGraph
+                        | ConsolidationArtifactRoleV1::SourceCodeGraphInput
+                )
+            })
+            .collect::<Vec<_>>();
+        let (target_graph, source_graphs) = graph_authorities
+            .split_first()
+            .ok_or_else(|| config_error("consolidation has no destination graph authority"))?;
+        let target_graph_record = artifact_record(&ledger.artifact_records, target_graph)?;
+        let mut maxima = if ledger.graph_offsets.is_empty() {
+            let target_mount = owner.mount(target_graph, target_graph_record).await?;
+            let maxima = sqlite::registered_graph_maxima(target_mount.database()).await;
+            let (maxima, token) = target_mount.finish_operation(maxima).await?;
+            drop(token);
+            Some(maxima)
+        } else {
+            None
+        };
+
+        let mut graph_tokens = Vec::with_capacity(source_graphs.len());
+        let mut computed_offsets = Vec::with_capacity(source_graphs.len());
+        for source in source_graphs {
+            let record = artifact_record(&ledger.artifact_records, source)?;
+            let mounted = owner.mount(source, record).await?;
+            if let Some(maxima) = maxima.as_mut() {
+                let source_maxima = sqlite::registered_graph_maxima(mounted.database()).await;
+                let (source_maxima, token) = mounted.finish_operation(source_maxima).await?;
+                computed_offsets.push(sqlite::graph_offsets((*source).clone(), *maxima));
+                sqlite::advance_graph_maxima(maxima, source_maxima)?;
+                graph_tokens.push(token);
+            } else {
+                let (_, token) = mounted.finish_operation(Ok(())).await?;
+                graph_tokens.push(token);
+            }
+        }
+        if ledger.graph_offsets.is_empty() {
+            ledger.graph_offsets = computed_offsets;
+            save_ledger(&resolved.report.ledger_path, ledger)?;
+        } else if ledger.graph_offsets.len() != graph_tokens.len()
+            || ledger
+                .graph_offsets
+                .iter()
+                .zip(source_graphs)
+                .any(|(offset, source)| &offset.source_authority != *source)
+        {
+            return Err(config_error(
+                "consolidation graph offsets do not match exact source authorities",
+            ));
+        }
+        let target_mount = owner.mount(target_graph, target_graph_record).await?;
+        let graph_sources = ledger
+            .graph_offsets
+            .iter()
+            .zip(graph_tokens)
+            .collect::<Vec<_>>();
+        let merged =
+            sqlite::merge_registered_graph_facts(target_mount.database(), graph_sources).await;
+        let (_, token) = target_mount.finish_operation(merged).await?;
+        drop(token);
+
+        let destination_sessions = authority_for_role(
+            &authorities,
+            ConsolidationArtifactRoleV1::DestinationSessions,
+        )?;
+        let source_sessions = authority_for_role(
+            &authorities,
+            ConsolidationArtifactRoleV1::SourceSessionsInput,
+        )?;
+        let target_input = authority_for_role(
+            &authorities,
+            ConsolidationArtifactRoleV1::TargetSessionsInput,
+        )?;
+        let destination_sessions_record =
+            artifact_record(&ledger.artifact_records, destination_sessions)?;
+        let mounted = owner
+            .mount(destination_sessions, destination_sessions_record)
+            .await?;
+        let offsets = async {
+            sqlite::normalize_registered_sessions(mounted.database()).await?;
+            if ledger.session_offsets.is_none() {
+                sqlite::registered_session_offsets(mounted.database())
+                    .await
+                    .map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+        .await;
+        let (computed_session_offsets, token) = mounted.finish_operation(offsets).await?;
+        drop(token);
+        if let Some(offsets) = computed_session_offsets {
+            ledger.session_offsets = Some(offsets);
+            save_ledger(&resolved.report.ledger_path, ledger)?;
+        }
+
+        let source_record = artifact_record(&ledger.artifact_records, source_sessions)?;
+        let mounted = owner.mount(source_sessions, source_record).await?;
+        let prepared = async {
+            sqlite::normalize_registered_sessions(mounted.database()).await?;
+            sqlite::validate_registered_session_source(mounted.database()).await
+        }
+        .await;
+        let (_, source_token) = mounted.finish_operation(prepared).await?;
+
+        let target_input_record = artifact_record(&ledger.artifact_records, target_input)?;
+        let mounted = owner.mount(target_input, target_input_record).await?;
+        let (_, target_input_token) = mounted.finish_operation(Ok(())).await?;
+
+        let offsets = ledger
+            .session_offsets
+            .clone()
+            .ok_or_else(|| config_error("session merge offsets are missing from the ledger"))?;
+        let mounted = owner
+            .mount(destination_sessions, destination_sessions_record)
+            .await?;
+        let merged = async {
+            sqlite::normalize_registered_sessions(mounted.database()).await?;
+            sqlite::merge_registered_sessions(
+                mounted.database(),
+                source_token,
+                target_input_token,
+                &resolved.report.source.project_id,
+                &offsets,
+            )
+            .await
+        }
+        .await;
+        let (_, token) = mounted.finish_operation(merged).await?;
+        drop(token);
+        Ok(())
+    }
+    .await;
+    let cleanup = owner.close().await;
+    match (operation, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(config_error(format!(
+            "{error}; destination-runtime cleanup also failed: {cleanup_error}"
+        ))),
+    }
+}
+
+fn artifact_record<'a>(
+    records: &'a [ConsolidationArtifactRecordV1],
+    expected: &ConsolidationArtifactAuthorityV1,
+) -> Result<&'a ConsolidationArtifactRecordV1> {
+    records
+        .iter()
+        .find(|record| record.authority == *expected)
+        .ok_or_else(|| config_error("exact consolidation artifact record is missing"))
+}
+
+fn authority_for_role(
+    authorities: &[ConsolidationArtifactAuthorityV1],
+    role: ConsolidationArtifactRoleV1,
+) -> Result<&ConsolidationArtifactAuthorityV1> {
+    let mut matches = authorities
+        .iter()
+        .filter(|authority| authority.role == role);
+    let authority = matches
+        .next()
+        .ok_or_else(|| config_error("required consolidation artifact role is missing"))?;
+    if matches.next().is_some() {
+        return Err(config_error(
+            "consolidation artifact role has multiple authorities",
+        ));
+    }
+    Ok(authority)
 }
 
 fn merge_non_database_artifacts(

@@ -1,14 +1,11 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-
-#[cfg(not(all(test, windows)))]
-use libsql::{Builder, TransactionBehavior};
-use libsql::{Connection, Database as LibsqlDatabase, Transaction};
+use std::path::Path;
 
 use super::{
-    LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE, attach, db_error, db_message, query_i64,
+    LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE, attach_snapshot_as, db_error, db_message, query_i64,
     quote_identifier, table_exists,
 };
+use crate::db::engine::{Error as EngineError, QueryExecutor, Row};
 use crate::errors::Result;
 
 #[derive(Debug, Clone, Copy)]
@@ -31,11 +28,6 @@ struct LcmMessageCollisionCounts {
     content_hashes: u64,
     storage_kinds: u64,
     payload_refs: u64,
-}
-
-pub(in crate::migrate::consolidate) struct OfflineDatabaseGuards {
-    _holds: Vec<(Transaction, LibsqlDatabase)>,
-    _authorities: Vec<crate::db::DatabaseAuthority>,
 }
 
 #[derive(Default)]
@@ -83,7 +75,7 @@ impl GraphLogicalIdentities {
 }
 
 pub(in crate::migrate::consolidate) async fn extend_graph_identities(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     identities: &mut GraphLogicalIdentities,
 ) -> Result<()> {
     if table_exists(conn, "main", "memory_facts").await? {
@@ -95,78 +87,10 @@ pub(in crate::migrate::consolidate) async fn extend_graph_identities(
     Ok(())
 }
 
-#[cfg(all(test, windows))]
-pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
-    paths: &[PathBuf],
-) -> Result<OfflineDatabaseGuards> {
-    // Windows byte-range locks prevent the same process from copying a file
-    // after BEGIN IMMEDIATE. Production consolidation already fails closed on
-    // Windows because open-holder discovery is unsupported; unit fixtures use
-    // isolated stores and exercise the remaining migration semantics here.
-    let _ = paths;
-    Ok(OfflineDatabaseGuards {
-        _holds: Vec::new(),
-        _authorities: Vec::new(),
-    })
-}
-
-#[cfg(not(all(test, windows)))]
-pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
-    paths: &[PathBuf],
-) -> Result<OfflineDatabaseGuards> {
-    let mut ordered = paths.to_vec();
-    ordered.sort();
-    ordered.dedup();
-    let mut holds = Vec::new();
-    let mut authorities = Vec::new();
-    for path in ordered {
-        if !crate::storage::has_sqlite_database_header(&path).map_err(|error| {
-            db_error(
-                "acquire_offline_guards",
-                format!("failed to inspect '{}': {error}", path.display()),
-            )
-        })? {
-            return Err(db_message(
-                "acquire_offline_guards",
-                format!("file is not a database: '{}'", path.display()),
-            ));
-        }
-        let authority = crate::db::DatabaseAuthority::for_runtime(
-            &path,
-            "consolidate SQLite database offline",
-        )?;
-        let db = Builder::new_local(&path)
-            .build()
-            .await
-            .map_err(|error| db_error("acquire_offline_guards", error))?;
-        let conn = db
-            .connect()
-            .map_err(|error| db_error("acquire_offline_guards", error))?;
-        conn.execute_batch("PRAGMA busy_timeout = 0;")
-            .await
-            .map_err(|error| db_error("acquire_offline_guards", error))?;
-        let transaction = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|error| {
-                db_message(
-                    "acquire_offline_guards",
-                    format!(
-                        "database '{}' is still writable by another process: {error}; stop MCP/CLI writers and retry",
-                        path.display()
-                    ),
-                )
-            })?;
-        holds.push((transaction, db));
-        authorities.push(authority);
-    }
-    Ok(OfflineDatabaseGuards {
-        _holds: holds,
-        _authorities: authorities,
-    })
-}
-
-async fn read_fact_keys(conn: &Connection, identities: &mut HashSet<Vec<u8>>) -> Result<()> {
+async fn read_fact_keys(
+    conn: &impl QueryExecutor,
+    identities: &mut HashSet<Vec<u8>>,
+) -> Result<()> {
     let mut rows = conn
         .query("SELECT content FROM memory_facts", ())
         .await
@@ -187,7 +111,10 @@ async fn read_fact_keys(conn: &Connection, identities: &mut HashSet<Vec<u8>>) ->
     Ok(())
 }
 
-async fn read_feedback_keys(conn: &Connection, identities: &mut HashSet<Vec<u8>>) -> Result<()> {
+async fn read_feedback_keys(
+    conn: &impl QueryExecutor,
+    identities: &mut HashSet<Vec<u8>>,
+) -> Result<()> {
     let mut rows = conn
         .query(
             "SELECT f.content, e.action, e.trust_delta, e.old_trust,
@@ -223,11 +150,11 @@ async fn read_feedback_keys(conn: &Connection, identities: &mut HashSet<Vec<u8>>
     Ok(())
 }
 
-fn row_text(row: &libsql::Row, index: i32) -> Result<String> {
+fn row_text(row: &Row, index: i32) -> Result<String> {
     row.get::<String>(index).map_err(logical_error)
 }
 
-fn logical_error(error: libsql::Error) -> crate::errors::TraceDecayError {
+fn logical_error(error: EngineError) -> crate::errors::TraceDecayError {
     db_error("logical_identities", error)
 }
 
@@ -279,7 +206,7 @@ pub(in crate::migrate::consolidate) async fn quick_check_in(
 }
 
 pub(in crate::migrate::consolidate) async fn quick_check_connection(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     path: &Path,
 ) -> Result<()> {
     let mut rows = conn
@@ -353,7 +280,10 @@ async fn overlap_count(
     let source = read_snapshot(snapshots, source)?;
     let target = read_snapshot(snapshots, target)?;
     let conn = source.connection();
-    attach(conn, target.path()).await?;
+    let target_token = target
+        .attach_token()
+        .map_err(|error| db_error("inspect_collisions", error))?;
+    attach_snapshot_as(conn, &target_token, "other").await?;
     let count =
         if table_exists(conn, "main", table).await? && table_exists(conn, "other", table).await? {
             query_i64(
@@ -385,7 +315,10 @@ async fn lcm_message_collision_counts(
     let source = read_snapshot(snapshots, source)?;
     let target = read_snapshot(snapshots, target)?;
     let conn = source.connection();
-    attach(conn, target.path()).await?;
+    let target_token = target
+        .attach_token()
+        .map_err(|error| db_error("inspect_collisions", error))?;
+    attach_snapshot_as(conn, &target_token, "other").await?;
     let counts = if table_exists(conn, "main", "lcm_raw_messages").await?
         && table_exists(conn, "other", "lcm_raw_messages").await?
     {

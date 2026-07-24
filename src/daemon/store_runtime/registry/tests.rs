@@ -27,6 +27,22 @@ fn budget_defaults_to_four_caps_at_eight_and_rejects_zero() {
     }
 }
 
+#[test]
+fn exclusive_maintenance_budget_accepts_any_nonzero_exact_count() {
+    for budget in [1, MAX_PROJECT_CODE_OPEN_RUNTIMES + 1, usize::MAX] {
+        let config = StoreRuntimeRegistryConfig::for_exclusive_maintenance(budget).unwrap();
+        assert_eq!(config.project_code_open_runtime_budget(), budget);
+        let _ = registry(config);
+    }
+    assert!(matches!(
+        StoreRuntimeRegistryConfig::for_exclusive_maintenance(0),
+        Err(StoreRuntimeRegistryFailure::InvalidProjectCodeBudget {
+            requested: 0,
+            maximum: usize::MAX,
+        })
+    ));
+}
+
 #[tokio::test]
 async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
     for round in 0..8 {

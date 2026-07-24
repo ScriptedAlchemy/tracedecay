@@ -14,7 +14,7 @@ async fn superseded_chained_ledgers_skip_retirement_validation() {
         std::fs::write(
             ledger_root.join(format!("{migration_id}.json")),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": 2,
+                "schema_version": LEDGER_SCHEMA_VERSION,
                 "migration_id": migration_id,
                 "confirmation_token": "confirm",
                 "input_fingerprint": "fixture",
@@ -47,7 +47,10 @@ async fn superseded_chained_ledgers_skip_retirement_validation() {
         "proj_bbbbbbbbbbbbbbbb",
     );
 
-    let report = retire_applied_input_manifests(&profile).await;
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let report = runtime
+        .retire_applied_input_manifests_for_test(&profile)
+        .await;
     assert!(
         !report
             .warnings
@@ -151,7 +154,11 @@ async fn legacy_single_db_plan_is_read_only_and_apply_preserves_source_graph() {
     assert_eq!(preserved.last_synced_at, "0");
     let preserved_path = applied.destination_data_root.join(&preserved.db_file);
     let (db, _) = test_open_read_only(&preserved_path).await;
-    let facts = MemoryStore::new(db.conn())
+    let memory = db
+        .begin_memory_read_transaction("inspect preserved legacy memory")
+        .await
+        .unwrap();
+    let facts = MemoryStore::new_database_transaction(&memory)
         .list_facts(None, Some(0.0), 100)
         .await
         .unwrap();
@@ -161,6 +168,7 @@ async fn legacy_single_db_plan_is_read_only_and_apply_preserves_source_graph() {
             .any(|fact| fact.content == "legacy durable fact"),
         "the preserved source graph lost its legacy fact"
     );
+    drop(memory);
     db.close();
 }
 
@@ -490,7 +498,7 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
             path.display()
         );
     }
-    let global = GlobalDb::open_at_without_structured_backfill(&fixture.profile.join("global.db"))
+    let global = HostAdmissionTestRuntimeV1::profile(&fixture.profile)
         .await
         .unwrap();
     let owners = global
@@ -501,7 +509,6 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
         .map(|project| project.project_id)
         .collect::<Vec<_>>();
     assert_eq!(owners, vec![applied.destination_project_id.clone()]);
-    global.close();
     assert!(
         fixture
             .profile
@@ -747,6 +754,179 @@ async fn run_consolidation_restart(stop: ConsolidationState) {
     );
 }
 
+async fn stop_at_destination_ready() -> (
+    Fixture,
+    ConsolidationOptions,
+    ConsolidationReport,
+    ConsolidationLedger,
+    BTreeMap<PathBuf, TreeSnapshotEntry>,
+) {
+    let fixture = fixture().await;
+    let source_root = fixture.profile.join("projects").join(&fixture.source_id);
+    let source_before = full_tree_snapshot(&source_root);
+    let options = fixture.options();
+    let report = plan(&options).await.unwrap();
+
+    let error = apply_with_stop(
+        &options,
+        &report.confirmation_token,
+        Some(ConsolidationState::DestinationReady),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("synthetic interruption"),
+        "{error}"
+    );
+    let ledger = load_ledger(&report.ledger_path).unwrap().unwrap();
+    assert_eq!(ledger.state, ConsolidationState::DestinationReady);
+    assert_eq!(
+        full_tree_snapshot(&source_root),
+        source_before,
+        "publishing the destination changed the source shard"
+    );
+
+    (fixture, options, report, ledger, source_before)
+}
+
+#[tokio::test]
+async fn destination_ready_persists_typed_artifact_authority() {
+    let (_fixture, _options, _report, ledger, _source_before) = stop_at_destination_ready().await;
+
+    assert!(
+        !ledger.artifact_records.is_empty(),
+        "DestinationReady must persist exact artifact authority"
+    );
+    assert!(ledger.artifact_records.iter().any(|record| {
+        record.authority.role == ConsolidationArtifactRoleV1::DestinationCodeGraph
+    }));
+    assert!(ledger.artifact_records.iter().any(|record| {
+        record.authority.role == ConsolidationArtifactRoleV1::DestinationSessions
+    }));
+    for record in &ledger.artifact_records {
+        assert!(
+            !record.authority.relative_locator.is_absolute(),
+            "artifact locator must remain store-relative: {:?}",
+            record.authority
+        );
+        assert!(
+            record
+                .authority
+                .relative_locator
+                .components()
+                .all(|component| !matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )),
+            "artifact locator escaped the destination store: {:?}",
+            record.authority
+        );
+        assert!(record.authority.incarnation.get() > 0);
+    }
+
+    let encoded = serde_json::to_value(&ledger.artifact_records).unwrap();
+    let decoded: Vec<ConsolidationArtifactRecordV1> = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, ledger.artifact_records);
+}
+
+#[tokio::test]
+async fn destination_ready_resume_rejects_wrong_artifact_role_without_source_mutation() {
+    let (fixture, options, report, mut ledger, source_before) = stop_at_destination_ready().await;
+    let record = ledger
+        .artifact_records
+        .iter_mut()
+        .find(|record| record.authority.role == ConsolidationArtifactRoleV1::DestinationSessions)
+        .expect("destination sessions authority");
+    record.authority.role = ConsolidationArtifactRoleV1::DestinationCodeGraph;
+    save_ledger(&report.ledger_path, &ledger).unwrap();
+
+    let error = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("role does not match"), "{error}");
+    assert_eq!(
+        full_tree_snapshot(&fixture.profile.join("projects").join(&fixture.source_id)),
+        source_before
+    );
+}
+
+#[tokio::test]
+async fn destination_ready_resume_rejects_escaping_artifact_locator_without_source_mutation() {
+    let (fixture, options, report, mut ledger, source_before) = stop_at_destination_ready().await;
+    ledger.artifact_records[0].authority.relative_locator = PathBuf::from("../outside.db");
+    save_ledger(&report.ledger_path, &ledger).unwrap();
+
+    let error = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("normalized relative path"),
+        "{error}"
+    );
+    assert_eq!(
+        full_tree_snapshot(&fixture.profile.join("projects").join(&fixture.source_id)),
+        source_before
+    );
+}
+
+#[tokio::test]
+async fn destination_ready_resume_rejects_stale_artifact_identity_without_source_mutation() {
+    let (fixture, options, report, mut ledger, source_before) = stop_at_destination_ready().await;
+    let record = &mut ledger.artifact_records[0];
+    record.authority.incarnation =
+        tracedecay_store::StoreIncarnationV1::new(record.authority.incarnation.get() + 1).unwrap();
+    save_ledger(&report.ledger_path, &ledger).unwrap();
+
+    let error = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ledger authority does not match"),
+        "{error}"
+    );
+    assert_eq!(
+        full_tree_snapshot(&fixture.profile.join("projects").join(&fixture.source_id)),
+        source_before
+    );
+}
+
+#[tokio::test]
+async fn destination_ready_resume_keeps_exact_artifact_identity() {
+    let (fixture, options, report, ledger, _source_before) = stop_at_destination_ready().await;
+    let expected = ledger.artifact_records;
+    let source_root = fixture.profile.join("projects").join(&fixture.source_id);
+    let source_databases_before = relative_file_map(&source_root)
+        .unwrap()
+        .into_iter()
+        .filter(|(relative, _)| is_sqlite_database(relative) || is_sqlite_sidecar(relative))
+        .map(|(relative, path)| (relative, file_digest(&path).unwrap()))
+        .collect::<BTreeMap<_, _>>();
+
+    let applied = apply(&options, &report.confirmation_token).await.unwrap();
+    assert_eq!(applied.state, ConsolidationState::Applied);
+    assert_eq!(
+        load_ledger(&report.ledger_path)
+            .unwrap()
+            .unwrap()
+            .artifact_records,
+        expected
+    );
+    let source_databases_after = relative_file_map(&source_root)
+        .unwrap()
+        .into_iter()
+        .filter(|(relative, _)| is_sqlite_database(relative) || is_sqlite_sidecar(relative))
+        .map(|(relative, path)| (relative, file_digest(&path).unwrap()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        source_databases_after, source_databases_before,
+        "exact-identity resume changed a source SQLite family"
+    );
+}
+
 #[tokio::test]
 async fn consolidation_restarts_after_backups_ready() {
     run_consolidation_restart(ConsolidationState::BackupsReady).await;
@@ -773,7 +953,7 @@ async fn consolidation_restarts_after_registered() {
 }
 
 #[tokio::test]
-async fn version_one_premerge_ledger_migrates_before_resume() {
+async fn version_one_destination_ready_without_authority_fails_closed() {
     let fixture = fixture().await;
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
@@ -791,16 +971,15 @@ async fn version_one_premerge_ledger_migrates_before_resume() {
 
     let mut ledger = load_ledger(&report.ledger_path).unwrap().unwrap();
     ledger.schema_version = 1;
+    ledger.artifact_records.clear();
     save_ledger(&report.ledger_path, &ledger).unwrap();
 
-    let applied = apply(&options, &report.confirmation_token).await.unwrap();
-    assert_eq!(applied.state, ConsolidationState::Applied);
-    assert_eq!(
-        load_ledger(&report.ledger_path)
-            .unwrap()
-            .unwrap()
-            .schema_version,
-        LEDGER_SCHEMA_VERSION
+    let error = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cannot be migrated safely"),
+        "{error}"
     );
 }
 
@@ -942,7 +1121,11 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
             TARGET_ORPHAN_FACT
         };
         let (db, _) = test_open_read_only(&path).await;
-        let facts = MemoryStore::new(db.conn())
+        let memory = db
+            .begin_memory_read_transaction("inspect recovered branch memory")
+            .await
+            .unwrap();
+        let facts = MemoryStore::new_database_transaction(&memory)
             .list_facts(None, Some(0.0), 100)
             .await
             .unwrap();
@@ -950,6 +1133,7 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
             facts.iter().any(|fact| fact.content == expected),
             "recovered branch '{name}' lost its unique fact"
         );
+        drop(memory);
         db.close();
     }
 }

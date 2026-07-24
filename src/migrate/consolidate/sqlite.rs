@@ -1,11 +1,12 @@
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 
-use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use super::runtime::{ConsolidationArtifactAuthorityV1, ConsolidationAttachTokenV1};
 use crate::db::Database;
+use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
 use crate::memory::store::MemoryStore;
 
 mod inspect;
@@ -22,14 +23,14 @@ pub(super) use observation::{preflight_observation_merge, verify_observation_mer
 #[cfg(test)]
 pub(super) use inspect::count_rows;
 pub(super) use inspect::{
-    GraphLogicalIdentities, acquire_offline_guards, count_rows_in, extend_graph_identities,
-    inspect_collisions, quick_check_connection, quick_check_in,
+    GraphLogicalIdentities, count_rows_in, extend_graph_identities, inspect_collisions,
+    quick_check_connection, quick_check_in,
 };
 pub(super) use verify::verify_session_union_sql;
 
 #[cfg(test)]
 pub(super) async fn verify_projection_plan_for_test(
-    conn: &Connection,
+    conn: &impl Executor,
     source: &Path,
     target_input: &Path,
     source_project_id: &str,
@@ -57,10 +58,9 @@ pub(super) async fn verify_projection_plan_for_test(
 
 #[cfg(test)]
 pub(super) async fn merge_memory_v2_for_test(target_path: &Path, source: &Path) -> Result<()> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(target_path, "merge memory_v2 test")?;
-    let (target, _) = Database::open(target_path, &authority).await?;
+    let target = open_migration_database(target_path, "merge memory_v2 test").await?;
     let transaction = target
-        .begin_write_transaction("merge memory_v2 test")
+        .begin_memory_write_transaction("merge memory_v2 test")
         .await?;
     attach_as(&transaction, source, "source").await?;
     transaction
@@ -91,14 +91,9 @@ pub(super) fn set_temporal_merge_fault_phase(phase: &str) {
 pub(super) async fn merge_temporal_for_test(target_path: &Path, source: &Path) -> Result<()> {
     normalize_sessions(target_path).await?;
     normalize_sessions(source).await?;
-    let target = GlobalDb::try_open_at(target_path).await?.ok_or_else(|| {
-        db_message(
-            "merge_temporal_for_test",
-            "could not open target sessions DB",
-        )
-    })?;
+    let target = open_migration_database(target_path, "merge temporal test store").await?;
     let transaction = target
-        .begin_write_transaction()
+        .begin_write_transaction("merge temporal test store")
         .await
         .map_err(|error| db_error("merge_temporal_for_test", error))?;
     attach_as(&transaction, source, "source").await?;
@@ -112,7 +107,7 @@ pub(super) async fn merge_temporal_for_test(target_path: &Path, source: &Path) -
         .commit()
         .await
         .map_err(|error| db_error("merge_temporal_for_test", error))?;
-    target.checkpoint().await;
+    target.checkpoint().await?;
     target.close();
     Ok(())
 }
@@ -131,7 +126,7 @@ const SESSION_MESSAGE_DIVERGENCE_PREDICATE: &str =
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct GraphMergeOffsets {
-    pub source_path: PathBuf,
+    pub source_authority: ConsolidationArtifactAuthorityV1,
     pub fact_id: i64,
     pub entity_id: i64,
     pub feedback_id: i64,
@@ -146,94 +141,86 @@ pub(super) struct SessionMergeOffsets {
     pub analytics: i64,
 }
 
-pub(super) async fn plan_graph_offsets(paths: &[PathBuf]) -> Result<Vec<GraphMergeOffsets>> {
-    let (target_path, source_paths) = paths
-        .split_first()
-        .ok_or_else(|| db_message("plan_graph_offsets", "no graph databases were supplied"))?;
-    normalize_graph(target_path).await?;
-    for path in source_paths {
-        normalize_graph(path).await?;
-    }
-    let mut maxima = graph_maxima(target_path).await?;
-    let mut offsets = Vec::new();
-    for path in source_paths {
-        let source = graph_maxima(path).await?;
-        let offset = GraphMergeOffsets {
-            source_path: path.clone(),
-            fact_id: maxima.0,
-            entity_id: maxima.1,
-            feedback_id: maxima.2,
-            oplog_id: maxima.3,
-        };
-        maxima.0 = checked_advance(maxima.0, source.0, "fact_id")?;
-        maxima.1 = checked_advance(maxima.1, source.1, "entity_id")?;
-        maxima.2 = checked_advance(maxima.2, source.2, "feedback_id")?;
-        maxima.3 = checked_advance(maxima.3, source.3, "oplog_id")?;
-        offsets.push(offset);
-    }
-    Ok(offsets)
+pub(super) async fn registered_graph_maxima(database: &Database) -> Result<(i64, i64, i64, i64)> {
+    let snapshot = database
+        .begin_engine_read_snapshot("read consolidation graph maxima")
+        .await?;
+    Ok((
+        table_max(&snapshot, "memory_facts", "fact_id").await?,
+        table_max(&snapshot, "memory_entities", "entity_id").await?,
+        table_max(&snapshot, "memory_feedback_events", "event_id").await?,
+        table_max(&snapshot, "memory_oplog", "id").await?,
+    ))
 }
 
-pub(super) async fn merge_graph_facts(
-    paths: &[PathBuf],
-    offsets: &[GraphMergeOffsets],
+pub(super) fn graph_offsets(
+    source_authority: ConsolidationArtifactAuthorityV1,
+    target_maxima: (i64, i64, i64, i64),
+) -> GraphMergeOffsets {
+    GraphMergeOffsets {
+        source_authority,
+        fact_id: target_maxima.0,
+        entity_id: target_maxima.1,
+        feedback_id: target_maxima.2,
+        oplog_id: target_maxima.3,
+    }
+}
+
+pub(super) fn advance_graph_maxima(
+    maxima: &mut (i64, i64, i64, i64),
+    source: (i64, i64, i64, i64),
 ) -> Result<()> {
-    let target_path = paths
-        .first()
-        .ok_or_else(|| db_message("merge_graph_facts", "no target graph database"))?;
-    let authority = crate::db::DatabaseAuthority::for_runtime(target_path, "merge graph facts")?;
-    let (target, _) = Database::open(target_path, &authority).await?;
-    for offset in offsets {
-        merge_one_graph(&target, offset).await?;
-    }
-    {
+    maxima.0 = checked_advance(maxima.0, source.0, "fact_id")?;
+    maxima.1 = checked_advance(maxima.1, source.1, "entity_id")?;
+    maxima.2 = checked_advance(maxima.2, source.2, "feedback_id")?;
+    maxima.3 = checked_advance(maxima.3, source.3, "oplog_id")?;
+    Ok(())
+}
+
+pub(super) async fn merge_registered_graph_facts(
+    target: &Database,
+    sources: Vec<(&GraphMergeOffsets, ConsolidationAttachTokenV1)>,
+) -> Result<()> {
+    for (offset, token) in sources {
         let transaction = target
-            .begin_write_transaction("rebuild merged memory banks")
+            .begin_memory_write_transaction("merge graph facts")
             .await?;
-        MemoryStore::new(&transaction).rebuild_all_banks().await?;
-        transaction.commit().await?;
+        attach_token_as(&transaction, token, "source").await?;
+        transaction
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .await
+            .map_err(|error| db_error("merge_graph_facts", error))?;
+        if let Err(error) = merge_one_graph_tx(&transaction, offset).await {
+            let _ = transaction.rollback().await;
+            let _ = detach_graph_source(target).await;
+            return Err(error);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| db_error("merge_graph_facts", error))?;
+        detach_graph_source(target).await?;
     }
-    target.checkpoint().await?;
-    target.close();
-    Ok(())
+    let transaction = target
+        .begin_memory_write_transaction("rebuild merged memory banks")
+        .await?;
+    MemoryStore::new_database_transaction(&transaction)
+        .rebuild_all_banks()
+        .await?;
+    transaction.commit().await
 }
 
-async fn normalize_graph(path: &Path) -> Result<()> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(path, "normalize graph")?;
-    let (db, _) = Database::open(path, &authority).await?;
-    db.checkpoint().await?;
-    db.close();
-    Ok(())
-}
-
-async fn graph_maxima(path: &Path) -> Result<(i64, i64, i64, i64)> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(path, "read graph maxima")?;
-    let (db, _) = Database::open_read_only(path, &authority).await?;
-    let result = (
-        table_max(db.conn(), "memory_facts", "fact_id").await?,
-        table_max(db.conn(), "memory_entities", "entity_id").await?,
-        table_max(db.conn(), "memory_feedback_events", "event_id").await?,
-        table_max(db.conn(), "memory_oplog", "id").await?,
-    );
-    db.close();
-    Ok(result)
-}
-
-async fn merge_one_graph(db: &Database, offset: &GraphMergeOffsets) -> Result<()> {
-    let transaction = db.begin_write_transaction("merge graph facts").await?;
-    attach_as(&transaction, &offset.source_path, "source").await?;
-    transaction
-        .execute("PRAGMA defer_foreign_keys = ON", ())
+async fn detach_graph_source(target: &Database) -> Result<()> {
+    target
+        .writer_connection("detach consolidation graph source")
+        .await?
+        .execute("DETACH DATABASE source", ())
         .await
-        .map_err(|error| db_error("merge_graph_facts", error))?;
-    merge_one_graph_tx(&transaction, offset).await?;
-    transaction
-        .commit()
-        .await
+        .map(|_| ())
         .map_err(|error| db_error("merge_graph_facts", error))
 }
 
-async fn merge_one_graph_tx(conn: &Connection, offset: &GraphMergeOffsets) -> Result<()> {
+async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) -> Result<()> {
     conn.execute_batch(&format!(
         "CREATE TEMP TABLE IF NOT EXISTS consolidation_fact_map(
              source_id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL
@@ -427,6 +414,7 @@ async fn merge_one_graph_tx(conn: &Connection, offset: &GraphMergeOffsets) -> Re
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn plan_session_offsets(
     target: &Path,
     source: &Path,
@@ -442,6 +430,23 @@ pub(super) async fn plan_session_offsets(
     })
 }
 
+pub(super) async fn registered_session_offsets(target: &Database) -> Result<SessionMergeOffsets> {
+    let target = target
+        .begin_engine_read_snapshot("plan consolidation session offsets")
+        .await?;
+    Ok(SessionMergeOffsets {
+        raw: table_max(&target, "lcm_raw_messages", "store_id").await?,
+        span: table_max(&target, "session_git_spans", "span_id").await?,
+        savings: table_max(&target, "savings_ledger", "id").await?,
+        analytics: table_max(&target, "analytics_events", "id").await?,
+    })
+}
+
+pub(super) async fn validate_registered_session_source(source: &Database) -> Result<()> {
+    reject_session_registry_rows_database(source).await
+}
+
+#[cfg(test)]
 pub(super) async fn merge_sessions(
     target_path: &Path,
     source_path: &Path,
@@ -451,11 +456,9 @@ pub(super) async fn merge_sessions(
 ) -> Result<()> {
     normalize_sessions(target_path).await?;
     normalize_sessions(source_path).await?;
-    let target = GlobalDb::try_open_at(target_path)
-        .await?
-        .ok_or_else(|| db_message("merge_sessions", "could not open target sessions DB"))?;
+    let target = open_migration_database(target_path, "merge consolidated session store").await?;
     let transaction = target
-        .begin_write_transaction()
+        .begin_write_transaction("merge consolidated session store")
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
     attach_as(&transaction, source_path, "source").await?;
@@ -479,26 +482,63 @@ pub(super) async fn merge_sessions(
         .commit()
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
-    target.checkpoint().await;
+    target.checkpoint().await?;
     target.close();
     Ok(())
 }
 
+pub(super) async fn merge_registered_sessions(
+    target: &Database,
+    source: ConsolidationAttachTokenV1,
+    target_input: ConsolidationAttachTokenV1,
+    source_project_id: &str,
+    offsets: &SessionMergeOffsets,
+) -> Result<()> {
+    let transaction = target
+        .begin_write_transaction("merge consolidated session store")
+        .await
+        .map_err(|error| db_error("merge_sessions", error))?;
+    attach_token_as(&transaction, source, "source").await?;
+    attach_token_as(&transaction, target_input, "target_input").await?;
+    transaction
+        .execute("PRAGMA defer_foreign_keys = ON", ())
+        .await
+        .map_err(|error| db_error("merge_sessions", error))?;
+    reject_session_content_collisions(&transaction, "source", "target_input").await?;
+    build_consolidation_message_map(&transaction, "source", "target_input", source_project_id)
+        .await?;
+    projection::materialize(&transaction, "target_input", "source").await?;
+    temporal::preflight(&transaction).await?;
+    preflight_observation_merge(&transaction).await?;
+    merge_sessions_tx(&transaction, offsets).await?;
+    verify_observation_merge(&transaction).await?;
+    crate::sessions::lcm::schema::rebuild_raw_fts(&transaction)
+        .await
+        .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| db_error("merge_sessions", error))
+}
+
+#[cfg(test)]
 async fn normalize_sessions(path: &Path) -> Result<()> {
-    let db = GlobalDb::try_open_at(path).await?.ok_or_else(|| {
-        db_message(
-            "normalize_sessions",
-            format!("could not open '{}'", path.display()),
-        )
-    })?;
+    let db = open_migration_database(path, "normalize consolidated session store").await?;
+    normalize_registered_sessions(&db).await?;
+    db.checkpoint().await?;
+    db.close();
+    Ok(())
+}
+
+pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
     let transaction = db
-        .begin_write_transaction()
+        .begin_write_transaction("normalize consolidated session store")
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
     crate::sessions::lcm::schema::ensure_lcm_schema(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema(&transaction)
+    crate::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
     crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
@@ -516,24 +556,34 @@ async fn normalize_sessions(path: &Path) -> Result<()> {
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
     transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
+                store TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                text_len INTEGER NOT NULL,
+                encoder TEXT NOT NULL,
+                token_count INTEGER NOT NULL,
+                computed_at INTEGER NOT NULL,
+                PRIMARY KEY (store, provider, message_id)
+            )",
+        )
+        .await
+        .map_err(|error| db_error("normalize_sessions", error))?;
+    transaction
         .commit()
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    if !db.ensure_token_count_cache().await {
-        return Err(db_message(
-            "normalize_sessions",
-            "could not ensure dashboard token-count schema",
-        ));
-    }
-    db.checkpoint().await;
-    db.close();
     Ok(())
 }
 
+#[cfg(test)]
 async fn reject_session_registry_rows(path: &Path) -> Result<()> {
-    let db = GlobalDb::open_read_only_at(path)
+    let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let db = crate::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
-        .ok_or_else(|| db_message("merge_sessions", "could not inspect source sessions DB"))?;
+        .map_err(|error| db_error("merge_sessions", error))?;
+    let snapshot = db.connection();
     for table in [
         "code_projects",
         "project_aliases",
@@ -541,8 +591,8 @@ async fn reject_session_registry_rows(path: &Path) -> Result<()> {
         "graph_scopes",
         "store_artifacts",
     ] {
-        if table_exists(db.read_connection(), "main", table).await?
-            && table_max_count(db.read_connection(), table).await? > 0
+        if table_exists(snapshot, "main", table).await?
+            && table_max_count(snapshot, table).await? > 0
         {
             return Err(db_message(
                 "merge_sessions",
@@ -550,12 +600,34 @@ async fn reject_session_registry_rows(path: &Path) -> Result<()> {
             ));
         }
     }
-    db.close();
+    Ok(())
+}
+
+async fn reject_session_registry_rows_database(database: &Database) -> Result<()> {
+    let snapshot = database
+        .begin_engine_read_snapshot("inspect consolidation source sessions")
+        .await?;
+    for table in [
+        "code_projects",
+        "project_aliases",
+        "store_instances",
+        "graph_scopes",
+        "store_artifacts",
+    ] {
+        if table_exists(&snapshot, "main", table).await?
+            && table_max_count(&snapshot, table).await? > 0
+        {
+            return Err(db_message(
+                "merge_sessions",
+                format!("source sessions DB unexpectedly contains registry rows in {table}"),
+            ));
+        }
+    }
     Ok(())
 }
 
 async fn reject_session_content_collisions(
-    conn: &Connection,
+    conn: &impl Executor,
     source_schema: &str,
     target_schema: &str,
 ) -> Result<()> {
@@ -632,7 +704,7 @@ fn scalar_parent_rows_sql(schema: &str, table: &str, include_child: bool) -> Str
 }
 
 pub(super) async fn build_consolidation_message_map(
-    conn: &Connection,
+    conn: &impl Executor,
     source_schema: &str,
     target_schema: &str,
     source_project_id: &str,
@@ -856,7 +928,7 @@ pub(super) fn mapped_turn_message_id(alias: &str) -> String {
     )
 }
 
-async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> Result<()> {
+async fn merge_sessions_tx(conn: &impl Executor, offsets: &SessionMergeOffsets) -> Result<()> {
     let session_metadata = mapped_parent_metadata("s", false);
     let raw_metadata = mapped_parent_metadata("s", true);
     let turn_message_id = mapped_turn_message_id("s");
@@ -1125,11 +1197,8 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
     Ok(())
 }
 
-async fn attach(conn: &Connection, path: &Path) -> Result<()> {
-    attach_as(conn, path, "other").await
-}
-
-async fn attach_as(conn: &Connection, path: &Path, alias: &str) -> Result<()> {
+#[cfg(test)]
+async fn attach_as(conn: &impl Executor, path: &Path, alias: &str) -> Result<()> {
     let sql = format!("ATTACH DATABASE ?1 AS {}", quote_identifier(alias));
     conn.execute(&sql, params![path.to_string_lossy().to_string()])
         .await
@@ -1137,7 +1206,35 @@ async fn attach_as(conn: &Connection, path: &Path, alias: &str) -> Result<()> {
     Ok(())
 }
 
-async fn table_exists(conn: &Connection, schema: &str, table: &str) -> Result<bool> {
+async fn attach_token_as(
+    conn: &impl Executor,
+    token: ConsolidationAttachTokenV1,
+    alias: &str,
+) -> Result<()> {
+    let path = token.into_verified_path()?;
+    let sql = format!("ATTACH DATABASE ?1 AS {}", quote_identifier(alias));
+    conn.execute(&sql, params![path.to_string_lossy().to_string()])
+        .await
+        .map_err(|error| db_error("attach_database", error))?;
+    Ok(())
+}
+
+pub(super) async fn attach_snapshot_as(
+    conn: &impl Executor,
+    token: &crate::sqlite_read_snapshot::SnapshotAttachToken<'_>,
+    alias: &str,
+) -> Result<()> {
+    let path = token
+        .verified_path()
+        .map_err(|error| db_error("attach_snapshot", error))?;
+    let sql = format!("ATTACH DATABASE ?1 AS {}", quote_identifier(alias));
+    conn.execute(&sql, params![path.to_string_lossy().to_string()])
+        .await
+        .map_err(|error| db_error("attach_snapshot", error))?;
+    Ok(())
+}
+
+async fn table_exists(conn: &impl QueryExecutor, schema: &str, table: &str) -> Result<bool> {
     let sql = format!(
         "SELECT COUNT(*) FROM {}.sqlite_schema WHERE type='table' AND name=?1",
         quote_identifier(schema)
@@ -1157,7 +1254,7 @@ async fn table_exists(conn: &Connection, schema: &str, table: &str) -> Result<bo
         > 0)
 }
 
-async fn table_max(conn: &Connection, table: &str, column: &str) -> Result<i64> {
+async fn table_max(conn: &impl QueryExecutor, table: &str, column: &str) -> Result<i64> {
     if !table_exists(conn, "main", table).await? {
         return Ok(0);
     }
@@ -1172,16 +1269,35 @@ async fn table_max(conn: &Connection, table: &str, column: &str) -> Result<i64> 
     .await
 }
 
+#[cfg(test)]
 async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
-    let db = GlobalDb::open_read_only_at(path)
+    let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let db = crate::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
-        .ok_or_else(|| db_message("table_max", format!("could not open '{}'", path.display())))?;
-    let value = table_max(db.read_connection(), table, column).await?;
-    db.close();
-    Ok(value)
+        .map_err(|error| db_error("table_max", error))?;
+    table_max(db.connection(), table, column).await
 }
 
-async fn table_max_count(conn: &Connection, table: &str) -> Result<i64> {
+#[cfg(test)]
+async fn open_migration_database(path: &Path, operation: &'static str) -> Result<Database> {
+    let authority = crate::db::DatabaseAuthority::for_runtime(path, operation)?;
+    match Database::open(path, &authority).await {
+        Ok((database, _)) => Ok(database),
+        #[cfg(test)]
+        Err(_) if authority.role() == crate::db::DatabaseAuthorityRole::Test => {
+            Database::publish_test_runtime(
+                path,
+                &authority,
+                crate::db::TestDatabaseRuntimeMode::Existing,
+            )
+            .await
+            .map(|(database, _)| database)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn table_max_count(conn: &impl QueryExecutor, table: &str) -> Result<i64> {
     query_i64(
         conn,
         &format!("SELECT COUNT(*) FROM {}", quote_identifier(table)),
@@ -1189,7 +1305,7 @@ async fn table_max_count(conn: &Connection, table: &str) -> Result<i64> {
     .await
 }
 
-async fn query_i64(conn: &Connection, sql: &str) -> Result<i64> {
+async fn query_i64(conn: &impl QueryExecutor, sql: &str) -> Result<i64> {
     let mut rows = conn
         .query(sql, ())
         .await

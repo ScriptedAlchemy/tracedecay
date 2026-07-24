@@ -82,8 +82,7 @@ impl ConsolidationArtifactAuthorityV1 {
             ) | (
                 ConsolidationArtifactRoleV1::FrozenInputCodeGraph,
                 StoreShardScopeV1::Code {
-                    scope:
-                        CodeShardScopeV1::Worktree { .. } | CodeShardScopeV1::Branch { .. },
+                    scope: CodeShardScopeV1::Worktree { .. } | CodeShardScopeV1::Branch { .. },
                     ..
                 }
             )
@@ -200,7 +199,9 @@ pub(super) struct ConsolidationRuntimeOwnerV1 {
     root: PathBuf,
     registry: StoreRuntimeRegistry,
     profile_pin: ProfileAuthorityPin,
-    _profile_runtime: StoreRuntimeHandle,
+    profile_runtime: Option<StoreRuntimeHandle>,
+    profile_binding: StoreRuntimeBindingV1,
+    profile_authority: DatabaseAuthority,
     authorities: BTreeMap<StoreRuntimeKey, DatabaseAuthority>,
     active_artifact: Arc<AtomicBool>,
     revocation_epoch: Arc<AtomicU64>,
@@ -276,7 +277,7 @@ impl ConsolidationRuntimeOwnerV1 {
                 profile_shard.clone(),
                 profile_incarnation,
                 None,
-                profile_authority,
+                profile_authority.clone(),
             ))
             .await
         {
@@ -288,9 +289,17 @@ impl ConsolidationRuntimeOwnerV1 {
                 ));
             }
         };
+        let profile_binding = profile_runtime.binding().clone();
         let profile_pin = match registry.profile_authority_pin(&profile_shard) {
             ProfileAuthorityPinResult::Pinned(pin) => pin,
             outcome => {
+                drop(profile_runtime);
+                registry
+                    .close_exact(&profile_binding, &profile_authority)
+                    .await
+                    .map_err(|failure| {
+                        registry_error("close unpinned consolidation profile", failure)
+                    })?;
                 return Err(runtime_error(format!(
                     "could not pin consolidation profile authority: {outcome:?}"
                 )));
@@ -300,11 +309,27 @@ impl ConsolidationRuntimeOwnerV1 {
             root,
             registry,
             profile_pin,
-            _profile_runtime: profile_runtime,
+            profile_runtime: Some(profile_runtime),
+            profile_binding,
+            profile_authority,
             authorities,
             active_artifact: Arc::new(AtomicBool::new(false)),
             revocation_epoch: Arc::new(AtomicU64::new(1)),
         })
+    }
+
+    pub(super) async fn close(mut self) -> Result<()> {
+        if self.active_artifact.load(Ordering::Acquire) {
+            return Err(runtime_error(
+                "cannot close consolidation runtime owner with an active artifact",
+            ));
+        }
+        drop(self.profile_runtime.take());
+        self.registry
+            .close_exact(&self.profile_binding, &self.profile_authority)
+            .await
+            .map_err(|failure| registry_error("close consolidation profile runtime", failure))?;
+        Ok(())
     }
 
     pub(super) async fn mount(
@@ -658,10 +683,7 @@ impl FrozenInputRuntimeSetV1 {
             profile_authority,
         };
         for record in records {
-            if let Err(error) = frozen
-                .acquire_one(&profile_pin, &authorities, record)
-                .await
-            {
+            if let Err(error) = frozen.acquire_one(&profile_pin, &authorities, record).await {
                 let cleanup = frozen.release_and_join_inner().await;
                 return match cleanup {
                     Ok(()) => Err(error),

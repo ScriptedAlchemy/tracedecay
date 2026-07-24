@@ -16,6 +16,7 @@ pub(crate) const DEFAULT_PROJECT_CODE_OPEN_RUNTIMES: usize = 4;
 pub(crate) struct StoreRuntimeRegistryConfig {
     project_code_open_runtime_budget: usize,
     eviction_idle: Duration,
+    exclusive_maintenance: bool,
 }
 
 impl StoreRuntimeRegistryConfig {
@@ -25,6 +26,22 @@ impl StoreRuntimeRegistryConfig {
         Self::with_eviction_idle(project_code_open_runtime_budget, Duration::ZERO)
     }
 
+    pub(crate) fn for_exclusive_maintenance(
+        project_code_open_runtime_budget: usize,
+    ) -> Result<Self, StoreRuntimeRegistryFailure> {
+        if project_code_open_runtime_budget == 0 {
+            return Err(StoreRuntimeRegistryFailure::InvalidProjectCodeBudget {
+                requested: project_code_open_runtime_budget,
+                maximum: usize::MAX,
+            });
+        }
+        Ok(Self {
+            project_code_open_runtime_budget,
+            eviction_idle: Duration::ZERO,
+            exclusive_maintenance: true,
+        })
+    }
+
     pub(crate) fn with_eviction_idle(
         project_code_open_runtime_budget: usize,
         eviction_idle: Duration,
@@ -32,6 +49,7 @@ impl StoreRuntimeRegistryConfig {
         let config = Self {
             project_code_open_runtime_budget,
             eviction_idle,
+            exclusive_maintenance: false,
         };
         config.validate()?;
         Ok(config)
@@ -42,10 +60,17 @@ impl StoreRuntimeRegistryConfig {
     }
 
     pub(super) fn validate(self) -> Result<(), StoreRuntimeRegistryFailure> {
-        if !(1..=MAX_PROJECT_CODE_OPEN_RUNTIMES).contains(&self.project_code_open_runtime_budget) {
+        let valid = self.project_code_open_runtime_budget > 0
+            && (self.exclusive_maintenance
+                || self.project_code_open_runtime_budget <= MAX_PROJECT_CODE_OPEN_RUNTIMES);
+        if !valid {
             return Err(StoreRuntimeRegistryFailure::InvalidProjectCodeBudget {
                 requested: self.project_code_open_runtime_budget,
-                maximum: MAX_PROJECT_CODE_OPEN_RUNTIMES,
+                maximum: if self.exclusive_maintenance {
+                    usize::MAX
+                } else {
+                    MAX_PROJECT_CODE_OPEN_RUNTIMES
+                },
             });
         }
         Ok(())
@@ -65,6 +90,7 @@ impl Default for StoreRuntimeRegistryConfig {
         Self {
             project_code_open_runtime_budget: DEFAULT_PROJECT_CODE_OPEN_RUNTIMES,
             eviction_idle: Duration::ZERO,
+            exclusive_maintenance: false,
         }
     }
 }
@@ -193,7 +219,9 @@ impl StoreRuntimeRegistry {
     }
 }
 
-fn drain_and_close(handle: &StoreRuntimeHandle) -> Result<(), StoreRuntimeRegistryFailure> {
+pub(super) fn drain_and_close_physical(
+    handle: &StoreRuntimeHandle,
+) -> Result<(), StoreRuntimeRegistryFailure> {
     if let Err(message) = handle.inner.attachment.drain() {
         return Err(attachment_failure("drain", message));
     }
@@ -204,6 +232,11 @@ fn drain_and_close(handle: &StoreRuntimeHandle) -> Result<(), StoreRuntimeRegist
     if !physical.is_drained() {
         return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { snapshot: physical });
     }
+    Ok(())
+}
+
+fn drain_and_close(handle: &StoreRuntimeHandle) -> Result<(), StoreRuntimeRegistryFailure> {
+    drain_and_close_physical(handle)?;
     handle
         .runtime()
         .transition(RuntimeMaintenanceStateV1::Closed)
