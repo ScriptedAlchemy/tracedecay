@@ -41,9 +41,9 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblemKind, CancellationContext, CancellationObservation,
-    CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest,
-    RequestContext, RequestId, ResolvedScope,
+    CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
+    CoverageCompleteness, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
+    OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
@@ -1005,11 +1005,21 @@ async fn feedback_handle_bootstrap_reads() {
         )
         .await
         .expect("diagnostics owner invocation");
-    let FeedbackReadInvocationResultV1::Diagnostics(Err(problem)) = diagnostics else {
-        panic!("empty bootstrap diagnostics must return a structured problem");
+    let FeedbackReadInvocationResultV1::Diagnostics(Ok(diagnostics)) = diagnostics else {
+        panic!("empty bootstrap diagnostics must return terminal evidence");
     };
-    assert_eq!(problem.problem.kind(), ApplicationProblemKind::Unavailable);
-    assert_eq!(problem.problem.revision, 1);
+    let ApplicationOutcome::Evidence(diagnostics) = diagnostics.outcome else {
+        panic!("empty bootstrap diagnostics must preserve evidence");
+    };
+    assert_eq!(
+        diagnostics.execution.termination,
+        OperationTermination::Failed
+    );
+    assert!(diagnostics.payload.is_none());
+    assert_eq!(
+        diagnostics.coverage.completeness,
+        CoverageCompleteness::Unknown
+    );
 
     let concealed = owner
         .invoke(

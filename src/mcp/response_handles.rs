@@ -505,21 +505,21 @@ fn response_handle_path_in_dir(response_handle_root: &Path, handle: &str) -> Res
 }
 
 fn validate_handle(handle: &str) -> Result<()> {
-    let Some(hex) = handle.strip_prefix(HANDLE_PREFIX) else {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "invalid response handle: expected `{HANDLE_PREFIX}` followed by {HANDLE_HEX_CHARS} hex characters copied from a truncated MCP response envelope"
-            ),
-        });
-    };
-    if hex.len() != HANDLE_HEX_CHARS || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "invalid response handle: expected `{HANDLE_PREFIX}` followed by {HANDLE_HEX_CHARS} hex characters copied from a truncated MCP response envelope"
-            ),
-        });
+    if is_valid_response_handle(handle) {
+        return Ok(());
     }
-    Ok(())
+    Err(TraceDecayError::Config {
+        message: format!(
+            "invalid response handle: expected `{HANDLE_PREFIX}` followed by {HANDLE_HEX_CHARS} hex characters copied from a truncated MCP response envelope"
+        ),
+    })
+}
+
+pub(crate) fn is_valid_response_handle(handle: &str) -> bool {
+    let Some(hex) = handle.strip_prefix(HANDLE_PREFIX) else {
+        return false;
+    };
+    hex.len() == HANDLE_HEX_CHARS && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 #[track_caller]
