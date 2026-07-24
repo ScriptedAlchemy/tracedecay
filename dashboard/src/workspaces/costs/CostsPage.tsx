@@ -1,6 +1,7 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { Chart } from '../../viz/chart/Chart.tsx';
-import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { ReadoutBar } from '../../ui/instrument.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { SavingsOverviewPayloadSchema } from './contracts.ts';
 
@@ -41,24 +42,38 @@ export function CostsPage() {
                   : 'turn ledger unavailable'}
               </span>
             </div>
-            <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
-              <StatTile
-                label="saved today"
-                value={ledger ? formatTokens(ledger.today.saved_tokens) : '—'}
-              />
-              <StatTile
-                label="saved 7d"
-                value={ledger ? formatTokens(ledger.last_7d.saved_tokens) : '—'}
-              />
-              <StatTile
-                label="saved 30d"
-                value={ledger ? formatTokens(ledger.last_30d.saved_tokens) : '—'}
-              />
-              <StatTile
-                label="saved all-time"
-                value={ledger ? formatTokens(ledger.all_time.saved_tokens) : '—'}
-              />
-            </div>
+            {/* The four windows are nested: today is inside 7d is inside 30d
+             * is inside all-time. So each one's rail is truthfully its share
+             * of the lifetime figure, and all-time is by definition full --
+             * the row reads as one accumulating quantity seen at four depths
+             * rather than four unrelated tiles. */}
+            <ReadoutBar
+              label="Saved tokens by window"
+              size="xl"
+              elevation="raised"
+              items={[
+                {
+                  label: 'saved today',
+                  ...splitTokens(ledger?.today.saved_tokens),
+                  fraction: share(ledger?.today.saved_tokens, ledger?.all_time.saved_tokens),
+                },
+                {
+                  label: 'saved 7d',
+                  ...splitTokens(ledger?.last_7d.saved_tokens),
+                  fraction: share(ledger?.last_7d.saved_tokens, ledger?.all_time.saved_tokens),
+                },
+                {
+                  label: 'saved 30d',
+                  ...splitTokens(ledger?.last_30d.saved_tokens),
+                  fraction: share(ledger?.last_30d.saved_tokens, ledger?.all_time.saved_tokens),
+                },
+                {
+                  label: 'saved all-time',
+                  ...splitTokens(ledger?.all_time.saved_tokens),
+                  fraction: ledger ? 1 : null,
+                },
+              ]}
+            />
             <OverviewGrid>
               <OverviewCard title="Savings by window">
                 {ledger ? (
@@ -70,7 +85,13 @@ export function CostsPage() {
                         type: 'category',
                         data: ['today', '7d', '30d', 'all time'],
                       },
-                      yAxis: { type: 'value' },
+                      // "50,000,000" spent eleven glyphs and most of the plot
+                      // width saying "50M". The axis speaks the same compact
+                      // magnitude language as every other number on the page.
+                      yAxis: {
+                        type: 'value',
+                        axisLabel: { formatter: (value: number) => formatTokens(value) },
+                      },
                       series: [
                         {
                           type: 'bar',
@@ -160,6 +181,28 @@ function formatTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
   return tokens.toLocaleString();
+}
+
+/** The same magnitude language with the unit split off, so the display tier can
+ * set the figure large and its unit small on the shared baseline. */
+function splitTokens(tokens: number | null | undefined): {
+  value: string;
+  unit?: string;
+} {
+  if (tokens == null || !Number.isFinite(tokens)) return { value: '—' };
+  if (tokens >= 1_000_000_000)
+    return { value: (tokens / 1_000_000_000).toFixed(1), unit: 'B' };
+  if (tokens >= 1_000_000) return { value: (tokens / 1_000_000).toFixed(1), unit: 'M' };
+  if (tokens >= 1_000) return { value: (tokens / 1_000).toFixed(1), unit: 'K' };
+  return { value: tokens.toLocaleString() };
+}
+
+/** A window's share of the lifetime figure it is nested inside. Null whenever
+ * either end is missing — an absent denominator must never render as a full
+ * bar. */
+function share(part: number | undefined, whole: number | undefined): number | null {
+  if (part == null || whole == null || !Number.isFinite(whole) || whole <= 0) return null;
+  return part / whole;
 }
 
 function shortPath(path: string): string {

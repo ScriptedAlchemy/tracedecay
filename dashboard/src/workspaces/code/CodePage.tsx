@@ -321,7 +321,11 @@ function SymbolRow({
 }) {
   return (
     <DataRow selected={selected} onSelect={onSelect}>
-      <span className="td-legend w-20 shrink-0 truncate">{node.kind}</span>
+      {/* Under 768px the symbol's own name and its connectedness are the row;
+       * kind and file path are what a narrow viewport gives up. Carrying all
+       * four columns left the name -- the thing being listed -- with no width
+       * at all. */}
+      <span className="td-legend w-20 shrink-0 truncate max-md:hidden">{node.kind}</span>
       <span className="td-value min-w-0 flex-1 truncate text-text-primary">
         {node.qualified_name ?? node.name ?? node.id}
       </span>
@@ -342,7 +346,7 @@ function SymbolRow({
         </span>
       ) : null}
       <span
-        className="td-value w-52 shrink-0 truncate text-right text-2xs text-text-muted"
+        className="td-value w-52 shrink-0 truncate text-right text-2xs text-text-muted max-md:hidden"
         title={node.file_path ?? undefined}
       >
         {elideStart(node.file_path, 29)}

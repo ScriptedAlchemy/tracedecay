@@ -283,12 +283,16 @@ function FactListRow({
         />
       </span>
       <span className="min-w-0 flex-1 truncate text-text-primary">{summary}</span>
+      {/* Column priority under 768px: the fact itself and how far it can be
+       * trusted are the row. Category and recall count are what a narrow
+       * viewport gives up -- keeping all four columns crushed the summary to
+       * three glyphs, which is not density, just damage. */}
       {fact.category ? (
-        <span className="td-legend shrink-0 border border-edge-subtle px-1.5 py-1">
+        <span className="td-legend shrink-0 border border-edge-subtle px-1.5 py-1 max-md:hidden">
           {fact.category}
         </span>
       ) : null}
-      <span className="flex w-20 shrink-0 flex-col items-end gap-1">
+      <span className="flex w-20 shrink-0 flex-col items-end gap-1 max-md:hidden">
         <span className="td-value text-2xs leading-none text-text-secondary" data-cell="numeric">
           {recalls}
           <span className="td-unit ml-1">rc</span>

@@ -54,8 +54,13 @@ function kindColor(kind: string, light: boolean): string {
   // forty overlapping translucent discs accumulated into a white cloud with no
   // structure in it at all. On paper a node is saturated ink: darker than its
   // medium, with a little more chroma to hold its hue at the lower lightness.
-  const chroma = (light ? 0.128 : 0.112) + ((hash >>> 9) % 6) * 0.011;
-  const lightness = light ? 0.55 : 0.78;
+  // Chroma is what survives overlap. At the old 0.112 the dark hues were
+  // pastels sitting near the top of the lightness range, so a dense cluster of
+  // them accumulated into an undifferentiated pale mass -- the graph lost its
+  // colour exactly where it had the most structure to show. Saturated bodies a
+  // little further down the range stay tellable apart when they pile up.
+  const chroma = (light ? 0.135 : 0.152) + ((hash >>> 9) % 6) * 0.012;
+  const lightness = light ? 0.55 : 0.72;
   return `oklch(${lightness} ${chroma.toFixed(3)} ${186 + (hash % 148)})`;
 }
 
@@ -190,6 +195,16 @@ export function GraphCanvas({
     // relative sizes within a graph, which is the only comparison that means
     // anything. The dense case is left exactly where it was.
     const density = Math.min(1, Math.max(0.45, Math.sqrt(nodes.length / 40)));
+    // The second half of the same problem: node radius is in screen pixels but
+    // the SPACING between nodes is not, so the identical graph that reads
+    // correctly in a 1060px canvas becomes a solid mass of overlapping discs in
+    // a 270px one. Measuring the canvas area each node actually gets lets a
+    // narrow viewport shrink the bodies instead of fusing them. It only ever
+    // reduces -- a roomy canvas is already correct.
+    const perNode =
+      (container.clientWidth * container.clientHeight) / Math.max(nodes.length, 1);
+    const roominess = Math.min(1, Math.sqrt(perNode / 8000));
+    const bodyScale = Math.max(0.4, density * roominess);
     sorted.forEach((node, index) => {
       const angle = (index / sorted.length) * Math.PI * 2;
       const [kr, kg, kb] = cssColorToRgb(kindColor(node.kind, seedLight));
@@ -199,7 +214,7 @@ export function GraphCanvas({
         degree: node.degree,
         x: Math.cos(angle),
         y: Math.sin(angle),
-        size: (5 + 9 * Math.sqrt(node.degree / maxDegree)) * density,
+        size: (5 + 9 * Math.sqrt(node.degree / maxDegree)) * bodyScale,
         isHub: node.degree >= maxDegree * 0.75,
         // A graph with no vitality measurement rests mid-scale, so an absent
         // signal never masquerades as a dead network.
