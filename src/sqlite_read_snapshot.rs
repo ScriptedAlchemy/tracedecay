@@ -183,7 +183,13 @@ pub(crate) struct SnapshotDatabase {
     connection: SnapshotConnection,
     source: PathBuf,
     source_state: Vec<FileState>,
+    /// The `file:...` URI used to ATTACH this snapshot. Percent-encoded and
+    /// carrying `mode=ro`/`immutable=1`, so it is never a valid filesystem
+    /// path — use `identity_path` for anything that touches the filesystem.
     path: PathBuf,
+    /// The real on-disk file this snapshot reads: the untouched source in
+    /// direct-immutable mode, or the scratch copy in copy mode.
+    identity_path: PathBuf,
     _scratch: Option<Arc<ScratchDirectory>>,
     _authority: crate::db::DatabaseAuthority,
     #[cfg(test)]
@@ -200,8 +206,10 @@ impl SnapshotDatabase {
     }
 
     pub(crate) fn attach_token(&self) -> io::Result<SnapshotAttachToken<'_>> {
-        let file_identity = crate::sessions::source::sqlite_generation_identity(&self.path)
-            .map_err(|_| io::Error::other("could not identify immutable SQLite snapshot"))?;
+        let file_identity =
+            crate::sessions::source::sqlite_generation_identity(&self.identity_path).map_err(
+                |_| io::Error::other("could not identify immutable SQLite snapshot"),
+            )?;
         Ok(SnapshotAttachToken {
             snapshot: self,
             file_identity,
@@ -588,12 +596,16 @@ async fn finish_one(
     if family_state(&prepared.source)? != prepared.source_state {
         return Err(changed_during_snapshot(&prepared.source));
     }
-    let (open_path, attach_path, flags, scratch) =
+    // `identity_path` is the real file on disk; `attach_path` is the URI used
+    // to ATTACH it. They are never interchangeable — the URI is percent-encoded
+    // and carries query parameters, so passing it to the filesystem fails.
+    let (open_path, attach_path, identity_path, flags, scratch) =
         if matches!(prepared.mode, SnapshotMode::DirectImmutable) {
             let uri = PathBuf::from(immutable_uri(&prepared.source)?);
             (
                 uri.clone(),
                 uri,
+                prepared.source.clone(),
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
                 None,
             )
@@ -601,6 +613,7 @@ async fn finish_one(
             (
                 prepared.target.clone(),
                 PathBuf::from(read_only_uri(&prepared.target)?),
+                prepared.target.clone(),
                 OpenFlags::SQLITE_OPEN_READ_ONLY,
                 Some(scratch),
             )
@@ -615,6 +628,7 @@ async fn finish_one(
         source: prepared.source,
         source_state: prepared.source_state,
         path: attach_path,
+        identity_path,
         _scratch: scratch,
         _authority: prepared.authority,
         #[cfg(test)]
