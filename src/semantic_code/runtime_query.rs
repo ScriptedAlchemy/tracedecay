@@ -100,14 +100,22 @@ where
         if authority.projection() != request.projection {
             return Err(RetrievalPortError::IncompatibleProjection);
         }
+        if request.query_digest.privacy_domain != *request.projection.privacy_domain()
+            || request.query_digest.key_epoch != request.projection.privacy_key_epoch()
+        {
+            return Err(RetrievalPortError::IncompatibleProjection);
+        }
         if self.cancellation.cancelled() {
             return Err(RetrievalPortError::Cancelled);
         }
 
+        let max_query_bytes = authority.max_batch_bytes() as usize;
+        if request.query_view.as_bytes().len() > max_query_bytes {
+            return Err(RetrievalPortError::BudgetExceeded);
+        }
         let text = request.query_view.as_str().to_owned();
-        let batch =
-            BoundedSanitizedTextBatchV1::try_new(vec![text], 1, request.query_view.as_str().len())
-                .map_err(map_embed_error)?;
+        let batch = BoundedSanitizedTextBatchV1::try_new(vec![text], 1, max_query_bytes)
+            .map_err(map_embed_error)?;
         let mut session = pool.acquire(&authority).map_err(map_acquire_error)?;
         let mut vectors = session
             .embed_batch(&batch, self.cancellation.as_ref())
@@ -149,9 +157,8 @@ fn map_embed_error(error: EmbedError) -> RetrievalPortError {
         EmbedError::DimensionMismatch { .. } | EmbedError::NonFiniteVectorValue => {
             RetrievalPortError::IncompatibleProjection
         }
-        EmbedError::EmptyBatch
-        | EmbedError::TooManyTexts { .. }
-        | EmbedError::BatchBytesExceeded { .. } => {
+        EmbedError::BatchBytesExceeded { .. } => RetrievalPortError::BudgetExceeded,
+        EmbedError::EmptyBatch | EmbedError::TooManyTexts { .. } => {
             RetrievalPortError::Contract("bounded query embedding was rejected".to_owned())
         }
         EmbedError::Runtime(_) => {
@@ -268,6 +275,90 @@ mod tests {
             embedder_factory.runtime().stats().sessions_opened,
             1,
             "the production adapter path reuses one warmed session"
+        );
+    }
+
+    #[test]
+    fn query_identity_mismatch_is_rejected_before_session_admission() {
+        let authority = Arc::new(authority());
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let service = SemanticRuntimeService::new_owned(
+            Arc::clone(&authority),
+            factory,
+            config(1, std::time::Duration::from_mins(1), 1 << 20),
+        )
+        .expect("runtime service");
+        let embedder_factory = PooledSemanticQueryEmbedderFactory::new(Arc::clone(&service));
+        let embedder = embedder_factory.create(Arc::new(ManualCancellation::new()));
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "must not reach inference",
+            domain_id::<SanitizerRevision>("sanitizer.v1"),
+            domain_id::<QueryNormalizationRevision>("normalizer.v1"),
+        )
+        .expect("bounded query");
+        let wrong_digest = QueryDigest::new(
+            domain_id("privacy.other"),
+            authority.projection().privacy_key_epoch(),
+            QueryMac::new(format!("hmac-sha256:{}", "33".repeat(32))).expect("query MAC"),
+        );
+
+        assert_eq!(
+            embedder
+                .embed_query(SemanticQueryEmbeddingRequestV1 {
+                    query_digest: &wrong_digest,
+                    query_view: &query_view,
+                    projection: authority.projection(),
+                })
+                .err(),
+            Some(RetrievalPortError::IncompatibleProjection)
+        );
+        assert_eq!(
+            service.stats().sessions_opened,
+            0,
+            "invalid privacy identity cannot load or invoke the model"
+        );
+    }
+
+    #[test]
+    fn oversized_query_is_rejected_before_session_admission() {
+        let authority = Arc::new(authority().with_test_max_batch_bytes(8));
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let service = SemanticRuntimeService::new_owned(
+            Arc::clone(&authority),
+            factory,
+            config(1, std::time::Duration::from_mins(1), 1 << 20),
+        )
+        .expect("runtime service");
+        let embedder_factory = PooledSemanticQueryEmbedderFactory::new(Arc::clone(&service));
+        let embedder = embedder_factory.create(Arc::new(ManualCancellation::new()));
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "longer than eight bytes",
+            domain_id::<SanitizerRevision>("sanitizer.v1"),
+            domain_id::<QueryNormalizationRevision>("normalizer.v1"),
+        )
+        .expect("globally bounded query");
+        let query_digest = QueryDigest::new(
+            authority.projection().privacy_domain().clone(),
+            authority.projection().privacy_key_epoch(),
+            QueryMac::new(format!("hmac-sha256:{}", "44".repeat(32))).expect("query MAC"),
+        );
+
+        assert_eq!(
+            embedder
+                .embed_query(SemanticQueryEmbeddingRequestV1 {
+                    query_digest: &query_digest,
+                    query_view: &query_view,
+                    projection: authority.projection(),
+                })
+                .err(),
+            Some(RetrievalPortError::BudgetExceeded)
+        );
+        assert_eq!(
+            service.stats().sessions_opened,
+            0,
+            "query byte admission runs before model loading"
         );
     }
 

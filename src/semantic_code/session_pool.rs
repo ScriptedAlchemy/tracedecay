@@ -419,9 +419,36 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 max: self.inner.config.max_sessions,
             });
         }
-        // Reserve the slot before opening so concurrent acquirers observe
-        // the bound, then open outside the lock.
+        // Reserve both the slot and a conservative resident-byte bound before
+        // opening. FastEmbed model loading is itself memory-intensive, so a
+        // post-open check would allow concurrent opens to transiently exceed
+        // the configured ceiling.
+        let reserved_bytes = self.inner.runtime.resident_bytes_reservation(authority);
+        let projected_resident = state.resident_bytes.checked_add(reserved_bytes);
+        let violated_ceiling = if reserved_bytes > authority.resident_byte_ceiling() {
+            Some(authority.resident_byte_ceiling())
+        } else if projected_resident
+            .is_none_or(|bytes| bytes > self.inner.config.memory_ceiling_bytes)
+        {
+            Some(self.inner.config.memory_ceiling_bytes)
+        } else {
+            None
+        };
+        if let Some(ceiling_bytes) = violated_ceiling {
+            let used_bytes = state.resident_bytes;
+            drop(state);
+            if reaped != 0 {
+                self.inner.wakeups.notify_all();
+            }
+            return Err(SessionAcquireError::MemoryCeilingExceeded {
+                used_bytes,
+                requested_bytes: reserved_bytes,
+                ceiling_bytes,
+            });
+        }
         state.active += 1;
+        state.resident_bytes =
+            projected_resident.unwrap_or_else(|| panic!("resident reservation checked above"));
         drop(state);
 
         let session = match self.inner.runtime.open_session(authority) {
@@ -429,6 +456,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             Err(err) => {
                 let mut state = self.inner.lock_state();
                 state.active -= 1;
+                state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
                 state.mark_availability_changed();
                 drop(state);
                 self.inner.wakeups.notify_all();
@@ -439,6 +467,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         let mut state = self.inner.lock_state();
         if state.closed {
             state.active -= 1;
+            state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
             state.sessions_opened += 1;
             state.sessions_closed += 1;
             state.mark_availability_changed();
@@ -447,19 +476,19 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             drop(session);
             return Err(SessionAcquireError::Closed);
         }
-        let projected_resident = state.resident_bytes.checked_add(resident_bytes);
-        let violated_ceiling = if resident_bytes > authority.resident_byte_ceiling() {
-            Some(authority.resident_byte_ceiling())
-        } else if projected_resident
-            .is_none_or(|bytes| bytes > self.inner.config.memory_ceiling_bytes)
-        {
-            Some(self.inner.config.memory_ceiling_bytes)
+        let resident_without_reservation = state.resident_bytes.saturating_sub(reserved_bytes);
+        let projected_resident = resident_without_reservation.checked_add(resident_bytes);
+        let violated_ceiling = if resident_bytes > reserved_bytes {
+            Some(reserved_bytes)
         } else {
-            None
+            projected_resident
+                .is_none_or(|bytes| bytes > self.inner.config.memory_ceiling_bytes)
+                .then_some(self.inner.config.memory_ceiling_bytes)
         };
         if let Some(ceiling_bytes) = violated_ceiling {
-            let used = state.resident_bytes;
+            let used = resident_without_reservation;
             state.active -= 1;
+            state.resident_bytes = resident_without_reservation;
             state.sessions_opened += 1;
             state.sessions_closed += 1;
             state.mark_availability_changed();
@@ -1043,8 +1072,8 @@ pub(crate) mod tests {
         assert_eq!(stats.resident_bytes, 1024);
         assert_eq!(
             (stats.sessions_opened, stats.sessions_closed),
-            (2, 1),
-            "resource accounting includes sessions rejected after runtime open"
+            (1, 0),
+            "memory admission rejects the second session before model loading"
         );
     }
 

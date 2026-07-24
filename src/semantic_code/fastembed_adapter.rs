@@ -243,6 +243,16 @@ impl VerifiedEmbeddingArtifactV1 {
         self.max_batch_bytes
     }
 
+    fn declares_member(&self, role: ArtifactMemberRoleV1) -> bool {
+        self.artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.manifest().package_member(role).is_some())
+            || self
+                .lifecycle_install
+                .as_ref()
+                .is_some_and(|install| install.declares_member(role))
+    }
+
     #[cfg(feature = "semantic-fastembed")]
     fn max_threads(&self) -> u32 {
         self.max_threads
@@ -548,9 +558,33 @@ impl AdmittedProjectionArtifactV1 {
     pub(super) fn resident_byte_ceiling(&self) -> u64 {
         self.runtime_artifact.resident_byte_ceiling()
     }
+
+    pub(super) fn max_batch_bytes(&self) -> u32 {
+        self.runtime_artifact.max_batch_bytes()
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_max_batch_bytes(mut self, max_batch_bytes: u32) -> Self {
+        self.runtime_artifact.max_batch_bytes = max_batch_bytes;
+        self
+    }
 }
 
 impl LifecycleInstallArtifactV1 {
+    fn declares_member(&self, role: ArtifactMemberRoleV1) -> bool {
+        let key = match role {
+            ArtifactMemberRoleV1::Model => "model",
+            ArtifactMemberRoleV1::Tokenizer => "tokenizer",
+            ArtifactMemberRoleV1::Config => "config",
+            ArtifactMemberRoleV1::SpecialTokensMap => "special_tokens_map",
+            ArtifactMemberRoleV1::TokenizerConfig => "tokenizer_config",
+            ArtifactMemberRoleV1::QueryInstruction | ArtifactMemberRoleV1::DocumentInstruction => {
+                return false;
+            }
+        };
+        self.members.contains_key(key)
+    }
+
     fn read_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
         let key = match role {
             ArtifactMemberRoleV1::Model => "model",
@@ -852,6 +886,11 @@ pub(super) trait EmbeddingSession: Send {
 pub(super) trait EmbeddingRuntime {
     type Session: EmbeddingSession;
 
+    /// Conservative resident-byte reservation made before session loading.
+    /// Production runtimes must return an upper bound so concurrent opens
+    /// cannot transiently exceed the pool's memory ceiling.
+    fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64;
+
     /// Cheap admission-time compatibility check (Plan 31: activation verifies
     /// runtime/platform compatibility before publishing). Performs no model
     /// load and no I/O beyond descriptor/platform inspection.
@@ -935,6 +974,10 @@ impl EmbeddingSession for UnavailableEmbeddingSession {
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = UnavailableEmbeddingSession;
 
+    fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
+        authority.resident_byte_ceiling()
+    }
+
     fn verify_artifact_compatibility(
         &self,
         _authority: &AdmittedProjectionArtifactV1,
@@ -960,6 +1003,10 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
 impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     type Session = FastEmbedEmbeddingSession;
 
+    fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
+        authority.resident_byte_ceiling()
+    }
+
     fn verify_artifact_compatibility(
         &self,
         authority: &AdmittedProjectionArtifactV1,
@@ -978,12 +1025,6 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
             ));
         }
         let _ = fastembed_pooling(artifact.pooling())?;
-        let admitted = artifact.artifact.as_ref().ok_or_else(|| {
-            fastembed_failure(
-                RuntimeFailureKindV1::LoadFailed,
-                "verified artifact bytes are unavailable",
-            )
-        })?;
         for role in [
             ArtifactMemberRoleV1::Model,
             ArtifactMemberRoleV1::Tokenizer,
@@ -991,7 +1032,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
             ArtifactMemberRoleV1::SpecialTokensMap,
             ArtifactMemberRoleV1::TokenizerConfig,
         ] {
-            if admitted.manifest().package_member(role).is_none() {
+            if !artifact.declares_member(role) {
                 return Err(fastembed_failure(
                     RuntimeFailureKindV1::IncompatibleRuntime,
                     "the artifact lacks a FastEmbed-required tokenizer member",
@@ -1084,10 +1125,19 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
                     "FastEmbed returned an unexpected embedding count",
                 ));
             }
+            let mut values = embedded
+                .pop()
+                .unwrap_or_else(|| panic!("embedding count was checked"));
+            // Canonicalize IEEE negative zero before vector hashing and
+            // exact-flat comparison. FastEmbed remains the sole producer;
+            // this changes no distance while removing signed-zero drift.
+            for value in &mut values {
+                if *value == 0.0 {
+                    *value = 0.0;
+                }
+            }
             let vector = EmbeddingVectorV1 {
-                values: embedded
-                    .pop()
-                    .unwrap_or_else(|| panic!("embedding count was checked")),
+                values,
                 dimensions: artifact.dimensions(),
                 metric: artifact.metric(),
                 normalization: artifact.normalization(),
@@ -1231,6 +1281,10 @@ impl FakeEmbeddingRuntime {
 #[cfg(test)]
 impl EmbeddingRuntime for FakeEmbeddingRuntime {
     type Session = FakeEmbeddingSession;
+
+    fn resident_bytes_reservation(&self, _authority: &AdmittedProjectionArtifactV1) -> u64 {
+        self.resident_bytes_per_session
+    }
 
     fn verify_artifact_compatibility(
         &self,
@@ -1579,6 +1633,20 @@ mod tests {
                 .expect("model bytes"),
             b"model"
         );
+        #[cfg(feature = "semantic-fastembed")]
+        {
+            let runtime = FastEmbedEmbeddingRuntime;
+            runtime
+                .verify_artifact_compatibility(&authority)
+                .expect("production runtime admits the verified lifecycle install");
+            assert!(matches!(
+                runtime.open_session(&authority),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::LoadFailed,
+                    ..
+                }))
+            ));
+        }
         std::fs::write(install.path().join("tokenizer.json"), b"mutated")
             .expect("corrupt tokenizer");
         assert!(matches!(
