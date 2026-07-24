@@ -240,7 +240,7 @@ fn canonical_domain_identities_are_reused_and_storage_projections_round_trip() {
 
     assert_ne!(
         std::any::TypeId::of::<StoreSnapshotIdV1>(),
-        std::any::TypeId::of::<tracedecay_domain::SnapshotId>()
+        std::any::TypeId::of::<tracedecay_domain::RepositoryStateSnapshotId>()
     );
     assert_ne!(
         std::any::TypeId::of::<ShardWatermarkV1>(),

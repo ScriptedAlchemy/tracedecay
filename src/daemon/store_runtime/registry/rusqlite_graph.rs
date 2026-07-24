@@ -760,21 +760,22 @@ mod tests {
             .unwrap()
             .begin_immediate()
             .unwrap();
-        let queued_write = metadata.set("queued-replacement", "must-not-persist");
-        tokio::pin!(queued_write);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut queued_write)
+        let error = {
+            let mut queued_write = Box::pin(metadata.set("queued-replacement", "must-not-persist"));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut queued_write)
+                    .await
+                    .is_err(),
+                "metadata write unexpectedly bypassed the occupied writer actor"
+            );
+
+            replace_graph_database(&path);
+            holder.rollback().unwrap();
+
+            queued_write
                 .await
-                .is_err(),
-            "metadata write unexpectedly bypassed the occupied writer actor"
-        );
-
-        replace_graph_database(&path);
-        holder.rollback().unwrap();
-
-        let error = queued_write
-            .await
-            .expect_err("queued graph write must recheck the opened file identity");
+                .expect_err("queued graph write must recheck the opened file identity")
+        };
         assert!(
             format!("{error:?}").contains("identity changed"),
             "unexpected queued replacement error: {error:?}"

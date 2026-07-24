@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tracedecay_store::StoreShardScopeV1;
 
 use super::*;
 

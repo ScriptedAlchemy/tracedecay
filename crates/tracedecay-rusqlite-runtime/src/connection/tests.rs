@@ -200,10 +200,10 @@ fn create_new_pins_and_discards_the_exact_database() {
 fn create_new_refuses_to_replace_an_existing_database() {
     let file = NamedTempFile::new().unwrap();
 
-    assert_eq!(
-        OpenedDatabaseFile::create_new(file.path()).unwrap_err(),
-        OpenedDatabaseFileError::Create
-    );
+    assert!(matches!(
+        OpenedDatabaseFile::create_new(file.path()),
+        Err(OpenedDatabaseFileError::Create)
+    ));
 }
 
 #[cfg(windows)]
