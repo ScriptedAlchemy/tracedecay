@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import Graph from 'graphology';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
 import Sigma from 'sigma';
-import { ActivationField, cssColorToRgb, lerpRgb } from './activation.ts';
+import { ActivationField, cssColorToRgb, lerpRgb, lerpRgbTuple } from './activation.ts';
+import { cn } from '../../ui/cn';
 
 export interface GraphCanvasNode {
   id: string;
@@ -15,6 +16,22 @@ export interface GraphCanvasEdge {
   source: string;
   target: string;
   kind?: string;
+}
+
+/**
+ * Deep-space plasma palette: a node's kind picks a hue on the cyan → violet
+ * arc at fixed chroma and lightness. One rule instead of a hardcoded map, so
+ * every graph in the app harmonizes — repositories and checkouts here, symbol
+ * kinds in Code — and an unseen kind still lands somewhere deliberate rather
+ * than defaulting to grey. The arc is bounded so colour never wanders into
+ * muddy yellows that read as "warning" against the dark field.
+ */
+function kindColor(kind: string): string {
+  let hash = 0;
+  for (let index = 0; index < kind.length; index += 1) {
+    hash = (hash * 31 + kind.charCodeAt(index)) >>> 0;
+  }
+  return `oklch(0.76 0.15 ${190 + (hash % 130)})`;
 }
 
 /** Samples the resolved theme tokens Sigma needs; canvas renderers cannot
@@ -50,6 +67,7 @@ export function GraphCanvas({
   selectedId,
   onSelect,
   height = 320,
+  fill = false,
   activation,
 }: {
   nodes: GraphCanvasNode[];
@@ -57,6 +75,9 @@ export function GraphCanvas({
   selectedId?: string | null;
   onSelect?: (id: string | null) => void;
   height?: number;
+  /** Occupy the parent's full height instead of a fixed one. The parent must
+   * establish the height (e.g. `flex-1 min-h-0`). */
+  fill?: boolean;
   /** External synapse field; when omitted the canvas owns a local one fed by
    * selection strikes. */
   activation?: ActivationField;
@@ -87,6 +108,7 @@ export function GraphCanvas({
     const sorted = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
     sorted.forEach((node, index) => {
       const angle = (index / sorted.length) * Math.PI * 2;
+      const [kr, kg, kb] = cssColorToRgb(kindColor(node.kind));
       graph.addNode(node.id, {
         label: node.label,
         kind: node.kind,
@@ -95,6 +117,7 @@ export function GraphCanvas({
         y: Math.sin(angle),
         size: 5 + 9 * Math.sqrt(node.degree / maxDegree),
         isHub: node.degree >= maxDegree * 0.75,
+        kindRgb: [kr, kg, kb] as [number, number, number],
       });
     });
     for (const edge of edges) {
@@ -185,8 +208,14 @@ export function GraphCanvas({
         const heat = field.heatOf(node);
         // Synapse heat: color lerps toward the accent and the node swells —
         // a strike blooms then decays to dark (exponential half-life).
-        const baseColor = dimmed ? colors.dim : colors.node;
-        const resting = data['isHub'] ? colors.label : baseColor;
+        // At rest a node wears its kind's plasma hue, not a flat grey: colour
+        // carries meaning and the field reads as a constellation. Dimming
+        // during hover still collapses everything to the neutral token so the
+        // isolated neighborhood is unambiguous.
+        const [kr, kg, kb] = (data['kindRgb'] as [number, number, number] | undefined) ?? [
+          149, 152, 157,
+        ];
+        const resting = dimmed ? colors.dim : `rgb(${kr}, ${kg}, ${kb})`;
         const color =
           isSelected || isHovered
             ? colors.nodeSelected
@@ -297,19 +326,27 @@ export function GraphCanvas({
         }
       }
     };
+    // Every point glows, not only the firing ones: a resting halo in the
+    // node's own hue turns flat discs into stars, and heat then blooms that
+    // same halo toward the accent. Gated by size — one companion node per real
+    // node is cheap at constellation scale but not at tier-limit scale.
+    const restingGlow = graph.order <= 400;
     const syncHalos = () => {
       const [hr, hg, hb] = hotRgb;
       for (const node of [...graph.nodes()]) {
         if (node.startsWith(HALO) || node.startsWith(PULSE)) continue;
         const heat = field.heatOf(node);
         const haloId = HALO + node;
-        if (heat > 0.12) {
+        if (heat > 0.12 || restingGlow) {
           const attrs = graph.getNodeAttributes(node);
+          const [kr, kg, kb] = (attrs['kindRgb'] as [number, number, number] | undefined) ?? hotRgb;
+          // Resting glow leans on the node's hue; heat lerps it to the accent.
+          const [gr, gg, gb] = heat > 0 ? lerpRgbTuple([kr, kg, kb], hotRgb, Math.min(1, heat)) : [kr, kg, kb];
           const halo = {
             x: attrs['x'],
             y: attrs['y'],
             size: (attrs['size'] as number) * (1.6 + 1.4 * heat),
-            color: `rgba(${hr}, ${hg}, ${hb}, ${(0.22 * heat).toFixed(3)})`,
+            color: `rgba(${gr}, ${gg}, ${gb}, ${(0.10 + 0.22 * heat).toFixed(3)})`,
             label: '',
             zIndex: 0,
           };
@@ -411,11 +448,14 @@ export function GraphCanvas({
     );
   }
   return (
-    <figure className="flex flex-col gap-1">
+    <figure className={cn('flex flex-col gap-1', fill && 'h-full min-h-0')}>
       <div
         ref={containerRef}
-        style={{ height }}
-        className="overflow-hidden rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-0 [background:radial-gradient(120%_90%_at_50%_40%,var(--raw-surface-1)_0%,var(--raw-surface-0)_58%,oklch(0.11_0.01_260)_100%)]"
+        style={fill ? undefined : { height }}
+        className={cn(
+          'overflow-hidden rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-0 [background:radial-gradient(120%_90%_at_50%_40%,var(--raw-surface-1)_0%,var(--raw-surface-0)_58%,oklch(0.11_0.01_260)_100%)]',
+          fill && 'min-h-0 flex-1',
+        )}
         role="img"
         aria-label={`Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`}
       />

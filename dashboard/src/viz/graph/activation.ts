@@ -83,6 +83,17 @@ export function lerpRgb(
   to: [number, number, number],
   t: number,
 ): string {
+  const [r, g, b] = lerpRgbTuple(from, to, t);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** The same mix as {@link lerpRgb} but left as components, for callers that
+ * need to apply their own alpha rather than a solid `rgb()` string. */
+export function lerpRgbTuple(
+  from: [number, number, number],
+  to: [number, number, number],
+  t: number,
+): [number, number, number] {
   const mix = (a: number, b: number) => Math.round(a + (b - a) * t);
-  return `rgb(${mix(from[0], to[0])}, ${mix(from[1], to[1])}, ${mix(from[2], to[2])})`;
+  return [mix(from[0], to[0]), mix(from[1], to[1]), mix(from[2], to[2])];
 }

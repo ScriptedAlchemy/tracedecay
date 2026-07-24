@@ -3,7 +3,7 @@ import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
-import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
@@ -36,7 +36,7 @@ export function BrainPage() {
             { stores: 0, artifacts: 0, scopes: 0 },
           );
         return (
-          <div className="flex h-full flex-col overflow-auto">
+          <div className="flex h-full min-h-0 flex-col">
             <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
               <h1 className="text-sm font-semibold tracking-tight">Brain</h1>
               <span className="text-2xs text-text-muted">
@@ -44,22 +44,38 @@ export function BrainPage() {
                 {data.summary.truncated ? ' · truncated' : ''}
               </span>
             </div>
-            <div className="border-b border-edge-subtle p-3">
-              <SynapseMap groups={groups} activeProjectId={data.active_project_id ?? null} />
-            </div>
-            <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
-              <StatTile label="repositories" value={data.summary.repo_count} />
-              <StatTile label="projects" value={data.summary.project_count} />
-              <StatTile label="stores" value={totals.stores} />
-              <StatTile label="graph scopes" value={totals.scopes} />
-            </div>
-            <div className="flex flex-col gap-3 px-4 pb-4">
-              {groups.map((group, index) => (
-                <RepoGroupCard
-                  key={`${group.git_common_dir ?? group.label}#${index}`}
-                  group={group}
+            {/* The brain is the surface, not a banner above a list: the canvas
+             * takes every pixel the viewport can spare, readouts sit on it as
+             * instrument HUD, and the registry becomes a dense side rail that
+             * remains the canvas's accessible equivalent. */}
+            <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+              <div className="relative flex min-h-0 flex-1 flex-col p-3">
+                <SynapseMap
+                  groups={groups}
+                  activeProjectId={data.active_project_id ?? null}
                 />
-              ))}
+                <InstrumentReadout
+                  items={[
+                    { label: 'repos', value: data.summary.repo_count },
+                    { label: 'projects', value: data.summary.project_count },
+                    { label: 'stores', value: totals.stores },
+                    { label: 'scopes', value: totals.scopes },
+                    { label: 'artifacts', value: totals.artifacts },
+                  ]}
+                />
+              </div>
+              <aside
+                aria-label="Project registry"
+                tabIndex={0}
+                className="flex w-full shrink-0 flex-col gap-2 overflow-auto border-t border-edge-subtle p-3 lg:w-80 lg:border-l lg:border-t-0"
+              >
+                {groups.map((group, index) => (
+                  <RepoGroupCard
+                    key={`${group.git_common_dir ?? group.label}#${index}`}
+                    group={group}
+                  />
+                ))}
+              </aside>
             </div>
           </div>
         );
@@ -147,7 +163,7 @@ function SynapseMap({
     <GraphCanvas
       nodes={nodes}
       edges={edges}
-      height={340}
+      fill
       activation={activationRef.current}
       selectedId={scope.kind === 'project' ? scope.projectId : null}
       onSelect={(id) => {
@@ -158,6 +174,34 @@ function SynapseMap({
         if (project) selectProject(project.project_id, project.label);
       }}
     />
+  );
+}
+
+/** Corner-bracketed instrument readout floating on the canvas: the counts that
+ * used to occupy four tall tiles, rendered as one hairline strip so the brain
+ * keeps the space. Pointer-transparent so it never steals a graph drag. */
+function InstrumentReadout({
+  items,
+}: {
+  items: ReadonlyArray<{ label: string; value: number }>;
+}) {
+  return (
+    <div className="pointer-events-none absolute left-6 top-6 flex select-none items-stretch">
+      <span aria-hidden className="w-2 border-y border-l border-accent/40" />
+      <dl className="flex items-center gap-4 bg-surface-0/70 px-3 py-1.5 backdrop-blur-sm">
+        {items.map((item) => (
+          <div key={item.label} className="flex items-baseline gap-1.5">
+            <dd className="tabular text-sm font-semibold leading-none text-text-primary">
+              {item.value.toLocaleString()}
+            </dd>
+            <dt className="text-2xs uppercase tracking-wider text-text-muted">
+              {item.label}
+            </dt>
+          </div>
+        ))}
+      </dl>
+      <span aria-hidden className="w-2 border-y border-r border-accent/40" />
+    </div>
   );
 }
 
