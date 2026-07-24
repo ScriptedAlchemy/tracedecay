@@ -137,6 +137,7 @@ impl<A: RestorePublicationAuthority> BackupDriver for SqliteOnlineBackupDriver<'
     fn freeze_families(
         &mut self,
         required: &FrozenWatermarkVectorV1,
+        cancellation: &dyn Cancellation,
     ) -> Result<FrozenFamilySnapshot, Self::Error> {
         let actual = FrozenWatermarkVectorV1::new(
             self.sources.values().map(|source| source.watermark.clone()),
@@ -159,7 +160,7 @@ impl<A: RestorePublicationAuthority> BackupDriver for SqliteOnlineBackupDriver<'
                 source.connection,
                 &mut filesystem,
                 self.options,
-                &NeverCancel,
+                cancellation,
                 |_| {},
             ) {
                 Ok(completed) => completed,
@@ -322,14 +323,6 @@ impl SqliteBackupFilesystem for SnapshotDestination {
     }
 }
 
-struct NeverCancel;
-
-impl Cancellation for NeverCancel {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
-
 /// Verifies a completed SQLite backup through the runtime's read-only
 /// `PRAGMA quick_check` authority.
 pub fn verify_sqlite_snapshot(path: &Path) -> Result<(), OnlineBackupError> {
@@ -392,7 +385,7 @@ fn backup_error(error: SqliteBackupError<OnlineBackupError>) -> OnlineBackupErro
 
 #[cfg(test)]
 mod tests {
-    use std::convert::Infallible;
+    use std::{cell::Cell, convert::Infallible};
 
     use tempfile::TempDir;
 
@@ -464,7 +457,14 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot = driver.freeze_families(&required).unwrap();
+        let snapshot = driver
+            .freeze_families(
+                &required,
+                &CancelAfter {
+                    checks_remaining: Cell::new(usize::MAX),
+                },
+            )
+            .unwrap();
 
         assert_eq!(snapshot.frozen_watermarks, required);
         assert_eq!(snapshot.artifacts.len(), 1);
@@ -472,5 +472,81 @@ mod tests {
             &snapshot.artifacts[0].identity,
             ArtifactIdentity::Store(_)
         ));
+    }
+
+    struct CancelAfter {
+        checks_remaining: Cell<usize>,
+    }
+
+    impl Cancellation for CancelAfter {
+        fn is_cancelled(&self) -> bool {
+            let remaining = self.checks_remaining.get();
+            if remaining == 0 {
+                true
+            } else {
+                self.checks_remaining.set(remaining - 1);
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn online_driver_cancels_between_sqlite_backup_steps() {
+        let directory = TempDir::new().unwrap();
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE facts(value BLOB); INSERT INTO facts VALUES (zeroblob(1048576));",
+            )
+            .unwrap();
+        assert!(
+            connection
+                .pragma_query_value(None, "page_count", |row| row.get::<_, u32>(0))
+                .unwrap()
+                > 1
+        );
+        let watermark: ShardWatermarkV1 = serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.backup.cancel",
+                "profile_id": "profile.backup.cancel",
+                "scope": { "kind": "project", "project_id": "project.backup.cancel" }
+            },
+            "incarnation": 1,
+            "authority_epoch": 2,
+            "commit_sequence": 3
+        }))
+        .unwrap();
+        let required = FrozenWatermarkVectorV1::new([watermark.clone()]).unwrap();
+        let source = OnlineBackupSource::from_writer_connection(watermark, &connection);
+        let mut driver = SqliteOnlineBackupDriver::new(
+            BackupRoot::open(directory.path().join("backups")).unwrap(),
+            [source],
+            SchemaVersion(1),
+            PrivacyClass::Project,
+            DeletionState::Live,
+            BTreeMap::new(),
+            SqliteBackupOptions::new(1, 0, std::time::Duration::ZERO, None).unwrap(),
+            Authority,
+        )
+        .unwrap();
+        let cancellation = CancelAfter {
+            checks_remaining: Cell::new(2),
+        };
+
+        let error = driver
+            .freeze_families(&required, &cancellation)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OnlineBackupError::Backup(message) if message.contains("cancelled")
+        ));
+        assert_eq!(cancellation.checks_remaining.get(), 0);
+        assert!(
+            std::fs::read_dir(directory.path().join("backups/.staging"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 }

@@ -50,7 +50,7 @@ where
         check_cancelled(cancellation)?;
         let snapshot = self
             .driver
-            .freeze_families(required)
+            .freeze_families(required, cancellation)
             .map_err(driver_error)?;
         if &snapshot.frozen_watermarks != required {
             return Err(BackupRestoreError::Manifest(ManifestError::InvalidIdentity));

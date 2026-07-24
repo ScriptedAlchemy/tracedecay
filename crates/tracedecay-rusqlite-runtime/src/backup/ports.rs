@@ -55,6 +55,7 @@ pub trait BackupDriver {
     fn freeze_families(
         &mut self,
         required: &FrozenWatermarkVectorV1,
+        cancellation: &dyn Cancellation,
     ) -> Result<FrozenFamilySnapshot, Self::Error>;
     /// Allocates only private staging resources. Every replacement binding is
     /// supplied by the canonical registry authority outside this driver.

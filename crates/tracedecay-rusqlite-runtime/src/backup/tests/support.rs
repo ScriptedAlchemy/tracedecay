@@ -165,6 +165,7 @@ impl BackupDriver for FakeDriver {
     fn freeze_families(
         &mut self,
         _: &FrozenWatermarkVectorV1,
+        _: &dyn Cancellation,
     ) -> Result<FrozenFamilySnapshot, Self::Error> {
         Ok(self.snapshot.clone())
     }
