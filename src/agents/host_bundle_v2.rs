@@ -641,6 +641,13 @@ pub struct ObservedHostArtifactV1 {
     /// Digest last recorded by the component's durable ownership receipt.
     /// This is distinct from the bytes currently observed on disk.
     pub owned_artifact_digest: Option<[u8; 32]>,
+    /// Ownership marker the first-party catalog assigns to this exact deploy
+    /// path, independent of any receipt. Only observations taken directly from
+    /// the planned component's cataloged artifact list may set it; receipt- and
+    /// orphan-derived observations must leave it `None`. Pre-v2 installers
+    /// wrote these cataloged paths without ever writing a v2 receipt, so
+    /// `Repair` alone may adopt such an artifact.
+    pub cataloged_ownership_marker: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -890,7 +897,17 @@ fn plan_artifact_action(
         ObservedArtifactKindV1::RegularFile => {}
     }
     if state.ownership_marker.as_deref() != Some(artifact.ownership_marker.as_str()) {
-        return Err(HostBundleError::OwnershipConflict);
+        // Receiptless artifacts left behind by the pre-v2 installer are the one
+        // exception, and only under `Repair`. Adoption still requires the exact
+        // expected ownership marker; a foreign or absent marker conflicts.
+        if !adopts_pre_receipt_artifact(operation, artifact, state) {
+            return Err(HostBundleError::OwnershipConflict);
+        }
+        return Ok(if state.artifact_digest == Some(artifact.artifact_digest) {
+            HostArtifactActionV1::Noop
+        } else {
+            HostArtifactActionV1::BackupThenReplace
+        });
     }
     let owned_digest = state
         .owned_artifact_digest
@@ -927,6 +944,38 @@ fn plan_artifact_action(
             }
         }
     }
+}
+
+/// Decide whether a receiptless observation may be adopted into v2 ownership.
+///
+/// Pre-v2 installers deployed first-party artifacts without writing a v2
+/// ownership receipt, so their files are indistinguishable from foreign files
+/// by receipt evidence alone and every lifecycle operation refuses them. The
+/// adoption boundary is deliberately narrow:
+///
+/// * only `Repair`, whose contract is already "restore the cataloged
+///   deployment", may adopt. `Install` must never claim a path it did not
+///   create, `Update` must know the previously owned digest before it can tell
+///   a stale deployment from a user edit, and `Uninstall` must never delete a
+///   file whose ownership it cannot prove;
+/// * the observation must carry the planned component's own cataloged
+///   ownership marker for this exact deploy path, and it must equal the
+///   expected artifact's marker. Observations derived from receipts or from
+///   orphan paths never set it, so they can never reach this branch;
+/// * no receipt may claim the path. A receipt-backed artifact keeps the
+///   unmodified marker equality check, which stays the security boundary.
+///
+/// Adoption itself never destroys anything: a byte-identical file becomes a
+/// `Noop`, and anything else is backed up before it is replaced.
+fn adopts_pre_receipt_artifact(
+    operation: HostBundleLifecycleOpV1,
+    artifact: &HostBundleArtifactV1,
+    state: &ObservedHostArtifactV1,
+) -> bool {
+    operation == HostBundleLifecycleOpV1::Repair
+        && state.ownership_marker.is_none()
+        && state.owned_artifact_digest.is_none()
+        && state.cataloged_ownership_marker.as_deref() == Some(artifact.ownership_marker.as_str())
 }
 
 /// Bytes obtained from the verified embedded host bundle. They are checked
@@ -1414,11 +1463,18 @@ fn component_set_artifact_state_revision(
             .into_iter()
             .map(
                 |(relative_path, (ownership_marker, owned_artifact_digest))| {
+                    let cataloged_ownership_marker = component
+                        .manifest
+                        .artifacts
+                        .iter()
+                        .find(|artifact| artifact.relative_path == relative_path)
+                        .map(|artifact| artifact.ownership_marker.clone());
                     observe_artifact_at(
                         artifact_root,
                         &relative_path,
                         ownership_marker,
                         owned_artifact_digest,
+                        cataloged_ownership_marker,
                     )
                 },
             )
@@ -1634,6 +1690,7 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
                     &artifact.relative_path,
                     owned.map(|owned| owned.ownership_marker.clone()),
                     owned.map(|owned| owned.artifact_digest),
+                    Some(artifact.ownership_marker.clone()),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -1660,6 +1717,7 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
                     &owned.relative_path,
                     Some(owned.ownership_marker.clone()),
                     Some(owned.artifact_digest),
+                    None,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -1898,6 +1956,7 @@ pub fn inspect_installed_host_bundle_components_at(
                 &artifact.relative_path,
                 Some(artifact.ownership_marker.clone()),
                 Some(artifact.artifact_digest),
+                None,
             );
             let (observed_digest, state) = match observed {
                 Ok(observed) if observed.kind == ObservedArtifactKindV1::Missing => {
@@ -2263,6 +2322,7 @@ fn observe_artifact_at(
     relative_path: &str,
     ownership_marker: Option<String>,
     owned_artifact_digest: Option<[u8; 32]>,
+    cataloged_ownership_marker: Option<String>,
 ) -> Result<ObservedHostArtifactV1, HostBundleError> {
     let path = inspect_install_target(root, Path::new(relative_path))?;
     let (kind, artifact_digest) = match fs::symlink_metadata(&path) {
@@ -2289,6 +2349,7 @@ fn observe_artifact_at(
         artifact_digest,
         ownership_marker,
         owned_artifact_digest,
+        cataloged_ownership_marker,
     })
 }
 
@@ -3113,6 +3174,7 @@ impl HostBundleWriterV1 {
                                 &artifact.relative_path,
                                 owned.map(|owned| owned.ownership_marker.clone()),
                                 owned.map(|owned| owned.artifact_digest),
+                                Some(artifact.ownership_marker.clone()),
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?
@@ -3140,6 +3202,7 @@ impl HostBundleWriterV1 {
                             &owned.relative_path,
                             Some(owned.ownership_marker.clone()),
                             Some(owned.artifact_digest),
+                            None,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -3423,6 +3486,7 @@ impl HostBundleWriterV1 {
                 artifact_digest: digest,
                 ownership_marker: receipt_artifact.map(|record| record.ownership_marker.clone()),
                 owned_artifact_digest: receipt_artifact.map(|record| record.artifact_digest),
+                cataloged_ownership_marker: Some(artifact.ownership_marker.clone()),
             });
         }
         Ok(observed)
@@ -3446,6 +3510,7 @@ impl HostBundleWriterV1 {
             artifact_digest,
             ownership_marker: Some(owned.ownership_marker.clone()),
             owned_artifact_digest: Some(owned.artifact_digest),
+            cataloged_ownership_marker: None,
         })
     }
 
@@ -5081,6 +5146,64 @@ mod tests {
     }
 
     #[test]
+    fn repair_adopts_only_cataloged_pre_receipt_artifacts() {
+        let repair_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repair_root.path().join("plugins")).unwrap();
+        std::fs::write(
+            repair_root.path().join("plugins/tracedecay.json"),
+            b"legacy",
+        )
+        .unwrap();
+        let bundle = manifest(HostKindV1::KimiCode, b"expected");
+        let mut writer = HostBundleWriterV1::open(repair_root.path()).unwrap();
+        let receipt = writer
+            .execute(
+                &bundle,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Repair,
+                    20,
+                    true,
+                ),
+                &content(b"expected"),
+                &verifier(&bundle),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(repair_root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"expected"
+        );
+        assert_eq!(receipt.artifacts.len(), 1);
+
+        let install_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(install_root.path().join("plugins")).unwrap();
+        std::fs::write(
+            install_root.path().join("plugins/tracedecay.json"),
+            b"legacy",
+        )
+        .unwrap();
+        let mut writer = HostBundleWriterV1::open(install_root.path()).unwrap();
+        assert_eq!(
+            writer.execute(
+                &bundle,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Install,
+                    21,
+                    true,
+                ),
+                &content(b"expected"),
+                &verifier(&bundle),
+            ),
+            Err(HostBundleError::OwnershipConflict)
+        );
+        assert_eq!(
+            std::fs::read(install_root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"legacy"
+        );
+    }
+
+    #[test]
     fn lifecycle_preserves_ownership_receipts_and_rollback_plan() {
         let root = tempfile::tempdir().unwrap();
         let first = manifest(HostKindV1::KimiCode, b"first");
@@ -5135,6 +5258,166 @@ mod tests {
                 &verifier(&second),
             ),
             Err(HostBundleError::OwnershipConflict)
+        );
+    }
+
+    fn pre_v2_artifact(
+        artifact: &HostBundleArtifactV1,
+        observed_bytes: &[u8],
+        cataloged_ownership_marker: Option<String>,
+    ) -> ObservedHostArtifactV1 {
+        ObservedHostArtifactV1 {
+            relative_path: artifact.relative_path.clone(),
+            kind: ObservedArtifactKindV1::RegularFile,
+            artifact_digest: Some(Sha256::digest(observed_bytes).into()),
+            ownership_marker: None,
+            owned_artifact_digest: None,
+            cataloged_ownership_marker,
+        }
+    }
+
+    #[test]
+    fn repair_adopts_a_receiptless_artifact_carrying_the_expected_ownership_marker() {
+        let bundle = manifest(HostKindV1::KimiCode, b"current");
+        let artifact = &bundle.artifacts[0];
+        let marker = Some(artifact.ownership_marker.clone());
+
+        // Stale pre-v2 bytes are adopted, but only after they are backed up.
+        assert_eq!(
+            plan_artifact_action(
+                HostBundleLifecycleOpV1::Repair,
+                artifact,
+                Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
+            ),
+            Ok(HostArtifactActionV1::BackupThenReplace)
+        );
+        // Pre-v2 bytes that already match the catalog need no mutation at all.
+        assert_eq!(
+            plan_artifact_action(
+                HostBundleLifecycleOpV1::Repair,
+                artifact,
+                Some(&pre_v2_artifact(artifact, b"current", marker.clone())),
+            ),
+            Ok(HostArtifactActionV1::Noop)
+        );
+
+        // Adoption belongs to Repair alone.
+        for operation in [
+            HostBundleLifecycleOpV1::Install,
+            HostBundleLifecycleOpV1::Update,
+            HostBundleLifecycleOpV1::Uninstall,
+        ] {
+            assert_eq!(
+                plan_artifact_action(
+                    operation,
+                    artifact,
+                    Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
+                ),
+                Err(HostBundleError::OwnershipConflict),
+                "{operation:?} must not adopt an artifact no receipt records"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_refuses_a_receiptless_artifact_whose_ownership_marker_does_not_match() {
+        let bundle = manifest(HostKindV1::KimiCode, b"current");
+        let artifact = &bundle.artifacts[0];
+        let foreign = expected_ownership_marker(HostKindV1::Hermes, HostBundleComponentV1::Core);
+        assert_ne!(foreign, artifact.ownership_marker);
+
+        // A foreign marker on the same deploy path is still a conflict.
+        assert_eq!(
+            plan_artifact_action(
+                HostBundleLifecycleOpV1::Repair,
+                artifact,
+                Some(&pre_v2_artifact(artifact, b"pre-v2", Some(foreign))),
+            ),
+            Err(HostBundleError::OwnershipConflict)
+        );
+        // So is an absent marker: receipt- and orphan-derived observations
+        // never carry one, so they can never be adopted.
+        assert_eq!(
+            plan_artifact_action(
+                HostBundleLifecycleOpV1::Repair,
+                artifact,
+                Some(&pre_v2_artifact(artifact, b"pre-v2", None)),
+            ),
+            Err(HostBundleError::OwnershipConflict)
+        );
+        // A receipt claiming the path with a foreign marker keeps the original
+        // ownership boundary; adoption never applies to receipt-backed state.
+        let mut claimed =
+            pre_v2_artifact(artifact, b"pre-v2", Some(artifact.ownership_marker.clone()));
+        claimed.ownership_marker = Some(expected_ownership_marker(
+            HostKindV1::Kiro,
+            HostBundleComponentV1::Core,
+        ));
+        claimed.owned_artifact_digest = Some(Sha256::digest(b"pre-v2").into());
+        assert_eq!(
+            plan_artifact_action(HostBundleLifecycleOpV1::Repair, artifact, Some(&claimed)),
+            Err(HostBundleError::OwnershipConflict)
+        );
+    }
+
+    #[test]
+    fn repair_takes_ownership_of_pre_v2_artifacts_that_no_receipt_records() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = manifest(HostKindV1::KimiCode, b"current");
+        std::fs::create_dir_all(root.path().join("plugins")).unwrap();
+        std::fs::write(root.path().join("plugins/tracedecay.json"), b"pre-v2").unwrap();
+
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let receipt = writer
+            .execute(
+                &bundle,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Repair,
+                    21,
+                    true,
+                ),
+                &content(b"current"),
+                &verifier(&bundle),
+            )
+            .unwrap();
+
+        assert_eq!(receipt.artifacts.len(), 1);
+        assert_eq!(
+            receipt.artifacts[0].ownership_marker,
+            bundle.artifacts[0].ownership_marker
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"current"
+        );
+    }
+
+    #[test]
+    fn install_still_refuses_pre_v2_artifacts_that_no_receipt_records() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = manifest(HostKindV1::KimiCode, b"current");
+        std::fs::create_dir_all(root.path().join("plugins")).unwrap();
+        std::fs::write(root.path().join("plugins/tracedecay.json"), b"pre-v2").unwrap();
+
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        assert_eq!(
+            writer.execute(
+                &bundle,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Install,
+                    22,
+                    true
+                ),
+                &content(b"current"),
+                &verifier(&bundle),
+            ),
+            Err(HostBundleError::OwnershipConflict)
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"pre-v2"
         );
     }
 
