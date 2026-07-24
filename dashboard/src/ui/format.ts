@@ -28,6 +28,28 @@ export function splitCount(value: number | null | undefined): {
   return { value: value.toLocaleString() };
 }
 
+/** A wall-clock stamp trimmed to what a dense row can actually carry.
+ *
+ * `toLocaleString()` prints "7/24/2026, 9:07:20 PM" — twenty-one glyphs of
+ * which the seconds are noise in a list you scan for ordering, and the width
+ * forces the row's real content to truncate. This keeps the full calendar date
+ * and the minute and drops only the seconds, in a fixed-width ISO-ish form
+ * that sorts and aligns as a column. Absolute, not relative: a screenshot of a
+ * fixture has to render identically tomorrow.
+ *
+ * The unabbreviated value stays available — every row that uses this also
+ * exposes the raw record in its inspector. */
+export function formatStamp(epochSeconds: number | null | undefined): string {
+  if (epochSeconds == null || !Number.isFinite(epochSeconds)) return '—';
+  const date = new Date(epochSeconds * 1000);
+  if (Number.isNaN(date.getTime())) return '—';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    ` ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+}
+
 /** Byte magnitudes with the unit split out for the same reason. */
 export function splitBytes(bytes: number | null | undefined): {
   value: string;
