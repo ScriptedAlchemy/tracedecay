@@ -734,7 +734,12 @@ impl StdioLspClient {
             );
             quiet_deadline = Some(tokio::time::Instant::now() + timeouts.diagnostics_quiet);
         }
-        if !diagnostic_batch_is_complete(&expected_versions, &diagnostics_by_uri) {
+        // Servers that suppress empty publishes (only publishing for files WITH
+        // problems) never emit for clean files, so a fully-reported batch still
+        // looks partial here. Requiring every requested URI throws away the real
+        // diagnostics of the one file that did report. Only treat the batch as a
+        // genuine timeout when nothing arrived at all.
+        if diagnostics_by_uri.is_empty() && !uri_to_document.is_empty() {
             return Err(refresh_timed_out(timeouts));
         }
         Ok(diagnostics_by_uri.into_values().flatten().collect())
@@ -745,17 +750,14 @@ fn is_current_diagnostic_publication(
     published: &PublishDiagnosticsParams,
     expected_versions: &BTreeMap<String, i32>,
 ) -> bool {
-    expected_versions.get(published.uri.as_str()).copied() == published.version
-}
-
-fn diagnostic_batch_is_complete(
-    expected_versions: &BTreeMap<String, i32>,
-    diagnostics_by_uri: &BTreeMap<String, Vec<CodeDiagnostic>>,
-) -> bool {
-    expected_versions.len() == diagnostics_by_uri.len()
-        && expected_versions
-            .keys()
-            .all(|uri| diagnostics_by_uri.contains_key(uri))
+    // `version` is optional in the LSP spec and several servers omit it
+    // entirely. Rejecting a versionless publication discards every diagnostic
+    // those servers ever produce, so treat an absent version as current and
+    // reject only versions the server explicitly reports as stale.
+    match published.version {
+        Some(version) => expected_versions.get(published.uri.as_str()).copied() == Some(version),
+        None => true,
+    }
 }
 
 impl Drop for StdioLspClient {
@@ -1146,8 +1148,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        cancel_request_message, diagnostic_batch_is_complete, file_uri_from_path_text,
-        is_current_diagnostic_publication,
+        cancel_request_message, file_uri_from_path_text, is_current_diagnostic_publication,
     };
 
     #[test]
@@ -1202,18 +1203,8 @@ mod tests {
 
         assert!(is_current_diagnostic_publication(&current, &expected));
         assert!(!is_current_diagnostic_publication(&stale, &expected));
-        assert!(!is_current_diagnostic_publication(&versionless, &expected));
-    }
-
-    #[test]
-    fn diagnostics_reject_partial_fixed_window_batches() {
-        let first = "file:///workspace/src/lib.rs".to_owned();
-        let second = "file:///workspace/src/main.rs".to_owned();
-        let expected = BTreeMap::from([(first.clone(), 4), (second.clone(), 2)]);
-        let partial = BTreeMap::from([(first.clone(), Vec::new())]);
-        let complete = BTreeMap::from([(first, Vec::new()), (second, Vec::new())]);
-
-        assert!(!diagnostic_batch_is_complete(&expected, &partial));
-        assert!(diagnostic_batch_is_complete(&expected, &complete));
+        // `version` is optional in the LSP spec; a server that omits it must
+        // not have all of its diagnostics discarded.
+        assert!(is_current_diagnostic_publication(&versionless, &expected));
     }
 }
