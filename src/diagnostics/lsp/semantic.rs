@@ -9,10 +9,10 @@ use url::Url;
 
 use crate::application::context::CancellationToken;
 use crate::daemon::lsp_gateway::{
-    AdmittedRoot, LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFuture,
+    AdmittedRoot, LspAnalyzerCancellationAuthority, LspPosition, LspRequestId, LspRuntimeFuture,
     LspSemanticOperationOutcome, LspSemanticRequestAuthority, Pr12SemanticProviderAdapter,
     SemanticCapability, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
-    SemanticResponse,
+    SemanticResponse, utf16_position_to_byte_offset,
 };
 use crate::db::Database;
 use crate::diagnostics::lsp::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
@@ -323,6 +323,7 @@ async fn graph_semantic_request(
                         .uri
                         .as_str(),
                     params.text_document_position_params.position.line,
+                    params.text_document_position_params.position.character,
                     &[
                         EdgeKind::Uses,
                         EdgeKind::Calls,
@@ -343,6 +344,7 @@ async fn graph_semantic_request(
                         .uri
                         .as_str(),
                     params.text_document_position_params.position.line,
+                    params.text_document_position_params.position.character,
                     &[EdgeKind::TypeOf, EdgeKind::Returns, EdgeKind::Receives],
                     EdgeDirection::Outgoing,
                 )
@@ -358,6 +360,7 @@ async fn graph_semantic_request(
                         .uri
                         .as_str(),
                     params.text_document_position_params.position.line,
+                    params.text_document_position_params.position.character,
                     &[EdgeKind::Implements, EdgeKind::Extends],
                     EdgeDirection::Incoming,
                 )
@@ -369,6 +372,7 @@ async fn graph_semantic_request(
                     project_root,
                     params.text_document_position.text_document.uri.as_str(),
                     params.text_document_position.position.line,
+                    params.text_document_position.position.character,
                     &[
                         EdgeKind::Uses,
                         EdgeKind::Calls,
@@ -391,6 +395,7 @@ async fn graph_semantic_request(
                         .uri
                         .as_str(),
                     params.text_document_position_params.position.line,
+                    params.text_document_position_params.position.character,
                 )
                 .await?;
                 Ok(GraphProjection::complete(node.map_or(
@@ -442,6 +447,7 @@ async fn graph_semantic_request(
                         .uri
                         .as_str(),
                     params.text_document_position_params.position.line,
+                    params.text_document_position_params.position.character,
                     call_item,
                 )
                 .await
@@ -452,6 +458,7 @@ async fn graph_semantic_request(
                     project_root,
                     params.item.uri.as_str(),
                     params.item.range.start.line,
+                    params.item.range.start.character,
                     EdgeDirection::Incoming,
                 )
                 .await
@@ -462,6 +469,7 @@ async fn graph_semantic_request(
                     project_root,
                     params.item.uri.as_str(),
                     params.item.range.start.line,
+                    params.item.range.start.character,
                     EdgeDirection::Outgoing,
                 )
                 .await
@@ -476,6 +484,7 @@ async fn graph_semantic_request(
                         .uri
                         .as_str(),
                     params.text_document_position_params.position.line,
+                    params.text_document_position_params.position.character,
                 )
                 .await
             }
@@ -489,6 +498,7 @@ async fn graph_semantic_request(
                         .uri
                         .as_str(),
                     params.text_document_position_params.position.line,
+                    params.text_document_position_params.position.character,
                     type_item,
                 )
                 .await
@@ -499,6 +509,7 @@ async fn graph_semantic_request(
                     project_root,
                     params.item.uri.as_str(),
                     params.item.range.start.line,
+                    params.item.range.start.character,
                     EdgeDirection::Outgoing,
                 )
                 .await
@@ -509,6 +520,7 @@ async fn graph_semantic_request(
                     project_root,
                     params.item.uri.as_str(),
                     params.item.range.start.line,
+                    params.item.range.start.character,
                     EdgeDirection::Incoming,
                 )
                 .await
@@ -553,10 +565,11 @@ async fn position_targets(
     project_root: &Path,
     uri: &str,
     line: u32,
+    character: u32,
     kinds: &[EdgeKind],
     direction: EdgeDirection,
 ) -> Result<GraphProjection> {
-    let Some(node) = node_at_position(database, project_root, uri, line).await? else {
+    let Some(node) = node_at_position(database, project_root, uri, line, character).await? else {
         return Ok(GraphProjection::complete(json!([])));
     };
     let nodes = related_nodes(database, &node, kinds, direction).await?;
@@ -575,9 +588,10 @@ async fn hierarchy_prepare(
     project_root: &Path,
     uri: &str,
     line: u32,
+    character: u32,
     project: fn(&Path, &Node) -> Result<Value>,
 ) -> Result<GraphProjection> {
-    let value = match node_at_position(database, project_root, uri, line).await? {
+    let value = match node_at_position(database, project_root, uri, line, character).await? {
         Some(node) => json!([project(project_root, &node)?]),
         None => json!([]),
     };
@@ -589,9 +603,10 @@ async fn hierarchy_calls(
     project_root: &Path,
     uri: &str,
     line: u32,
+    character: u32,
     direction: EdgeDirection,
 ) -> Result<GraphProjection> {
-    let Some(node) = node_at_position(database, project_root, uri, line).await? else {
+    let Some(node) = node_at_position(database, project_root, uri, line, character).await? else {
         return Ok(GraphProjection::complete(json!([])));
     };
     let edges = related_edges(database, &node, &[EdgeKind::Calls], direction).await?;
@@ -631,8 +646,9 @@ async fn signature_help(
     project_root: &Path,
     uri: &str,
     line: u32,
+    character: u32,
 ) -> Result<GraphProjection> {
-    let Some(node) = node_at_position(database, project_root, uri, line).await? else {
+    let Some(node) = node_at_position(database, project_root, uri, line, character).await? else {
         return Ok(GraphProjection::complete(Value::Null));
     };
     let mut nodes =
@@ -662,9 +678,10 @@ async fn hierarchy_types(
     project_root: &Path,
     uri: &str,
     line: u32,
+    character: u32,
     direction: EdgeDirection,
 ) -> Result<GraphProjection> {
-    let Some(node) = node_at_position(database, project_root, uri, line).await? else {
+    let Some(node) = node_at_position(database, project_root, uri, line, character).await? else {
         return Ok(GraphProjection::complete(json!([])));
     };
     let nodes = related_nodes(
@@ -687,14 +704,80 @@ async fn node_at_position(
     project_root: &Path,
     uri: &str,
     line: u32,
+    character: u32,
 ) -> Result<Option<Node>> {
     let path = relative_document_path(project_root, uri)?;
-    Ok(database
-        .get_nodes_by_file(&path)
-        .await?
+    let document_path = scoped_document_path(project_root, &path)?;
+    let text =
+        crate::sync::read_source_file(&document_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read semantic document: {error}"),
+        })?;
+    select_node_at_lsp_position(
+        database.get_nodes_by_file(&path).await?,
+        &text,
+        LspPosition { line, character },
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("invalid semantic document position: {error:?}"),
+    })
+}
+
+fn select_node_at_lsp_position(
+    nodes: Vec<Node>,
+    text: &str,
+    position: LspPosition,
+) -> std::result::Result<Option<Node>, crate::daemon::lsp_gateway::PositionError> {
+    let offset = utf16_position_to_byte_offset(text, position)?;
+    let line_start = text[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline.saturating_add(1));
+    let byte_column = u32::try_from(offset.saturating_sub(line_start))
+        .map_err(|_| crate::daemon::lsp_gateway::PositionError::ByteOutOfBounds)?;
+    Ok(nodes
         .into_iter()
-        .filter(|node| node.start_line <= line && line <= node.end_line)
-        .min_by_key(|node| node.end_line.saturating_sub(node.start_line)))
+        .filter(|node| node.kind != NodeKind::File)
+        .filter(|node| node_contains_byte_position(node, position.line, byte_column))
+        .min_by(|left, right| {
+            node_position_span(left)
+                .cmp(&node_position_span(right))
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+        }))
+}
+
+fn node_contains_byte_position(node: &Node, line: u32, byte_column: u32) -> bool {
+    let after_start =
+        line > node.start_line || (line == node.start_line && byte_column >= node.start_column);
+    let before_end =
+        line < node.end_line || (line == node.end_line && byte_column < node.end_column);
+    after_start && before_end
+}
+
+fn node_position_span(node: &Node) -> (u32, u32) {
+    (
+        node.end_line.saturating_sub(node.start_line),
+        node.end_column.saturating_sub(node.start_column),
+    )
+}
+
+fn scoped_document_path(project_root: &Path, relative_path: &str) -> Result<PathBuf> {
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to resolve admitted semantic root: {error}"),
+        })?;
+    let canonical_document =
+        canonical_root
+            .join(relative_path)
+            .canonicalize()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to resolve semantic document: {error}"),
+            })?;
+    if !canonical_document.starts_with(&canonical_root) {
+        return Err(TraceDecayError::Config {
+            message: "semantic document resolves outside the admitted project root".to_owned(),
+        });
+    }
+    Ok(canonical_document)
 }
 
 async fn related_nodes(
@@ -867,6 +950,32 @@ fn bounded_graph_failure(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn function_node(name: &str, start_column: u32, end_column: u32) -> Node {
+        Node {
+            id: format!("node.{name}"),
+            kind: NodeKind::Function,
+            name: name.to_owned(),
+            qualified_name: format!("fixture::{name}"),
+            file_path: "src/lib.rs".to_owned(),
+            start_line: 0,
+            attrs_start_line: 0,
+            end_line: 0,
+            start_column,
+            end_column,
+            signature: None,
+            docstring: None,
+            visibility: crate::types::Visibility::Private,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+        }
+    }
+
     #[test]
     fn advertised_semantics_derive_from_the_graph_provider_contract() {
         assert_eq!(
@@ -886,6 +995,74 @@ mod tests {
             ]
             .into_iter()
             .collect()
+        );
+    }
+
+    #[test]
+    fn exact_utf16_character_selects_the_matching_same_line_symbol() {
+        let text = "🙂 first(); second();\n";
+        let nodes = vec![
+            function_node("first", 5, 12),
+            function_node("second", 14, 22),
+        ];
+
+        let selected = select_node_at_lsp_position(
+            nodes.clone(),
+            text,
+            LspPosition {
+                line: 0,
+                character: 12,
+            },
+        )
+        .expect("valid UTF-16 position")
+        .expect("second symbol");
+        assert_eq!(selected.name, "second");
+
+        assert!(
+            select_node_at_lsp_position(
+                nodes,
+                text,
+                LspPosition {
+                    line: 0,
+                    character: 10,
+                },
+            )
+            .expect("valid UTF-16 position")
+            .is_none(),
+            "the exclusive end of the first symbol must not resolve it"
+        );
+    }
+
+    #[test]
+    fn semantic_position_rejects_the_middle_of_a_utf16_surrogate_pair() {
+        let error = select_node_at_lsp_position(
+            vec![function_node("emoji", 0, 4)],
+            "🙂",
+            LspPosition {
+                line: 0,
+                character: 1,
+            },
+        )
+        .expect_err("a partial surrogate pair is not a negotiated position");
+        assert_eq!(
+            error,
+            crate::daemon::lsp_gateway::PositionError::InsideSurrogatePair
+        );
+    }
+
+    #[test]
+    fn semantic_document_reads_cannot_escape_the_admitted_root() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        std::fs::write(fixture.path().join("outside.rs"), "fn outside() {}").expect("outside");
+
+        let error =
+            scoped_document_path(&root, "../outside.rs").expect_err("scope escape must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("outside the admitted project root")
         );
     }
 }
