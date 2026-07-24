@@ -1357,12 +1357,13 @@ impl DaemonInvocationState {
         // root, no upward discovery). A non-git project has no code-index
         // identity by design: skip mounting instead of failing project open —
         // every non-code-index surface stays available.
-        if let Err(error) = gix::open(project_root) {
+        let git_control = project_root.join(".git");
+        if !git_control.is_dir() && !git_control.is_file() {
             tracing::warn!(
                 event = "code_index_mount",
                 outcome = "skipped",
                 project = %project_root.display(),
-                reason = %error,
+                reason = "missing project-root .git control path",
                 "project root is not a git repository; code index disabled"
             );
             return Ok(());
