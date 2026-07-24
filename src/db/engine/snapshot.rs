@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlReadSnapshot;
 
@@ -22,9 +22,7 @@ impl ReadSnapshot {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
         let rows = tokio::task::spawn_blocking(move || {
-            runtime
-                .lock()
-                .expect("migration SQL read snapshot lock")
+            lock_runtime(&runtime)?
                 .query(statement)
                 .map_err(super::Error::from)
         })
@@ -42,6 +40,34 @@ impl ReadSnapshot {
     }
 }
 
+fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
+    runtime
+        .lock()
+        .map_err(|_| super::Error::Runtime("migration SQL read snapshot lock poisoned".to_owned()))
+}
+
 fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("migration SQL read snapshot task failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::{super::Error, lock_runtime};
+
+    #[test]
+    fn poisoned_snapshot_lock_returns_a_typed_error() {
+        let runtime = Mutex::new(());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = runtime.lock().unwrap();
+            panic!("poison snapshot lock");
+        });
+
+        let result = lock_runtime(&runtime);
+        let Err(Error::Runtime(message)) = result else {
+            panic!("poisoned snapshot lock must return a runtime error");
+        };
+        assert_eq!(message, "migration SQL read snapshot lock poisoned");
+    }
 }
