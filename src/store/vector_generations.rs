@@ -25,6 +25,11 @@ pub use tracedecay_domain::VectorGenerationIdV1;
 
 use crate::code_index::projection::verify_batch_receipt;
 use crate::db::{Database, engine::params};
+use crate::semantic_code::legacy_migration::{
+    LegacyVectorCanonicalRebuildPortV1, LegacyVectorInventoryPortV1,
+    LegacyVectorMigrationCancellationV1, LegacyVectorMigrationOwnerTransactionV1,
+    LegacyVectorMigrationReceiptV1, prepare_legacy_vector_migration,
+};
 use crate::semantic_code::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, SemanticProjectionErrorV1,
 };
@@ -298,6 +303,8 @@ pub enum VectorGenerationStoreErrorV1 {
     PhysicalVectorConflict,
     #[error("injected failure before atomic publication swap")]
     InjectedPublicationFailure,
+    #[error("legacy vector migration failed: {0}")]
+    LegacyMigration(String),
     #[error("project vector generation storage failed: {0}")]
     Storage(String),
     #[error("project vector generation state changed repeatedly during compare-and-swap")]
@@ -323,6 +330,8 @@ struct StagedVectorGenerationV1 {
 struct PublishedStateV1 {
     generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
     active_generation: Option<VectorGenerationIdV1>,
+    #[serde(default)]
+    legacy_migration_receipts: BTreeMap<ManifestDigest, LegacyVectorMigrationReceiptV1>,
     #[serde(skip, default)]
     physical_vectors: BTreeMap<ManifestDigest, PhysicalVectorPayloadV1>,
     #[serde(default)]
@@ -687,8 +696,84 @@ impl FakeVectorGenerationStoreV1 {
             manifest_digest: generation.manifest_digest().clone(),
             checkpoint: generation.checkpoint().clone(),
         };
-        self.published.active_generation = Some(generation_id.clone());
+        let mut next = self.published.clone();
+        next.active_generation = Some(generation_id.clone());
+        if self.fail_before_publication_swap {
+            self.fail_before_publication_swap = false;
+            return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
+        }
+        self.published = next;
         Ok(publication)
+    }
+
+    /// Atomically disable semantic reads while retaining immutable generations
+    /// for an exact offline rollback.
+    pub fn deactivate_generation(
+        &mut self,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        if self.published.active_generation.as_ref() != expected_active_generation {
+            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
+        }
+        let mut next = self.published.clone();
+        next.active_generation = None;
+        if self.fail_before_publication_swap {
+            self.fail_before_publication_swap = false;
+            return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
+        }
+        self.published = next;
+        Ok(())
+    }
+
+    fn commit_legacy_vector_migration(
+        &mut self,
+        transaction: &LegacyVectorMigrationOwnerTransactionV1,
+    ) -> Result<LegacyVectorMigrationReceiptV1, VectorGenerationStoreErrorV1> {
+        transaction
+            .validate()
+            .map_err(|error| VectorGenerationStoreErrorV1::LegacyMigration(error.to_string()))?;
+        if self.published.active_generation != transaction.expected_prior_active_generation {
+            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
+        }
+        for rebuilt in transaction
+            .receipt
+            .items
+            .iter()
+            .filter_map(|item| item.rebuilt_generation.as_ref())
+        {
+            if !self.published.generations.contains_key(rebuilt) {
+                return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
+            }
+        }
+        if let Some(next_active) = &transaction.next_active_generation
+            && !self.published.generations.contains_key(next_active)
+        {
+            return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
+        }
+
+        let mut next = self.published.clone();
+        match next
+            .legacy_migration_receipts
+            .get(&transaction.receipt.receipt_digest)
+        {
+            Some(existing) if existing != &transaction.receipt => {
+                return Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict);
+            }
+            Some(_) => {}
+            None => {
+                next.legacy_migration_receipts.insert(
+                    transaction.receipt.receipt_digest.clone(),
+                    transaction.receipt.clone(),
+                );
+            }
+        }
+        next.active_generation = transaction.next_active_generation.clone();
+        if self.fail_before_publication_swap {
+            self.fail_before_publication_swap = false;
+            return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
+        }
+        self.published = next;
+        Ok(transaction.receipt.clone())
     }
 
     pub fn active_checkpoint(&self) -> Option<&VectorProjectionCheckpointV1> {
@@ -840,6 +925,34 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
             state.activate_generation(generation_id, expected_active_generation)
         })
         .await
+    }
+
+    pub async fn deactivate_generation(
+        &self,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| state.deactivate_generation(expected_active_generation))
+            .await
+    }
+
+    /// Rebuild legacy identities through caller-owned canonical-code ports,
+    /// then atomically persist the receipt with the resulting active pointer.
+    /// Preparation never reads or republishes legacy vector bytes.
+    pub(crate) async fn migrate_legacy_vectors<Inventory, Rebuilder, Cancellation>(
+        &self,
+        inventory: &Inventory,
+        rebuilder: &mut Rebuilder,
+        cancellation: &Cancellation,
+    ) -> Result<LegacyVectorMigrationReceiptV1, VectorGenerationStoreErrorV1>
+    where
+        Inventory: LegacyVectorInventoryPortV1,
+        Rebuilder: LegacyVectorCanonicalRebuildPortV1,
+        Cancellation: LegacyVectorMigrationCancellationV1,
+    {
+        let transaction = prepare_legacy_vector_migration(inventory, rebuilder, cancellation)
+            .map_err(|error| VectorGenerationStoreErrorV1::LegacyMigration(error.to_string()))?;
+        self.mutate_state(|state| state.commit_legacy_vector_migration(&transaction))
+            .await
     }
 
     pub async fn active_generation_id(
@@ -1039,6 +1152,13 @@ fn validate_loaded_state(
         return Err(VectorGenerationStoreErrorV1::Storage(
             "active vector generation pointer is dangling".to_string(),
         ));
+    }
+    for (receipt_digest, receipt) in &state.published.legacy_migration_receipts {
+        if &receipt.receipt_digest != receipt_digest || receipt.validate().is_err() {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "legacy vector migration receipt is invalid".to_string(),
+            ));
+        }
     }
     for (generation_id, generation) in &state.published.generations {
         if generation.generation_id() != generation_id {
@@ -1378,6 +1498,101 @@ mod tests {
             },
             manifest_digest: generation_id.as_digest().clone(),
         }
+    }
+
+    fn insert_generation(
+        store: &mut FakeVectorGenerationStoreV1,
+        generation: PublishedVectorGenerationV1,
+    ) -> VectorGenerationIdV1 {
+        let generation_id = generation.generation_id().clone();
+        intern_generation_vectors(
+            &store.physical_vector_pool,
+            &mut store.published,
+            &generation,
+        )
+        .expect("intern generation vectors");
+        store
+            .published
+            .generations
+            .insert(generation_id.clone(), generation);
+        generation_id
+    }
+
+    #[test]
+    fn active_pointer_cas_fault_restart_and_semantic_off_are_atomic() {
+        let embedding = admitted_embedding();
+        let first = logical_generation(
+            'a',
+            embedding.clone(),
+            "code-generation.atomic-a",
+            '1',
+            "chunk.v1.atomic-a",
+            'a',
+            vec![0.25],
+        );
+        let second = logical_generation(
+            'b',
+            embedding,
+            "code-generation.atomic-b",
+            '2',
+            "chunk.v1.atomic-b",
+            'b',
+            vec![0.75],
+        );
+        let mut store = FakeVectorGenerationStoreV1::new();
+        let first_id = insert_generation(&mut store, first);
+        let second_id = insert_generation(&mut store, second);
+        store.published.active_generation = Some(first_id.clone());
+
+        assert_eq!(
+            store.activate_generation(&second_id, None),
+            Err(VectorGenerationStoreErrorV1::StaleActiveGeneration)
+        );
+        assert_eq!(store.active_generation_id(), Some(&first_id));
+
+        store.fail_before_publication_swap_once();
+        assert_eq!(
+            store.activate_generation(&second_id, Some(&first_id)),
+            Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure)
+        );
+        assert_eq!(store.active_generation_id(), Some(&first_id));
+
+        store
+            .activate_generation(&second_id, Some(&first_id))
+            .expect("activate replacement generation");
+        assert_eq!(
+            store.deactivate_generation(Some(&first_id)),
+            Err(VectorGenerationStoreErrorV1::StaleActiveGeneration)
+        );
+        assert_eq!(store.active_generation_id(), Some(&second_id));
+        let encoded = serde_json::to_string(&store).expect("serialize vector state");
+        let mut restarted: FakeVectorGenerationStoreV1 =
+            serde_json::from_str(&encoded).expect("deserialize vector state");
+        restarted
+            .ensure_physical_reuse_index()
+            .expect("rebuild physical reuse index");
+        validate_loaded_state(&restarted).expect("validate restarted vector state");
+        assert_eq!(restarted.active_generation_id(), Some(&second_id));
+
+        restarted.fail_before_publication_swap_once();
+        assert_eq!(
+            restarted.deactivate_generation(Some(&second_id)),
+            Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure)
+        );
+        assert_eq!(restarted.active_generation_id(), Some(&second_id));
+
+        restarted
+            .deactivate_generation(Some(&second_id))
+            .expect("disable semantic generation");
+        assert_eq!(restarted.active_generation_id(), None);
+        assert!(
+            restarted.generation(&second_id).is_some(),
+            "semantic-off retains the immutable generation for rollback"
+        );
+        restarted
+            .activate_generation(&second_id, None)
+            .expect("restore exact retained generation");
+        assert_eq!(restarted.active_generation_id(), Some(&second_id));
     }
 
     #[test]
