@@ -824,6 +824,72 @@ fn invalid_summary_successor_does_not_hide_eligible_predecessor() {
 }
 
 #[test]
+fn evolution_accepts_predecessor_and_successor_with_an_identical_shared_source_state() {
+    block_on(async {
+        let predecessor = summary("predecessor", "shared-source", 7);
+        let successor = summary("successor", "shared-source", 8)
+            .with_predecessor(predecessor.summary_id().clone())
+            .expect("valid predecessor reference");
+        let port = FakeReadPort::new(
+            vec![
+                candidate("predecessor", "summary-predecessor", 20),
+                candidate("successor", "summary-successor", 10),
+            ],
+            vec![
+                TemporalRecord::Summary(predecessor),
+                TemporalRecord::Summary(successor),
+                covered_summary_source("shared-source", 7),
+                covered_summary_source("shared-source", 7),
+            ],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Evolution, 2),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("shared summary source state");
+
+        assert_eq!(result.ranked.len(), 2);
+        assert!(result.summary_omissions.is_empty());
+    });
+}
+
+#[test]
+fn contradictory_duplicate_summary_source_states_are_rejected() {
+    block_on(async {
+        let port = FakeReadPort::new(
+            vec![candidate("summary", "summary-one", 10)],
+            vec![
+                TemporalRecord::Summary(summary("one", "shared-source", 7)),
+                covered_summary_source("shared-source", 7),
+                summary_source("shared-source", SummarySourceState::Missing),
+            ],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Current, 1),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(TemporalKernelError::Port(TemporalPortError::Read {
+                operation: "collect summary source states",
+                message,
+            })) if message == "adapter returned contradictory summary source states"
+        ));
+    });
+}
+
+#[test]
 fn summary_lineage_is_limited_to_the_selected_ranked_page() {
     block_on(async {
         let port = FakeReadPort::new(

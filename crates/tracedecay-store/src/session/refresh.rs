@@ -74,9 +74,8 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         self
     }
 
-    /// Selects the temporal coverage the refresh must satisfy. The default is
-    /// `Current`; a forensic-mode refresh of the same frontier is a distinct
-    /// durable operation, never join-equivalent to a current-mode refresh.
+    /// Selects the temporal coverage reported to this caller. The default is
+    /// `Current`; query-only coverage does not alter refresh operation identity.
     pub fn with_coverage_request(
         mut self,
         coverage_request: SessionTemporalCoverageRequestV1,
@@ -101,13 +100,11 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         self.refresh_key.as_ref()
     }
 
-    /// Join equivalence is exact session plus exact observed/committed target
-    /// plus identical temporal coverage request.
+    /// Join equivalence binds only projection-affecting source and scope inputs.
     pub fn is_equivalent_to(&self, other: &Self) -> bool {
         self.session_id == other.session_id
             && self.target_frontier == other.target_frontier
             && self.refresh_key == other.refresh_key
-            && self.coverage_request == other.coverage_request
     }
 }
 

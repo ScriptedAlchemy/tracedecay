@@ -776,7 +776,6 @@ fn refresh_binding_digest(
         "source_frontier": request.target_frontier().committed_through(),
         "target_frontier": request.target_frontier().observed_through(),
         "refresh_key": request.refresh_key(),
-        "coverage_request": request.coverage_request(),
     }))
     .map_err(|error| storage(BEGIN_REFRESH, error))?;
     Ok(digest_bytes(&encoded))

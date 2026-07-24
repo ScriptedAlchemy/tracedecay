@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
     CopyProofV1, LogicalCopyRecordV1, MessageOccurrenceIdV1, ObservationId, RetrievalAnchorId,

@@ -42,7 +42,7 @@ fn refresh_begin_request_preserves_temporal_coverage_mode() {
         forensic.coverage_request().mode(),
         tracedecay_domain::TemporalModeV1::Forensic
     );
-    assert!(!current.is_equivalent_to(&forensic));
+    assert!(current.is_equivalent_to(&forensic));
 }
 
 #[test]

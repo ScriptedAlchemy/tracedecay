@@ -1,7 +1,7 @@
 use tempfile::tempdir;
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
-    UtcMicros,
+    TemporalValidityV1, UtcMicros,
 };
 
 use super::candidates::*;
@@ -17,7 +17,7 @@ use crate::query::temporal::ports::{
     TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalWatermarks,
 };
 use crate::query::temporal::ranking::RankingCandidate;
-use crate::query::temporal::resolution::ValidatedAuthorization;
+use crate::query::temporal::resolution::{SummarySourceState, ValidatedAuthorization};
 
 const REQUIRED_SCHEMA_INDEXES: &[&str] = &[
     "idx_session_temporal_generations_session_state",
@@ -417,6 +417,13 @@ impl HostAdmissionTestRuntimeV1 {
              ) VALUES (
                 'session-b', 1, 'assertion-b', 'supports',
                 'same-anchor', 'other-anchor', 5, '{\"kind\":\"unknown\"}', '{}'
+             );
+             INSERT INTO session_current_entities (
+                session_id, generation, entity_kind, entity_id,
+                current_assertion_id, current_occurrence_id, coverage_json
+             ) VALUES (
+                'session-b', 1, 'occurrence_anchor', 'same-anchor',
+                NULL, 'same-id', '{}'
              );",
         )
         .await
@@ -671,6 +678,86 @@ impl HostAdmissionTestRuntimeV1 {
         .await
         .expect("provider summary fixture");
     }
+
+    async fn seed_historical_summary_successor_fixture_for_test(&self) {
+        let database = self
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        Executor::execute_batch(
+            &database
+                .writer_connection()
+                .expect("registered profile writer"),
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO observations (
+                observation_id, payload_digest, receipt_id, observation_json,
+                committed_cursor_json
+             ) VALUES (
+                'summary-history-observation', 'sha256:history', 'history-receipt',
+                '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
+             );
+             INSERT INTO session_occurrences (
+                session_id, generation, occurrence_id, source_observation_id,
+                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
+                valid_time_json, evidence_json, snippet_text, index_text
+             ) VALUES
+                (
+                    'session-snapshot', 1, 'summary-source-at-5',
+                    'summary-history-observation', 0, 'shared-summary-source',
+                    'user', 5, '{\"kind\":\"known\",\"valid_at\":5}', '{}',
+                    'source at 5', 'source at 5'
+                ),
+                (
+                    'session-snapshot', 1, 'summary-source-at-10',
+                    'summary-history-observation', 1, 'shared-summary-source',
+                    'user', 10, '{\"kind\":\"known\",\"valid_at\":10}', '{}',
+                    'source at 10', 'source at 10'
+                );
+             INSERT INTO session_current_entities (
+                session_id, generation, entity_kind, entity_id,
+                current_assertion_id, current_occurrence_id, coverage_json
+             ) VALUES (
+                'session-snapshot', 1, 'occurrence_anchor', 'shared-summary-source',
+                NULL, 'summary-source-at-10', '{}'
+             );
+             INSERT INTO session_summary_nodes (
+                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                source_horizon_json, publication_json, created_at
+             ) VALUES
+                (
+                    'historical-summary', 'session-snapshot', 'historical-summary-anchor',
+                    'historical', 'historical',
+                    '{\"knowledge_through\":5,\"valid_through\":5}', NULL, 5
+                ),
+                (
+                    'successor-summary', 'session-snapshot', 'successor-summary-anchor',
+                    'successor', 'successor',
+                    '{\"knowledge_through\":10,\"valid_through\":10}', NULL, 10
+                );
+             INSERT INTO session_summary_sources (
+                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
+             ) VALUES
+                ('historical-summary', 0, 'anchor', 'shared-summary-source', NULL),
+                ('successor-summary', 0, 'anchor', 'shared-summary-source', NULL);
+             INSERT INTO session_summary_successors (
+                predecessor_summary_id, successor_summary_id, created_at
+             ) VALUES ('historical-summary', 'successor-summary', 10);
+             INSERT INTO session_summary_availability (
+                session_id, generation, summary_id, availability,
+                source_horizon_json, reason, checked_at
+             ) VALUES
+                (
+                    'session-snapshot', 1, 'historical-summary', 'stale',
+                    '{\"knowledge_through\":5,\"valid_through\":5}',
+                    'predecessor_superseded', 10
+                ),
+                (
+                    'session-snapshot', 1, 'successor-summary', 'available',
+                    '{\"knowledge_through\":10,\"valid_through\":10}', NULL, 10
+                );",
+        )
+        .await
+        .expect("historical summary successor fixture");
+    }
 }
 
 #[test]
@@ -777,6 +864,10 @@ fn one_hundred_thousand_candidates_are_windowed_before_sql_allocation() {
 fn mode_sql_is_shaped_without_optional_or_fallback_predicates() {
     let current = RecordModeSql::new(TemporalModeV1::Current, 9);
     assert!(current.occurrence_join.contains("session_current_entities"));
+    assert!(
+        current.assertion_join.is_empty(),
+        "current resolution needs every assertion, including conflicts and support"
+    );
     assert!(!current.occurrence_join.contains(" OR "));
 
     let as_of = RecordModeSql::new(
@@ -1584,6 +1675,73 @@ async fn root_record_hydration_rejects_cross_session_copy_and_assertion_traps() 
     assert!(kinds_b.contains(&"occurrence".to_string()));
     assert!(kinds_b.contains(&"assertion".to_string()));
     assert!(kinds_b.contains(&"copy".to_string()));
+}
+
+#[tokio::test]
+async fn current_record_hydration_retains_non_superseding_assertions_for_resolution() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_cross_session_record_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let snapshot = root_snapshot_with_mode(1, None, TemporalModeV1::Current);
+    let mut candidate = candidate_for_anchor("same-anchor");
+    candidate.session = Some("session-b".to_string());
+
+    let kinds = read
+        .record_kinds(&snapshot, candidate, &record_request())
+        .await;
+
+    assert!(kinds.contains(&"occurrence".to_string()));
+    assert!(
+        kinds.contains(&"assertion".to_string()),
+        "Current must pass conflict/support assertions to the shared resolver"
+    );
+}
+
+#[tokio::test]
+async fn as_of_summary_source_uses_frozen_horizon_not_later_current_occurrence() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime
+        .seed_historical_summary_successor_fixture_for_test()
+        .await;
+    let read = runtime.retrieval_read_for_test().await;
+    let snapshot = scoped_snapshot_with_mode(
+        1,
+        None,
+        TemporalModeV1::AsOf {
+            cutoff: UtcMicros(6),
+        },
+    );
+
+    let records = read
+        .records(
+            &snapshot,
+            candidate_for_anchor("historical-summary-anchor"),
+            &record_request(),
+        )
+        .await;
+    let source = records
+        .iter()
+        .find_map(|record| match record {
+            TemporalRecord::SummarySource(source) => Some(source),
+            _ => None,
+        })
+        .expect("historical summary source");
+
+    assert_eq!(
+        source.state,
+        SummarySourceState::Covered {
+            knowledge_at: UtcMicros(5),
+            valid_time: TemporalValidityV1::Known {
+                valid_at: UtcMicros(5),
+            },
+        }
+    );
 }
 
 #[tokio::test]

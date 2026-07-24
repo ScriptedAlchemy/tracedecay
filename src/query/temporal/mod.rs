@@ -288,16 +288,19 @@ pub async fn execute_temporal_kernel(
                 TemporalRecord::Assertion(value) => records.assertions.push(value),
                 TemporalRecord::Summary(value) => records.summaries.push(value),
                 TemporalRecord::SummarySource(value) => {
-                    if records
-                        .summary_sources
-                        .insert(value.anchor_id, value.state)
-                        .is_some()
-                    {
-                        return Err(TemporalKernelError::Port(TemporalPortError::Read {
-                            operation: "collect summary source states",
-                            message: "adapter returned a duplicate summary source state"
-                                .to_string(),
-                        }));
+                    match records.summary_sources.entry(value.anchor_id) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(value.state);
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry)
+                            if entry.get() == &value.state => {}
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            return Err(TemporalKernelError::Port(TemporalPortError::Read {
+                                operation: "collect summary source states",
+                                message: "adapter returned contradictory summary source states"
+                                    .to_string(),
+                            }));
+                        }
                     }
                 }
             }

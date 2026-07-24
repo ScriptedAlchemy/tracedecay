@@ -449,11 +449,12 @@ pub(super) fn build_record_query(
                     COALESCE(source_occurrence.valid_time_json, '{{\"kind\":\"unknown\"}}'),
                     NULL, NULL, NULL, NULL, NULL,
                     CASE
-                        WHEN availability.availability = 'stale' THEN 'stale'
-                        WHEN availability.availability = 'unavailable' THEN 'unavailable'
-                        WHEN COALESCE(
-                            ss.source_anchor_id, source_summary.summary_anchor_id
-                        ) IS NULL THEN 'missing'
+                        WHEN ss.source_anchor_id IS NOT NULL
+                             AND source_occurrence.occurrence_id IS NULL THEN 'missing'
+                        WHEN ss.source_summary_id IS NOT NULL
+                             AND source_summary.summary_id IS NULL THEN 'missing'
+                        WHEN COALESCE(ss.source_anchor_id,
+                                      source_summary.summary_anchor_id) IS NULL THEN 'missing'
                         ELSE 'covered'
                     END, n.session_id
              FROM candidate AS c
@@ -465,17 +466,23 @@ pub(super) fn build_record_query(
              LEFT JOIN session_summary_nodes AS source_summary
                ON source_summary.summary_id = ss.source_summary_id
               AND source_summary.session_id = n.session_id
-             LEFT JOIN session_current_entities AS source_current
-               ON source_current.session_id = {source_current_session}
-              AND source_current.generation = {summary_generation}
-              AND source_current.entity_kind = 'occurrence_anchor'
-              AND source_current.entity_id = COALESCE(
-                  ss.source_anchor_id, source_summary.summary_anchor_id
-              )
              LEFT JOIN session_occurrences AS source_occurrence
-               ON source_occurrence.session_id = source_current.session_id
-              AND source_occurrence.generation = source_current.generation
-              AND source_occurrence.occurrence_id = source_current.current_occurrence_id
+               ON source_occurrence.session_id = n.session_id
+              AND source_occurrence.generation = {summary_generation}
+              AND source_occurrence.retrieval_anchor_id = ss.source_anchor_id
+              AND source_occurrence.occurrence_id = (
+                  SELECT historical_source.occurrence_id
+                  FROM session_occurrences AS historical_source
+                  WHERE historical_source.session_id = n.session_id
+                    AND historical_source.generation = {summary_generation}
+                    AND historical_source.retrieval_anchor_id = ss.source_anchor_id
+                    AND historical_source.knowledge_at <= json_extract(
+                        n.source_horizon_json, '$.knowledge_through'
+                    )
+                  ORDER BY historical_source.knowledge_at DESC,
+                           historical_source.occurrence_id DESC
+                  LIMIT 1
+              )
              LEFT JOIN session_summary_availability AS availability
                ON availability.summary_id = n.summary_id
               AND {availability_condition}
@@ -568,7 +575,6 @@ pub(super) fn build_record_query(
         summary_generation_join = record_scope.summary_generation_join,
         availability_condition = record_scope.availability_condition,
         summary_generation = record_scope.summary_generation,
-        source_current_session = record_scope.source_current_session,
         occurrence_join = mode.occurrence_join,
         occurrence_predicate = mode.occurrence_predicate,
         assertion_join = mode.assertion_join,
@@ -611,7 +617,6 @@ impl RecordScopeSql {
                      AND availability.generation = ?{generation_param}"
                 ),
                 summary_generation: format!("?{generation_param}"),
-                source_current_session: format!("?{scope_param}"),
             },
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot => Self {
                 occurrence_condition: "AND o.session_id = c.session_id".to_string(),
@@ -643,7 +648,6 @@ impl RecordScopeSql {
                      AND availability.generation = summary_generation.generation"
                     .to_string(),
                 summary_generation: "summary_generation.generation".to_string(),
-                source_current_session: "n.session_id".to_string(),
             },
         }
     }
@@ -661,12 +665,7 @@ impl RecordModeSql {
                    AND occurrence_current.current_occurrence_id = o.occurrence_id"
                     .to_string(),
                 occurrence_predicate: "1 = 1".to_string(),
-                assertion_join: "JOIN session_current_entities AS assertion_current
-                    ON assertion_current.session_id = a.session_id
-                   AND assertion_current.generation = a.generation
-                   AND assertion_current.entity_kind = 'assertion_anchor'
-                   AND assertion_current.current_assertion_id = a.assertion_id"
-                    .to_string(),
+                assertion_join: String::new(),
                 assertion_predicate: "1 = 1".to_string(),
                 copy_join: "JOIN session_current_entities AS copy_current
                     ON copy_current.session_id = target.session_id
@@ -737,7 +736,6 @@ pub(super) struct RecordScopeSql {
     pub(super) summary_generation_join: String,
     pub(super) availability_condition: String,
     pub(super) summary_generation: String,
-    pub(super) source_current_session: String,
 }
 
 pub(super) struct RecordModeSql {

@@ -246,6 +246,37 @@ impl RegisteredTemporalHarness {
             .expect("count value")
     }
 
+    pub(super) async fn raw_store_id(&self, message_id: &str) -> i64 {
+        let snapshot = self
+            .registered
+            .read_snapshot()
+            .await
+            .expect("registered read snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id
+                 FROM lcm_raw_messages
+                 WHERE provider = 'provider.application'
+                   AND session_id = 'session.temporal.application'
+                   AND message_id = ?1",
+                [message_id],
+            )
+            .await
+            .expect("raw message lookup");
+        let store_id = rows
+            .next()
+            .await
+            .expect("raw message row")
+            .expect("raw message result")
+            .get(0)
+            .expect("raw message store id");
+        assert!(
+            rows.next().await.expect("raw message uniqueness").is_none(),
+            "raw message fixture must be unique"
+        );
+        store_id
+    }
+
     async fn seed_cursor_key(&self, key_id: &str, version: i64, material: u8) {
         self.registered
             .writer_connection()

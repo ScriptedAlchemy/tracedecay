@@ -137,7 +137,7 @@ fn progress_for(
 }
 
 #[tokio::test]
-async fn begin_joins_exact_requests_and_rejects_conflicting_running_targets() {
+async fn begin_joins_across_coverage_requests_and_rejects_conflicting_running_targets() {
     let tmp = TempDir::new().unwrap();
     let runtime = registered_temporal_runtime(&tmp).await;
     let store = temporal_store(&runtime);
@@ -145,7 +145,15 @@ async fn begin_joins_exact_requests_and_rejects_conflicting_running_targets() {
 
     let started = begin(&store, &session_id, frontier(4, 0)).await;
     assert_eq!(started.disposition(), SessionRefreshDispositionV1::Started);
-    let joined = begin(&store, &session_id, frontier(4, 0)).await;
+    let joined = store
+        .begin_or_join_session_refresh(
+            SessionRefreshBeginOrJoinRequestV1::new(session_id.clone(), frontier(4, 0))
+                .with_coverage_request(SessionTemporalCoverageRequestV1::new(
+                    TemporalModeV1::Forensic,
+                )),
+        )
+        .await
+        .unwrap();
     assert_eq!(joined.disposition(), SessionRefreshDispositionV1::Joined);
     assert_eq!(joined.operation_id(), started.operation_id());
 
@@ -167,6 +175,7 @@ async fn begin_joins_exact_requests_and_rejects_conflicting_running_targets() {
     assert_eq!(recovery.operation_id(), started.operation_id());
     assert_eq!(recovery.source_frontier(), 0);
     assert_eq!(recovery.target_frontier(), frontier(4, 0));
+    assert_eq!(recovery.coverage_request().mode(), TemporalModeV1::Current);
     assert_eq!(
         recovery.projector_version(),
         "session-temporal-projector.v1"
@@ -331,7 +340,15 @@ async fn complete_activates_the_bound_generation_and_terminal_retry_is_exact() {
             .unwrap()
             .is_none()
     );
-    let retry = begin(&store, &session_id, frontier(0, 0)).await;
+    let retry = store
+        .begin_or_join_session_refresh(
+            SessionRefreshBeginOrJoinRequestV1::new(session_id, frontier(0, 0))
+                .with_coverage_request(SessionTemporalCoverageRequestV1::new(
+                    TemporalModeV1::Forensic,
+                )),
+        )
+        .await
+        .unwrap();
     assert_eq!(retry.disposition(), SessionRefreshDispositionV1::Joined);
     assert_eq!(retry.operation_id(), receipt.operation_id());
 }

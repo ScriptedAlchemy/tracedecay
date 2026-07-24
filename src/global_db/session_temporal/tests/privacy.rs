@@ -1,10 +1,17 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, WorktreeId,
+    ActorId, HydrationStateV1, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalGrainV1,
+    SessionId, TemporalModeV1, WorktreeId,
 };
 
-use super::harness::{PRIVACY_CANARY, PROJECT_ID, RegisteredTemporalHarness, SAFE_PRIVACY_PAYLOAD};
+use super::harness::{
+    EXTERNAL_PAYLOAD, INLINE_PAYLOAD, PRIVACY_CANARY, PROJECT_ID, RegisteredTemporalHarness,
+    SAFE_PRIVACY_PAYLOAD,
+};
 use crate::application::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
     PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
@@ -17,8 +24,12 @@ use crate::application::session::{
     SessionTemporalQuery,
 };
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use crate::query::temporal::TemporalKernelResult;
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ranking::DiversityLimits;
+use crate::sessions::lcm::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
+};
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 
@@ -48,6 +59,45 @@ impl SessionScopeAuthorizer for DenyAuthorizer {
         _request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         Err(SessionAuthorizationError::Denied)
+    }
+}
+
+#[derive(Clone)]
+struct RevocableAuthorizer {
+    authorized: Arc<AtomicBool>,
+}
+
+impl RevocableAuthorizer {
+    fn new() -> Self {
+        Self {
+            authorized: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn allow(&self) {
+        self.authorized.store(true, Ordering::SeqCst);
+    }
+
+    fn revoke(&self) {
+        self.authorized.store(false, Ordering::SeqCst);
+    }
+}
+
+impl SessionScopeAuthorizer for RevocableAuthorizer {
+    fn authorize(
+        &self,
+        context: &RequestContext,
+        request: &SessionScopeAuthorizationRequest,
+    ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
+        if !self.authorized.load(Ordering::SeqCst) {
+            return Err(SessionAuthorizationError::Denied);
+        }
+        SessionAuthorizationGrant::issue(
+            AuthorizationGrantId::new("grant.temporal.revocable").unwrap(),
+            2,
+            context,
+            request,
+        )
     }
 }
 
@@ -192,6 +242,354 @@ async fn registered_sanitized_temporal_state_is_stable_across_execution_replay()
     assert!(!format!("{first:?}{replay:?}").contains(PRIVACY_CANARY));
 }
 
+#[tokio::test]
+async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_storage_mutation() {
+    let harness = RegisteredTemporalHarness::open("registered-lcm-read-authorization").await;
+    let policy_digest = harness.seed_application_fixture().await;
+    let raw_store_id = harness.raw_store_id("message-1").await;
+    let baseline = storage_fingerprint(&harness);
+    let context = request_context(policy_digest);
+    let authorizer = RevocableAuthorizer::new();
+    let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
+    let service = SessionRetrievalService::new(
+        authorizer.clone(),
+        &execution,
+        Words,
+        SessionRetrievalConfiguration::new(3, 5).unwrap(),
+    );
+
+    let describe_query = application_query(
+        "",
+        None,
+        TemporalModeV1::Forensic,
+        RetrievalGrainV1::Session,
+        1,
+    )
+    .with_compatibility_filter_digest("surface.describe.v1".to_owned());
+    assert_surface_completed(
+        &service.retrieve(&context, describe_query.clone()).await,
+        "describe",
+    );
+    let description = execution
+        .render_lcm_describe(LcmDescribeRequest {
+            provider: "provider.application".to_owned(),
+            session_id: "session.temporal.application".to_owned(),
+            target: LcmDescribeTarget::Session,
+        })
+        .await
+        .expect("authorized describe render");
+    let description = serde_json::to_value(description).expect("describe response JSON");
+    assert_eq!(description["raw_message_count"], 2);
+    assert_storage_unchanged(&harness, &baseline, "describe");
+    authorizer.revoke();
+    assert!(matches!(
+        service.retrieve(&context, describe_query).await,
+        SessionRetrievalOutcome::Denied
+    ));
+    assert_storage_unchanged(&harness, &baseline, "revoked describe");
+
+    authorizer.allow();
+    let expand_target = LcmExpandTarget::RawMessage {
+        store_id: raw_store_id,
+    };
+    let direct = execution
+        .resolve_lcm_expand_target(
+            "provider.application",
+            &SessionId::new("session.temporal.application").unwrap(),
+            &expand_target,
+        )
+        .await
+        .expect("resolve authorized expand target");
+    assert_storage_unchanged(&harness, &baseline, "expand target resolution");
+    let expand_query = application_query(
+        "",
+        None,
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        1,
+    )
+    .with_compatibility_filter_digest("surface.expand.v1".to_owned())
+    .with_direct_anchor(direct.anchor_id.clone());
+    let expanded = only_result(
+        service.retrieve(&context, expand_query.clone()).await,
+        "expand",
+    );
+    let canonical_content = available_content(&expanded, &direct.anchor_id);
+    let expansion = execution
+        .render_lcm_expand(
+            LcmExpandRequest {
+                provider: "provider.application".to_owned(),
+                session_id: "session.temporal.application".to_owned(),
+                target: expand_target,
+                content_slice: Some(LcmContentSlice {
+                    offset: 0,
+                    limit: 256,
+                }),
+                source_offset: 0,
+                source_limit: None,
+            },
+            &canonical_content,
+        )
+        .await
+        .expect("authorized expand render");
+    let expansion = serde_json::to_value(expansion).expect("expand response JSON");
+    assert_eq!(expansion["content"], INLINE_PAYLOAD);
+    assert_storage_unchanged(&harness, &baseline, "expand");
+    authorizer.revoke();
+    assert!(matches!(
+        service.retrieve(&context, expand_query).await,
+        SessionRetrievalOutcome::Denied
+    ));
+    assert_storage_unchanged(&harness, &baseline, "revoked expand");
+
+    authorizer.allow();
+    let expand_query = application_query(
+        "occurrence payload",
+        None,
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        8,
+    )
+    .with_compatibility_filter_digest("surface.expand-query.v1".to_owned());
+    let expanded_query = only_result(
+        service.retrieve(&context, expand_query.clone()).await,
+        "expand-query",
+    );
+    assert!(expanded_query.context.rendered.contains(INLINE_PAYLOAD));
+    assert!(expanded_query.context.rendered.contains(EXTERNAL_PAYLOAD));
+    assert_storage_unchanged(&harness, &baseline, "expand-query");
+    authorizer.revoke();
+    assert!(matches!(
+        service.retrieve(&context, expand_query).await,
+        SessionRetrievalOutcome::Denied
+    ));
+    assert_storage_unchanged(&harness, &baseline, "revoked expand-query");
+}
+
+#[tokio::test]
+async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_storage_mutation() {
+    let harness = RegisteredTemporalHarness::open("registered-lcm-read-replay").await;
+    let policy_digest = harness.seed_application_fixture().await;
+    let baseline = storage_fingerprint(&harness);
+    let context = request_context(policy_digest);
+    let authorizer = RevocableAuthorizer::new();
+    let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
+    let service = SessionRetrievalService::new(
+        authorizer.clone(),
+        &execution,
+        Words,
+        SessionRetrievalConfiguration::new(3, 5).unwrap(),
+    );
+
+    let discovery = only_result(
+        service
+            .retrieve(
+                &context,
+                application_query(
+                    "inline occurrence",
+                    None,
+                    TemporalModeV1::Current,
+                    RetrievalGrainV1::Occurrence,
+                    8,
+                ),
+            )
+            .await,
+        "direct-anchor discovery",
+    );
+    let anchor_id = discovery.ranked[0].anchor_id.clone();
+    assert_storage_unchanged(&harness, &baseline, "direct-anchor discovery");
+
+    let direct_query = application_query(
+        "",
+        None,
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        1,
+    )
+    .with_direct_anchor(anchor_id.clone());
+    let direct = only_result(
+        service.retrieve(&context, direct_query.clone()).await,
+        "direct-anchor",
+    );
+    assert_eq!(direct.ranked[0].anchor_id, anchor_id);
+    assert_storage_unchanged(&harness, &baseline, "direct-anchor");
+    authorizer.revoke();
+    assert!(matches!(
+        service.retrieve(&context, direct_query).await,
+        SessionRetrievalOutcome::Denied
+    ));
+    assert_storage_unchanged(&harness, &baseline, "revoked direct-anchor");
+
+    authorizer.allow();
+    let replay_query = application_query(
+        "occurrence payload",
+        None,
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        8,
+    );
+    let first = only_result(
+        service.retrieve(&context, replay_query.clone()).await,
+        "replay first execution",
+    );
+    let replay_execution =
+        RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
+    let replay_service = SessionRetrievalService::new(
+        authorizer.clone(),
+        &replay_execution,
+        Words,
+        SessionRetrievalConfiguration::new(3, 5).unwrap(),
+    );
+    let replay = only_result(
+        replay_service
+            .retrieve(&context, replay_query.clone())
+            .await,
+        "replay reconstructed execution",
+    );
+    assert_eq!(
+        first
+            .ranked
+            .iter()
+            .map(|item| &item.anchor_id)
+            .collect::<Vec<_>>(),
+        replay
+            .ranked
+            .iter()
+            .map(|item| &item.anchor_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(first.context.rendered, replay.context.rendered);
+    assert_storage_unchanged(&harness, &baseline, "replay");
+    authorizer.revoke();
+    assert!(matches!(
+        replay_service.retrieve(&context, replay_query).await,
+        SessionRetrievalOutcome::Denied
+    ));
+    assert_storage_unchanged(&harness, &baseline, "revoked replay");
+
+    authorizer.allow();
+    let first_page = only_result(
+        service
+            .retrieve(
+                &context,
+                application_query(
+                    "occurrence payload",
+                    None,
+                    TemporalModeV1::Current,
+                    RetrievalGrainV1::Occurrence,
+                    1,
+                ),
+            )
+            .await,
+        "continuation first page",
+    );
+    let first_anchor = first_page.ranked[0].anchor_id.clone();
+    let cursor = first_page
+        .next_cursor
+        .clone()
+        .expect("first page must carry a canonical continuation");
+    assert_storage_unchanged(&harness, &baseline, "continuation first page");
+    let continuation_query = application_query(
+        "occurrence payload",
+        Some(cursor),
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        1,
+    );
+    let continued = only_result(
+        service.retrieve(&context, continuation_query.clone()).await,
+        "continuation",
+    );
+    assert_ne!(continued.ranked[0].anchor_id, first_anchor);
+    assert_storage_unchanged(&harness, &baseline, "continuation");
+    authorizer.revoke();
+    assert!(matches!(
+        service.retrieve(&context, continuation_query).await,
+        SessionRetrievalOutcome::Denied
+    ));
+    assert_storage_unchanged(&harness, &baseline, "revoked continuation");
+}
+
+fn assert_surface_completed(
+    outcome: &SessionRetrievalOutcome<TemporalKernelResult>,
+    surface: &str,
+) {
+    assert!(
+        matches!(
+            outcome,
+            SessionRetrievalOutcome::Complete { .. }
+                | SessionRetrievalOutcome::CompleteZero { .. }
+                | SessionRetrievalOutcome::Partial { .. }
+        ),
+        "{surface} must complete through the canonical service: {outcome:?}"
+    );
+}
+
+fn only_result(
+    outcome: SessionRetrievalOutcome<TemporalKernelResult>,
+    surface: &str,
+) -> TemporalKernelResult {
+    match outcome {
+        SessionRetrievalOutcome::Complete { mut items, .. }
+        | SessionRetrievalOutcome::Partial { mut items, .. } => {
+            assert_eq!(items.len(), 1, "{surface} must return one kernel result");
+            items.pop().unwrap()
+        }
+        outcome => panic!("{surface} must return a canonical kernel result: {outcome:?}"),
+    }
+}
+
+fn available_content(result: &TemporalKernelResult, anchor_id: &RetrievalAnchorId) -> String {
+    let content = result
+        .hydrated
+        .iter()
+        .find(|hydrated| {
+            hydrated.anchor_id() == anchor_id && hydrated.state() == HydrationStateV1::Available
+        })
+        .and_then(|hydrated| hydrated.content())
+        .expect("authorized canonical payload");
+    std::str::from_utf8(content)
+        .expect("canonical payload UTF-8")
+        .to_owned()
+}
+
+fn storage_fingerprint(harness: &RegisteredTemporalHarness) -> ([u8; 32], [u8; 32], [u8; 32]) {
+    let database_path = harness.registered.db_path();
+    let database = file_fingerprint(database_path);
+    let wal = file_fingerprint(&database_path.with_file_name(format!(
+        "{}-wal",
+        database_path.file_name().unwrap().to_string_lossy()
+    )));
+    let payload = file_fingerprint(
+        &database_path
+            .parent()
+            .unwrap()
+            .join("lcm-payloads/application-fixture.bin"),
+    );
+    (database, wal, payload)
+}
+
+fn file_fingerprint(path: &std::path::Path) -> [u8; 32] {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read storage fingerprint {}: {error}", path.display()),
+    };
+    Sha256::digest(bytes).into()
+}
+
+fn assert_storage_unchanged(
+    harness: &RegisteredTemporalHarness,
+    expected: &([u8; 32], [u8; 32], [u8; 32]),
+    surface: &str,
+) {
+    assert_eq!(
+        &storage_fingerprint(harness),
+        expected,
+        "{surface} must not mutate the registered database, durable WAL, or external payload"
+    );
+}
+
 fn request_context(policy_digest: [u8; 32]) -> RequestContext {
     RequestContext::new(
         ActorId::new("actor.temporal.privacy").unwrap(),
@@ -214,6 +612,31 @@ fn request_context(policy_digest: [u8; 32]) -> RequestContext {
         CancellationToken::new(),
         RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
     )
+}
+
+fn application_query(
+    text: &str,
+    cursor: Option<String>,
+    temporal_mode: TemporalModeV1,
+    grain: RetrievalGrainV1,
+    limit: usize,
+) -> SessionTemporalQuery {
+    SessionTemporalQuery::new(
+        SessionId::new("session.temporal.application").unwrap(),
+        Some("provider.application".to_owned()),
+        text,
+        cursor,
+        temporal_mode,
+        grain,
+        limit,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: 64_000,
+            max_tokens: 16_000,
+            estimator_version: "privacy-words-v1".to_owned(),
+        },
+    )
+    .unwrap()
 }
 
 fn privacy_query() -> SessionTemporalQuery {
