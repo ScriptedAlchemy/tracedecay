@@ -422,3 +422,17 @@ fn mixed_snapshot_and_duplicate_chunk_identities_are_rejected_before_diffing() {
         Err(ChunkIncrementErrorV1::DuplicateChunk(_))
     ));
 }
+
+#[test]
+fn duplicate_file_occurrences_are_rejected_before_manifest_flattening() {
+    let expected_generation = generation(2);
+    let first = baseline_file(&expected_generation, "file.duplicate", "src/first.rs");
+    let second = baseline_file(&expected_generation, "file.duplicate", "src/second.rs");
+
+    assert_eq!(
+        GenerationChunkManifestV1::new(expected_generation, vec![first, second]),
+        Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(id(
+            "file.duplicate"
+        )))
+    );
+}

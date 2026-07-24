@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -13,8 +13,10 @@ use tracedecay_application::{
     RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, EphemeralSanitizedQueryViewV1, ManifestDigest, ProjectId,
-    QueryNormalizationRevision, RefId, RepositoryId, SanitizerRevision, UtcMicros, WorktreeId,
+    ActorId, CalibrationProfileId, CommitId, ComponentRevision, DiversityPolicy,
+    EphemeralSanitizedQueryViewV1, FusionProfile, ManifestDigest, PrivacyDomainId, ProjectId,
+    QueryNormalizationRevision, RefId, RepositoryId, RetrievalBudget, RetrievalCursorKeyId,
+    RetrieverKind, SanitizerRevision, UtcMicros, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -36,6 +38,8 @@ use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
     SharedCodeIndexBytePoolV1,
 };
+use crate::query::retrieval::Pr9QueryAuthorityV1;
+use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
 
 struct GitFixture {
     root: TempDir,
@@ -157,6 +161,93 @@ fn query_meta() -> RetrievalRequestMeta {
         ResultProjection::Evidence,
         RetrievalOrder::Relevance,
     )
+}
+
+fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<Pr9QueryAuthorityV1> {
+    let id = |value: &str| value.to_owned();
+    let profile = FusionProfile {
+        profile_id: id("profile.code-index.fixture")
+            .try_into()
+            .expect("profile id"),
+        evaluation_result_anchor: id("evaluation.code-index.fixture")
+            .try_into()
+            .expect("evaluation anchor"),
+        calibrations: RetrieverKind::PR9_FALLBACK_LANES
+            .into_iter()
+            .map(|lane| {
+                (
+                    lane,
+                    CalibrationProfileId::new(format!(
+                        "calibration.{}.code-index.fixture",
+                        lane.as_str()
+                    ))
+                    .expect("calibration id"),
+                )
+            })
+            .collect(),
+        score_domain_calibrations: BTreeMap::new(),
+        weights_micros: [
+            (RetrieverKind::ExactLiteral, 1_000_000),
+            (RetrieverKind::Lexical, 500_000),
+            (RetrieverKind::Graph, 250_000),
+        ]
+        .into_iter()
+        .collect(),
+        diversity_policy_id: id("diversity.code-index.fixture")
+            .try_into()
+            .expect("diversity id"),
+        rerank_policy_id: None,
+        retrieval_budget: RetrievalBudget {
+            max_candidates_per_lane: 32,
+            max_fused_candidates: 32,
+            max_hydrated_results: 32,
+            max_hydration_bytes: 32 * 65_536,
+            deadline_micros: None,
+        },
+    };
+    let diversity = DiversityPolicy {
+        policy_id: profile.diversity_policy_id.clone(),
+        evaluation_result_anchor: Some(profile.evaluation_result_anchor.clone()),
+        per_source_namespace: None,
+        per_source_instance: None,
+        per_repository: None,
+        per_session_or_thread: None,
+        per_copy_cluster: None,
+        per_evidence_role: None,
+    };
+    let keyring = RetrievalCursorKeyringV1::new(
+        privacy_domain,
+        RetrievalCursorKeyId::new("retrieval-key.code-index.fixture").expect("cursor key id"),
+        1,
+        vec![7_u8; 32],
+        1_000_000,
+    )
+    .expect("cursor keyring");
+    Arc::new(
+        Pr9QueryAuthorityV1::new(
+            profile,
+            diversity,
+            ComponentRevision::new("ranking.code-index.fixture").expect("ranking revision"),
+            keyring,
+        )
+        .expect("query authority"),
+    )
+}
+
+async fn mount_query_authority(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    context: &RequestContext,
+    privacy_domain: PrivacyDomainId,
+) {
+    registry
+        .mount_pr9_query_authority(
+            project_root,
+            context.scope(),
+            query_authority(privacy_domain),
+        )
+        .await
+        .expect("mount query authority");
 }
 
 #[test]
@@ -755,6 +846,128 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_reconciles_are_globally_bounded_across_worktrees() {
+    let first = GitFixture::new(&[("src/lib.rs", "pub fn first() -> u32 { 1 }\n")]);
+    let second = GitFixture::new(&[("src/lib.rs", "pub fn second() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    for fixture in [&first, &second] {
+        registry
+            .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+            .await
+            .expect("mount worktree");
+    }
+    let first_generation = wait_for_initial_generation(&registry, first.path()).await;
+    let second_generation = wait_for_initial_generation(&registry, second.path()).await;
+
+    let first_handle = registry
+        .scheduler_handle(first.path())
+        .await
+        .expect("first scheduler");
+    let first_wake = {
+        let scheduler = first_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(&scheduler.wake)
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = first_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal first lock held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("first scheduler lock acquired");
+
+    first.edit("src/lib.rs", "pub fn first() -> u32 { 2 }\n");
+    first_wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    second.edit("src/lib.rs", "pub fn second() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(second.path(), second.path().join("src/lib.rs"))
+            .await
+    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        registry.latest_generation_id(second.path()).await,
+        Some(second_generation.clone()),
+        "a second worktree must wait behind the bounded background reconcile admission"
+    );
+
+    release_tx.send(()).expect("release first scheduler");
+    lock_thread.join().expect("first lock thread joins");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let first_advanced = registry
+                .latest_generation_id(first.path())
+                .await
+                .is_some_and(|generation| generation != first_generation);
+            let second_advanced = registry
+                .latest_generation_id(second.path())
+                .await
+                .is_some_and(|generation| generation != second_generation);
+            if first_advanced && second_advanced {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both queued worktrees reconcile");
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler");
+    let poison = Arc::clone(&scheduler);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poison.lock().expect("unpoisoned scheduler");
+            panic!("fixture poison");
+        })
+        .join()
+        .is_err()
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .notify_path(fixture.path().join("src/lib.rs"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if registry
+                .latest_generation_id(fixture.path())
+                .await
+                .is_some_and(|generation| generation != initial)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker recovers and publishes after poison");
+    registry.shutdown().await;
+}
+
 #[cfg(feature = "semantic-fastembed")]
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() {
@@ -940,6 +1153,13 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let exact_operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let exact_context = application_context(&exact_operation, repository.clone(), worktree.clone());
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &exact_context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
     let exact_request =
         ExactOccurrenceRequest::new("caller", None, scope.clone(), query_meta()).expect("exact");
     let exact = registry
@@ -1495,6 +1715,100 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn freshness_failure_does_not_serve_a_stale_complete_generation() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let git_dir = fixture.path().join(".git");
+    let unavailable_git_dir = fixture.path().join(".git-unavailable");
+    std::fs::rename(&git_dir, &unavailable_git_dir).expect("hide git authority");
+    let latest = registry.latest_complete_fresh(fixture.path()).await;
+    std::fs::rename(&unavailable_git_dir, &git_dir).expect("restore git authority");
+
+    assert!(
+        latest.is_none(),
+        "failed freshness resolution must fail closed instead of serving stale data"
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_query_does_not_wait_for_a_busy_scheduler() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount scheduler");
+    let generation = wait_for_initial_generation(&registry, fixture.path()).await;
+    let latest = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("latest generation");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let context = application_context(
+        &operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree identity"),
+    )
+    .with_deadline(Deadline::new(UtcMicros(1)).expect("expired deadline"));
+    let request = ExactOccurrenceRequest::new(
+        "alpha",
+        None,
+        CodeQueryScope::new(generation, None).expect("scope"),
+        query_meta(),
+    )
+    .expect("request");
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler lock held");
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+
+    let started = std::time::Instant::now();
+    let outcome = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    let elapsed = started.elapsed();
+    lock_thread.join().expect("scheduler lock thread joins");
+
+    assert!(matches!(outcome, RetrievalPortOutcome::Unavailable(_)));
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "expired query waited {elapsed:?} for scheduler work"
+    );
+    registry.shutdown().await;
+}
+
 #[test]
 fn same_content_head_move_publishes_new_source_identity() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
@@ -1580,6 +1894,13 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
     let operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        target.path(),
+        &context,
+        target_latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
     let scope =
         CodeQueryScope::new(super::queries::unpinned_latest_generation(), None).expect("scope");
     let request = ExactOccurrenceRequest::new(target_literal, None, scope, query_meta())
@@ -1621,6 +1942,7 @@ async fn pinned_generation_from_another_worktree_is_unavailable() {
         .await
         .expect("mount requester worktree");
     let owner_generation = wait_for_initial_generation(&registry, owner.path()).await;
+    wait_for_initial_generation(&registry, requester.path()).await;
     let requester_latest = registry
         .latest_complete_fresh(requester.path())
         .await
@@ -1758,6 +2080,13 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
     let operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
     let scope =
         CodeQueryScope::new(super::queries::unpinned_latest_generation(), None).expect("scope");
     let request =
@@ -1827,6 +2156,13 @@ async fn pinned_query_bypasses_freshness_resolution() {
     let operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
     let scope = CodeQueryScope::new(initial.clone(), None).expect("scope");
     let request =
         ExactOccurrenceRequest::new("alpha", None, scope, query_meta()).expect("exact request");
