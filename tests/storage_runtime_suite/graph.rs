@@ -1,7 +1,7 @@
-//! Graph-store read-only compatibility evidence across libsql and bundled SQLite.
+//! Graph-store read-only compatibility evidence across the canonical runtime and immutable SQLite.
 //!
 //! The helper is deliberately exercised only through its closed, typed protocol.
-//! Legacy-side SQL below captures fixed read-only SQLite metadata; it is not a
+//! Runtime-side SQL below captures fixed read-only SQLite metadata; it is not a
 //! helper escape hatch and no SQL is ever sent across the subprocess boundary.
 
 #[path = "../common/mod.rs"]
@@ -11,16 +11,29 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
-use libsql::params;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracedecay::{
     db::Database,
     types::{Edge, EdgeKind, FileRecord, Node},
 };
+use tracedecay_domain::LocatorDigest;
+use tracedecay_rusqlite_runtime::{
+    migration_sql::{
+        MigrationSqlHandle, MigrationSqlRow, MigrationSqlRows, MigrationSqlStatement,
+        MigrationSqlValue,
+    },
+    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+};
 use tracedecay_sqlite_parity_protocol::{
     CopiedDatabase, CopiedSnapshotProvenance, DatabaseKind, SnapshotFileIdentity,
+};
+use tracedecay_store::{
+    AdmissionConfigV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, StorageRuntimeErrorV1,
+    StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::support::{
@@ -78,7 +91,7 @@ struct FtsMatchEvidence {
 }
 
 #[derive(Debug)]
-struct LegacyGraphEvidence {
+struct GraphRuntimeEvidence {
     schema: SchemaEvidence,
     foreign_keys: bool,
     page_size: u32,
@@ -89,14 +102,83 @@ struct LegacyGraphEvidence {
     fts_matches: Vec<FtsMatchEvidence>,
 }
 
+#[derive(Clone)]
+struct NoTypedReads;
+
+impl ReaderQueryExecutor for NoTypedReads {
+    fn execute_read(
+        &mut self,
+        _snapshot: &rusqlite::Transaction<'_>,
+        _request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        unreachable!("graph parity uses only the bounded migration-SQL read channel")
+    }
+}
+
+struct CanonicalGraphReader {
+    handle: MigrationSqlHandle,
+    _readers: ReaderPool<NoTypedReads>,
+}
+
+impl CanonicalGraphReader {
+    fn open(path: &Path) -> Self {
+        let path = path
+            .canonicalize()
+            .expect("canonicalize graph runtime baseline");
+        let binding: StoreRuntimeBindingV1 = serde_json::from_value(json!({
+            "shard_id": {
+                "brain_id": "brain.storage-runtime-suite",
+                "profile_id": "profile.storage-runtime-suite",
+                "scope": {
+                    "kind": "project",
+                    "project_id": "project.storage-runtime-suite.graph"
+                }
+            },
+            "incarnation": 1,
+            "authority_epoch": 1
+        }))
+        .expect("construct graph runtime baseline binding");
+        let digest = hex::encode(Sha256::digest(path.as_os_str().as_encoded_bytes()));
+        let locator = VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            StoreIncarnationV1::new(1).expect("valid graph runtime incarnation"),
+            LocatorDigest::new(format!("sha256:{digest}"))
+                .expect("valid graph runtime locator digest"),
+        );
+        let readers = ReaderPool::start(
+            ExistingReaderLocator::new(binding, locator, path)
+                .expect("valid graph runtime reader locator"),
+            AdmissionConfigV1::default().readers,
+            NoTypedReads,
+        )
+        .expect("start canonical graph runtime readers");
+        let handle = MigrationSqlHandle::attach_read_only(&readers);
+        Self {
+            handle,
+            _readers: readers,
+        }
+    }
+
+    fn query(&self, sql: &str, params: Vec<MigrationSqlValue>) -> MigrationSqlRows {
+        self.handle
+            .query(
+                MigrationSqlStatement::new(sql.to_string(), params)
+                    .expect("valid fixed graph runtime query"),
+                Duration::from_secs(5),
+            )
+            .unwrap_or_else(|error| panic!("execute fixed graph runtime query {sql:?}: {error}"))
+    }
+}
+
 #[tokio::test]
 async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
     let root = IsolatedTempRoot::new("graph");
     let source = root.path().join("source-graph.db");
-    let legacy_baseline_copy = root.path().join("legacy-baseline-graph.db");
+    let runtime_baseline_copy = root.path().join("runtime-baseline-graph.db");
     let helper_snapshot_copy = root.path().join("helper-snapshot-graph.db");
 
     let writer = seed_latest_schema_graph(&source).await;
+    assert_graph_api_evidence(&writer).await;
     writer
         .checkpoint()
         .await
@@ -109,11 +191,11 @@ async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
         "seeded graph source authority",
     );
 
-    let legacy_baseline_before_reads = copy_checkpointed_graph_snapshot(
+    let runtime_baseline_before_reads = copy_checkpointed_graph_snapshot(
         &source,
         &source_authority_before_probes,
-        &legacy_baseline_copy,
-        "legacy libsql graph baseline",
+        &runtime_baseline_copy,
+        "canonical runtime graph baseline",
     );
     let helper_snapshot_before_reads = copy_checkpointed_graph_snapshot(
         &source,
@@ -132,30 +214,24 @@ async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
         "creating coherent graph probe copies must not mutate the source authority",
     );
 
-    let (legacy_reader, migrated) = common::open_test_database_read_only(&legacy_baseline_copy)
-        .await
-        .expect("open isolated graph baseline through legacy libsql read-only path");
-    assert!(
-        !migrated,
-        "read-only graph open must never migrate the legacy baseline copy"
-    );
-    let legacy = capture_legacy_evidence(&legacy_reader).await;
-    legacy_reader.close();
+    let runtime_reader = CanonicalGraphReader::open(&runtime_baseline_copy);
+    let runtime = capture_runtime_evidence(&runtime_reader);
+    drop(runtime_reader);
 
-    let legacy_baseline_after_reads = inventory_database_artifacts(&legacy_baseline_copy);
-    assert_legacy_read_only_baseline_sidecars(
-        &legacy_baseline_before_reads,
-        &legacy_baseline_after_reads,
+    let runtime_baseline_after_reads = inventory_database_artifacts(&runtime_baseline_copy);
+    assert_runtime_read_only_baseline_sidecars(
+        &runtime_baseline_before_reads,
+        &runtime_baseline_after_reads,
     );
     assert_artifacts_unchanged(
         &source_authority_before_probes,
         &inventory_database_artifacts(&source),
-        "legacy graph baseline must not mutate the source authority",
+        "canonical graph baseline must not mutate the source authority",
     );
 
     // Compare the normalized logical baseline from its own coherent copy with
     // the process-isolated helper reading only the pristine helper snapshot.
-    assert_rusqlite_helper_parity(&helper_authority, &legacy);
+    assert_rusqlite_helper_parity(&helper_authority, &runtime);
     assert_artifacts_unchanged(
         &helper_snapshot_before_reads,
         &inventory_database_artifacts(&helper_snapshot_copy),
@@ -165,7 +241,7 @@ async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
     // Each typed command starts a fresh helper process. Repeat the complete
     // comparison so the helper reopen is itself covered by the immutable
     // DB/WAL/SHM inventory assertion.
-    assert_rusqlite_helper_parity(&helper_authority, &legacy);
+    assert_rusqlite_helper_parity(&helper_authority, &runtime);
     assert_artifacts_unchanged(
         &helper_snapshot_before_reads,
         &inventory_database_artifacts(&helper_snapshot_copy),
@@ -242,11 +318,11 @@ fn graph_sample_nodes() -> (Node, Node) {
     (primary, secondary)
 }
 
-async fn capture_legacy_evidence(database: &Database) -> LegacyGraphEvidence {
+async fn assert_graph_api_evidence(database: &Database) {
     let stats = database
         .get_stats()
         .await
-        .expect("read graph stats from legacy libsql reader");
+        .expect("read graph stats from canonical runtime");
     assert_eq!(stats.node_count, 2, "fixture must contain two graph nodes");
     assert_eq!(stats.edge_count, 1, "fixture must contain one graph edge");
     assert_eq!(stats.file_count, 1, "fixture must contain one graph file");
@@ -254,13 +330,13 @@ async fn capture_legacy_evidence(database: &Database) -> LegacyGraphEvidence {
     let node = database
         .get_node_by_id(PRIMARY_NODE_ID)
         .await
-        .expect("read graph node by id from legacy libsql reader")
+        .expect("read graph node by id from canonical runtime")
         .expect("seeded primary graph node must exist");
     assert_eq!(node.id, PRIMARY_NODE_ID, "node lookup must preserve its id");
     let ordered_nodes = database
         .get_nodes_by_file(GRAPH_FILE)
         .await
-        .expect("read graph nodes ordered by file from legacy libsql reader");
+        .expect("read graph nodes ordered by file from canonical runtime");
     assert_eq!(
         ordered_nodes
             .iter()
@@ -272,103 +348,70 @@ async fn capture_legacy_evidence(database: &Database) -> LegacyGraphEvidence {
     let search = database
         .search_nodes("paritytoken", usize::from(FTS_LIMIT))
         .await
-        .expect("perform legacy FTS graph search");
+        .expect("perform canonical runtime FTS graph search");
     assert_eq!(search.len(), 2, "fixture FTS search must return both nodes");
+}
 
-    LegacyGraphEvidence {
+fn capture_runtime_evidence(database: &CanonicalGraphReader) -> GraphRuntimeEvidence {
+    GraphRuntimeEvidence {
         schema: SchemaEvidence {
-            schema_version: scalar_i64(database, "PRAGMA schema_version").await,
-            user_version: scalar_i64(database, "PRAGMA user_version").await,
-            objects: schema_objects(database).await,
+            schema_version: scalar_i64(database, "PRAGMA schema_version"),
+            user_version: scalar_i64(database, "PRAGMA user_version"),
+            objects: schema_objects(database),
         },
-        foreign_keys: scalar_i64(database, "PRAGMA foreign_keys").await != 0,
-        page_size: u32::try_from(scalar_i64(database, "PRAGMA page_size").await)
-            .expect("legacy SQLite page size must fit u32"),
-        journal_mode: scalar_string(database, "PRAGMA journal_mode").await,
-        quick_check: string_rows(database, "PRAGMA quick_check(1000)").await,
-        integrity_check: string_rows(database, "PRAGMA integrity_check(1000)").await,
-        table_counts: table_counts(database).await,
-        fts_matches: fts_matches(database).await,
+        foreign_keys: scalar_i64(database, "PRAGMA foreign_keys") != 0,
+        page_size: u32::try_from(scalar_i64(database, "PRAGMA page_size"))
+            .expect("canonical SQLite page size must fit u32"),
+        journal_mode: scalar_string(database, "PRAGMA journal_mode"),
+        quick_check: string_rows(database, "PRAGMA quick_check(1000)"),
+        integrity_check: string_rows(database, "PRAGMA integrity_check(1000)"),
+        table_counts: table_counts(database),
+        fts_matches: fts_matches(database),
     }
 }
 
-async fn scalar_i64(database: &Database, sql: &str) -> i64 {
-    let mut rows = database
-        .conn()
-        .query(sql, ())
-        .await
-        .unwrap_or_else(|error| {
-            panic!("execute fixed legacy parity scalar query {sql:?}: {error}")
-        });
+fn scalar_i64(database: &CanonicalGraphReader, sql: &str) -> i64 {
+    let rows = database.query(sql, Vec::new());
     let row = rows
-        .next()
-        .await
-        .unwrap_or_else(|error| panic!("read legacy parity scalar query {sql:?}: {error}"))
-        .unwrap_or_else(|| panic!("fixed legacy parity scalar query returned no row: {sql:?}"));
-    row.get::<i64>(0)
-        .unwrap_or_else(|error| panic!("decode legacy parity scalar query {sql:?}: {error}"))
+        .rows
+        .first()
+        .unwrap_or_else(|| panic!("fixed runtime scalar query returned no row: {sql:?}"));
+    row_i64(row, 0, sql)
 }
 
-async fn scalar_string(database: &Database, sql: &str) -> String {
-    let mut rows = database
-        .conn()
-        .query(sql, ())
-        .await
-        .unwrap_or_else(|error| {
-            panic!("execute fixed legacy parity string query {sql:?}: {error}")
-        });
+fn scalar_string(database: &CanonicalGraphReader, sql: &str) -> String {
+    let rows = database.query(sql, Vec::new());
     let row = rows
-        .next()
-        .await
-        .unwrap_or_else(|error| panic!("read legacy parity string query {sql:?}: {error}"))
-        .unwrap_or_else(|| panic!("fixed legacy parity string query returned no row: {sql:?}"));
-    row.get::<String>(0)
-        .unwrap_or_else(|error| panic!("decode legacy parity string query {sql:?}: {error}"))
+        .rows
+        .first()
+        .unwrap_or_else(|| panic!("fixed runtime string query returned no row: {sql:?}"));
+    row_string(row, 0, sql)
 }
 
-async fn string_rows(database: &Database, sql: &str) -> Vec<String> {
-    let mut rows = database
-        .conn()
-        .query(sql, ())
-        .await
-        .unwrap_or_else(|error| panic!("execute fixed legacy parity rows query {sql:?}: {error}"));
-    let mut values = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .unwrap_or_else(|error| panic!("read legacy parity rows query {sql:?}: {error}"))
-    {
-        values
-            .push(row.get::<String>(0).unwrap_or_else(|error| {
-                panic!("decode legacy parity rows query {sql:?}: {error}")
-            }));
-    }
-    values
+fn string_rows(database: &CanonicalGraphReader, sql: &str) -> Vec<String> {
+    database
+        .query(sql, Vec::new())
+        .rows
+        .iter()
+        .map(|row| row_string(row, 0, sql))
+        .collect()
 }
 
-async fn schema_objects(database: &Database) -> Vec<SchemaObjectEvidence> {
-    let mut rows = database
-        .conn()
-        .query(SCHEMA_SQL, ())
-        .await
-        .expect("query fixed legacy graph schema metadata");
-    let mut objects = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .expect("read fixed legacy graph schema metadata")
-    {
-        objects.push(SchemaObjectEvidence {
-            kind: row.get(0).expect("decode legacy schema object type"),
-            name: row.get(1).expect("decode legacy schema object name"),
-            table_name: row.get(2).expect("decode legacy schema object table name"),
-            sql: row.get(3).expect("decode legacy schema object SQL"),
-        });
-    }
-    objects
+fn schema_objects(database: &CanonicalGraphReader) -> Vec<SchemaObjectEvidence> {
+    database
+        .query(SCHEMA_SQL, Vec::new())
+        .rows
+        .iter()
+        .map(|row| SchemaObjectEvidence {
+            kind: row_string(row, 0, "schema object type"),
+            name: row_string(row, 1, "schema object name"),
+            table_name: row_string(row, 2, "schema object table name"),
+            sql: row_optional_string(row, 3, "schema object SQL"),
+        })
+        .collect()
 }
 
-async fn table_counts(database: &Database) -> BTreeMap<String, u64> {
+fn table_counts(database: &CanonicalGraphReader) -> BTreeMap<String, u64> {
     let tables = [
         ("nodes", "SELECT COUNT(*) FROM nodes"),
         ("edges", "SELECT COUNT(*) FROM edges"),
@@ -380,29 +423,61 @@ async fn table_counts(database: &Database) -> BTreeMap<String, u64> {
     ];
     let mut counts = BTreeMap::new();
     for (table, sql) in tables {
-        let count = u64::try_from(scalar_i64(database, sql).await)
-            .unwrap_or_else(|_| panic!("legacy row count for {table} must not be negative"));
+        let count = u64::try_from(scalar_i64(database, sql))
+            .unwrap_or_else(|_| panic!("runtime row count for {table} must not be negative"));
         counts.insert(table.to_string(), count);
     }
     counts
 }
 
-async fn fts_matches(database: &Database) -> Vec<FtsMatchEvidence> {
-    let mut rows = database
-        .conn()
-        .query(FTS_SQL, params![FTS_QUERY, i64::from(FTS_LIMIT)])
-        .await
-        .expect("query fixed legacy FTS parity evidence");
-    let mut matches = Vec::new();
-    while let Some(row) = rows.next().await.expect("read legacy FTS parity evidence") {
-        matches.push(FtsMatchEvidence {
-            rowid: row.get(0).expect("decode legacy FTS rowid"),
-            rank: row.get(1).expect("decode legacy FTS rank"),
-            snippet: row.get(2).expect("decode legacy FTS snippet"),
-        });
-    }
+fn fts_matches(database: &CanonicalGraphReader) -> Vec<FtsMatchEvidence> {
+    let rows = database.query(
+        FTS_SQL,
+        vec![
+            MigrationSqlValue::Text(FTS_QUERY.to_string()),
+            MigrationSqlValue::Integer(i64::from(FTS_LIMIT)),
+        ],
+    );
+    let matches = rows
+        .rows
+        .iter()
+        .map(|row| FtsMatchEvidence {
+            rowid: row_i64(row, 0, "FTS rowid"),
+            rank: row_f64(row, 1, "FTS rank"),
+            snippet: row_string(row, 2, "FTS snippet"),
+        })
+        .collect::<Vec<_>>();
     assert_eq!(matches.len(), 2, "fixture FTS query must return both nodes");
     matches
+}
+
+fn row_i64(row: &MigrationSqlRow, index: usize, context: &str) -> i64 {
+    match row.values.get(index) {
+        Some(MigrationSqlValue::Integer(value)) => *value,
+        value => panic!("decode {context} as INTEGER, got {value:?}"),
+    }
+}
+
+fn row_f64(row: &MigrationSqlRow, index: usize, context: &str) -> f64 {
+    match row.values.get(index) {
+        Some(MigrationSqlValue::Real(value)) => *value,
+        value => panic!("decode {context} as REAL, got {value:?}"),
+    }
+}
+
+fn row_string(row: &MigrationSqlRow, index: usize, context: &str) -> String {
+    match row.values.get(index) {
+        Some(MigrationSqlValue::Text(value)) => value.clone(),
+        value => panic!("decode {context} as TEXT, got {value:?}"),
+    }
+}
+
+fn row_optional_string(row: &MigrationSqlRow, index: usize, context: &str) -> Option<String> {
+    match row.values.get(index) {
+        Some(MigrationSqlValue::Null) => None,
+        Some(MigrationSqlValue::Text(value)) => Some(value.clone()),
+        value => panic!("decode {context} as optional TEXT, got {value:?}"),
+    }
 }
 
 /// Test-owned authority over the sealed helper snapshot copy.
@@ -474,7 +549,7 @@ impl HelperSnapshotAuthority {
 
 fn assert_rusqlite_helper_parity(
     authority: &HelperSnapshotAuthority,
-    legacy: &LegacyGraphEvidence,
+    runtime: &GraphRuntimeEvidence,
 ) {
     let metadata = parity_output(authority, "metadata", json!({ "type": "metadata" }));
     assert_eq!(
@@ -504,10 +579,10 @@ fn assert_rusqlite_helper_parity(
     let schema = parity_output(authority, "schema", json!({ "type": "schema" }));
     assert_eq!(
         schema["schema_version"],
-        json!(legacy.schema.schema_version)
+        json!(runtime.schema.schema_version)
     );
-    assert_eq!(schema["user_version"], json!(legacy.schema.user_version));
-    let expected_objects = legacy
+    assert_eq!(schema["user_version"], json!(runtime.schema.user_version));
+    let expected_objects = runtime
         .schema
         .objects
         .iter()
@@ -525,22 +600,22 @@ fn assert_rusqlite_helper_parity(
     let foreign_keys = parity_output(authority, "foreign-keys", json!({ "type": "foreign_keys" }));
     assert_eq!(
         foreign_keys["enabled"],
-        json!(legacy.foreign_keys),
-        "rusqlite helper foreign-key state must match the legacy read-only graph connection"
+        json!(runtime.foreign_keys),
+        "rusqlite helper foreign-key state must match the canonical read-only graph runtime"
     );
 
     let page_size = parity_output(authority, "page-size", json!({ "type": "page_size" }));
-    assert_eq!(page_size["bytes"], json!(legacy.page_size));
+    assert_eq!(page_size["bytes"], json!(runtime.page_size));
 
     let journal_mode = parity_output(authority, "journal-mode", json!({ "type": "journal_mode" }));
     assert_eq!(
-        legacy.journal_mode, "wal",
-        "the legacy graph store must retain its configured WAL source mode"
+        runtime.journal_mode, "wal",
+        "the canonical graph store must retain its configured WAL source mode"
     );
     assert_eq!(
         journal_mode["source_header"]["mode"],
-        json!(legacy.journal_mode),
-        "the copied source header journal mode must match the legacy WAL authority"
+        json!(runtime.journal_mode),
+        "the copied source header journal mode must match the canonical WAL authority"
     );
     assert_eq!(journal_mode["source_header"]["read_version"], json!(2));
     assert_eq!(journal_mode["source_header"]["write_version"], json!(2));
@@ -560,8 +635,8 @@ fn assert_rusqlite_helper_parity(
     );
 
     for (request_id, check, expected) in [
-        ("integrity-quick", "quick", &legacy.quick_check),
-        ("integrity-full", "full", &legacy.integrity_check),
+        ("integrity-quick", "quick", &runtime.quick_check),
+        ("integrity-full", "full", &runtime.integrity_check),
     ] {
         let integrity = parity_output(
             authority,
@@ -572,7 +647,7 @@ fn assert_rusqlite_helper_parity(
         assert_eq!(integrity["findings"], json!(expected));
     }
 
-    for (table, expected_count) in &legacy.table_counts {
+    for (table, expected_count) in &runtime.table_counts {
         let counts = parity_output(
             authority,
             &format!("count-{table}"),
@@ -596,8 +671,8 @@ fn assert_rusqlite_helper_parity(
     let matches = fts["matches"]
         .as_array()
         .expect("helper FTS output must contain a matches array");
-    assert_eq!(matches.len(), legacy.fts_matches.len());
-    for (index, (observed, expected)) in matches.iter().zip(&legacy.fts_matches).enumerate() {
+    assert_eq!(matches.len(), runtime.fts_matches.len());
+    for (index, (observed, expected)) in matches.iter().zip(&runtime.fts_matches).enumerate() {
         assert_eq!(observed["rowid"], json!(expected.rowid));
         assert_eq!(observed["snippet"], json!(expected.snippet));
         assert_float_eq(
@@ -683,41 +758,41 @@ fn assert_checkpointed_snapshot(inventory: &DatabaseArtifactInventory, context: 
     }
 }
 
-fn assert_legacy_read_only_baseline_sidecars(
+fn assert_runtime_read_only_baseline_sidecars(
     before: &DatabaseArtifactInventory,
     after: &DatabaseArtifactInventory,
 ) {
     assert_eq!(
         before.database_path, after.database_path,
-        "legacy read-only baseline must retain its isolated database path"
+        "canonical read-only baseline must retain its isolated database path"
     );
     assert_eq!(
         before
             .artifacts
             .get(&DatabaseArtifactKind::Database)
-            .expect("legacy baseline inventory must include database"),
+            .expect("runtime baseline inventory must include database"),
         after
             .artifacts
             .get(&DatabaseArtifactKind::Database)
-            .expect("legacy baseline inventory must include database"),
-        "legacy libsql read-only baseline must not rewrite its main database"
+            .expect("runtime baseline inventory must include database"),
+        "canonical read-only baseline must not rewrite its main database"
     );
     for kind in [DatabaseArtifactKind::Wal, DatabaseArtifactKind::Shm] {
         assert!(
             before
                 .artifacts
                 .get(&kind)
-                .expect("legacy baseline inventory must include SQLite sidecar")
+                .expect("runtime baseline inventory must include SQLite sidecar")
                 .is_none(),
-            "legacy baseline must start checkpointed without a {kind:?} sidecar"
+            "runtime baseline must start checkpointed without a {kind:?} sidecar"
         );
         assert!(
             after
                 .artifacts
                 .get(&kind)
-                .expect("legacy baseline inventory must include SQLite sidecar")
+                .expect("runtime baseline inventory must include SQLite sidecar")
                 .is_some(),
-            "legacy libsql read-only baseline is expected to create a {kind:?} sidecar; this S1 behavior is recorded separately from the rusqlite helper no-mutation proof\nafter: {after:#?}"
+            "canonical live-runtime readers are expected to create a {kind:?} sidecar; this behavior is recorded separately from the immutable helper no-mutation proof\nafter: {after:#?}"
         );
     }
 }
