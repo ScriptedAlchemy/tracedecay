@@ -166,8 +166,8 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     let config = StoreRuntimeRegistryConfig::new(2).unwrap();
     let (registry, _, publisher) = registry(config);
     let pin = profile_pin(&registry).await;
-    let held = open_published(&registry, project_request("project.held", &pin)).await;
-    let leased = open_published(&registry, project_request("project.leased", &pin)).await;
+    let held = open_published(&registry, code_request("worktree.held", &pin)).await;
+    let leased = open_published(&registry, code_request("worktree.leased", &pin)).await;
     let leased_binding = leased.binding().clone();
     let lease = active_lease(&leased_binding, "lease.registry.blocker");
     assert!(matches!(
@@ -177,7 +177,7 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     drop(leased);
 
     assert!(matches!(
-        registry.begin_or_join_open(&project_request("project.overflow", &pin)),
+        registry.begin_or_join_open(&code_request("worktree.overflow", &pin)),
         StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted {
             limit: 2
         })
@@ -190,7 +190,7 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
 
     let held_runtime = Arc::downgrade(held.runtime());
     drop(held);
-    open_published(&registry, project_request("project.overflow", &pin)).await;
+    open_published(&registry, code_request("worktree.overflow", &pin)).await;
     assert!(
         held_runtime.upgrade().is_none(),
         "eviction must release the canonical runtime after closing it"
@@ -211,7 +211,7 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
         )
     ));
     assert!(matches!(
-        registry.begin_or_join_open(&project_request("project.after-profile-fault", &pin)),
+        registry.begin_or_join_open(&code_request("worktree.after-profile-fault", &pin)),
         StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::ProfileAuthorityUnavailable {
             state: RuntimeMaintenanceStateV1::Faulted,
             ..
@@ -246,6 +246,37 @@ async fn profile_sessions_require_the_profile_pin_without_consuming_project_capa
         registry.lookup(project.binding()),
         StoreRuntimeLookup::Ready(_)
     ));
+}
+
+#[tokio::test]
+async fn project_memory_and_sessions_do_not_consume_code_capacity() {
+    let config = StoreRuntimeRegistryConfig::new(1).unwrap();
+    let (registry, _, _) = registry(config);
+    let pin = profile_pin(&registry).await;
+    let code = open_published(&registry, code_request("worktree.full-budget", &pin)).await;
+    let project = open_published(
+        &registry,
+        project_request("project.memory-outside-code-budget", &pin),
+    )
+    .await;
+    let sessions = open_published(
+        &registry,
+        project_sessions_request("project.sessions-outside-code-budget", &pin),
+    )
+    .await;
+
+    assert!(matches!(
+        registry.begin_or_join_open(&code_request("worktree.overflow", &pin)),
+        StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted {
+            limit: 1
+        })
+    ));
+    for binding in [code.binding(), project.binding(), sessions.binding()] {
+        assert!(matches!(
+            registry.lookup(binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+    }
 }
 
 #[tokio::test]

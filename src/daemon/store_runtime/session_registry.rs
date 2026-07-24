@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Mutex;
 use tracedecay_domain::RefId;
@@ -25,11 +26,16 @@ use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 
-const INITIAL_STORE_INCARNATION: u64 = 1;
+static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn mark_process_long_lived_for_session_maintenance() {
+    LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
+}
 
 /// One canonical registry and profile pin shared by every daemon session shard.
 pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     identity: LocalProfileIdentityAuthorityV1,
+    incarnation: StoreIncarnationV1,
     resolver: Arc<LocalStoreRuntimeResolverV1>,
     registry: StoreRuntimeRegistry,
     profile_pin: ProfileAuthorityPin,
@@ -37,11 +43,13 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     profile_database: Mutex<Option<Arc<RegisteredGlobalDb>>>,
     profile_memory: Mutex<Option<Arc<Database>>>,
     profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
+    project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
+        let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
             LocalProfileStoreAuthorityV1::from_profile_identity(&identity),
         ));
@@ -54,6 +62,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             &registry,
             resolver.as_ref(),
             profile_shard.clone(),
+            incarnation,
             None,
             None,
             true,
@@ -71,6 +80,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         };
         Ok(Self {
             identity,
+            incarnation,
             resolver,
             registry,
             profile_pin,
@@ -78,6 +88,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             profile_database: Mutex::new(None),
             profile_memory: Mutex::new(None),
             profile_sessions: Mutex::new(None),
+            project_memory: Mutex::new(BTreeMap::new()),
             project_sessions: Mutex::new(BTreeMap::new()),
         })
     }
@@ -109,6 +120,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             &self.registry,
             self.resolver.as_ref(),
             shard_id,
+            self.incarnation,
             Some(self.profile_pin.clone()),
             None,
             true,
@@ -136,6 +148,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             &self.registry,
             self.resolver.as_ref(),
             shard_id,
+            self.incarnation,
             Some(self.profile_pin.clone()),
             None,
             true,
@@ -144,6 +157,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
+        crate::db::migrations::migrate(database.as_ref()).await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -183,6 +197,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             &self.registry,
             self.resolver.as_ref(),
             shard_id,
+            self.incarnation,
             Some(self.profile_pin.clone()),
             None,
             true,
@@ -194,11 +209,66 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
+    /// Mounts one project graph/memory database through the retained registry.
+    ///
+    /// The typed project id and enrollment roots authorize the resolver; the
+    /// returned database remains cached so migration and live use share one
+    /// writer authority.
+    pub(crate) async fn project_memory(
+        &self,
+        project_id: ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Arc<Database>> {
+        self.resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                enrollment_roots,
+            ))
+            .map_err(|error| {
+                session_registry_error("register project memory authority", format!("{error:?}"))
+            })?;
+        let mut mounted = self.project_memory.lock().await;
+        if let Some(database) = mounted.get(&project_id) {
+            return Ok(Arc::clone(database));
+        }
+        let shard_id = StoreShardIdV1::project(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            shard_id,
+            self.incarnation,
+            Some(self.profile_pin.clone()),
+            None,
+            true,
+            "mount project memory store",
+        )
+        .await?;
+        let database =
+            Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
+        crate::db::migrations::migrate(database.as_ref()).await?;
+        mounted.insert(project_id, Arc::clone(&database));
+        Ok(database)
+    }
+
     pub(crate) async fn code_graph(
         &self,
         shard_id: StoreShardIdV1,
         database_path: PathBuf,
         database_authority: DatabaseAuthority,
+    ) -> Result<StoreRuntimeHandle> {
+        self.code_graph_with_authority(shard_id, database_path, Some(database_authority))
+            .await
+    }
+
+    async fn code_graph_with_authority(
+        &self,
+        shard_id: StoreShardIdV1,
+        database_path: PathBuf,
+        database_authority: Option<DatabaseAuthority>,
     ) -> Result<StoreRuntimeHandle> {
         let initialize_if_missing = !matches!(
             &shard_id.scope,
@@ -225,8 +295,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             &self.registry,
             self.resolver.as_ref(),
             shard_id,
+            self.incarnation,
             Some(self.profile_pin.clone()),
-            Some(database_authority),
+            database_authority,
             initialize_if_missing,
             "mount code-shard store",
         )
@@ -277,6 +348,45 @@ impl DaemonSessionRuntimeRegistryV1 {
         database_authority: DatabaseAuthority,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
+        self.code_graph_branch_with_authority(
+            project_root,
+            project_id,
+            branch_name,
+            database_path,
+            Some(database_authority),
+            access,
+        )
+        .await
+    }
+
+    pub(crate) async fn code_graph_branch_registered(
+        &self,
+        project_root: &Path,
+        project_id: ProjectId,
+        branch_name: &str,
+        database_path: PathBuf,
+        access: DatabaseAccessMode,
+    ) -> Result<Database> {
+        self.code_graph_branch_with_authority(
+            project_root,
+            project_id,
+            branch_name,
+            database_path,
+            None,
+            access,
+        )
+        .await
+    }
+
+    async fn code_graph_branch_with_authority(
+        &self,
+        project_root: &Path,
+        project_id: ProjectId,
+        branch_name: &str,
+        database_path: PathBuf,
+        database_authority: Option<DatabaseAuthority>,
+        access: DatabaseAccessMode,
+    ) -> Result<Database> {
         let identity = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
             project_root,
         )
@@ -307,7 +417,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             },
         );
         let runtime = self
-            .code_graph(shard_id, database_path, database_authority)
+            .code_graph_with_authority(shard_id, database_path, database_authority)
             .await?;
         Database::publish_runtime(runtime, access).await
     }
@@ -346,17 +456,51 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 }
 
+fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {
+    let process_run_id = crate::runtime_identity::process_run_id();
+    let daemon_generation = crate::daemon::authority::current_record(identity.profile_root())?
+        .filter(|record| {
+            record.process_run_id == process_run_id
+                && record.profile_root == identity.profile_root()
+                && record.brain_id.as_ref() == Some(identity.brain_id())
+                && record.profile_id.as_ref() == Some(identity.profile_id())
+        })
+        .map(|record| record.epoch);
+    let generation = match daemon_generation {
+        Some(generation) => generation,
+        None => {
+            let raw = process_run_id
+                .get(..16)
+                .and_then(|prefix| u64::from_str_radix(prefix, 16).ok())
+                .or_else(|| {
+                    process_run_id
+                        .strip_prefix("mcp-")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .map(|timestamp| timestamp ^ u64::from(std::process::id()))
+                })
+                .ok_or_else(|| {
+                    session_registry_error(
+                        "create store incarnation",
+                        "process runtime generation has an unsupported format".to_owned(),
+                    )
+                })?;
+            raw.max(1)
+        }
+    };
+    StoreIncarnationV1::new(generation)
+        .map_err(|error| session_registry_error("create store incarnation", error.to_string()))
+}
+
 async fn open_runtime(
     registry: &StoreRuntimeRegistry,
     resolver: &LocalStoreRuntimeResolverV1,
     shard_id: StoreShardIdV1,
+    incarnation: StoreIncarnationV1,
     profile_pin: Option<ProfileAuthorityPin>,
     database_authority: Option<DatabaseAuthority>,
     initialize_if_missing: bool,
     operation: &'static str,
 ) -> Result<StoreRuntimeHandle> {
-    let incarnation = StoreIncarnationV1::new(INITIAL_STORE_INCARNATION)
-        .map_err(|error| session_registry_error("create store incarnation", error.to_string()))?;
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
     let locator = match resolver.resolve_key(&key) {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
@@ -413,13 +557,31 @@ async fn attach_registered(
     operation: &'static str,
 ) -> Result<Arc<RegisteredGlobalDb>> {
     let expected_binding: StoreRuntimeBindingV1 = runtime.binding().clone();
+    let schedule_structured_backfill = matches!(
+        &expected_binding.shard_id.scope,
+        tracedecay_store::StoreShardScopeV1::ProfileSessions
+            | tracedecay_store::StoreShardScopeV1::ProjectSessions { .. }
+    );
     let expected_locator = runtime.locator().verified().clone();
     let authority = runtime
         .database_authority(operation)
         .map_err(|failure| registry_open_error(operation, failure))?;
-    RegisteredGlobalDb::migrate_and_attach(runtime, expected_binding, expected_locator, authority)
-        .await
-        .map(Arc::new)
+    let database = Arc::new(
+        RegisteredGlobalDb::migrate_and_attach(
+            runtime,
+            expected_binding,
+            expected_locator,
+            authority,
+        )
+        .await?,
+    );
+    if schedule_structured_backfill && LONG_LIVED_SESSION_MAINTENANCE.load(Ordering::Relaxed) {
+        let database = Arc::clone(&database);
+        tokio::spawn(async move {
+            let _ = crate::sessions::transcript_backfill::backfill_structured_rows(&database).await;
+        });
+    }
+    Ok(database)
 }
 
 fn registry_open_error(
@@ -439,6 +601,110 @@ fn session_registry_error(operation: &'static str, message: String) -> TraceDeca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_restart_fences_the_previous_session_runtime_binding() {
+        let temporary = tempfile::tempdir().expect("temporary profile parent");
+        let profile_root = temporary.path().join("profile");
+        #[cfg(unix)]
+        let endpoint = crate::daemon::transport::DaemonEndpoint::Unix(
+            profile_root.join("session-runtime.sock"),
+        );
+        #[cfg(not(unix))]
+        let endpoint = crate::daemon::transport::default_loopback_endpoint();
+
+        let first_authority =
+            crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
+                .expect("first daemon authority");
+        let identity = first_authority.profile_identity().clone();
+        let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("first session runtime registry");
+        let stale = first_registry.profile_runtime.binding().clone();
+        assert_eq!(
+            stale.incarnation.get(),
+            first_authority.record().epoch,
+            "the durable daemon generation must own the store incarnation"
+        );
+        drop(first_registry);
+        drop(first_authority);
+
+        let second_authority =
+            crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
+                .expect("successor daemon authority");
+        let second_registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("successor session runtime registry");
+        let current = second_registry.profile_runtime.binding();
+
+        assert_eq!(current.incarnation.get(), second_authority.record().epoch);
+        assert!(current.incarnation > stale.incarnation);
+        assert!(matches!(
+            second_registry.registry.lookup(&stale),
+            super::super::registry::StoreRuntimeLookup::WrongIncarnation {
+                expected,
+                actual,
+            } if *expected == stale && actual.as_ref() == current
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn existing_profile_memory_is_migrated_before_exposure() {
+        let temporary = tempfile::tempdir().expect("temporary profile parent");
+        let profile_root = temporary.path().join("profile");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let memory_path = crate::memory::user::user_memory_db_path(identity.profile_root());
+        let authority = DatabaseAuthority::acquire_test(
+            &memory_path,
+            "seed existing profile memory migration fixture",
+        )
+        .expect("profile memory test authority");
+        let (seed, _) = Database::publish_test_runtime(
+            &memory_path,
+            &authority,
+            crate::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("seed profile memory database");
+        seed.writer_connection("downgrade profile memory fixture")
+            .await
+            .expect("profile memory fixture writer")
+            .execute_batch(
+                "DROP TABLE memory_v2_fact_relations;
+                 PRAGMA user_version = 22;",
+            )
+            .await
+            .expect("downgrade profile memory fixture");
+        drop(seed);
+        drop(authority);
+
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let database = registry
+            .profile_memory()
+            .await
+            .expect("migrated profile memory");
+        let mut rows = database
+            .conn()
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'memory_v2_fact_relations'",
+                (),
+            )
+            .await
+            .expect("query migrated profile memory schema");
+        let table_count: i64 = rows
+            .next()
+            .await
+            .expect("read schema row")
+            .expect("schema count row")
+            .get(0)
+            .expect("decode schema count");
+
+        assert_eq!(table_count, 1);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pin() {

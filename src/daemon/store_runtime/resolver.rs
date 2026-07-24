@@ -382,15 +382,19 @@ impl LocalStoreRuntimeResolverV1 {
             .get(key.shard_id())
             .cloned()
             .ok_or(LocalStoreLocatorUnavailableReasonV1::MissingCodeStoreAuthority)?;
+        // A never-indexed worktree has no graph database until its first index
+        // creates one under the daemon's authority. Resolve a prospective
+        // locator exactly like the project and session locators do, so the
+        // `Initialize` open mode can create the file. `canonical_or_prospective_*`
+        // still reject symlinked or non-regular existing paths and confine the
+        // locator to the profile root; the mode-aware `resolve()` remains the
+        // authoritative existence gate, failing closed for a non-`Initialize`
+        // open of a missing store. Requiring pre-existence here instead blocked
+        // that legitimate first-touch initialization.
         let canonical_path = canonical_or_prospective_regular_file(
             &authority.database_path,
             canonical_profile_root,
         )?;
-        let metadata = fs::symlink_metadata(&canonical_path)
-            .map_err(|_| LocalStoreLocatorUnavailableReasonV1::CodeDatabaseUnavailable)?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
-        }
         let canonical_store_root = canonical_path
             .parent()
             .ok_or(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)?
@@ -911,6 +915,10 @@ fn canonical_locator_digest(path: &Path) -> LocalStoreLocatorResult<LocatorDiges
     hasher.update(path.as_bytes());
     LocatorDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)
+}
+
+pub(crate) fn canonical_store_locator_digest(path: &Path) -> Result<LocatorDigest, String> {
+    canonical_locator_digest(path).map_err(|reason| format!("{reason:?}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1557,7 +1565,7 @@ mod tests {
     fn branch_code_authority_keeps_its_typed_ref_path_distinct_from_worktree() {
         let fixture = Fixture::new();
         let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());
-        let worktree_id = id("worktree-component");
+        let worktree_id = id::<tracedecay_domain::WorktreeId>("worktree-component");
         let project_id = fixture.project_id.clone();
         let branch_shard = StoreShardIdV1::code(
             id::<BrainId>("brain.local-resolver"),

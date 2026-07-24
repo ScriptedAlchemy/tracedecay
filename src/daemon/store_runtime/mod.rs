@@ -7,13 +7,15 @@
 #![allow(dead_code)] // S8 lands before all daemon call sites route through this registry.
 
 #[allow(dead_code)]
-pub(crate) mod driver;
+mod graph_metadata;
 #[allow(dead_code)]
 pub(crate) mod registry;
 #[allow(dead_code)]
 pub(crate) mod resolver;
 #[allow(dead_code)]
 pub(crate) mod rusqlite_parity;
+#[allow(dead_code)]
+pub(crate) mod session_registry;
 #[allow(dead_code)]
 pub(crate) mod shard;
 #[allow(dead_code)]

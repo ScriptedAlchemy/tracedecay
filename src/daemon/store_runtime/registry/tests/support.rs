@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
+use tracedecay_domain::{
+    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
+};
 use tracedecay_store::{
-    RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, StoreClientIdV1,
+    CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, StoreClientIdV1,
     StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1,
     VerifiedStoreLocatorV1,
 };
@@ -44,6 +46,26 @@ fn project_shard(project: &str) -> StoreShardIdV1 {
         id::<BrainId>("brain.registry"),
         id::<UserProfileId>("profile.registry"),
         id::<ProjectId>(project),
+    )
+}
+
+fn project_sessions_shard(project: &str) -> StoreShardIdV1 {
+    StoreShardIdV1::project_sessions(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<ProjectId>(project),
+    )
+}
+
+fn code_shard(worktree: &str) -> StoreShardIdV1 {
+    StoreShardIdV1::code(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<ProjectId>("project.registry"),
+        id::<RepositoryId>("repository.registry"),
+        CodeShardScopeV1::Worktree {
+            worktree_id: id::<WorktreeId>(worktree),
+        },
     )
 }
 
@@ -168,6 +190,21 @@ pub(super) async fn profile_pin(registry: &StoreRuntimeRegistry) -> ProfileAutho
 
 pub(super) fn project_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
     StoreRuntimeOpenRequest::new(project_shard(project), incarnation(), Some(pin.clone()))
+}
+
+pub(super) fn project_sessions_request(
+    project: &str,
+    pin: &ProfileAuthorityPin,
+) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(
+        project_sessions_shard(project),
+        incarnation(),
+        Some(pin.clone()),
+    )
+}
+
+pub(super) fn code_request(worktree: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(code_shard(worktree), incarnation(), Some(pin.clone()))
 }
 
 pub(super) fn profile_sessions_request(pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {

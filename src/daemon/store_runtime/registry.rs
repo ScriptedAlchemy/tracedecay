@@ -11,6 +11,7 @@
 
 mod attachment;
 mod capacity;
+mod close;
 mod leases;
 mod open;
 mod ports;
@@ -44,6 +45,7 @@ pub(crate) use attachment::{
 pub(crate) use capacity::{
     DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES, StoreRuntimeRegistryConfig,
 };
+pub(crate) use close::ClosedStoreRuntime;
 pub(crate) use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeLeaseAcquireResult,
     StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
@@ -88,12 +90,7 @@ impl StoreRuntimeKey {
     }
 
     fn is_project_code_capacity_exempt(&self) -> bool {
-        matches!(
-            self.shard_id.scope,
-            StoreShardScopeV1::Profile
-                | StoreShardScopeV1::ProfileMemory
-                | StoreShardScopeV1::ProfileSessions
-        )
+        !matches!(self.shard_id.scope, StoreShardScopeV1::Code { .. })
     }
 }
 
@@ -550,6 +547,12 @@ pub(crate) enum StoreRuntimeRegistryFailure {
     },
     RuntimeEvictionInProgress {
         key: Box<StoreRuntimeKey>,
+    },
+    RuntimeCloseBlocked {
+        binding: Box<StoreRuntimeBindingV1>,
+        external_handles: usize,
+        external_runtime_references: usize,
+        client_leases: u32,
     },
     AuthorityEpochExhausted,
     OpenAttemptExhausted,
