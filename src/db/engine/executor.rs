@@ -6,6 +6,16 @@ pub(crate) trait QueryExecutor {
         P: IntoParams;
 }
 
+pub(crate) trait WalCheckpointExecutor: QueryExecutor {
+    async fn checkpoint_wal_truncate(&self) -> Result<Rows>;
+}
+
+impl WalCheckpointExecutor for Connection {
+    async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
+        Connection::checkpoint_wal_truncate(self).await
+    }
+}
+
 impl QueryExecutor for Connection {
     async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where

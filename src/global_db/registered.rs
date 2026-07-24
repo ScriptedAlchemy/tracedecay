@@ -9,7 +9,7 @@ use crate::{
         DatabaseAuthority,
         engine::{
             Connection, Executor, IntoParams, QueryExecutor, ReadConnection, ReadSnapshot, Rows,
-            Statement, Transaction, TransactionBehavior,
+            Statement, Transaction, TransactionBehavior, WalCheckpointExecutor,
         },
     },
     errors::TraceDecayError,
@@ -441,6 +441,13 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.authority
             .require_active_write_scope(intent)
             .map_err(|error| crate::db::engine::Error::invalid_operation(error.to_string()))
+    }
+}
+
+impl WalCheckpointExecutor for RegisteredGlobalDbWriterConnection<'_> {
+    async fn checkpoint_wal_truncate(&self) -> crate::db::engine::Result<Rows> {
+        self.require_active("checkpoint registered global database WAL")?;
+        self.connection.checkpoint_wal_truncate().await
     }
 }
 

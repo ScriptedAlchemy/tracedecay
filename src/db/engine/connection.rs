@@ -15,6 +15,7 @@ const READER_WAIT: Duration = Duration::from_secs(5);
 pub(super) trait Runtime: Send + Sync {
     fn execute(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlExecuteResult>;
     fn query(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlRows>;
+    fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows>;
     fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult>;
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()>;
     fn last_insert_rowid(&self) -> i64;
@@ -31,6 +32,10 @@ impl Runtime for MigrationSqlHandle {
 
     fn query(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlRows> {
         self.query(statement, READER_WAIT).map_err(Into::into)
+    }
+
+    fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows> {
+        self.checkpoint_wal_truncate().map_err(Into::into)
     }
 
     fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult> {
@@ -121,6 +126,22 @@ impl Connection {
         let statement = statement(sql, params)?;
         let runtime = Arc::clone(&self.runtime);
         let rows = tokio::task::spawn_blocking(move || runtime.query(statement))
+            .await
+            .map_err(join_error)??;
+        Ok(Rows::from_parts(
+            rows.columns,
+            rows.rows
+                .into_iter()
+                .map(|row| {
+                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
+                })
+                .collect(),
+        ))
+    }
+
+    pub(crate) async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
+        let runtime = Arc::clone(&self.runtime);
+        let rows = tokio::task::spawn_blocking(move || runtime.checkpoint_wal_truncate())
             .await
             .map_err(join_error)??;
         Ok(Rows::from_parts(

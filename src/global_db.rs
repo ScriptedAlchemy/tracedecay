@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub use tracedecay_store::ParseOffset;
 
-use crate::db::engine::Value as EngineValue;
+use crate::db::engine::{Value as EngineValue, WalCheckpointExecutor};
 use crate::errors::TraceDecayError;
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
@@ -825,7 +825,7 @@ impl RegisteredGlobalDb {
             global_db_operation_error("open registered WAL checkpoint writer", error)
         })?;
         let mut rows = writer
-            .query("PRAGMA wal_checkpoint(TRUNCATE);", ())
+            .checkpoint_wal_truncate()
             .await
             .map_err(|error| global_db_operation_error("checkpoint registered WAL", error))?;
         let row = rows

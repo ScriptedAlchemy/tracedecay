@@ -522,6 +522,22 @@ impl MigrationSqlHandle {
         (self.query)(statement, max_wait)
     }
 
+    /// Checkpoints and truncates the WAL on the serialized writer connection.
+    pub fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows, MigrationSqlError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.writer
+            .as_ref()
+            .ok_or(MigrationSqlError::WriterUnavailable)?
+            .try_send(WriterCommand::CheckpointWalTruncate {
+                reply,
+                authority: self.write_authority.clone(),
+            })
+            .map_err(map_writer_send_error)?;
+        response
+            .recv()
+            .map_err(|_| MigrationSqlError::WriterUnavailable)?
+    }
+
     pub fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult, MigrationSqlError> {
         validate_batch(&sql)?;
         match self.dispatch_writer(MigrationSqlRequest::ExecuteBatch(sql))? {
@@ -820,6 +836,10 @@ pub(crate) enum WriterCommand {
         expired: Arc<AtomicBool>,
         authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
     },
+    CheckpointWalTruncate {
+        reply: SyncSender<Result<MigrationSqlRows, MigrationSqlError>>,
+        authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
+    },
 }
 
 pub(crate) enum TransactionCommand {
@@ -913,6 +933,32 @@ pub(crate) fn run_writer_command(
                 }
             }
         }
+        WriterCommand::CheckpointWalTruncate { reply, authority } => {
+            if let Err(error) =
+                verify_write_authority(authority.as_deref(), MigrationSqlWriteIntent::Query)
+            {
+                let _ = reply.send(Err(error));
+                return;
+            }
+            let statement = MigrationSqlStatement::new(
+                "PRAGMA wal_checkpoint(TRUNCATE)".to_owned(),
+                Vec::new(),
+            )
+            .expect("fixed WAL checkpoint statement is valid");
+            let result = with_migration_guard(
+                connection,
+                false,
+                Some(Arc::clone(shutdown_requested)),
+                None,
+                true,
+                None,
+                crate::connection::authorize_writer,
+                false,
+                None,
+                || execute_query_unchecked(connection, statement),
+            );
+            let _ = reply.send(result);
+        }
     }
 }
 
@@ -922,6 +968,9 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
             let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
         }
         WriterCommand::BeginTransaction { reply, .. } => {
+            let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
+        }
+        WriterCommand::CheckpointWalTruncate { reply, .. } => {
             let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
         }
     }
@@ -1791,6 +1840,18 @@ mod tests {
                 "{pragma}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn writer_checkpoint_returns_status() {
+        let fixture = fixture('a', 'a');
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+
+        let rows = channel.checkpoint_wal_truncate().unwrap();
+
+        assert_eq!(rows.columns.len(), 3);
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(rows.rows[0].values.len(), 3);
     }
 
     #[test]
