@@ -1151,10 +1151,14 @@ const settings: Record<string, unknown> = {
   environment: {
     global_accounting_mode: 'auto',
     global_accounting_enabled: true,
-    pricing_offline: false,
+    // `pricing_offline` is derived daemon-side from TRACEDECAY_OFFLINE, so the
+    // active variable below and this value are deliberately consistent: the
+    // fixture exercises an environment override that is actually in force,
+    // which is the one per-value provenance state /api/settings reports.
+    pricing_offline: true,
     variables: [
       { name: 'TRACEDECAY_ENABLE_GLOBAL_DB', active: false, value: null, description: 'Force-enables or disables global savings-ledger recording.' },
-      { name: 'TRACEDECAY_OFFLINE', active: false, value: null, description: 'Skips network pricing fetches.' },
+      { name: 'TRACEDECAY_OFFLINE', active: true, value: '1', description: 'Skips network pricing fetches.' },
       { name: 'TRACEDECAY_DATA_DIR', active: false, value: null, description: 'Pins the user-level TraceDecay data directory.' },
     ],
   },
