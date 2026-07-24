@@ -6,7 +6,7 @@ export function useLegacy<T>(
   key: readonly unknown[],
   url: string,
   schema: z.ZodType<T>,
-  options?: { refetchInterval?: number | false; staleTime?: number },
+  options?: { refetchInterval?: number | false; staleTime?: number; enabled?: boolean },
 ) {
   return useQuery<LegacyResult<T>>({
     queryKey: key,
@@ -15,5 +15,6 @@ export function useLegacy<T>(
     // fetch-on-mount only so stacked refetches never starve the daemon.
     refetchInterval: options?.refetchInterval ?? false,
     staleTime: options?.staleTime ?? 60_000,
+    enabled: options?.enabled ?? true,
   });
 }
