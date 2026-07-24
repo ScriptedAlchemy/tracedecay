@@ -260,16 +260,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         database_path: PathBuf,
         database_authority: DatabaseAuthority,
     ) -> Result<StoreRuntimeHandle> {
-        self.code_graph_with_authority(shard_id, database_path, Some(database_authority))
-            .await
-    }
-
-    async fn code_graph_with_authority(
-        &self,
-        shard_id: StoreShardIdV1,
-        database_path: PathBuf,
-        database_authority: Option<DatabaseAuthority>,
-    ) -> Result<StoreRuntimeHandle> {
         let initialize_if_missing = !matches!(
             &shard_id.scope,
             tracedecay_store::StoreShardScopeV1::Code {
@@ -277,6 +267,22 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ..
             }
         );
+        self.code_graph_with_authority(
+            shard_id,
+            database_path,
+            Some(database_authority),
+            initialize_if_missing,
+        )
+        .await
+    }
+
+    async fn code_graph_with_authority(
+        &self,
+        shard_id: StoreShardIdV1,
+        database_path: PathBuf,
+        database_authority: Option<DatabaseAuthority>,
+        initialize_if_missing: bool,
+    ) -> Result<StoreRuntimeHandle> {
         self.resolver
             .register_code_authority(
                 LocalCodeStoreAuthorityV1::new(shard_id.clone(), database_path).map_err(
@@ -331,7 +337,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             },
         );
         let runtime = self
-            .code_graph(shard_id, database_path, database_authority)
+            .code_graph_with_authority(
+                shard_id,
+                database_path,
+                Some(database_authority),
+                matches!(access, DatabaseAccessMode::ReadWrite),
+            )
             .await?;
         Database::publish_runtime(runtime, access).await
     }
@@ -417,7 +428,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             },
         );
         let runtime = self
-            .code_graph_with_authority(shard_id, database_path, database_authority)
+            .code_graph_with_authority(
+                shard_id,
+                database_path,
+                database_authority,
+                matches!(access, DatabaseAccessMode::ReadWrite),
+            )
             .await?;
         Database::publish_runtime(runtime, access).await
     }
@@ -871,6 +887,54 @@ mod tests {
         assert!(
             error.to_string().contains("DuplicateProjectAuthority"),
             "unexpected authority error: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        gix::init(&project_root).expect("initialize project repository");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let database_path = profile_root.join("stores/worktree.db");
+        std::fs::create_dir_all(database_path.parent().expect("database parent"))
+            .expect("database directory");
+        rusqlite::Connection::open(&database_path)
+            .expect("seed worktree database")
+            .execute_batch("CREATE TABLE seed(value INTEGER);")
+            .expect("seed worktree schema");
+        assert!(database_path.exists(), "lifecycle existence precheck");
+        std::fs::remove_file(&database_path).expect("delete after lifecycle existence check");
+        let database_authority =
+            DatabaseAuthority::acquire_test(&database_path, "read-only deletion race")
+                .expect("database authority");
+        let result = registry
+            .code_graph_worktree(
+                &project_root,
+                ProjectId::new("project.read-only-race").expect("project id"),
+                database_path.clone(),
+                database_authority,
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "read-only mount must fail for a deleted DB"
+        );
+        assert!(
+            !database_path.exists(),
+            "read-only mount recreated the deleted worktree DB"
         );
     }
 }
