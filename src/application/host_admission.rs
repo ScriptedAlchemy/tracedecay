@@ -6,14 +6,12 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tracedecay_domain::{
     BrainId, FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ProjectId, RetrievalAnchorId, UserProfileId, VectorWatermark,
+    ObservationSourceIdentityV1, ProjectId, RetrievalAnchorId, UserProfileId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
-    ObservationStore, ObservationStoreError, ObservationStoreResult,
-    ObservedEvidenceAnchorResolution, ProjectionPersistOutcome, RetrievalAnchorOwnerV1,
-    StoreShardScopeV1, StoredObservation, StoredRetrievalAnchorRecordV1,
+    ObservationPersistOutcome, ObservationReplayRequest, ObservationStore, ObservationStoreError,
+    ObservationStoreResult, ProjectionPersistOutcome, StoreShardScopeV1, StoredObservation,
     build_scope_resolution_authorization_v1,
 };
 
@@ -586,6 +584,36 @@ pub struct HostAdmissionFacade<'a> {
 impl<'a> HostAdmissionFacade<'a> {
     pub const fn new(authorities: HostAdmissionAuthorities<'a>) -> Self {
         Self { authorities }
+    }
+
+    pub(crate) async fn resolve_evidence_assembly_anchor(
+        &self,
+        context: &tracedecay_application::RequestContext,
+        owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
+        anchor_id: &RetrievalAnchorId,
+    ) -> tracedecay_store::EvidenceAssemblyStoreResult<
+        crate::application::evidence_assembly::EvidenceAssemblyAnchorResolutionV1,
+    > {
+        let unavailable = || tracedecay_store::EvidenceAssemblyStoreError::Unavailable;
+        let project_id = owner.owner.project_id().ok_or_else(unavailable)?;
+        if project_id != &context.scope().project_id {
+            return Err(unavailable());
+        }
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        self.authorities
+            .validate_scope(&scope)
+            .map_err(|_| unavailable())?;
+        let database = self
+            .authorities
+            .registered_database(HostAdmissionScope::Project)
+            .map_err(|_| unavailable())?
+            .ok_or_else(unavailable)?;
+        database
+            .evidence_assembly_store()?
+            .resolve_anchor(context, owner, anchor_id)
+            .await
     }
 
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
@@ -4881,15 +4909,12 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
         let authority_scope = host_scope(&scope);
         let record = match self.authorities.registered_database(authority_scope) {
             Ok(Some(registered)) => registered
-                .retrieval_anchor_store()
-                .and_then(|store| {
-                    store.resolve_anchor(&anchor_id, &RetrievalAnchorOwnerV1::from(owner))
-                })
+                .resolve_observation_evidence_anchor(&scope, &anchor_id)
+                .await
                 .map_err(|error| EvidenceAnchorResolutionError::Authority {
                     operation: "resolve registered observation evidence anchor",
                     source: Box::new(error),
                 })?
-                .and_then(v2_anchor_record)
                 .ok_or_else(|| EvidenceAnchorResolutionError::Unavailable {
                     anchor_id: anchor_id.clone(),
                 })?,
@@ -4950,40 +4975,13 @@ impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
         })?;
         let authority_scope = host_scope(&scope);
         let observed = match self.authorities.registered_database(authority_scope) {
-            Ok(Some(registered)) => {
-                let stored = registered
-                    .retrieval_anchor_store()
-                    .and_then(|store| {
-                        store.resolve_anchor(
-                            &anchor_id,
-                            &RetrievalAnchorOwnerV1::from(owner.clone()),
-                        )
-                    })
-                    .map_err(|error| EvidenceAnchorResolutionError::Authority {
-                        operation: "resolve registered observation evidence anchor report",
-                        source: Box::new(error),
-                    })?;
-                match stored.and_then(v2_anchor_record) {
-                    Some(record) => {
-                        let checkpoint = registered
-                            .observation_store()
-                            .projection_checkpoint()
-                            .await
-                            .map_err(|error| EvidenceAnchorResolutionError::Authority {
-                                operation: "read registered observation projection checkpoint",
-                                source: Box::new(error),
-                            })?;
-                        ObservedEvidenceAnchorResolution::Resolved {
-                            observed_watermark: observed_anchor_watermark(
-                                record.projection_watermark(),
-                                checkpoint.last_sequence(),
-                            ),
-                            record: Box::new(record),
-                        }
-                    }
-                    None => ObservedEvidenceAnchorResolution::Unavailable,
-                }
-            }
+            Ok(Some(registered)) => registered
+                .resolve_observation_evidence_anchor_report(&scope, &anchor_id)
+                .await
+                .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                    operation: "resolve registered observation evidence anchor report",
+                    source: Box::new(error),
+                })?,
             Ok(None) => {
                 return Err(EvidenceAnchorResolutionError::Authority {
                     operation: "resolve registered observation evidence anchor report",
@@ -5013,26 +5011,6 @@ impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
                 operation: "validate observation evidence anchor report",
                 source: Box::new(error),
             })
-    }
-}
-
-fn v2_anchor_record(
-    stored: StoredRetrievalAnchorRecordV1,
-) -> Option<tracedecay_domain::RetrievalAnchorRecordV2> {
-    match stored {
-        StoredRetrievalAnchorRecordV1::V2(record) => Some(record),
-        StoredRetrievalAnchorRecordV1::V3(_) => None,
-    }
-}
-
-fn observed_anchor_watermark(frozen: &VectorWatermark, observed_sequence: u64) -> VectorWatermark {
-    VectorWatermark {
-        components: frozen
-            .components
-            .keys()
-            .cloned()
-            .map(|shard| (shard, observed_sequence))
-            .collect(),
     }
 }
 

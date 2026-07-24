@@ -109,8 +109,8 @@ async fn append_anchor_disposition_inner(
     let mut replay = connection
         .query(
             "SELECT record_json FROM retrieval_anchor_dispositions
-             WHERE disposition_id = ?1",
-            [record.disposition_id()],
+             WHERE disposition_id = ?1 AND owner_json = ?2",
+            params![record.disposition_id(), owner.as_str()],
         )
         .await
         .map_err(database_error)?;
@@ -433,8 +433,8 @@ impl super::Database {
         let mut replay = transaction
             .query(
                 "SELECT record_json FROM retrieval_anchor_dispositions
-                 WHERE disposition_id = ?1",
-                [record.disposition_id()],
+                 WHERE disposition_id = ?1 AND owner_json = ?2",
+                params![record.disposition_id(), owner.as_str()],
             )
             .await
             .map_err(database_error)?;

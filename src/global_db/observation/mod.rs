@@ -7,12 +7,13 @@ mod schema;
 pub(super) use schema::ensure_observation_schema;
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationScopeV1, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    VectorWatermark,
+    AnchorSourceGenerationV2, CanonicalObservationIdV1, ObservationScopeV1,
+    ObservationSourceGenerationV1, RetrievalAnchorId, RetrievalAnchorRecordV2,
+    RetrievalAnchorTargetV2, VectorWatermark,
 };
 use tracedecay_store::{
     ObservationProjectionStatus, ObservationStoreError, ObservationStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION,
+    ObservedEvidenceAnchorResolution, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
 use crate::db::engine::{QueryExecutor, params};
@@ -98,7 +99,36 @@ async fn resolve_owner_bound_anchor_record(
     if record.projection_generation() != receipt.projection_generation() {
         return Err(ObservationStoreError::RetrievalAnchorProjectionGenerationMismatch);
     }
+    validate_exact_observation_provenance(
+        record.target(),
+        record.source_generation(),
+        record.source_observations(),
+        receipt.observation().observation_id(),
+        receipt.observation().identity().generation(),
+    )?;
     Ok(Some(record))
+}
+
+fn validate_exact_observation_provenance(
+    target: &RetrievalAnchorTargetV2,
+    source_generation: &AnchorSourceGenerationV2,
+    source_observations: &[CanonicalObservationIdV1],
+    observation_id: &CanonicalObservationIdV1,
+    observation_generation: ObservationSourceGenerationV1,
+) -> ObservationStoreResult<()> {
+    let RetrievalAnchorTargetV2::ExactObservation(target_observation_id) = target else {
+        return Ok(());
+    };
+    if target_observation_id != observation_id {
+        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+    }
+    if source_generation != &AnchorSourceGenerationV2::Observation(observation_generation) {
+        return Err(ObservationStoreError::RetrievalAnchorSourceGenerationMismatch);
+    }
+    if source_observations != std::slice::from_ref(observation_id) {
+        return Err(ObservationStoreError::RetrievalAnchorSourceLineageMismatch);
+    }
+    Ok(())
 }
 
 /// Current position of the observation projection stream, defaulting to zero
@@ -138,6 +168,127 @@ fn observed_anchor_watermark(frozen: &VectorWatermark, observed_sequence: u64) -
         components.insert(shard.clone(), observed_sequence);
     }
     VectorWatermark { components }
+}
+
+impl super::RegisteredGlobalDb {
+    pub(crate) async fn resolve_observation_evidence_anchor(
+        &self,
+        owner: &ObservationScopeV1,
+        anchor_id: &RetrievalAnchorId,
+    ) -> ObservationStoreResult<Option<RetrievalAnchorRecordV2>> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage("open evidence anchor resolution snapshot", error))?;
+        resolve_owner_bound_anchor_record(&snapshot, owner, anchor_id).await
+    }
+
+    pub(crate) async fn resolve_observation_evidence_anchor_report(
+        &self,
+        owner: &ObservationScopeV1,
+        anchor_id: &RetrievalAnchorId,
+    ) -> ObservationStoreResult<ObservedEvidenceAnchorResolution> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage("open evidence anchor report snapshot", error))?;
+        let record = match resolve_owner_bound_anchor_record(&snapshot, owner, anchor_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return Ok(ObservedEvidenceAnchorResolution::Unavailable),
+            Err(ObservationStoreError::RetrievalAnchorCollision) => {
+                return Ok(ObservedEvidenceAnchorResolution::Ambiguous);
+            }
+            Err(error) => return Err(error),
+        };
+        let observed_sequence = read_projection_checkpoint_sequence(&snapshot).await?;
+        Ok(ObservedEvidenceAnchorResolution::Resolved {
+            observed_watermark: observed_anchor_watermark(
+                record.projection_watermark(),
+                observed_sequence,
+            ),
+            record: Box::new(record),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_domain::{CommitId, RepositoryId};
+
+    fn observation_id(byte: &str) -> CanonicalObservationIdV1 {
+        CanonicalObservationIdV1::new(format!("sha256:{}", byte.repeat(64))).unwrap()
+    }
+
+    #[test]
+    fn exact_observation_resolution_rechecks_generation_and_ordered_lineage() {
+        let canonical_id = observation_id("a");
+        let other_id = observation_id("b");
+        let generation = ObservationSourceGenerationV1::new(7).unwrap();
+        let target = RetrievalAnchorTargetV2::ExactObservation(canonical_id.clone());
+        let source_generation = AnchorSourceGenerationV2::Observation(generation);
+
+        assert!(
+            validate_exact_observation_provenance(
+                &target,
+                &source_generation,
+                std::slice::from_ref(&canonical_id),
+                &canonical_id,
+                generation,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_exact_observation_provenance(
+                &target,
+                &AnchorSourceGenerationV2::Observation(
+                    ObservationSourceGenerationV1::new(8).unwrap(),
+                ),
+                std::slice::from_ref(&canonical_id),
+                &canonical_id,
+                generation,
+            ),
+            Err(ObservationStoreError::RetrievalAnchorSourceGenerationMismatch)
+        ));
+        assert!(matches!(
+            validate_exact_observation_provenance(
+                &target,
+                &source_generation,
+                &[canonical_id.clone(), other_id],
+                &canonical_id,
+                generation,
+            ),
+            Err(ObservationStoreError::RetrievalAnchorSourceLineageMismatch)
+        ));
+        assert!(matches!(
+            validate_exact_observation_provenance(
+                &RetrievalAnchorTargetV2::ExactObservation(observation_id("c")),
+                &source_generation,
+                std::slice::from_ref(&canonical_id),
+                &canonical_id,
+                generation,
+            ),
+            Err(ObservationStoreError::RetrievalAnchorObservationMismatch)
+        ));
+    }
+
+    #[test]
+    fn non_observation_anchor_keeps_its_own_provenance_contract() {
+        let target = RetrievalAnchorTargetV2::ExactRepositoryCommit {
+            repository_id: RepositoryId::new("repository.fixture").unwrap(),
+            commit_id: CommitId::new("commit.fixture").unwrap(),
+        };
+        assert!(
+            validate_exact_observation_provenance(
+                &target,
+                &AnchorSourceGenerationV2::Unknown,
+                &[],
+                &observation_id("a"),
+                ObservationSourceGenerationV1::new(7).unwrap(),
+            )
+            .is_ok()
+        );
+    }
 }
 
 async fn read_projection_status(

@@ -437,6 +437,12 @@ impl EvidenceSourceOccurrenceRecordV1 {
         if self.occurrence_anchor.owner() != &self.owner {
             return Err(invalid("source occurrence anchor owner"));
         }
+        validate_derived_anchor_lineage(
+            &self.occurrence_anchor,
+            &self.owner,
+            std::slice::from_ref(&self.exact_source_anchor),
+            "source occurrence anchor lineage",
+        )?;
         if self
             .relations
             .iter()
@@ -1153,6 +1159,12 @@ impl RetrieverContributionRecordV1 {
         if self.anchor.owner() != &self.owner.owner {
             return Err(invalid("retriever contribution anchor owner"));
         }
+        validate_derived_anchor_lineage(
+            &self.anchor,
+            &self.owner.owner,
+            std::slice::from_ref(&self.span_anchor_id),
+            "retriever contribution anchor lineage",
+        )?;
         self.identity_projection().validate()?;
         validate_member_count(self.exact_source_anchors.len())?;
         if self.contribution_id != derive_retriever_contribution_id_v1(&self.identity_projection())?
@@ -1282,6 +1294,7 @@ impl EvidenceAssemblyWriteV1 {
         validate_member_count(self.occurrences.len())?;
         let mut occurrence_ids = Vec::with_capacity(self.occurrences.len());
         let mut source_anchors = Vec::with_capacity(self.occurrences.len());
+        let mut occurrence_anchor_ids = Vec::with_capacity(self.occurrences.len());
         for occurrence in &self.occurrences {
             occurrence.validate()?;
             if occurrence.owner != self.owner.owner {
@@ -1289,6 +1302,7 @@ impl EvidenceAssemblyWriteV1 {
             }
             occurrence_ids.push(occurrence.occurrence_id.clone());
             source_anchors.push(occurrence.exact_source_anchor.clone());
+            occurrence_anchor_ids.push(occurrence.occurrence_anchor.anchor_id().clone());
         }
         ensure_unique(&occurrence_ids, "evidence assembly occurrences")?;
         let by_id = self
@@ -1353,6 +1367,12 @@ impl EvidenceAssemblyWriteV1 {
         self.projection_receipt.validate()?;
         self.contribution.validate()?;
         self.receipt.validate()?;
+        validate_derived_anchor_lineage(
+            &self.span.anchor,
+            &self.owner.owner,
+            &occurrence_anchor_ids,
+            "evidence span anchor lineage",
+        )?;
         let catalog_mismatch = self
             .span
             .catalog_binding
@@ -1425,6 +1445,31 @@ impl EvidenceAssemblyWriteV1 {
         ))
         .map_err(invalid)
     }
+}
+
+fn validate_derived_anchor_lineage(
+    anchor: &RetrievalAnchorRecordV3,
+    owner: &AnchorOwnerBindingV1,
+    expected_sources: &[RetrievalAnchorId],
+    field: &'static str,
+) -> EvidenceAssemblyStoreResult<()> {
+    if anchor.source_anchors().len() != expected_sources.len() {
+        return Err(invalid(field));
+    }
+    for (ordinal, (source, expected_id)) in anchor
+        .source_anchors()
+        .iter()
+        .zip(expected_sources)
+        .enumerate()
+    {
+        if source.source_ordinal() != u64::try_from(ordinal).map_err(invalid)?
+            || source.anchor_id() != expected_id
+            || source.owner() != owner
+        {
+            return Err(invalid(field));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1542,7 +1587,10 @@ fn keyed_canonical_digest<T: Serialize>(
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        BlobId, PrivacyDomainId, ProjectId, ProviderId, RepositoryId, SessionId, UserProfileId,
+        AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV3, AnchorProvenanceRelationV2,
+        AnchorSourceGenerationV3, BlobId, EvidenceClass, PayloadAccessState,
+        PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
+        ResolutionAuthorizationV1, RetentionClass, SessionId, UserProfileId,
     };
 
     fn owner() -> EvidenceAssemblyOwnerV1 {
@@ -1606,6 +1654,58 @@ mod tests {
         }
     }
 
+    fn retrieval_anchor(
+        target: RetrievalAnchorTargetV3,
+        sources: Vec<RetrievalAnchorId>,
+    ) -> RetrievalAnchorRecordV3 {
+        let owner = owner().owner;
+        RetrievalAnchorRecordV3::new(tracedecay_domain::RetrievalAnchorRecordV3Parts {
+            target,
+            owner: owner.clone(),
+            aliases: vec![],
+            occurred_at: None,
+            ingested_at: UtcMicros(1),
+            evidence_class: EvidenceClass::Observed,
+            source_generation: AnchorSourceGenerationV3::Unknown,
+            projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
+            projection_watermark: VectorWatermark::default(),
+            coverage: CoverageReportV1::default(),
+            source_observations: vec![],
+            source_anchors: sources
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, source)| {
+                    AnchorLineageRefV3::new(
+                        u64::try_from(ordinal).unwrap(),
+                        AnchorProvenanceRelationV2::DerivedFrom,
+                        source,
+                        owner.clone(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            authorization: ResolutionAuthorizationV1 {
+                resolved_scope_id: ScopeResolutionId::new("scope.fixture").unwrap(),
+                privacy_domain_id: PrivacyDomainId::new("privacy.fixture").unwrap(),
+                access_policy_digest: AccessPolicyDigest::new(format!(
+                    "sha256:{}",
+                    "aa".repeat(32)
+                ))
+                .unwrap(),
+                capability_id: CapabilityId::new("capability.fixture").unwrap(),
+                canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(format!(
+                    "sha256:{}",
+                    "bb".repeat(32)
+                ))
+                .unwrap(),
+            },
+            payload_access: PayloadAccessState::Eligible,
+            retention_class: RetentionClass::new("retention.fixture").unwrap(),
+            durability: AnchorDurabilityClass::DurableEvidence,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn privacy_bound_digests_separate_domains_epochs_and_keys() {
         let envelope = PrivacyBoundRequestEnvelopeV1 {
@@ -1664,6 +1764,32 @@ mod tests {
         let mut changed = projection;
         changed.projector_version = ComponentVersion::new("projector.v2").unwrap();
         assert_ne!(replay, derive_source_occurrence_id_v1(&changed).unwrap());
+    }
+
+    #[test]
+    fn occurrence_anchor_binds_exact_lineage() {
+        let projection = occurrence_projection();
+        let occurrence_id = derive_source_occurrence_id_v1(&projection).unwrap();
+        let anchor = retrieval_anchor(
+            RetrievalAnchorTargetV3::ExactSourceOccurrence(occurrence_id),
+            vec![projection.exact_source_anchor.clone()],
+        );
+        validate_derived_anchor_lineage(
+            &anchor,
+            &projection.owner,
+            std::slice::from_ref(&projection.exact_source_anchor),
+            "test occurrence lineage",
+        )
+        .unwrap();
+        assert!(
+            validate_derived_anchor_lineage(
+                &anchor,
+                &projection.owner,
+                &[RetrievalAnchorId::new("retrieval.other.fixture").unwrap()],
+                "test occurrence lineage",
+            )
+            .is_err()
+        );
     }
 
     #[test]

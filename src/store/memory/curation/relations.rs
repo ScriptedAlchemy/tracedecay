@@ -17,7 +17,7 @@ use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1, FactEventId,
@@ -122,6 +122,74 @@ pub(in crate::store::memory) async fn compatibility_curation_evidence_ids_tx(
         ids.push(fact_id);
     }
     Ok(ids)
+}
+
+pub(super) async fn compatibility_record_curated_correction_provenance_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    corrected_fact_id: &FactId,
+    evidence_fact_ids: &[FactId],
+    confidence: Confidence,
+    operation: &str,
+    actor: Option<&ActorId>,
+    now: UtcMicros,
+) -> FactStoreResult<()> {
+    let key = OwnerKey::new(owner)?;
+    let evidence_json = to_json(
+        &evidence_fact_ids
+            .iter()
+            .map(FactId::as_str)
+            .collect::<Vec<_>>(),
+        "serialize curated correction evidence facts",
+    )?;
+    let source_label =
+        compatibility_source_label(Some(&format!("compatibility_curation_{operation}")))?;
+    let provenance_json = to_json(
+        &json!({
+            "actor_id": actor.map(ActorId::as_str),
+            "operation": operation,
+        }),
+        "serialize curated correction provenance",
+    )?;
+    if evidence_fact_ids
+        .iter()
+        .any(|evidence_fact_id| evidence_fact_id == corrected_fact_id)
+    {
+        return Err(storage_message(
+            COMPATIBILITY_WRITE_OPERATION,
+            "curated correction evidence cannot be the corrected fact",
+        ));
+    }
+    for evidence_fact_id in evidence_fact_ids {
+        transaction
+            .execute(
+                "INSERT INTO memory_v2_fact_relations(
+                    owner_kind, project_id, source_fact_id, target_fact_id, relation,
+                    confidence, source_label, provenance_json, evidence_fact_ids_json,
+                    occurred_at, updated_at
+                 ) VALUES(?1, ?2, ?3, ?4, 'derived_from', ?5, ?6, ?7, ?8, ?9, ?9)
+                 ON CONFLICT(owner_kind, project_id, source_fact_id, target_fact_id, relation)
+                 DO UPDATE SET confidence = excluded.confidence,
+                               source_label = excluded.source_label,
+                               provenance_json = excluded.provenance_json,
+                               evidence_fact_ids_json = excluded.evidence_fact_ids_json,
+                               updated_at = excluded.updated_at",
+                params![
+                    key.kind,
+                    key.project_id.as_str(),
+                    corrected_fact_id.as_str(),
+                    evidence_fact_id.as_str(),
+                    confidence.as_f64(),
+                    source_label.as_str(),
+                    provenance_json.as_str(),
+                    evidence_json.as_str(),
+                    now.0,
+                ],
+            )
+            .await
+            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    }
+    Ok(())
 }
 
 pub(super) async fn compatibility_curation_mappings_from_ids_tx(
@@ -398,7 +466,7 @@ pub(super) async fn compatibility_normalize_tags_tx(
     operation: &CompatibilityFactNormalizeTagsV1,
     now: UtcMicros,
 ) -> FactStoreResult<FactId> {
-    let _evidence =
+    let evidence =
         compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
             .await?;
     let (fact_id, fact, mapping) =
@@ -434,6 +502,17 @@ pub(super) async fn compatibility_normalize_tags_tx(
         now,
     )?;
     compatibility_commit_batch_tx(transaction, &batch).await?;
+    compatibility_record_curated_correction_provenance_tx(
+        transaction,
+        owner,
+        &fact_id,
+        &evidence,
+        operation.confidence(),
+        "normalize_tags",
+        actor,
+        now,
+    )
+    .await?;
     compatibility_mirror_update_tx(
         db,
         transaction,

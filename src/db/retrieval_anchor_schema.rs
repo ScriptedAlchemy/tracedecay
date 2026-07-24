@@ -44,7 +44,7 @@ const ALIASES_SCHEMA: &str = "
 const AUTHORITY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS retrieval_anchor_dispositions (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        disposition_id TEXT NOT NULL UNIQUE CHECK(length(disposition_id) > 0),
+        disposition_id TEXT NOT NULL CHECK(length(disposition_id) > 0),
         anchor_id TEXT NOT NULL,
         owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
         state TEXT NOT NULL
@@ -59,6 +59,7 @@ const AUTHORITY_SCHEMA: &str = "
         )),
         effective_at INTEGER NOT NULL,
         record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+        UNIQUE(owner_json, disposition_id),
         FOREIGN KEY(anchor_id, owner_json)
             REFERENCES retrieval_anchors(anchor_id, owner_json),
         FOREIGN KEY(superseded_by, owner_json)
@@ -464,6 +465,55 @@ async fn dispositions_support_terminal_states(
     .all(|state| sql.contains(state)))
 }
 
+async fn dispositions_have_owner_bound_identity(
+    conn: &(impl Executor + Sync),
+    operation: &str,
+) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_index_list(?1) WHERE \"unique\" = 1 ORDER BY seq",
+            params![DISPOSITIONS_TABLE],
+        )
+        .await
+        .map_err(|error| database_error(operation, error))?;
+    let mut indexes = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| database_error(operation, error))?
+    {
+        indexes.push(
+            row.get::<String>(0)
+                .map_err(|error| database_error(operation, error))?,
+        );
+    }
+    drop(rows);
+    for index in indexes {
+        let mut columns = conn
+            .query(
+                "SELECT name FROM pragma_index_info(?1) ORDER BY seqno",
+                params![index],
+            )
+            .await
+            .map_err(|error| database_error(operation, error))?;
+        let mut names = Vec::new();
+        while let Some(row) = columns
+            .next()
+            .await
+            .map_err(|error| database_error(operation, error))?
+        {
+            names.push(
+                row.get::<String>(0)
+                    .map_err(|error| database_error(operation, error))?,
+            );
+        }
+        if names.len() == 2 && names[0] == "owner_json" && names[1] == "disposition_id" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 async fn validate_disposition_table_columns(
     conn: &(impl Executor + Sync),
     table: &str,
@@ -642,7 +692,10 @@ async fn upgrade_dispositions_if_needed(
     if current_exists {
         validate_disposition_table_columns(conn, DISPOSITIONS_TABLE, operation).await?;
     }
-    if current_exists && !dispositions_support_terminal_states(conn, operation).await? {
+    if current_exists
+        && (!dispositions_support_terminal_states(conn, operation).await?
+            || !dispositions_have_owner_bound_identity(conn, operation).await?)
+    {
         if legacy_exists {
             return Err(schema_error(
                 operation,
@@ -775,6 +828,56 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn disposition_identity_is_owner_scoped() {
+        let (_directory, conn) = connection().await;
+        install_retrieval_anchor_schema(&conn, "test retrieval-anchor schema")
+            .await
+            .expect("install schema");
+        conn.execute(
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                ('anchor-one', '{\"target\":\"fixture\"}', '{\"owner\":\"one\"}', 'generation-1'),
+                ('anchor-two', '{\"target\":\"fixture\"}', '{\"owner\":\"two\"}', 'generation-1')",
+            (),
+        )
+        .await
+        .expect("insert owner-scoped anchors");
+        for (anchor_id, owner) in [
+            ("anchor-one", "{\"owner\":\"one\"}"),
+            ("anchor-two", "{\"owner\":\"two\"}"),
+        ] {
+            conn.execute(
+                "INSERT INTO retrieval_anchor_dispositions (
+                    disposition_id, anchor_id, owner_json, state, superseded_by,
+                    reason_class, effective_at, record_json
+                 ) VALUES ('shared-disposition', ?1, ?2, 'active', NULL,
+                           'correction', 1, '{}')",
+                params![anchor_id, owner],
+            )
+            .await
+            .expect("insert owner-scoped disposition");
+        }
+        let mut rows = conn
+            .query(
+                "SELECT count(*) FROM retrieval_anchor_dispositions
+                 WHERE disposition_id = 'shared-disposition'",
+                (),
+            )
+            .await
+            .expect("count owner-scoped dispositions");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("read disposition count")
+                .expect("disposition count row")
+                .get::<i64>(0)
+                .expect("disposition count"),
+            2
         );
     }
 

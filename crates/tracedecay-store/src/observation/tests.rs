@@ -84,6 +84,24 @@ fn anchor(
     aliases: Vec<NativeAliasV2>,
     ingested_at: i64,
 ) -> RetrievalAnchorRecordV2 {
+    anchor_with_provenance(
+        observation,
+        owner,
+        aliases,
+        ingested_at,
+        AnchorSourceGenerationV2::Observation(observation.identity().generation()),
+        vec![observation.observation_id().clone()],
+    )
+}
+
+fn anchor_with_provenance(
+    observation: &DurableObservationV1,
+    owner: ObservationScopeV1,
+    aliases: Vec<NativeAliasV2>,
+    ingested_at: i64,
+    source_generation: AnchorSourceGenerationV2,
+    source_observations: Vec<CanonicalObservationIdV1>,
+) -> RetrievalAnchorRecordV2 {
     RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
         target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
         owner,
@@ -91,13 +109,11 @@ fn anchor(
         occurred_at: None,
         ingested_at: UtcMicros(ingested_at),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Observation(
-            observation.identity().generation(),
-        ),
+        source_generation,
         projection_generation: projection_generation(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
-        source_observations: vec![observation.observation_id().clone()],
+        source_observations,
         source_anchors: vec![],
         authorization: authorization(),
         payload_access: PayloadAccessState::Eligible,
@@ -175,6 +191,44 @@ fn anchored_write_rejects_identity_owner_and_projection_mismatches() {
             ProjectionGenerationId::new("projection.wrong").unwrap(),
         ),
         Err(ObservationStoreError::RetrievalAnchorProjectionGenerationMismatch)
+    ));
+}
+
+#[test]
+fn anchored_write_rejects_mismatched_source_generation_and_lineage() {
+    let candidate = observation("source-binding", ObservationScopeV1::Profile);
+    let other = observation("source-binding-other", ObservationScopeV1::Profile);
+    assert!(matches!(
+        AnchoredObservationWrite::new(
+            write(candidate.clone()),
+            anchor_with_provenance(
+                &candidate,
+                ObservationScopeV1::Profile,
+                vec![],
+                1,
+                AnchorSourceGenerationV2::Observation(
+                    ObservationSourceGenerationV1::new(8).unwrap()
+                ),
+                vec![candidate.observation_id().clone()],
+            ),
+            projection_generation(),
+        ),
+        Err(ObservationStoreError::RetrievalAnchorSourceGenerationMismatch)
+    ));
+    assert!(matches!(
+        AnchoredObservationWrite::new(
+            write(candidate.clone()),
+            anchor_with_provenance(
+                &candidate,
+                ObservationScopeV1::Profile,
+                vec![],
+                1,
+                AnchorSourceGenerationV2::Observation(candidate.identity().generation()),
+                vec![other.observation_id().clone()],
+            ),
+            projection_generation(),
+        ),
+        Err(ObservationStoreError::RetrievalAnchorSourceLineageMismatch)
     ));
 }
 

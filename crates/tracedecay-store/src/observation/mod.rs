@@ -790,6 +790,10 @@ pub enum ObservationStoreError {
     RetrievalAnchorObservationMismatch,
     #[error("retrieval anchor owner does not match the persisted observation scope")]
     RetrievalAnchorOwnerMismatch,
+    #[error("retrieval anchor source generation does not match the persisted observation")]
+    RetrievalAnchorSourceGenerationMismatch,
+    #[error("retrieval anchor source lineage does not match the persisted observation")]
+    RetrievalAnchorSourceLineageMismatch,
     #[error("retrieval anchor projection generation does not match the store write")]
     RetrievalAnchorProjectionGenerationMismatch,
     #[error("retrieval anchor identity collided with different authoritative contents")]

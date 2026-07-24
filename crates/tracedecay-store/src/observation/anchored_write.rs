@@ -21,6 +21,15 @@ pub(super) fn validate_retrieval_anchor_binding(
     if retrieval_anchor.owner() != observation.scope() {
         return Err(ObservationStoreError::RetrievalAnchorOwnerMismatch);
     }
+    if retrieval_anchor.source_generation()
+        != &AnchorSourceGenerationV2::Observation(observation.identity().generation())
+    {
+        return Err(ObservationStoreError::RetrievalAnchorSourceGenerationMismatch);
+    }
+    if retrieval_anchor.source_observations() != std::slice::from_ref(observation.observation_id())
+    {
+        return Err(ObservationStoreError::RetrievalAnchorSourceLineageMismatch);
+    }
     if retrieval_anchor.projection_generation() != projection_generation {
         return Err(ObservationStoreError::RetrievalAnchorProjectionGenerationMismatch);
     }
