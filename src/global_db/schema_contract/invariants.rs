@@ -34,7 +34,7 @@ const OPERATION: &str = "ensure global database authority invariants";
 /// Rows an authority row audit may ask the SQL channel for at once.
 ///
 /// The channel materializes an entire result set before yielding row one and
-/// rejects anything past `MAX_QUERY_ROWS` (10_000) or 64 MiB. Every audit below
+/// rejects anything past `MAX_QUERY_ROWS` (`10_000`) or 64 MiB. Every audit below
 /// walks a table (or a checkpoint suffix of one) whose length grows with the
 /// store, so each scan pages with a keyset cursor instead of requesting one
 /// unbounded result set. Without paging a store simply became unopenable once a
