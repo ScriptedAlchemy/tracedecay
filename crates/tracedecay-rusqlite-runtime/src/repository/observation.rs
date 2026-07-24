@@ -1320,6 +1320,27 @@ mod tests {
         let write = anchored_observation_write("fixture", "receipt.fixture");
         execute(&mut connection, &write).unwrap();
 
+        let point = read(
+            &mut connection,
+            &ObservationReadOperationV1::Observation {
+                observation_id: write.observation().observation_id().clone(),
+            },
+        )
+        .unwrap();
+        let ObservationReadResultV1::Observation(point) = point else {
+            panic!("unexpected point-read result");
+        };
+        let point = point.expect("persisted observation must be readable");
+        assert_eq!(point.observation, *write.observation());
+        assert_eq!(point.committed_cursor, *write.next_cursor());
+        assert_eq!(point.retrieval_anchor, *write.retrieval_anchor());
+        assert_eq!(point.projection_generation, *write.projection_generation());
+        assert_eq!(
+            point.repository_provenance,
+            *write.repository_provenance_attachment()
+        );
+        assert!(point.projection_queued);
+
         let replay = read(
             &mut connection,
             &ObservationReadOperationV1::Replay {
