@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::capabilities::{
-    ClientCapabilities, GatewayCapabilities, UpstreamCapabilities, negotiate_capabilities,
+    ClientCapabilities, GatewayCapabilities, SemanticCapability, UpstreamCapabilities,
+    negotiate_capabilities,
 };
 use super::context::{ContextProjectionPort, MAX_CONTEXT_PROJECTION_KINDS};
 use super::gateway::{AdmittedRoot, FeedbackCyclePort, SemanticProviderPort};
@@ -161,10 +162,20 @@ where
         mut gateway_capabilities: GatewayCapabilities,
         upstream_capabilities: UpstreamCapabilities,
     ) -> Self {
+        if upstream_capabilities
+            .semantic
+            .contains(&SemanticCapability::RenameCandidate)
+        {
+            gateway_capabilities
+                .semantic
+                .insert(SemanticCapability::RenameCandidate);
+        }
         gateway_capabilities.context_projections = context
             .registrations()
             .into_iter()
-            .filter(|registration| registration.kind.is_valid() && registration.revision > 0)
+            .filter(|registration| {
+                registration.kind.is_pr12_supported() && registration.revision > 0
+            })
             .take(MAX_CONTEXT_PROJECTION_KINDS)
             .map(|registration| (registration.kind, registration.revision))
             .collect::<BTreeMap<_, _>>();

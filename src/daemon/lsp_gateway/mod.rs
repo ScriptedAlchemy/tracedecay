@@ -60,7 +60,8 @@ pub use gateway::{
     AdmittedRoot, CallHierarchyItem, DaemonLspGateway, DiagnosticTrigger, DocumentSymbol,
     FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse, GatewayDocumentDiagnostics,
     GatewayMethod, GatewayResponse, Hover, IncomingCall, LspLocation, MethodUnavailable,
-    MethodUnavailableReason, OutgoingCall, SemanticProviderOutcome, SemanticProviderPort,
+    MethodUnavailableReason, OutgoingCall, RenameCandidate, RenameCandidateResult,
+    RenameCandidateUnavailableReason, SemanticProviderOutcome, SemanticProviderPort,
     SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem,
     UnavailableSemanticProvider, WorkspaceSymbol,
 };

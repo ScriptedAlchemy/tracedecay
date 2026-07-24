@@ -34,9 +34,9 @@ use super::diagnostics::{
 };
 use super::gateway::{
     AdmittedRoot, CallHierarchyItem, DocumentSymbol, FeedbackCyclePort, FeedbackCycleRequest,
-    FeedbackCycleResponse, Hover, IncomingCall, LspLocation, OutgoingCall, SemanticProviderOutcome,
-    SemanticProviderPort, SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem,
-    WorkspaceSymbol,
+    FeedbackCycleResponse, Hover, IncomingCall, LspLocation, OutgoingCall, RenameCandidateResult,
+    RenameCandidateUnavailableReason, SemanticProviderOutcome, SemanticProviderPort,
+    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
 use super::overlay::OverlaySnapshot;
 use super::provider::{
@@ -461,6 +461,7 @@ impl FeedbackCyclePort for Pr12FeedbackCycleAdapter {
 pub enum LspSemanticOperationOutcome {
     Complete(Value),
     Partial { value: Value, coverage: String },
+    RenameCandidate(RenameCandidateResult),
     Unavailable,
 }
 
@@ -715,6 +716,11 @@ fn lsp_semantic_request(request: &SemanticRequest) -> Result<LspSemanticRequest,
             decode_lsp(json!({ "item": type_item_value(item) }))
                 .map(LspSemanticRequest::TypeHierarchySubtypes)
         }
+        SemanticRequest::RenameCandidate {
+            document_uri,
+            position,
+        } => decode_lsp(position_params(document_uri, *position))
+            .map(LspSemanticRequest::PrepareRename),
     }
 }
 
@@ -750,6 +756,9 @@ fn project_semantic_outcome(
                 .map_or_else(|_| empty_semantic_response(request), |(value, _)| value);
             let (value, _) = confine_semantic_response(root, value);
             SemanticProviderOutcome::Partial { value, coverage }
+        }
+        LspSemanticOperationOutcome::RenameCandidate(value) => {
+            SemanticProviderOutcome::Complete(SemanticResponse::RenameCandidate(value))
         }
         LspSemanticOperationOutcome::Unavailable => SemanticProviderOutcome::Unavailable,
     }
@@ -795,6 +804,16 @@ fn confine_semantic_response(
             values.retain(|value| root.contains_document(&value.uri));
             let omitted = before != values.len();
             (SemanticResponse::TypeHierarchyItems(values), omitted)
+        }
+        SemanticResponse::RenameCandidate(RenameCandidateResult::Available(candidate))
+            if !root.contains_document(&candidate.document_uri) =>
+        {
+            (
+                SemanticResponse::RenameCandidate(RenameCandidateResult::Unavailable {
+                    reason: RenameCandidateUnavailableReason::AmbiguousEvidence,
+                }),
+                true,
+            )
         }
         response => (response, false),
     }
@@ -849,6 +868,7 @@ fn parse_semantic_response(
             SemanticResponse::TypeHierarchyItems(parse_type_items(value)?),
             None,
         )),
+        SemanticRequest::RenameCandidate { .. } => Err("rename-candidate-unmerged".to_owned()),
     }
 }
 
@@ -872,6 +892,11 @@ fn empty_semantic_response(request: &SemanticRequest) -> SemanticResponse {
         | SemanticRequest::TypeHierarchySupertypes { .. }
         | SemanticRequest::TypeHierarchySubtypes { .. } => {
             SemanticResponse::TypeHierarchyItems(Vec::new())
+        }
+        SemanticRequest::RenameCandidate { .. } => {
+            SemanticResponse::RenameCandidate(RenameCandidateResult::Unavailable {
+                reason: RenameCandidateUnavailableReason::EvidenceAbsent,
+            })
         }
     }
 }

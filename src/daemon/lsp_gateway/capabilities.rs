@@ -7,12 +7,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::context::{
-    ContextProjectionKind, ContextProjectionRegistration, MAX_CONTEXT_PROJECTION_KINDS,
-    TRACEDECAY_CONTEXT_REVISION,
+    ContextProjectionKind, ContextProjectionRegistration, MAX_CONTEXT_PROJECTION_BYTES,
+    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES,
+    MAX_CONTEXT_SUMMARY_BYTES, TRACEDECAY_CONTEXT_REVISION,
 };
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TraceDecayClientCapabilities {
+    revision: u32,
+    #[serde(default)]
+    opaque_expansion: bool,
+    projections: Vec<ContextProjectionRegistration>,
+}
 
 /// The protocol version implemented by the gateway contract.
 pub const LSP_PROTOCOL_VERSION: &str = "3.17";
@@ -59,10 +70,13 @@ pub enum SemanticCapability {
     CallHierarchy,
     SignatureHelp,
     TypeHierarchy,
+    /// Internal read-only analyzer/graph evidence merge. Never advertised as
+    /// an LSP rename provider.
+    RenameCandidate,
 }
 
 impl SemanticCapability {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Declaration,
         Self::Definition,
         Self::TypeDefinition,
@@ -74,6 +88,7 @@ impl SemanticCapability {
         Self::CallHierarchy,
         Self::SignatureHelp,
         Self::TypeHierarchy,
+        Self::RenameCandidate,
     ];
 }
 
@@ -202,33 +217,35 @@ impl ClientCapabilities {
             .and_then(Value::as_object)
             .and_then(|experimental| experimental.get("tracedecay"))
         {
-            let tracedecay = tracedecay
+            let revision = tracedecay
                 .as_object()
+                .and_then(|tracedecay| tracedecay.get("revision"))
+                .and_then(Value::as_u64)
+                .and_then(|revision| u32::try_from(revision).ok())
                 .ok_or(CapabilityParseError::InvalidTraceDecayCapabilities)?;
-            if tracedecay.get("revision").and_then(Value::as_u64)
-                != Some(u64::from(TRACEDECAY_CONTEXT_REVISION))
-            {
+            if revision != TRACEDECAY_CONTEXT_REVISION {
+                return Ok(capabilities);
+            }
+            let tracedecay: TraceDecayClientCapabilities =
+                serde_json::from_value(tracedecay.clone())
+                    .map_err(|_| CapabilityParseError::InvalidTraceDecayCapabilities)?;
+            debug_assert_eq!(tracedecay.revision, revision);
+            if tracedecay.projections.len() > MAX_CONTEXT_PROJECTION_KINDS {
                 return Err(CapabilityParseError::InvalidTraceDecayCapabilities);
             }
-            let projections = tracedecay
-                .get("projections")
-                .and_then(Value::as_array)
-                .ok_or(CapabilityParseError::InvalidTraceDecayCapabilities)?;
-            if projections.len() > MAX_CONTEXT_PROJECTION_KINDS {
-                return Err(CapabilityParseError::InvalidTraceDecayCapabilities);
-            }
-            for projection in projections {
-                let registration: ContextProjectionRegistration =
-                    serde_json::from_value(projection.clone())
-                        .map_err(|_| CapabilityParseError::InvalidTraceDecayCapabilities)?;
-                if !registration.kind.is_valid() || registration.revision == 0 {
+            let mut negotiated = BTreeMap::new();
+            for registration in tracedecay.projections {
+                if !registration.kind.is_pr12_supported()
+                    || registration.revision == 0
+                    || negotiated
+                        .insert(registration.kind, registration.revision)
+                        .is_some()
+                {
                     return Err(CapabilityParseError::InvalidTraceDecayCapabilities);
                 }
-                capabilities
-                    .context_projections
-                    .insert(registration.kind, registration.revision);
             }
-            capabilities.supports_context_expansion = bool_at(Some(tracedecay), "opaqueExpansion");
+            capabilities.context_projections = negotiated;
+            capabilities.supports_context_expansion = tracedecay.opaque_expansion;
         }
         Ok(capabilities)
     }
@@ -408,6 +425,13 @@ impl EffectiveCapabilities {
                     "tracedecay": {
                         "revision": TRACEDECAY_CONTEXT_REVISION,
                         "opaqueExpansion": self.supports_context_expansion,
+                        "limits": {
+                            "maxItems": MAX_CONTEXT_PROJECTION_ITEMS,
+                            "maxProjectionBytes": MAX_CONTEXT_PROJECTION_BYTES,
+                            "maxProjectionKinds": MAX_CONTEXT_PROJECTION_KINDS,
+                            "maxRetrievalHandleBytes": MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES,
+                            "maxSummaryBytes": MAX_CONTEXT_SUMMARY_BYTES,
+                        },
                         "projections": self.context_projections.iter().map(|(kind, revision)| {
                             json!({ "kind": kind, "revision": revision })
                         }).collect::<Vec<_>>(),
@@ -451,7 +475,7 @@ pub fn negotiate_capabilities(
     upstream: &UpstreamCapabilities,
 ) -> EffectiveCapabilities {
     let client_supports_utf16 = client.supports_position_encoding(PositionEncoding::Utf16);
-    let semantic = if client_supports_utf16 {
+    let mut semantic = if client_supports_utf16 {
         client
             .semantic
             .intersection(&gateway.semantic)
@@ -463,6 +487,16 @@ pub fn negotiate_capabilities(
     } else {
         BTreeSet::new()
     };
+    if client_supports_utf16
+        && gateway
+            .semantic
+            .contains(&SemanticCapability::RenameCandidate)
+        && upstream
+            .semantic
+            .contains(&SemanticCapability::RenameCandidate)
+    {
+        semantic.insert(SemanticCapability::RenameCandidate);
+    }
 
     let diagnostics_supported = client_supports_utf16
         && (gateway.supports_managed_diagnostics || upstream.supports_diagnostics);
@@ -582,6 +616,31 @@ mod tests {
 
         assert!(effective.supports_publish_diagnostics);
         assert!(effective.supports_document_diagnostics);
+        assert!(
+            !effective.supports_semantic(SemanticCapability::RenameCandidate),
+            "graph-only sessions cannot claim analyzer-derived rename evidence"
+        );
+    }
+
+    #[test]
+    fn internal_rename_candidate_capability_is_never_advertised() {
+        let effective = negotiate_capabilities(
+            &full_client(),
+            &GatewayCapabilities::default(),
+            &UpstreamCapabilities {
+                supports_diagnostics: true,
+                semantic: SemanticCapability::ALL.into_iter().collect(),
+            },
+        );
+
+        assert!(effective.supports_semantic(SemanticCapability::RenameCandidate));
+        assert!(!effective.rename_supported);
+        assert!(
+            effective
+                .to_lsp_server_capabilities()
+                .get("renameProvider")
+                .is_none()
+        );
     }
 
     #[test]
@@ -699,6 +758,10 @@ mod tests {
             effective.to_lsp_server_capabilities()["experimental"]["tracedecay"]["opaqueExpansion"],
             true
         );
+        assert_eq!(
+            effective.to_lsp_server_capabilities()["experimental"]["tracedecay"]["limits"]["maxItems"],
+            MAX_CONTEXT_PROJECTION_ITEMS
+        );
 
         let mut without_expansion = client;
         without_expansion.supports_context_expansion = false;
@@ -710,6 +773,54 @@ mod tests {
             )
             .supports_context_expansion
         );
+    }
+
+    #[test]
+    fn context_capability_dto_rejects_unknown_duplicate_and_arbitrary_projections() {
+        for tracedecay in [
+            json!({
+                "revision": TRACEDECAY_CONTEXT_REVISION,
+                "projections": [],
+                "unexpected": true,
+            }),
+            json!({
+                "revision": TRACEDECAY_CONTEXT_REVISION,
+                "projections": [
+                    { "kind": "diagnostics", "revision": TRACEDECAY_CONTEXT_REVISION },
+                    { "kind": "diagnostics", "revision": TRACEDECAY_CONTEXT_REVISION },
+                ],
+            }),
+            json!({
+                "revision": TRACEDECAY_CONTEXT_REVISION,
+                "projections": [
+                    { "kind": "arbitraryProviderPayload", "revision": TRACEDECAY_CONTEXT_REVISION },
+                ],
+            }),
+        ] {
+            assert_eq!(
+                ClientCapabilities::from_initialize_capabilities(&json!({
+                    "experimental": { "tracedecay": tracedecay }
+                })),
+                Err(CapabilityParseError::InvalidTraceDecayCapabilities)
+            );
+        }
+    }
+
+    #[test]
+    fn future_context_revision_does_not_block_standard_capability_parsing() {
+        let capabilities = ClientCapabilities::from_initialize_capabilities(&json!({
+            "general": { "positionEncodings": ["utf-16"] },
+            "experimental": {
+                "tracedecay": {
+                    "revision": TRACEDECAY_CONTEXT_REVISION + 1,
+                    "futureShape": { "not": "a current DTO" }
+                }
+            }
+        }))
+        .expect("future extension must not block standard LSP");
+        assert!(capabilities.supports_position_encoding(PositionEncoding::Utf16));
+        assert!(capabilities.context_projections.is_empty());
+        assert!(!capabilities.supports_context_expansion);
     }
 
     #[test]

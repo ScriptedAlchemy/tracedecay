@@ -366,6 +366,30 @@ pub struct TypeHierarchyItem {
     pub selection_range: LspRange,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenameCandidate {
+    pub document_uri: String,
+    pub range: LspRange,
+    pub placeholder: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenameCandidateUnavailableReason {
+    AnalyzerUnavailable,
+    GraphUnavailable,
+    EvidenceAbsent,
+    StaleEvidence,
+    AmbiguousEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RenameCandidateResult {
+    Available(RenameCandidate),
+    Unavailable {
+        reason: RenameCandidateUnavailableReason,
+    },
+}
+
 /// A truthful semantic-provider outcome. Empty collections are complete only
 /// when the provider says they are complete; unavailable and partial states
 /// cannot collapse into a plausible clean empty result.
@@ -447,6 +471,10 @@ pub enum SemanticRequest {
     TypeHierarchySubtypes {
         item: TypeHierarchyItem,
     },
+    RenameCandidate {
+        document_uri: String,
+        position: LspPosition,
+    },
 }
 
 impl SemanticRequest {
@@ -467,6 +495,7 @@ impl SemanticRequest {
             Self::PrepareTypeHierarchy { .. } => GatewayMethod::TextDocumentPrepareTypeHierarchy,
             Self::TypeHierarchySupertypes { .. } => GatewayMethod::TypeHierarchySupertypes,
             Self::TypeHierarchySubtypes { .. } => GatewayMethod::TypeHierarchySubtypes,
+            Self::RenameCandidate { .. } => GatewayMethod::TextDocumentPrepareRename,
         }
     }
 
@@ -487,6 +516,7 @@ impl SemanticRequest {
             Self::PrepareTypeHierarchy { .. }
             | Self::TypeHierarchySupertypes { .. }
             | Self::TypeHierarchySubtypes { .. } => SemanticCapability::TypeHierarchy,
+            Self::RenameCandidate { .. } => SemanticCapability::RenameCandidate,
         }
     }
 
@@ -501,7 +531,8 @@ impl SemanticRequest {
             | Self::DocumentSymbols { document_uri }
             | Self::PrepareCallHierarchy { document_uri, .. }
             | Self::SignatureHelp { document_uri, .. }
-            | Self::PrepareTypeHierarchy { document_uri, .. } => Some(document_uri),
+            | Self::PrepareTypeHierarchy { document_uri, .. }
+            | Self::RenameCandidate { document_uri, .. } => Some(document_uri),
             Self::IncomingCalls { item } | Self::OutgoingCalls { item } => Some(&item.uri),
             Self::TypeHierarchySupertypes { item } | Self::TypeHierarchySubtypes { item } => {
                 Some(&item.uri)
@@ -522,6 +553,7 @@ pub enum SemanticResponse {
     OutgoingCalls(Vec<OutgoingCall>),
     SignatureHelp(Option<SignatureHelp>),
     TypeHierarchyItems(Vec<TypeHierarchyItem>),
+    RenameCandidate(RenameCandidateResult),
 }
 
 /// Typed daemon adapter for admitted upstream/graph semantic operations.
@@ -606,6 +638,12 @@ pub trait SemanticProviderPort {
             SemanticRequest::TypeHierarchySubtypes { item } => self
                 .type_hierarchy_subtypes(root, item)
                 .map(SemanticResponse::TypeHierarchyItems),
+            SemanticRequest::RenameCandidate {
+                document_uri,
+                position,
+            } => self
+                .rename_candidate(root, document_uri, *position)
+                .map(SemanticResponse::RenameCandidate),
         }
     }
 
@@ -735,6 +773,15 @@ pub trait SemanticProviderPort {
         _root: &AdmittedRoot,
         _item: &TypeHierarchyItem,
     ) -> SemanticProviderOutcome<Vec<TypeHierarchyItem>> {
+        SemanticProviderOutcome::Unavailable
+    }
+
+    fn rename_candidate(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _position: LspPosition,
+    ) -> SemanticProviderOutcome<RenameCandidateResult> {
         SemanticProviderOutcome::Unavailable
     }
 }
@@ -878,6 +925,15 @@ where
         item: &TypeHierarchyItem,
     ) -> SemanticProviderOutcome<Vec<TypeHierarchyItem>> {
         (**self).type_hierarchy_subtypes(root, item)
+    }
+
+    fn rename_candidate(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> SemanticProviderOutcome<RenameCandidateResult> {
+        (**self).rename_candidate(root, document_uri, position)
     }
 }
 
@@ -1234,6 +1290,45 @@ where
         )
     }
 
+    /// Internal read-only Plan 05/35 rename-candidate operation. It never
+    /// projects `renameProvider` and never returns or applies a `WorkspaceEdit`.
+    pub fn rename_candidate(
+        &self,
+        request_id: &LspRequestId,
+        document_uri: &str,
+        position: LspPosition,
+    ) -> GatewayResponse<RenameCandidateResult> {
+        let unavailable = RenameCandidateResult::Unavailable {
+            reason: RenameCandidateUnavailableReason::AmbiguousEvidence,
+        };
+        match self.semantic_request(
+            request_id,
+            &SemanticRequest::RenameCandidate {
+                document_uri: document_uri.to_owned(),
+                position,
+            },
+        ) {
+            GatewayResponse::Value(SemanticResponse::RenameCandidate(value)) => {
+                GatewayResponse::Value(value)
+            }
+            GatewayResponse::Partial {
+                value: SemanticResponse::RenameCandidate(value),
+                coverage,
+            } => GatewayResponse::Partial { value, coverage },
+            GatewayResponse::Value(_) => GatewayResponse::Partial {
+                value: unavailable,
+                coverage: "rename-candidate-response-mismatch".to_owned(),
+            },
+            GatewayResponse::Partial { coverage, .. } => GatewayResponse::Partial {
+                value: unavailable,
+                coverage,
+            },
+            GatewayResponse::Pending => GatewayResponse::Pending,
+            GatewayResponse::Unavailable(unavailable) => GatewayResponse::Unavailable(unavailable),
+            GatewayResponse::RequestFailed(failure) => GatewayResponse::RequestFailed(failure),
+        }
+    }
+
     pub fn semantic_request(
         &self,
         request_id: &LspRequestId,
@@ -1362,6 +1457,19 @@ mod tests {
                 range: zero_range(),
             }])
         }
+
+        fn rename_candidate(
+            &self,
+            _root: &AdmittedRoot,
+            document_uri: &str,
+            _position: LspPosition,
+        ) -> SemanticProviderOutcome<RenameCandidateResult> {
+            SemanticProviderOutcome::Complete(RenameCandidateResult::Available(RenameCandidate {
+                document_uri: document_uri.to_owned(),
+                range: zero_range(),
+                placeholder: "old_name".to_owned(),
+            }))
+        }
     }
 
     fn zero_range() -> LspRange {
@@ -1467,6 +1575,20 @@ mod tests {
                 }
             ),
             GatewayResponse::Value(locations) if locations.len() == 1
+        ));
+        assert!(matches!(
+            available.rename_candidate(
+                &LspRequestId::Number(7),
+                "file:///root/a.rs",
+                LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+            ),
+            GatewayResponse::Value(RenameCandidateResult::Available(RenameCandidate {
+                placeholder,
+                ..
+            })) if placeholder == "old_name"
         ));
     }
 

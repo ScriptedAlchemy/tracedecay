@@ -9,8 +9,9 @@ use super::diagnostics::{
 };
 use super::gateway::{
     CallHierarchyItem, DocumentSymbol, GatewayDocumentDiagnostics, GatewayResponse, Hover,
-    IncomingCall, LspLocation, MethodUnavailableReason, OutgoingCall, SemanticResponse,
-    SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
+    IncomingCall, LspLocation, MethodUnavailableReason, OutgoingCall, RenameCandidateResult,
+    RenameCandidateUnavailableReason, SemanticResponse, SignatureHelp, TypeHierarchyItem,
+    WorkspaceSymbol,
 };
 use super::overlay::{OverlayChange, OverlayError};
 use super::session::{LspRequestFailure, LspRequestId};
@@ -100,6 +101,28 @@ pub(super) fn semantic_response_value(response: SemanticResponse) -> Value {
         SemanticResponse::OutgoingCalls(value) => outgoing_calls_value(value),
         SemanticResponse::SignatureHelp(value) => signature_help_value(value),
         SemanticResponse::TypeHierarchyItems(value) => type_items_value(value),
+        SemanticResponse::RenameCandidate(value) => rename_candidate_value(value),
+    }
+}
+
+fn rename_candidate_value(value: RenameCandidateResult) -> Value {
+    match value {
+        RenameCandidateResult::Available(candidate) => json!({
+            "status": "available",
+            "documentUri": candidate.document_uri,
+            "range": range_value(candidate.range),
+            "placeholder": candidate.placeholder,
+        }),
+        RenameCandidateResult::Unavailable { reason } => json!({
+            "status": "unavailable",
+            "reason": match reason {
+                RenameCandidateUnavailableReason::AnalyzerUnavailable => "analyzerUnavailable",
+                RenameCandidateUnavailableReason::GraphUnavailable => "graphUnavailable",
+                RenameCandidateUnavailableReason::EvidenceAbsent => "evidenceAbsent",
+                RenameCandidateUnavailableReason::StaleEvidence => "staleEvidence",
+                RenameCandidateUnavailableReason::AmbiguousEvidence => "ambiguousEvidence",
+            },
+        }),
     }
 }
 

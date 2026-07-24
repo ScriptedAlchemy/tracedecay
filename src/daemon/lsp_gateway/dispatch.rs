@@ -419,18 +419,21 @@ fn dispatch_request<P, S, D>(
                 RpcFailure::invalid_params("tracedecay/nativeDiagnostics must be a notification"),
             ));
         }
-        LspClientMethod::CancelRequest => session.handle_cancel(&params),
-        LspClientMethod::TextDocumentDidOpen => {
-            let _ = session.handle_did_open(&params, now_ms);
-        }
-        LspClientMethod::TextDocumentDidChange => {
-            let _ = session.handle_did_change(&params, now_ms);
-        }
-        LspClientMethod::TextDocumentDidClose => {
-            let _ = session.handle_did_close(&params, now_ms);
-        }
-        LspClientMethod::TextDocumentDidSave => {
-            let _ = session.handle_did_save(&params, now_ms);
+        LspClientMethod::CancelRequest
+        | LspClientMethod::TextDocumentDidOpen
+        | LspClientMethod::TextDocumentDidChange
+        | LspClientMethod::TextDocumentDidClose
+        | LspClientMethod::TextDocumentDidSave => {
+            let _ = session.enqueue_value(error_response(
+                response_id,
+                RpcFailure {
+                    code: -32600,
+                    message: "Invalid Request",
+                    data: serde_json::json!({
+                        "detail": "client lifecycle and cancellation methods must be notifications",
+                    }),
+                },
+            ));
         }
         LspClientMethod::Unknown(method) => {
             let _ = session.enqueue_value(error_response(

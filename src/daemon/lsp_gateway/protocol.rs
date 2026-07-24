@@ -133,6 +133,12 @@ struct PendingContextExpansion {
     operation_id: LspRequestId,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ContextProjectionCurrentness {
+    generation: u64,
+    identity: ContextProjectionIdentity,
+}
+
 #[derive(Clone)]
 struct PendingSemanticRequest {
     response_id: Value,
@@ -284,7 +290,8 @@ where
     active_diagnostic_refreshes: BTreeMap<String, PendingDiagnosticRefresh>,
     context: Option<Arc<dyn ContextProjectionPort + Send + Sync>>,
     context_subscriptions: BTreeSet<ContextProjectionRegistration>,
-    context_generations: BTreeMap<(ContextProjectionKind, Option<String>), u64>,
+    context_currentness:
+        BTreeMap<(ContextProjectionKind, Option<String>), ContextProjectionCurrentness>,
     pending_context_requests: BTreeMap<LspRequestId, PendingContextRequest>,
     pending_context_expansions: BTreeMap<LspRequestId, PendingContextExpansion>,
     pending_semantic_requests: BTreeMap<LspRequestId, PendingSemanticRequest>,
@@ -461,7 +468,7 @@ where
             active_diagnostic_refreshes: BTreeMap::new(),
             context: None,
             context_subscriptions: BTreeSet::new(),
-            context_generations: BTreeMap::new(),
+            context_currentness: BTreeMap::new(),
             pending_context_requests: BTreeMap::new(),
             pending_context_expansions: BTreeMap::new(),
             pending_semantic_requests: BTreeMap::new(),
@@ -712,10 +719,57 @@ where
         self.diagnostic_refresh_needed = false;
         self.active_diagnostic_refreshes.clear();
         self.context_subscriptions.clear();
-        self.context_generations.clear();
+        self.context_currentness.clear();
         self.pending_context_requests.clear();
         self.pending_context_expansions.clear();
         self.pending_semantic_requests.clear();
+    }
+
+    fn cancel_pending_operations(&mut self) {
+        let semantic = std::mem::take(&mut self.pending_semantic_requests);
+        for (request_id, pending) in semantic {
+            let _ = self.control.cancel_request(&request_id);
+            if let Some(cancellation) = &self.cancellation {
+                let _ = cancellation.cancel_upstream(self.gateway.root(), &request_id);
+            }
+            self.complete_context_request(
+                request_id,
+                pending.response_id,
+                Err(RpcFailure::request_failure(
+                    LspRequestFailure::RequestCancelled,
+                )),
+            );
+        }
+
+        let snapshots = std::mem::take(&mut self.pending_context_requests);
+        for (request_id, pending) in snapshots {
+            let _ = self.control.cancel_request(&request_id);
+            if let Some(context) = &self.context {
+                let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
+            }
+            self.complete_context_request(
+                request_id,
+                pending.response_id,
+                Err(RpcFailure::request_failure(
+                    LspRequestFailure::RequestCancelled,
+                )),
+            );
+        }
+
+        let expansions = std::mem::take(&mut self.pending_context_expansions);
+        for (request_id, pending) in expansions {
+            let _ = self.control.cancel_request(&request_id);
+            if let Some(context) = &self.context {
+                let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
+            }
+            self.complete_context_request(
+                request_id,
+                pending.response_id,
+                Err(RpcFailure::request_failure(
+                    LspRequestFailure::RequestCancelled,
+                )),
+            );
+        }
     }
 
     fn dispatch_value(&mut self, value: Value, now_ms: u64) {
@@ -743,6 +797,18 @@ where
     }
 
     pub(super) fn handle_shutdown_request(&mut self, response_id: Value) {
+        if self.control.lifecycle() != SessionLifecycle::Ready {
+            let _ = self.enqueue_value(error_response(
+                response_id,
+                RpcFailure {
+                    code: -32600,
+                    message: "Invalid Request",
+                    data: json!({ "detail": "shutdown is not valid in this lifecycle state" }),
+                },
+            ));
+            return;
+        }
+        self.cancel_pending_operations();
         match self.control.shutdown() {
             Ok(()) => {
                 let _ = self.enqueue_value(success_response(response_id, Value::Null));
@@ -866,7 +932,7 @@ where
                     .registrations()
                     .into_iter()
                     .filter(|registration| {
-                        registration.kind.is_valid() && registration.revision > 0
+                        registration.kind.is_pr12_supported() && registration.revision > 0
                     })
                     .take(MAX_CONTEXT_PROJECTION_KINDS)
                     .map(|registration| (registration.kind, registration.revision))
@@ -1673,11 +1739,11 @@ where
         };
         self.validate_context_envelope(request, revision, &envelope)?;
         let key = (envelope.kind.clone(), envelope.document_uri.clone());
-        if self
-            .context_generations
-            .get(&key)
-            .is_some_and(|generation| *generation > envelope.generation)
-        {
+        if self.context_currentness.get(&key).is_some_and(|current| {
+            current.generation > envelope.generation
+                || (current.generation == envelope.generation
+                    && current.identity != envelope.identity)
+        }) {
             return Err(refresh_pending_failure(
                 None,
                 None,
@@ -1700,7 +1766,13 @@ where
                 None,
             ));
         }
-        self.context_generations.insert(key, envelope.generation);
+        self.context_currentness.insert(
+            key,
+            ContextProjectionCurrentness {
+                generation: envelope.generation,
+                identity: envelope.identity,
+            },
+        );
         Ok(Some(value))
     }
 
@@ -1857,6 +1929,8 @@ where
             .get(&envelope.kind)
             == Some(&envelope.revision);
         let valid_scope = envelope.root_uri == self.gateway.root().uri()
+            && envelope.kind.is_pr12_supported()
+            && envelope.generation > 0
             && envelope
                 .document_uri
                 .as_deref()
@@ -1871,6 +1945,14 @@ where
                 (false, None) => true,
                 _ => false,
             };
+        let current_scope = envelope.coverage != ContextCoverage::Complete
+            || self
+                .context_currentness
+                .get(&(envelope.kind.clone(), envelope.document_uri.clone()))
+                .is_some_and(|current| {
+                    current.generation == envelope.generation
+                        && current.identity == envelope.scope.identity
+                });
         let valid_payload = !envelope.stable_id.is_empty()
             && envelope.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
             && envelope.expires_at > 0
@@ -1881,7 +1963,7 @@ where
                 ContextCoverage::Partial => envelope.omission_reason.is_some(),
                 ContextCoverage::Unavailable | ContextCoverage::Failed => false,
             };
-        if negotiated && valid_scope && valid_payload {
+        if negotiated && valid_scope && current_scope && valid_payload {
             Ok(())
         } else {
             Err(RpcFailure {
@@ -1931,6 +2013,8 @@ where
         envelope: &ContextProjectionEnvelope,
     ) -> Result<(), RpcFailure> {
         let valid_scope = envelope.root_uri == self.gateway.root().uri()
+            && envelope.kind.is_pr12_supported()
+            && envelope.generation > 0
             && envelope.document_uri == request.document_uri
             && envelope
                 .document_uri
@@ -1963,9 +2047,27 @@ where
                         && envelope.omitted_count == 0
                         && envelope.omission_reasons.is_empty()
                 }
-                ContextCoverage::Partial => !envelope.omission_reasons.is_empty(),
-                ContextCoverage::Unavailable | ContextCoverage::Failed => {
-                    envelope.items.is_empty() && !envelope.omission_reasons.is_empty()
+                ContextCoverage::Partial => {
+                    !envelope.omission_reasons.is_empty()
+                        && matches!(
+                            envelope.producer_state,
+                            ContextProducerState::Partial | ContextProducerState::Indexing
+                        )
+                }
+                ContextCoverage::Unavailable => {
+                    envelope.items.is_empty()
+                        && !envelope.omission_reasons.is_empty()
+                        && matches!(
+                            envelope.producer_state,
+                            ContextProducerState::Unavailable
+                                | ContextProducerState::Cancelled
+                                | ContextProducerState::TimedOut
+                        )
+                }
+                ContextCoverage::Failed => {
+                    envelope.items.is_empty()
+                        && !envelope.omission_reasons.is_empty()
+                        && envelope.producer_state == ContextProducerState::Failed
                 }
             }
             && valid_retrieval_handle(envelope.retrieval_handle.as_deref())
@@ -2341,16 +2443,30 @@ where
             return;
         };
         let changes = context.poll_changes(self.gateway.root(), &self.context_subscriptions);
-        for change in changes.into_iter().take(MAX_CONTEXT_CHANGES_PER_POLL) {
+        for mut change in changes.into_iter().take(MAX_CONTEXT_CHANGES_PER_POLL) {
             if !self.valid_context_change(&change) {
                 continue;
             }
             let key = (change.kind.clone(), change.document_uri.clone());
-            if self
-                .context_generations
-                .get(&key)
-                .is_some_and(|generation| *generation >= change.generation)
-            {
+            let identity_drift_clear = match self.context_currentness.get(&key) {
+                Some(current) if current.generation > change.generation => continue,
+                Some(current)
+                    if current.generation == change.generation
+                        && current.identity == change.identity =>
+                {
+                    continue;
+                }
+                Some(current) if current.generation == change.generation => {
+                    change.identity = current.identity.clone();
+                    change.freshness = ContextFreshness::Unknown;
+                    change.producer_state = ContextProducerState::Unavailable;
+                    change.coverage = ContextCoverage::Unavailable;
+                    change.retrieval_handle = None;
+                    true
+                }
+                _ => false,
+            };
+            if !self.valid_context_change(&change) {
                 continue;
             }
             let Ok(params) = serde_json::to_value(&change) else {
@@ -2367,22 +2483,60 @@ where
             {
                 break;
             }
-            self.context_generations.insert(key, change.generation);
+            if identity_drift_clear {
+                self.context_currentness.remove(&key);
+            } else {
+                self.context_currentness.insert(
+                    key,
+                    ContextProjectionCurrentness {
+                        generation: change.generation,
+                        identity: change.identity,
+                    },
+                );
+            }
         }
     }
 
     fn valid_context_change(&self, change: &ContextProjectionChange) -> bool {
         change.root_uri == self.gateway.root().uri()
+            && change.kind.is_pr12_supported()
+            && change.generation > 0
             && change
                 .document_uri
                 .as_deref()
                 .is_none_or(|uri| self.gateway.root().contains_document(uri))
+            && valid_context_projection_identity(&change.identity)
+            && match (
+                change.document_uri.is_some(),
+                change.identity.document_content_digest.as_deref(),
+            ) {
+                (true, Some(digest)) => !digest.is_empty(),
+                (false, None) => true,
+                _ => false,
+            }
             && self
                 .context_subscriptions
                 .contains(&ContextProjectionRegistration {
                     kind: change.kind.clone(),
                     revision: change.revision,
                 })
+            && match change.coverage {
+                ContextCoverage::Complete => {
+                    change.freshness == ContextFreshness::Current
+                        && change.producer_state == ContextProducerState::Complete
+                }
+                ContextCoverage::Partial => matches!(
+                    change.producer_state,
+                    ContextProducerState::Partial | ContextProducerState::Indexing
+                ),
+                ContextCoverage::Unavailable => matches!(
+                    change.producer_state,
+                    ContextProducerState::Unavailable
+                        | ContextProducerState::Cancelled
+                        | ContextProducerState::TimedOut
+                ),
+                ContextCoverage::Failed => change.producer_state == ContextProducerState::Failed,
+            }
             && valid_retrieval_handle(change.retrieval_handle.as_deref())
     }
 
@@ -2416,28 +2570,35 @@ where
     fn cancel_request_and_upstream(&mut self, id: &LspRequestId) -> CancellationOutcome {
         let outcome = self.control.cancel_request(id);
         if outcome == CancellationOutcome::Accepted {
-            self.pending_semantic_requests.remove(id);
-            let context_operation = self
-                .pending_context_requests
-                .remove(id)
-                .map(|pending| pending.operation_id);
-            let expansion_operation = self
-                .pending_context_expansions
-                .remove(id)
-                .map(|pending| pending.operation_id);
+            let semantic = self.pending_semantic_requests.remove(id);
+            let context_pending = self.pending_context_requests.remove(id);
+            let expansion_pending = self.pending_context_expansions.remove(id);
             if let Some(cancellation) = &self.cancellation {
                 let _ = cancellation.cancel_upstream(self.gateway.root(), id);
             }
             if let Some(context) = &self.context {
-                if let Some(context_id) = context_operation.as_ref() {
-                    let _ = context.cancel_request(self.gateway.root(), context_id);
+                if let Some(pending) = context_pending.as_ref() {
+                    let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
                 }
-                if let Some(expansion_id) = expansion_operation.as_ref() {
-                    let _ = context.cancel_request(self.gateway.root(), expansion_id);
+                if let Some(pending) = expansion_pending.as_ref() {
+                    let _ = context.cancel_request(self.gateway.root(), &pending.operation_id);
                 }
-                if context_operation.is_none() && expansion_operation.is_none() {
+                if context_pending.is_none() && expansion_pending.is_none() {
                     let _ = context.cancel_request(self.gateway.root(), id);
                 }
+            }
+            let response_id = semantic
+                .map(|pending| pending.response_id)
+                .or_else(|| context_pending.map(|pending| pending.response_id))
+                .or_else(|| expansion_pending.map(|pending| pending.response_id));
+            if let Some(response_id) = response_id {
+                self.complete_context_request(
+                    id.clone(),
+                    response_id,
+                    Err(RpcFailure::request_failure(
+                        LspRequestFailure::RequestCancelled,
+                    )),
+                );
             }
         }
         outcome

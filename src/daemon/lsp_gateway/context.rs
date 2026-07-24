@@ -64,6 +64,16 @@ impl ContextProjectionKind {
         Self::is_valid_str(&self.0)
     }
 
+    pub fn is_pr12_supported(&self) -> bool {
+        matches!(
+            self.as_str(),
+            Self::DIAGNOSTICS
+                | Self::POST_EDIT_IMPACT
+                | Self::AFFECTED_TESTS
+                | Self::TEST_RUN_RESULTS
+        )
+    }
+
     fn is_valid_str(value: &str) -> bool {
         !value.is_empty()
             && value.len() <= 64
@@ -74,7 +84,7 @@ impl ContextProjectionKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContextProjectionRegistration {
     pub kind: ContextProjectionKind,
     pub revision: u32,
@@ -95,7 +105,7 @@ pub enum ContextCoverage {
 /// root-scoped projections remain bound to the complete snapshot digest and
 /// content identity without inventing a document identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContextProjectionIdentity {
     pub head_commit_id: String,
     pub code_generation_id: String,
@@ -127,7 +137,7 @@ pub enum ContextProducerState {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContextProjectionRequest {
     pub kind: ContextProjectionKind,
     #[serde(default)]
@@ -141,7 +151,7 @@ pub struct ContextExpansionRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContextSubscribeRequest {
     pub projections: Vec<ContextProjectionRegistration>,
 }
