@@ -536,9 +536,7 @@ mod tests {
         ManifestDigest::new(value).unwrap()
     }
 
-    async fn fixture_graph(
-        project_root: &Path,
-    ) -> (TraceDecay, crate::db::DaemonDatabaseScope) {
+    async fn fixture_graph(project_root: &Path) -> (TraceDecay, crate::db::DaemonDatabaseScope) {
         let profile_root = project_root.join(".tracedecay-test-profile");
         let open_options = TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
