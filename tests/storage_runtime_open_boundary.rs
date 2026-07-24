@@ -19,8 +19,17 @@ struct OpenBoundaryFixture {
 #[derive(Debug, Deserialize)]
 struct AllowedOpen {
     path: String,
+    #[serde(default)]
+    scope: Option<String>,
     callee: String,
     disposition: String,
+}
+
+fn matches_qualified_suffix(value: &str, suffix: &str) -> bool {
+    value == suffix
+        || value
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with("::"))
 }
 
 #[test]
@@ -34,10 +43,10 @@ fn concrete_sqlite_opens_are_closed_over_an_explicit_deletion_list() {
             let suffix = fixture
                 .direct_open_suffixes
                 .iter()
-                .find(|suffix| entry.callee.ends_with(suffix.as_str()))
+                .find(|suffix| matches_qualified_suffix(&entry.callee, suffix))
                 .cloned()
                 .unwrap_or_else(|| entry.callee.clone());
-            ((entry.path.clone(), suffix), entry)
+            ((entry.path.clone(), suffix, entry.scope.clone()), entry)
         })
         .collect::<BTreeMap<_, _>>();
     let mut observed = BTreeSet::new();
@@ -49,14 +58,19 @@ fn concrete_sqlite_opens_are_closed_over_an_explicit_deletion_list() {
             let Some(suffix) = fixture
                 .direct_open_suffixes
                 .iter()
-                .find(|suffix| call.callee.ends_with(suffix.as_str()))
+                .find(|suffix| matches_qualified_suffix(&call.callee, suffix))
             else {
                 continue;
             };
-            let key = (path.clone(), suffix.clone());
-            observed.insert(key.clone());
-            if !allowed.contains_key(&key) {
-                violations.push(format!("{}:{} {}", path, call.line, call.callee));
+            let exact_key = (path.clone(), suffix.clone(), Some(call.scope.clone()));
+            let broad_key = (path.clone(), suffix.clone(), None);
+            observed.insert(exact_key.clone());
+            observed.insert(broad_key.clone());
+            if !allowed.contains_key(&exact_key) && !allowed.contains_key(&broad_key) {
+                violations.push(format!(
+                    "{}:{} {} in {}",
+                    path, call.line, call.callee, call.scope
+                ));
             }
         }
     }
@@ -77,6 +91,33 @@ fn concrete_sqlite_opens_are_closed_over_an_explicit_deletion_list() {
             "stale direct-open allowlist entry must be removed with its call site: {key:?}"
         );
     }
+}
+
+#[test]
+fn files_below_cfg_test_parent_modules_are_not_production_sources() {
+    let files = rust_files_below(&["src".to_owned()]);
+    assert!(
+        !files
+            .iter()
+            .any(|path| path == "src/sessions/claude_observation_benchmark/runner.rs"),
+        "a child of a cfg(test) parent module must not enter the production-open scan"
+    );
+    assert!(
+        files.iter().any(|path| path == "src/sessions/ingest.rs"),
+        "the module-aware filter must retain ordinary production siblings"
+    );
+}
+
+#[test]
+fn direct_open_suffixes_match_complete_qualified_segments() {
+    assert!(matches_qualified_suffix(
+        "rusqlite::Connection::open_with_flags",
+        "Connection::open_with_flags"
+    ));
+    assert!(!matches_qualified_suffix(
+        "SnapshotConnection::open",
+        "Connection::open"
+    ));
 }
 
 #[test]

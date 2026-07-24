@@ -17,8 +17,6 @@ mod open;
 mod ports;
 
 #[cfg(test)]
-mod rusqlite_graph;
-#[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
@@ -56,9 +54,6 @@ pub(crate) use ports::{
     ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
 };
-#[cfg(test)]
-pub(crate) use rusqlite_graph::ExplicitPrecutoverRusqliteGraphPublisher;
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct StoreRuntimeKey {
     shard_id: StoreShardIdV1,
