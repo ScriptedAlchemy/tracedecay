@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import {
   StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
-  type StorageFindingKindStatus,
+  type DoctorReportEntry,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
   type WireCoverage,
@@ -159,12 +159,15 @@ function FindingsReadModel({
         refreshing={refreshing}
         onRefresh={onRefresh}
       />
-      {envelope.payload.kinds.length === 0 ? (
-        <ReadModelState kind="unknown" detail="finding status payload contained no kinds" />
+      {envelope.payload.entries.length === 0 ? (
+        <ReadModelState kind="unknown" detail="doctor report contained no findings" />
       ) : (
         <OverviewGrid>
-          {envelope.payload.kinds.map((finding) => (
-            <FindingCard key={finding.kind} finding={finding} />
+          {envelope.payload.entries.map((entry, index) => (
+            <FindingCard
+              key={`${entry.storage_kind ?? entry.finding.family}#${index}`}
+              entry={entry}
+            />
           ))}
         </OverviewGrid>
       )}
@@ -265,10 +268,14 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
   );
 }
 
-function FindingCard({ finding }: { finding: StorageFindingKindStatus }) {
+function FindingCard({ entry }: { entry: DoctorReportEntry }) {
+  const { finding } = entry;
   const presentation = doctorEvidencePresentation(finding.state);
+  const title = entry.storage_kind
+    ? storageFindingLabel(entry.storage_kind)
+    : finding.family.replaceAll('_', ' ');
   return (
-    <OverviewCard title={storageFindingLabel(finding.kind)}>
+    <OverviewCard title={title}>
       <div className="flex flex-col gap-2">
         <span
           className="inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium text-text-secondary"
@@ -278,10 +285,18 @@ function FindingCard({ finding }: { finding: StorageFindingKindStatus }) {
           <span aria-hidden className={`size-1.5 rounded-full ${presentation.dotClass}`} />
           {presentation.label}
         </span>
-        <p className="text-xs text-text-secondary">{finding.reason}</p>
-        <p className="text-2xs text-text-muted">
-          required source:{' '}
-          <span className="font-mono text-text-secondary">{finding.required_source}</span>
+        <p className="text-xs text-text-secondary">{finding.coverage.statement}</p>
+        <p className="tabular text-2xs text-text-muted">
+          {finding.evidence.length} evidence{' '}
+          {finding.evidence.length === 1 ? 'reference' : 'references'}
+          {finding.remediation ? (
+            <>
+              {' · remediation: '}
+              <span className="font-mono text-text-secondary">
+                {finding.remediation.owning_operation}
+              </span>
+            </>
+          ) : null}
         </p>
       </div>
     </OverviewCard>

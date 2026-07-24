@@ -1059,38 +1059,77 @@ const storageTelemetry = envelope({
 
 /** GET /api/storage/findings — observatory doctor (StorageFindingsPayloadSchema). */
 const storageFindings = envelope({
-  kinds: [
+  family_filter: 'storage',
+  entries: [
     {
-      kind: 'over_budget_store',
-      state: 'healthy_complete_coverage',
-      required_source: 'storage_telemetry',
-      reason: 'All stores are within advisory budgets.',
+      finding: {
+        family: 'storage',
+        state: 'healthy_complete_coverage',
+        evidence: [{ family: 'storage', reference: 'evidence.over_budget_store.latest' }],
+        coverage: { completeness: 'complete', statement: 'All stores are within advisory budgets.' },
+        remediation: null,
+      },
+      storage_kind: 'over_budget_store',
     },
     {
-      kind: 'orphan_store',
-      state: 'healthy_complete_coverage',
-      required_source: 'store_registry',
-      reason: 'No orphaned stores detected.',
+      finding: {
+        family: 'storage',
+        state: 'healthy_complete_coverage',
+        evidence: [{ family: 'storage', reference: 'evidence.orphan_store.latest' }],
+        coverage: { completeness: 'complete', statement: 'No orphaned stores detected.' },
+        remediation: null,
+      },
+      storage_kind: 'orphan_store',
     },
     {
-      kind: 'stale_branch_dbs',
-      state: 'partial',
-      required_source: 'branch_registry',
-      reason: 'Two branch databases have not been observed in 30 days.',
+      finding: {
+        family: 'storage',
+        state: 'partial',
+        evidence: [{ family: 'storage', reference: 'evidence.stale_branch_dbs.latest' }],
+        coverage: { completeness: 'partial', statement: 'Two branch databases have not been observed in 30 days.' },
+        remediation: { owning_operation: 'storage.retention.sweep', kind: "preview" },
+      },
+      storage_kind: 'stale_branch_dbs',
     },
     {
-      kind: 'incident_debris_present',
-      state: 'absent',
-      required_source: 'incident_log',
-      reason: 'No incident debris.',
+      finding: {
+        family: 'storage',
+        state: 'absent',
+        evidence: [{ family: 'storage', reference: 'evidence.incident_debris_present.latest' }],
+        coverage: { completeness: 'complete', statement: 'No incident debris.' },
+        remediation: null,
+      },
+      storage_kind: 'incident_debris_present',
     },
     {
-      kind: 'retention_backlog',
-      state: 'healthy_complete_coverage',
-      required_source: 'retention_runner',
-      reason: 'Retention is caught up.',
+      finding: {
+        family: 'storage',
+        state: 'healthy_complete_coverage',
+        evidence: [{ family: 'storage', reference: 'evidence.retention_backlog.latest' }],
+        coverage: { completeness: 'complete', statement: 'Retention is caught up.' },
+        remediation: null,
+      },
+      storage_kind: 'retention_backlog',
     },
   ],
+  report_coverage: {
+    families: [{ family: 'storage', consultation: { status: 'consulted' } }],
+    completeness: 'complete',
+    statement: {
+      completeness: 'complete',
+      statement: 'All storage evidence sources were consulted.',
+    },
+  },
+  remediations: [
+    {
+      operation: 'storage.retention.sweep',
+      surface: 'storage_runtime',
+      preview_available: true,
+      action_confirmation: 'required',
+      summary: 'Sweep stale branch databases after preview confirmation.',
+    },
+  ],
+  known_families: ['storage'],
   note: 'Findings reflect the most recent doctor sweep.',
 });
 

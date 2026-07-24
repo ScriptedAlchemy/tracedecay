@@ -159,11 +159,24 @@ describe("wire storage payload decoders", () => {
 
   it("decodes a storage findings payload", () => {
     const parsed = StorageFindingsPayloadSchema.parse({
-      kinds: [
-        { kind: "orphan_store", state: "absent", required_source: "src", reason: "r" },
+      family_filter: "storage",
+      entries: [
+        {
+          finding: {
+            family: "storage",
+            state: "absent",
+            evidence: [{ family: "storage", reference: "src" }],
+            coverage: { completeness: "complete", statement: "r" },
+            remediation: null,
+          },
+          storage_kind: "orphan_store",
+        },
       ],
+      report_coverage: null,
+      remediations: [],
+      known_families: ["storage"],
       note: "n",
     });
-    expect(parsed.kinds[0]!.kind).toBe("orphan_store");
+    expect(parsed.entries[0]!.storage_kind).toBe("orphan_store");
   });
 });
