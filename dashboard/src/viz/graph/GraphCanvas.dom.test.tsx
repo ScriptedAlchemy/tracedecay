@@ -48,9 +48,21 @@ vi.mock('sigma', () => ({
   },
 }));
 
+/** jsdom has no WebGL, so the canvas would take its no-context fallback.
+ * Simulate a WebGL-capable browser for the rendering tests, and the absence of
+ * one where that is the case under test. */
+function stubWebGl(available: boolean) {
+  Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+    configurable: true,
+    value: (kind: string) =>
+      available && kind.startsWith('webgl') ? ({} as unknown as RenderingContext) : null,
+  });
+}
+
 describe('GraphCanvas', () => {
   beforeEach(() => {
     sigmaState.nodeReducer = undefined;
+    stubWebGl(true);
     Object.defineProperties(HTMLElement.prototype, {
       clientWidth: { configurable: true, get: () => 640 },
       clientHeight: { configurable: true, get: () => 320 },
@@ -80,5 +92,19 @@ describe('GraphCanvas', () => {
 
     expect(sigmaState.nodeReducer?.('__halo__node', companion)).toEqual(companion);
     expect(sigmaState.nodeReducer?.('__pulse__edge', companion)).toEqual(companion);
+  });
+
+  it('states the missing WebGL context instead of constructing a renderer that throws', () => {
+    stubWebGl(false);
+    const { getByText } = render(
+      <GraphCanvas
+        nodes={[{ id: 'node', label: 'Node', kind: 'function', degree: 1 }]}
+        edges={[]}
+      />,
+    );
+    expect(getByText(/no WebGL context/i)).toBeTruthy();
+    // Never constructed: Sigma throws without a context, and that exception
+    // would take the whole workspace route down through the error boundary.
+    expect(sigmaState.nodeReducer).toBeUndefined();
   });
 });

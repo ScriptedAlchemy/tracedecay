@@ -57,13 +57,15 @@ export function GraphCanvas({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const [, setRetryTick] = useState(0);
+  const webglRef = useRef<boolean | null>(null);
+  if (webglRef.current === null) webglRef.current = hasWebGl();
   const fieldRef = useRef<ActivationField | null>(null);
   if (activation) fieldRef.current = activation;
   else if (!fieldRef.current) fieldRef.current = new ActivationField();
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || nodes.length === 0) return;
+    if (!container || nodes.length === 0 || !webglRef.current) return;
     // Mount race: Sigma throws on zero-width containers (narrow layouts,
     // pre-layout flex). Defer one frame until the container has size.
     if (container.clientWidth === 0 || container.clientHeight === 0) {
@@ -376,6 +378,18 @@ export function GraphCanvas({
       </p>
     );
   }
+  // Sigma is WebGL-only and throws during construction without a context,
+  // which React Router's error boundary turns into a dead workspace. Browsers
+  // with WebGL disabled or blocklisted get the truthful state instead — the
+  // symbol list beside the canvas remains the accessible equivalent.
+  if (!webglRef.current) {
+    return (
+      <p className="p-6 text-center text-sm text-text-muted">
+        this browser has no WebGL context, so the {nodes.length.toLocaleString()}-symbol
+        graph canvas cannot draw — the symbol list carries the same relations
+      </p>
+    );
+  }
   // Scale tier guard (plan 11a graph tiers): this Sigma canvas owns graphs up
   // to ~5k nodes. Larger brains (the profile holds stores up to 1.6M nodes)
   // belong to the GPU tier — render the truthful tier state, never a frozen
@@ -405,4 +419,21 @@ export function GraphCanvas({
       </figcaption>
     </figure>
   );
+}
+
+/** Whether this browser can give Sigma a WebGL context at all. Probed once per
+ * canvas mount against a throwaway element: a blocklisted or disabled GPU
+ * stack returns null here rather than throwing inside the renderer. */
+function hasWebGl(): boolean {
+  if (typeof document === 'undefined') return false;
+  try {
+    const probe = document.createElement('canvas');
+    const context =
+      probe.getContext('webgl2') ??
+      probe.getContext('webgl') ??
+      probe.getContext('experimental-webgl');
+    return context !== null;
+  } catch {
+    return false;
+  }
 }

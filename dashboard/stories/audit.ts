@@ -208,6 +208,10 @@ async function main(): Promise<void> {
   let screenshotCount = 0;
 
   try {
+    // Chromium's bundled SwiftShader already gives headless runs conformant
+    // WebGL (verified: ANGLE/SwiftShader), so the Sigma graph canvases render
+    // for real here. Do not pin --use-angle: that would force software even on
+    // a host that later has a GPU.
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ deviceScaleFactor: 1 });
     const page = await context.newPage();
