@@ -13,9 +13,9 @@ use crate::sessions::claude_observation::ClaudeObservationIngestError;
 use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId, UtcMicros};
 
@@ -45,9 +45,13 @@ pub async fn handle_hook_runtime(
         "hook_v2_admit" | "hook_v2_guidance_lookup" => hook_v2_admit(cg, &args, action).await?,
         "hook_v2_scout_prepare" => hook_v2_scout_prepare(cg, &args).await?,
         "hook_v2_delivery_receipt" => hook_v2_delivery_receipt(cg, &args).await?,
+        "hook_v2_feedback_notice_delivery" => hook_v2_feedback_notice_delivery(cg, &args).await?,
         "hook_v2_feedback" => hook_v2_feedback(cg, &args).await?,
         "hook_v2_cancel" => hook_v2_cancel(cg, &args).await?,
         "hook_v2_status" => hook_v2_status(cg, &args).await?,
+        action if ContextScoutReadSurfaceV1::from_action(action).is_some() => {
+            hook_v2_scout_read(cg, &args, action).await?
+        }
         "ingest_transcript" => {
             if args.get("user_scope").and_then(Value::as_bool) == Some(true) {
                 return Err(config_error(
@@ -69,6 +73,22 @@ pub async fn handle_hook_runtime(
             )));
         }
     };
+    Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
+}
+
+pub(crate) async fn handle_context_scout_read_surface(
+    cg: &TraceDecay,
+    args: Value,
+    tool_name: &str,
+) -> Result<ToolResult> {
+    let action = match tool_name {
+        "tracedecay_context_scout_recent" => "hook_v2_scout_recent",
+        "tracedecay_context_scout_explain" => "hook_v2_scout_explain",
+        "tracedecay_context_scout_capability" => "hook_v2_scout_capability",
+        "tracedecay_context_scout_budget" => "hook_v2_scout_budget",
+        _ => return Err(config_error("unknown Context Scout read tool")),
+    };
+    let output = hook_v2_scout_read(cg, &args, action).await?;
     Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
 }
 
@@ -172,6 +192,65 @@ enum HookV2BindingAdmission {
     CatchupRequired,
 }
 
+const MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS: usize = 256;
+
+fn retained_hook_v2_delivery_claims() -> &'static StdMutex<
+    BTreeMap<([u8; 16], [u8; 16]), crate::agents::context_scout_v2::ContextScoutDurableClaimV1>,
+> {
+    static CLAIMS: OnceLock<
+        StdMutex<
+            BTreeMap<
+                ([u8; 16], [u8; 16]),
+                crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
+            >,
+        >,
+    > = OnceLock::new();
+    CLAIMS.get_or_init(|| StdMutex::new(BTreeMap::new()))
+}
+
+fn retain_hook_v2_delivery_claim(
+    project_id: [u8; 16],
+    claim: crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
+    now: UtcMicros,
+) -> std::result::Result<(), crate::agents::context_scout_v2::ContextScoutDurableClaimV1> {
+    let key = (project_id, claim.entry.envelope.envelope_id);
+    let Ok(mut claims) = retained_hook_v2_delivery_claims().lock() else {
+        return Err(claim);
+    };
+    claims.retain(|_, claim| claim.lease.expires_at.0 > now.0);
+    if claims.contains_key(&key) || claims.len() >= MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS {
+        return Err(claim);
+    }
+    claims.insert(key, claim);
+    Ok(())
+}
+
+fn lookup_hook_v2_delivery_claim(
+    project_id: [u8; 16],
+    envelope_id: [u8; 16],
+) -> Option<crate::agents::context_scout_v2::ContextScoutDurableClaimV1> {
+    retained_hook_v2_delivery_claims()
+        .lock()
+        .ok()?
+        .get(&(project_id, envelope_id))
+        .cloned()
+}
+
+fn remove_hook_v2_delivery_claim(project_id: [u8; 16], envelope_id: [u8; 16]) {
+    if let Ok(mut claims) = retained_hook_v2_delivery_claims().lock() {
+        claims.remove(&(project_id, envelope_id));
+    }
+}
+
+fn release_hook_v2_delivery_claim(
+    project_id: [u8; 16],
+    envelope_id: [u8; 16],
+    outcome: crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1,
+) -> bool {
+    remove_hook_v2_delivery_claim(project_id, envelope_id);
+    outcome == crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable
+}
+
 fn classify_hook_v2_binding(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     outcome: tracedecay_hooks::HookConfigurationReadOutcomeV1,
@@ -228,8 +307,25 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
             .await
         {
             Some((guidance, claim)) => {
-                let _ = owner.requeue(claim).await;
-                serde_json::to_value(guidance).unwrap_or(Value::Null)
+                let envelope_id = claim.entry.envelope.envelope_id;
+                match retain_hook_v2_delivery_claim(envelope.project_id, claim, now) {
+                    Ok(()) => match serde_json::to_value(guidance) {
+                        Ok(guidance) => guidance,
+                        Err(_) => {
+                            if let Some(claim) =
+                                lookup_hook_v2_delivery_claim(envelope.project_id, envelope_id)
+                            {
+                                remove_hook_v2_delivery_claim(envelope.project_id, envelope_id);
+                                let _ = owner.requeue(claim).await;
+                            }
+                            Value::Null
+                        }
+                    },
+                    Err(claim) => {
+                        let _ = owner.requeue(claim).await;
+                        Value::Null
+                    }
+                }
             }
             None => Value::Null,
         },
@@ -243,7 +339,7 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
         snapshot.revision,
         false,
     );
-    let feedback_notice = crate::application::advisory::claim_pr13_advisory_hook_notice(
+    let feedback_notice = crate::application::advisory::peek_pr13_advisory_hook_notice(
         envelope.project_id,
         envelope.worktree_id,
     )
@@ -305,13 +401,7 @@ fn orchestration_response(
 }
 
 async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> Result<Value> {
-    let claim = required_value(args, "claim")?;
     let receipt = required_value(args, "receipt")?;
-    let claim =
-        serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutDurableClaimV1>(
-            claim,
-        )
-        .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?;
     let receipt = serde_json::from_value::<
         crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
     >(receipt)
@@ -319,9 +409,60 @@ async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> Result<Value
     let Some(owner) = cg.context_scout_owner() else {
         return Ok(json!({ "status": "unavailable" }));
     };
-    Ok(json!({
-        "status": scout_store_outcome(owner.record_delivery(&claim, &receipt).await),
-    }))
+    let mut retained_project_id = None;
+    let claim = match args.get("claim").cloned() {
+        Some(claim) => serde_json::from_value::<
+            crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
+        >(claim)
+        .map_err(|error| config_error(format!("invalid Context Scout claim: {error}")))?,
+        None => {
+            let Some(project_id) =
+                crate::hooks::hook_v2_project_id_for_layout(cg.hook_store_layout())
+            else {
+                return Ok(json!({ "status": "unavailable" }));
+            };
+            let Some(claim) = lookup_hook_v2_delivery_claim(project_id, receipt.envelope_id) else {
+                return Ok(json!({ "status": "unavailable" }));
+            };
+            retained_project_id = Some(project_id);
+            claim
+        }
+    };
+    let outcome = owner.record_delivery(&claim, &receipt).await;
+    if let Some(project_id) = retained_project_id
+        && release_hook_v2_delivery_claim(project_id, receipt.envelope_id, outcome)
+    {
+        let _ = owner.requeue(claim).await;
+    }
+    Ok(json!({ "status": scout_store_outcome(outcome) }))
+}
+
+async fn hook_v2_feedback_notice_delivery(cg: &TraceDecay, args: &Value) -> Result<Value> {
+    const ACTION: &str = "hook_v2_feedback_notice_delivery";
+    let envelope = hook_v2_envelope(args, ACTION)?;
+    match hook_v2_binding_admission(cg, &envelope, hook_now()) {
+        HookV2BindingAdmission::Bound(_) => {}
+        HookV2BindingAdmission::Unavailable => {
+            return Ok(json!({ "status": "unavailable" }));
+        }
+        HookV2BindingAdmission::CatchupRequired => {
+            return Ok(hook_v2_catchup_response(ACTION));
+        }
+    }
+    let notice = serde_json::from_value::<
+        crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+    >(required_value(args, "feedback_notice")?)
+    .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
+    let status = if crate::application::advisory::acknowledge_pr13_advisory_hook_notice(
+        envelope.project_id,
+        envelope.worktree_id,
+        &notice,
+    ) {
+        "stored"
+    } else {
+        "unavailable"
+    };
+    Ok(json!({ "status": status }))
 }
 
 async fn hook_v2_feedback(cg: &TraceDecay, args: &Value) -> Result<Value> {
@@ -371,6 +512,101 @@ async fn hook_v2_status(cg: &TraceDecay, args: &Value) -> Result<Value> {
         .map_err(|error| config_error(format!("Context Scout status unavailable: {error}")))?;
     serde_json::to_value(status)
         .map_err(|error| config_error(format!("Context Scout status encoding failed: {error}")))
+}
+
+#[derive(Clone, Copy)]
+enum ContextScoutReadSurfaceV1 {
+    Recent,
+    Explain,
+    Capability,
+    Budget,
+}
+
+impl ContextScoutReadSurfaceV1 {
+    fn from_action(action: &str) -> Option<Self> {
+        match action {
+            "hook_v2_scout_recent" => Some(Self::Recent),
+            "hook_v2_scout_explain" => Some(Self::Explain),
+            "hook_v2_scout_capability" => Some(Self::Capability),
+            "hook_v2_scout_budget" => Some(Self::Budget),
+            _ => None,
+        }
+    }
+}
+
+fn hook_v2_current_scout_read_locator(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    current_session_id: Option<&SessionId>,
+) -> Option<[u8; 32]> {
+    let protected_session_id =
+        crate::hooks::hook_v2_protected_session_id_for_native(current_session_id?.as_str());
+    (protected_session_id == envelope.protected_session_id).then_some(protected_session_id)
+}
+
+async fn hook_v2_resolve_current_scout_read_locator(
+    args: &Value,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> Option<[u8; 32]> {
+    let lifecycle = hook_v2_context_scout_lifecycle(args, envelope).await?;
+    hook_v2_current_scout_read_locator(envelope, Some(&lifecycle.session_id))
+}
+
+async fn hook_v2_scout_read(cg: &TraceDecay, args: &Value, action: &str) -> Result<Value> {
+    let surface = ContextScoutReadSurfaceV1::from_action(action)
+        .ok_or_else(|| config_error("unknown Context Scout read surface"))?;
+    let envelope = hook_v2_envelope(args, action)?;
+    match hook_v2_binding_admission(cg, &envelope, hook_now()) {
+        HookV2BindingAdmission::Bound(_) => {}
+        HookV2BindingAdmission::Unavailable => {
+            return Ok(json!({ "action": action, "status": "unavailable" }));
+        }
+        HookV2BindingAdmission::CatchupRequired => {
+            return Ok(hook_v2_catchup_response(action));
+        }
+    }
+    let Some(protected_session_id) =
+        hook_v2_resolve_current_scout_read_locator(args, &envelope).await
+    else {
+        return Ok(json!({ "action": action, "status": "unavailable" }));
+    };
+    let Some(owner) = cg.context_scout_owner() else {
+        return Ok(json!({ "action": action, "status": "unavailable" }));
+    };
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(8);
+    let value = match surface {
+        ContextScoutReadSurfaceV1::Recent => owner
+            .recent(protected_session_id, limit)
+            .await
+            .and_then(|recent| {
+                serde_json::to_value(recent).map_err(|_| {
+                    crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
+                })
+            }),
+        ContextScoutReadSurfaceV1::Explain => owner
+            .explain(protected_session_id, limit)
+            .await
+            .and_then(|explanation| {
+                serde_json::to_value(explanation).map_err(|_| {
+                    crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
+                })
+            }),
+        ContextScoutReadSurfaceV1::Capability => owner.capability().await.and_then(|capability| {
+            serde_json::to_value(capability)
+                .map_err(|_| crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits)
+        }),
+        ContextScoutReadSurfaceV1::Budget => owner.budget().await.and_then(|budget| {
+            serde_json::to_value(budget)
+                .map_err(|_| crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits)
+        }),
+    };
+    match value {
+        Ok(value) => Ok(json!({ "action": action, "status": "ready", "value": value })),
+        Err(_) => Ok(json!({ "action": action, "status": "unavailable" })),
+    }
 }
 
 fn required_value(args: &Value, key: &str) -> Result<Value> {
@@ -1367,6 +1603,140 @@ mod tests {
         CaptureClaudeObservationRequestError, ObservationApplicationError,
     };
 
+    static RETAINED_CLAIM_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn retained_claim(id: u8) -> crate::agents::context_scout_v2::ContextScoutDurableClaimV1 {
+        use crate::agents::context_scout_v2::{
+            ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+            ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1,
+            ContextScoutDurableQueueEntryV1, ContextScoutEvidenceBindingV1,
+            ContextScoutEvidenceGenerationV1, ContextScoutLeaseV1, ContextScoutModelRunOutcomeV1,
+            ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1, ContextScoutWorkV1,
+        };
+
+        let address = ContextScoutAddressV1 {
+            profile_id: [1; 16],
+            provider_id: [2; 16],
+            protected_session_id: [3; 32],
+            thread_id: [4; 16],
+            turn_id: [5; 16],
+            agent_id: [6; 16],
+            logical_message_id: [id; 16],
+            project_id: [201; 16],
+        };
+        let input_watermark = [7; 32];
+        let envelope = ContextScoutSuggestionEnvelopeV1 {
+            envelope_id: [id; 16],
+            address,
+            input_watermark,
+            configuration_revision: [8; 32],
+            delivery_window: ContextScoutDeliveryWindowV1::Immediate,
+            candidate: ContextScoutCandidateV1 {
+                dedupe_key: [id; 32],
+                category: ContextScoutCategoryV1::Diagnostic,
+                relevance_score: 1,
+                suggestion_text: "bounded".to_owned(),
+                evidence: vec![ContextScoutEvidenceBindingV1 {
+                    anchor_id: [9; 16],
+                    content_identity: [10; 32],
+                    generation: ContextScoutEvidenceGenerationV1::SavedContent,
+                }],
+                expires_at: UtcMicros(2_000),
+            },
+        };
+        ContextScoutDurableClaimV1 {
+            entry: ContextScoutDurableQueueEntryV1 {
+                work: ContextScoutWorkV1 {
+                    address,
+                    generation: 1,
+                    input_watermark,
+                },
+                route: ContextScoutRouteV1::Deterministic,
+                model_outcome: ContextScoutModelRunOutcomeV1::NotRequested,
+                model_receipt: None,
+                envelope,
+            },
+            lease: ContextScoutLeaseV1 {
+                lease_id: [id; 16],
+                expires_at: UtcMicros(1_000),
+            },
+        }
+    }
+
+    #[test]
+    fn exact_retained_claim_lookup_commits_beyond_thirty_two_entries() {
+        let _guard = RETAINED_CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let project_id = [201; 16];
+        for id in 1..=40 {
+            assert!(
+                retain_hook_v2_delivery_claim(project_id, retained_claim(id), UtcMicros(1)).is_ok()
+            );
+        }
+        for id in 1..=40 {
+            assert_eq!(
+                lookup_hook_v2_delivery_claim(project_id, [id; 16])
+                    .expect("exact retained claim")
+                    .entry
+                    .envelope
+                    .envelope_id,
+                [id; 16]
+            );
+            remove_hook_v2_delivery_claim(project_id, [id; 16]);
+        }
+    }
+
+    #[test]
+    fn retained_claims_backpressure_at_a_deterministic_bound() {
+        let _guard = RETAINED_CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for index in 0..MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS as u16 {
+            let mut project_id = [202; 16];
+            project_id[0] = (index >> 8) as u8;
+            assert!(
+                retain_hook_v2_delivery_claim(
+                    project_id,
+                    retained_claim(index as u8),
+                    UtcMicros(1),
+                )
+                .is_ok()
+            );
+        }
+        assert!(retain_hook_v2_delivery_claim([203; 16], retained_claim(1), UtcMicros(1)).is_err());
+        for index in 0..MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS as u16 {
+            let mut project_id = [202; 16];
+            project_id[0] = (index >> 8) as u8;
+            remove_hook_v2_delivery_claim(project_id, [index as u8; 16]);
+        }
+    }
+
+    #[test]
+    fn receipt_outcomes_release_claims_and_only_retry_unavailable() {
+        use crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1;
+
+        let _guard = RETAINED_CLAIM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let project_id = [204; 16];
+        for (id, outcome, retryable) in [
+            (1, ContextScoutDurableStoreOutcomeV1::Stored, false),
+            (2, ContextScoutDurableStoreOutcomeV1::Duplicate, false),
+            (3, ContextScoutDurableStoreOutcomeV1::Superseded, false),
+            (4, ContextScoutDurableStoreOutcomeV1::Unavailable, true),
+        ] {
+            assert!(
+                retain_hook_v2_delivery_claim(project_id, retained_claim(id), UtcMicros(1)).is_ok()
+            );
+            assert_eq!(
+                release_hook_v2_delivery_claim(project_id, [id; 16], outcome),
+                retryable
+            );
+            assert!(lookup_hook_v2_delivery_claim(project_id, [id; 16]).is_none());
+        }
+    }
+
     #[test]
     fn required_str_rejects_missing_and_empty_values() {
         assert!(required_str(&json!({}), "action").is_err());
@@ -1388,6 +1758,19 @@ mod tests {
             "ingest_transcript",
             &json!({ "user_scope": true }),
         ));
+    }
+
+    #[test]
+    fn scout_read_actions_are_closed_and_read_only() {
+        for action in [
+            "hook_v2_scout_recent",
+            "hook_v2_scout_explain",
+            "hook_v2_scout_capability",
+            "hook_v2_scout_budget",
+        ] {
+            assert!(ContextScoutReadSurfaceV1::from_action(action).is_some());
+        }
+        assert!(ContextScoutReadSurfaceV1::from_action("hook_v2_scout_apply").is_none());
     }
 
     #[test]
@@ -1457,6 +1840,44 @@ mod tests {
         assert!(
             hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn scout_read_locator_requires_current_daemon_lifecycle() {
+        let session_id = SessionId::new("native-session-1".to_owned()).unwrap();
+        let stale_session_id = SessionId::new("native-session-stale".to_owned()).unwrap();
+        let mut envelope = hook_v2_envelope_for_test();
+        envelope.protected_session_id =
+            crate::hooks::hook_v2_protected_session_id_for_native(session_id.as_str());
+
+        assert_eq!(
+            hook_v2_current_scout_read_locator(&envelope, Some(&session_id)),
+            Some(envelope.protected_session_id)
+        );
+        assert_eq!(hook_v2_current_scout_read_locator(&envelope, None), None);
+        assert_eq!(
+            hook_v2_current_scout_read_locator(&envelope, Some(&stale_session_id)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn scout_read_locator_denies_missing_daemon_lifecycle() {
+        let session_id = "native-session-without-lifecycle";
+        let mut envelope = hook_v2_envelope_for_test();
+        envelope.project_id = [241; 16];
+        envelope.worktree_id = [242; 16];
+        envelope.protected_session_id =
+            crate::hooks::hook_v2_protected_session_id_for_native(session_id);
+
+        assert!(
+            hook_v2_resolve_current_scout_read_locator(
+                &json!({ "native_session_id": session_id }),
+                &envelope,
+            )
+            .await
+            .is_none()
         );
     }
 
