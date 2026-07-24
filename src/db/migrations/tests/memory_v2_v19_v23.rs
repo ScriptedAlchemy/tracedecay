@@ -1,13 +1,11 @@
-//! PR7 memory-v2 v19 to v23 migration-chain tests (split from
-//! `migration_test.rs`).
+//! PR7 memory-v2 v19 to v23 migration-chain coverage.
 
 use super::*;
-use tracedecay::db::migrations::migrate;
 
 #[tokio::test]
 async fn test_create_schema_fresh_v22_proposal_projection_is_terminal() {
-    let (conn, _db, _dir) = create_raw_db().await;
-    create_schema(&conn)
+    let (conn, _dir) = create_raw_db().await;
+    create_schema_connection(&conn)
         .await
         .expect("fresh V22 schema should install");
 
@@ -63,7 +61,7 @@ async fn test_create_schema_fresh_v22_proposal_projection_is_terminal() {
 
 #[tokio::test]
 async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_to_v22_contracts() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v19_memory_schema_for_v20_test(&conn).await;
     conn.execute(
         "UPDATE memory_v2_proposal_current SET state = 'applying'
@@ -74,7 +72,7 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_to_v22_cont
     .expect("fixture must model a legacy durable applying projection");
 
     assert!(
-        migrate(&conn)
+        migrate_connection(&conn)
             .await
             .expect("v19 PR7 schema should migrate through v20 and v21")
     );
@@ -270,7 +268,7 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_to_v22_cont
         "v20 must bind aliases to the exact anchor owner"
     );
     assert!(
-        !migrate(&conn)
+        !migrate_connection(&conn)
             .await
             .expect("replaying the v20/v21 migration chain should be a no-op")
     );
@@ -278,11 +276,11 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_to_v22_cont
 
 #[tokio::test]
 async fn test_migrate_v20_current_projection_adds_v21_compatibility_state() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v20_current_projection_for_v21_test(&conn).await;
 
     assert!(
-        migrate(&conn)
+        migrate_connection(&conn)
             .await
             .expect("v20 current projection should migrate to v21")
     );
@@ -374,7 +372,7 @@ async fn test_migrate_v20_current_projection_adds_v21_compatibility_state() {
         "V21 vector watermark must be JSON when present"
     );
     assert!(
-        !migrate(&conn)
+        !migrate_connection(&conn)
             .await
             .expect("replaying V21 migration should be a no-op")
     );
@@ -382,12 +380,12 @@ async fn test_migrate_v20_current_projection_adds_v21_compatibility_state() {
 
 #[tokio::test]
 async fn test_migrate_v21_adds_owner_bound_compatibility_receipt_ledger() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v21_current_projection_for_v22_test(&conn).await;
     assert!(!table_exists(&conn, "memory_v2_compatibility_operation_receipts").await);
 
     assert!(
-        migrate(&conn)
+        migrate_connection(&conn)
             .await
             .expect("v21 current projection should migrate to v22")
     );
@@ -479,7 +477,7 @@ async fn test_migrate_v21_adds_owner_bound_compatibility_receipt_ledger() {
                 'profile', '', ?1, ?2, ?1,
                 NULL, NULL, '{\"outcome\":\"applied\"}', 121
              )",
-            libsql::params![operation_id, operation_kind],
+            (operation_id, operation_kind),
         )
         .await
         .expect("a real compatibility operation kind must retain an idempotency receipt");
@@ -561,7 +559,7 @@ async fn test_migrate_v21_adds_owner_bound_compatibility_receipt_ledger() {
         "a receipt must retain owner-bound canonical references"
     );
     assert!(
-        !migrate(&conn)
+        !migrate_connection(&conn)
             .await
             .expect("replaying V22 migration should be a no-op")
     );
@@ -569,9 +567,9 @@ async fn test_migrate_v21_adds_owner_bound_compatibility_receipt_ledger() {
 
 #[tokio::test]
 async fn test_migrate_v21_adds_owner_bound_typed_fact_relations() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v21_current_projection_for_v22_test(&conn).await;
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect("v21 current projection should migrate to V22 relations");
 
@@ -657,7 +655,7 @@ async fn test_migrate_v21_adds_owner_bound_typed_fact_relations() {
                 0.8, 'curator', '{\"provenance\":\"fixture\"}',
                 '[\"fact.relation.evidence\"]', 202, 202
              )",
-            libsql::params![relation],
+            (relation,),
         )
         .await
         .expect("V22 must preserve every legacy relation kind canonically");
@@ -723,9 +721,9 @@ async fn test_migrate_v21_adds_owner_bound_typed_fact_relations() {
 
 #[tokio::test]
 async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_owner() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v21_current_projection_for_v22_test(&conn).await;
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect("v21 current projection should migrate to V23 compatibility banks");
 
@@ -739,7 +737,7 @@ async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_o
             'profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'all',
             ?1, 'amari_fhrr', 2048, 1, 100
          )",
-        libsql::params![profile_vector],
+        (profile_vector,),
     )
     .await
     .expect("insert profile-owned compatibility bank");
@@ -752,7 +750,7 @@ async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_o
             '{\"kind\":\"project\",\"project_id\":\"project.other\"}', 'all',
             ?1, 'amari_fhrr', 2048, 1, 100
          )",
-        libsql::params![project_vector],
+        (project_vector,),
     )
     .await
     .expect("insert project-owned compatibility bank");
@@ -771,7 +769,7 @@ async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_o
                        hrr_dim = excluded.hrr_dim,
                        fact_count = excluded.fact_count,
                        updated_at = excluded.updated_at",
-        libsql::params![rebuilt_profile_vector],
+        (rebuilt_profile_vector,),
     )
     .await
     .expect("rebuild must replace only the owning bank projection");
@@ -853,7 +851,7 @@ async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_o
                 'profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'general',
                 ?1, 'amari_fhrr', 2048, 1, 102
              )",
-            libsql::params![malformed_header],
+            (malformed_header,),
         )
         .await
         .is_err(),
@@ -870,7 +868,7 @@ async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_o
                 'profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'general',
                 ?1, 'amari_fhrr', 2048, 1, 102
              )",
-            libsql::params![malformed_length],
+            (malformed_length,),
         )
         .await
         .is_err(),
@@ -894,13 +892,13 @@ async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_o
 
 #[tokio::test]
 async fn test_migrate_v20_proposal_rebuild_rolls_back_atomically() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v19_memory_schema_for_v20_test(&conn).await;
     conn.execute_batch("CREATE TABLE memory_v2_proposal_current_v19 (sentinel TEXT NOT NULL);")
         .await
         .expect("create a deterministic rebuild collision");
 
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect_err("a rebuild collision must fail the v20 migration");
 

@@ -132,6 +132,31 @@ pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
 pub(crate) async fn create_schema_connection(conn: &Connection) -> Result<()> {
     // Fresh databases only need the pragma before tables are created.
     configure_fresh_auto_vacuum(conn, "create_schema").await?;
+
+    let transaction =
+        conn.schema_migration_transaction()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to acquire fresh-schema writer lock: {e}"),
+                operation: "create_schema".to_string(),
+            })?;
+    let result = create_schema_transaction(&transaction).await;
+    match result {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to commit fresh schema: {e}"),
+                operation: "create_schema".to_string(),
+            }),
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS nodes (
             id TEXT PRIMARY KEY,

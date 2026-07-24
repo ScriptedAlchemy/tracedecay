@@ -1,15 +1,13 @@
-//! FTS trigger and memory-facts FTS tracking tests (split from
-//! `migration_test.rs`).
+//! FTS trigger and memory-facts FTS tracking coverage.
 
 use super::*;
-use tracedecay::db::migrations::migrate;
 
 /// FTS triggers exist after migration from v0.
 #[tokio::test]
 async fn test_fts_triggers_exist_after_migration() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
 
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect("migrate from v0 should succeed");
 
@@ -18,7 +16,7 @@ async fn test_fts_triggers_exist_after_migration() {
         let mut rows = conn
             .query(
                 "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?1",
-                libsql::params![*trigger],
+                (*trigger,),
             )
             .await
             .expect("failed to query sqlite_master for trigger");
@@ -34,7 +32,7 @@ async fn test_fts_triggers_exist_after_migration() {
 
 #[tokio::test]
 async fn test_v11_memory_facts_fts_triggers_track_insert_update_delete() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     conn.execute(
         "INSERT INTO memory_facts (content, category, tags)
@@ -55,7 +53,7 @@ async fn test_v11_memory_facts_fts_triggers_track_insert_update_delete() {
 
     conn.execute(
         "UPDATE memory_facts SET content='Use semantic banana storage', tags='[\"banana\"]' WHERE fact_id=?1",
-        libsql::params![fact_id],
+        (fact_id,),
     )
     .await
     .expect("failed to update memory fact");
@@ -76,12 +74,9 @@ async fn test_v11_memory_facts_fts_triggers_track_insert_update_delete() {
         1
     );
 
-    conn.execute(
-        "DELETE FROM memory_facts WHERE fact_id=?1",
-        libsql::params![fact_id],
-    )
-    .await
-    .expect("failed to delete memory fact");
+    conn.execute("DELETE FROM memory_facts WHERE fact_id=?1", (fact_id,))
+        .await
+        .expect("failed to delete memory fact");
     assert_eq!(
         scalar_i64(
             &conn,

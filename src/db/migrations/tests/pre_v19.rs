@@ -1,15 +1,13 @@
-//! Pre-v19 schema-version migration tests plus general create/open tests
-//! (split from `migration_test.rs`).
+//! Pre-v19 schema-version migration coverage plus general create/open tests.
 
 use super::*;
-use tracedecay::db::migrations::migrate;
 
 /// create_schema on a fresh database sets user_version to latest and creates all tables.
 #[tokio::test]
 async fn test_create_schema_fresh_db() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
 
-    create_schema(&conn)
+    create_schema_connection(&conn)
         .await
         .expect("create_schema should succeed");
 
@@ -76,12 +74,12 @@ async fn test_create_schema_fresh_db() {
 /// create_schema is idempotent — calling it twice does not error.
 #[tokio::test]
 async fn test_create_schema_idempotent() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
 
-    create_schema(&conn)
+    create_schema_connection(&conn)
         .await
         .expect("first create_schema should succeed");
-    create_schema(&conn)
+    create_schema_connection(&conn)
         .await
         .expect("second create_schema should succeed");
 
@@ -91,9 +89,11 @@ async fn test_create_schema_idempotent() {
 /// migrate returns false when already at the latest version.
 #[tokio::test]
 async fn test_migrate_already_latest_returns_false() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
-    let migrated = migrate(&conn).await.expect("migrate should succeed");
+    let migrated = migrate_connection(&conn)
+        .await
+        .expect("migrate should succeed");
 
     assert!(
         !migrated,
@@ -104,10 +104,10 @@ async fn test_migrate_already_latest_returns_false() {
 
 #[tokio::test]
 async fn test_migrate_rejects_schema_newer_than_supported() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
     set_user_version(&conn, 25).await;
 
-    let error = migrate(&conn)
+    let error = migrate_connection(&conn)
         .await
         .expect_err("future schema versions must be rejected");
 
@@ -118,12 +118,12 @@ async fn test_migrate_rejects_schema_newer_than_supported() {
 /// migrate from v0 (completely empty database) applies all migrations to latest.
 #[tokio::test]
 async fn test_migrate_from_v0() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
 
     // user_version defaults to 0 on a fresh database
     assert_eq!(get_user_version(&conn).await, 0);
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("migrate from v0 should succeed");
 
@@ -160,14 +160,14 @@ async fn test_migrate_from_v0() {
 /// migrate from v1 (tables exist, no metadata, no complexity columns) to v5.
 #[tokio::test]
 async fn test_migrate_from_v1() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v1_schema(&conn).await;
 
     assert_eq!(get_user_version(&conn).await, 1);
     assert!(!table_exists(&conn, "metadata").await);
     assert!(!column_exists(&conn, "nodes", "branches").await);
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("migrate from v1 should succeed");
 
@@ -195,7 +195,7 @@ async fn test_migrate_from_v1() {
 /// migrate from v2 (has metadata, no complexity columns) to v5.
 #[tokio::test]
 async fn test_migrate_from_v2() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v1_schema(&conn).await;
     apply_v2(&conn).await;
 
@@ -203,7 +203,7 @@ async fn test_migrate_from_v2() {
     assert!(table_exists(&conn, "metadata").await);
     assert!(!column_exists(&conn, "nodes", "branches").await);
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("migrate from v2 should succeed");
 
@@ -224,7 +224,7 @@ async fn test_migrate_from_v2() {
 /// migrate from v3 (has complexity columns, no safety columns) to v5.
 #[tokio::test]
 async fn test_migrate_from_v3() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v1_schema(&conn).await;
     apply_v2(&conn).await;
     apply_v3(&conn).await;
@@ -233,7 +233,7 @@ async fn test_migrate_from_v3() {
     assert!(column_exists(&conn, "nodes", "branches").await);
     assert!(!column_exists(&conn, "nodes", "unsafe_blocks").await);
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("migrate from v3 should succeed");
 
@@ -252,7 +252,7 @@ async fn test_migrate_from_v3() {
 /// migrate from v4 (has all columns, no edge dedup) to v5.
 #[tokio::test]
 async fn test_migrate_from_v4() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v1_schema(&conn).await;
     apply_v2(&conn).await;
     apply_v3(&conn).await;
@@ -261,7 +261,7 @@ async fn test_migrate_from_v4() {
     assert_eq!(get_user_version(&conn).await, 4);
     assert!(!index_exists(&conn, "idx_edges_unique").await);
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("migrate from v4 should succeed");
 
@@ -274,7 +274,7 @@ async fn test_migrate_from_v4() {
 /// V5 migration actually deduplicates edge rows.
 #[tokio::test]
 async fn test_v5_deduplicates_edges() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
     create_v1_schema(&conn).await;
     apply_v2(&conn).await;
     apply_v3(&conn).await;
@@ -334,7 +334,7 @@ async fn test_v5_deduplicates_edges() {
     }
 
     // Run migration (v4 -> v5)
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("migrate from v4 should succeed");
     assert!(migrated);
@@ -359,9 +359,9 @@ async fn test_v5_deduplicates_edges() {
 /// After full migration from v0, all expected indexes exist.
 #[tokio::test]
 async fn test_indexes_exist_after_full_migration() {
-    let (conn, _db, _dir) = create_raw_db().await;
+    let (conn, _dir) = create_raw_db().await;
 
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect("migrate from v0 should succeed");
 
@@ -386,32 +386,30 @@ async fn test_indexes_exist_after_full_migration() {
     assert!(index_exists(&conn, "idx_unresolved_refs_file_path").await);
 }
 
-/// Database::initialize creates a database at the latest schema version.
+/// Registered initialize mode creates a database at the latest schema version.
 #[tokio::test]
 async fn test_database_initialize_creates_latest_version() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("init_test.db");
 
-    let (db, _migrated) = crate::common::initialize_test_database(&db_path)
-        .await
-        .expect("Database::initialize should succeed");
+    let (db, _migrated) =
+        publish_test_database(&db_path, TestDatabaseRuntimeMode::Initialize).await;
 
     assert_eq!(get_user_version(db.conn()).await, 24);
 }
 
-/// Database::open on an already-current database does not re-migrate.
+/// Rejoining an already-current registered runtime does not re-migrate.
 #[tokio::test]
 async fn test_database_open_no_migration_needed() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("open_test.db");
 
-    // Seed a database that is already at the latest schema version
-    support::seed_latest_graph_db(&db_path).await;
+    // Seed and rejoin through the same retained canonical runtime. The second
+    // facade must not reopen the physical database.
+    let (_seed, _) = publish_test_database(&db_path, TestDatabaseRuntimeMode::Initialize).await;
 
-    // Open the same database — should not migrate
-    let (_db2, migrated) = crate::common::open_test_database(&db_path)
-        .await
-        .expect("Database::open should succeed");
+    // Rejoin the same database — should not migrate.
+    let (_db2, migrated) = publish_test_database(&db_path, TestDatabaseRuntimeMode::Existing).await;
 
     assert!(
         !migrated,
@@ -419,19 +417,16 @@ async fn test_database_open_no_migration_needed() {
     );
 }
 
-/// Database::open on a v1 database migrates to the latest schema version.
+/// Registered existing mode migrates a staged v1 database to the latest schema.
 #[tokio::test]
 async fn test_database_open_migrates_v1_to_latest() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("open_v1_test.db");
 
-    // Create a raw v1 database
+    // Create a v1 fixture on one engine-owned runtime, then release that
+    // physical owner before opening through the public registered facade.
     {
-        let raw_db = Builder::new_local(&db_path)
-            .build()
-            .await
-            .expect("failed to build libsql database");
-        let conn = raw_db.connect().expect("failed to connect");
+        let conn = TestConnection::open(&db_path);
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;",
@@ -441,10 +436,9 @@ async fn test_database_open_migrates_v1_to_latest() {
         create_v1_schema(&conn).await;
     }
 
-    // Open via Database::open — should detect v1 and migrate to latest
-    let (db, migrated) = crate::common::open_test_database(&db_path)
-        .await
-        .expect("Database::open should succeed");
+    // Publish the staged legacy input into the typed runtime, which should
+    // detect v1 and migrate to latest.
+    let (db, migrated) = publish_test_database(&db_path, TestDatabaseRuntimeMode::Existing).await;
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
@@ -454,7 +448,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 /// After create_schema, all v5 columns on nodes exist.
 #[tokio::test]
 async fn test_create_schema_has_all_node_columns() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     let expected_columns = [
         "id",
@@ -491,7 +485,7 @@ async fn test_create_schema_has_all_node_columns() {
 /// V5 unique index prevents duplicate edge insertion.
 #[tokio::test]
 async fn test_v5_unique_index_prevents_duplicates() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     // Insert nodes for FK
     conn.execute(
@@ -532,7 +526,7 @@ async fn test_v5_unique_index_prevents_duplicates() {
 
 #[tokio::test]
 async fn test_latest_schema_omits_legacy_memory_tables() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     assert!(!table_exists(&conn, "memory_decisions").await);
     assert!(!table_exists(&conn, "memory_code_areas").await);
@@ -543,7 +537,7 @@ async fn test_latest_schema_omits_legacy_memory_tables() {
 
 #[tokio::test]
 async fn test_v7_to_latest_upgrade_path() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
     // Drop the v8+ tables to simulate a true v7 starting state
@@ -560,7 +554,7 @@ async fn test_v7_to_latest_upgrade_path() {
         .await
         .unwrap();
 
-    let did_migrate = migrate(&conn).await.unwrap();
+    let did_migrate = migrate_connection(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
     assert_eq!(get_user_version(&conn).await, 24);
@@ -583,8 +577,10 @@ async fn test_v7_to_latest_upgrade_path() {
 /// V9 adds the `read_cache` table used by `tracedecay_read`.
 #[tokio::test]
 async fn test_migrate_v9_adds_read_cache() {
-    let (conn, _db, _dir) = create_raw_db().await;
-    migrate(&conn).await.expect("migrate should succeed");
+    let (conn, _dir) = create_raw_db().await;
+    migrate_connection(&conn)
+        .await
+        .expect("migrate should succeed");
 
     assert!(
         table_exists(&conn, "read_cache").await,
@@ -599,7 +595,7 @@ async fn test_migrate_v9_adds_read_cache() {
 /// V16 adds the `redundancy_pairs` cache table on a database that predates it.
 #[tokio::test]
 async fn test_migrate_v16_adds_redundancy_pairs() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     // Rewind past v16: drop the table and step the version back to v15.
     conn.execute("DROP TABLE IF EXISTS redundancy_pairs", ())
@@ -608,7 +604,9 @@ async fn test_migrate_v16_adds_redundancy_pairs() {
     set_user_version(&conn, 15).await;
     assert!(!table_exists(&conn, "redundancy_pairs").await);
 
-    let migrated = migrate(&conn).await.expect("v16 migration should apply");
+    let migrated = migrate_connection(&conn)
+        .await
+        .expect("v16 migration should apply");
 
     assert!(migrated, "expected migrate() to run the v16 addition");
     assert_eq!(get_user_version(&conn).await, 24);
@@ -632,7 +630,7 @@ async fn test_migrate_v16_adds_redundancy_pairs() {
 
 #[tokio::test]
 async fn test_migrate_v18_preserves_memory_and_adds_bounded_relations() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
     conn.execute(
         "INSERT INTO memory_facts (content, category, created_at, updated_at)
          VALUES ('preserved fact', 'project', 11, 11)",
@@ -655,7 +653,7 @@ async fn test_migrate_v18_preserves_memory_and_adds_bounded_relations() {
         .unwrap();
     set_user_version(&conn, 17).await;
 
-    assert!(migrate(&conn).await.unwrap());
+    assert!(migrate_connection(&conn).await.unwrap());
 
     assert_eq!(get_user_version(&conn).await, 24);
     assert!(table_exists(&conn, "memory_fact_relations").await);
@@ -680,7 +678,7 @@ async fn test_migrate_v18_preserves_memory_and_adds_bounded_relations() {
 
 #[tokio::test]
 async fn test_v11_create_schema_has_holographic_memory_schema() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     let mut rows = conn
         .query(
@@ -786,7 +784,7 @@ async fn test_v11_create_schema_has_holographic_memory_schema() {
     let mut rows = conn
         .query(
             "SELECT tags, trust_score, retrieval_count, helpful_count, unhelpful_count, source, metadata, hrr_algebra, hrr_dim, hrr_precision FROM memory_facts WHERE fact_id=?1",
-            libsql::params![fact_id],
+            (fact_id,),
         )
         .await
         .unwrap();
@@ -805,14 +803,16 @@ async fn test_v11_create_schema_has_holographic_memory_schema() {
 
 #[tokio::test]
 async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
-    let (conn, _db, _dir) = create_v10_db().await;
+    let (conn, _dir) = create_v10_db().await;
 
     assert_eq!(get_user_version(&conn).await, 10);
     assert!(table_exists(&conn, "memory_decisions").await);
     assert!(table_exists(&conn, "memory_code_areas").await);
     assert!(!table_exists(&conn, "memory_facts").await);
 
-    let did_migrate = migrate(&conn).await.expect("v10 to v11 should migrate");
+    let did_migrate = migrate_connection(&conn)
+        .await
+        .expect("v10 to v11 should migrate");
 
     assert!(did_migrate);
     assert_eq!(get_user_version(&conn).await, 24);
@@ -829,10 +829,12 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
 
 #[tokio::test]
 async fn test_v11_database_migrates_to_monotonic_v12() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
     set_user_version(&conn, 11).await;
 
-    let did_migrate = migrate(&conn).await.expect("v11 to v12 should migrate");
+    let did_migrate = migrate_connection(&conn)
+        .await
+        .expect("v11 to v12 should migrate");
 
     assert!(did_migrate);
     assert_eq!(get_user_version(&conn).await, 24);
@@ -841,7 +843,7 @@ async fn test_v11_database_migrates_to_monotonic_v12() {
 
 #[tokio::test]
 async fn test_v11_feedback_events_enforce_action_and_cascade_with_facts() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     conn.execute(
         "INSERT INTO memory_facts (content, category) VALUES ('Feedback fact', 'test')",
@@ -853,7 +855,7 @@ async fn test_v11_feedback_events_enforce_action_and_cascade_with_facts() {
     conn.execute(
         "INSERT INTO memory_feedback_events (fact_id, action, trust_delta, old_trust, new_trust, note)
          VALUES (?1, 'helpful', 0.1, 0.5, 0.6, 'worked')",
-        libsql::params![fact_id],
+        (fact_id,),
     )
     .await
     .expect("valid feedback action should insert");
@@ -862,7 +864,7 @@ async fn test_v11_feedback_events_enforce_action_and_cascade_with_facts() {
         .execute(
             "INSERT INTO memory_feedback_events (fact_id, action, trust_delta, old_trust, new_trust)
              VALUES (?1, 'neutral', 0.0, 0.5, 0.5)",
-            libsql::params![fact_id],
+            (fact_id,),
         )
         .await;
     assert!(invalid.is_err(), "invalid feedback action should fail");
@@ -870,25 +872,22 @@ async fn test_v11_feedback_events_enforce_action_and_cascade_with_facts() {
     let mut rows = conn
         .query(
             "SELECT source FROM memory_feedback_events WHERE fact_id=?1",
-            libsql::params![fact_id],
+            (fact_id,),
         )
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     assert_eq!(row.get::<String>(0).unwrap(), "mcp");
 
-    conn.execute(
-        "DELETE FROM memory_facts WHERE fact_id=?1",
-        libsql::params![fact_id],
-    )
-    .await
-    .expect("deleting memory fact should cascade");
+    conn.execute("DELETE FROM memory_facts WHERE fact_id=?1", (fact_id,))
+        .await
+        .expect("deleting memory fact should cascade");
     assert_eq!(
         {
             let mut rows = conn
                 .query(
                     "SELECT COUNT(*) FROM memory_feedback_events WHERE fact_id=?1",
-                    libsql::params![fact_id],
+                    (fact_id,),
                 )
                 .await
                 .unwrap();
@@ -901,16 +900,18 @@ async fn test_v11_feedback_events_enforce_action_and_cascade_with_facts() {
 
 #[tokio::test]
 async fn test_v11_backfills_legacy_memory_decisions_as_facts() {
-    let (conn, _db, _dir) = create_v10_db().await;
+    let (conn, _dir) = create_v10_db().await;
     conn.execute(
         "INSERT INTO memory_decisions (text, reason, created_at, files, tags)
-         VALUES ('Prefer libsql migrations', 'Keeps install path simple', 1234, '[\"src/db/migrations.rs\"]', '[\"db\",\"memory\"]')",
+         VALUES ('Prefer native SQLite migrations', 'Keeps install path simple', 1234, '[\"src/db/migrations.rs\"]', '[\"db\",\"memory\"]')",
         (),
     )
     .await
     .expect("failed to insert legacy decision");
 
-    migrate(&conn).await.expect("v11 migration should backfill");
+    migrate_connection(&conn)
+        .await
+        .expect("v11 migration should backfill");
 
     let mut rows = conn
         .query(
@@ -926,14 +927,14 @@ async fn test_v11_backfills_legacy_memory_decisions_as_facts() {
     let metadata = row.get::<String>(3).unwrap();
 
     assert!(fact_id > 0);
-    assert!(content.contains("Prefer libsql migrations"));
+    assert!(content.contains("Prefer native SQLite migrations"));
     assert!(content.contains("Keeps install path simple"));
     assert_eq!(tags, "[\"db\",\"memory\"]");
     assert!(!metadata.contains("legacy-decision-"));
     assert!(metadata.contains("holographic_memory_backfill_v1"));
     assert!(metadata.contains("memory_decisions"));
     assert!(metadata.contains("\"legacy_id\":1"));
-    assert!(metadata.contains("\"decision_text\":\"Prefer libsql migrations\""));
+    assert!(metadata.contains("\"decision_text\":\"Prefer native SQLite migrations\""));
     assert!(metadata.contains("src/db/migrations.rs"));
     assert_eq!(
         scalar_i64(
@@ -952,7 +953,7 @@ async fn test_v11_backfills_legacy_memory_decisions_as_facts() {
 
 #[tokio::test]
 async fn test_v11_backfills_legacy_memory_code_areas_as_facts() {
-    let (conn, _db, _dir) = create_v10_db().await;
+    let (conn, _dir) = create_v10_db().await;
     conn.execute(
         "INSERT INTO memory_code_areas (path, description, last_touched_at, touch_count)
          VALUES ('src/db/migrations.rs', 'Schema migration code', 5678, 3)",
@@ -961,7 +962,9 @@ async fn test_v11_backfills_legacy_memory_code_areas_as_facts() {
     .await
     .expect("failed to insert legacy code area");
 
-    migrate(&conn).await.expect("v11 migration should backfill");
+    migrate_connection(&conn)
+        .await
+        .expect("v11 migration should backfill");
 
     let mut rows = conn
         .query(
@@ -1003,7 +1006,7 @@ async fn test_v11_backfills_legacy_memory_code_areas_as_facts() {
 
 #[tokio::test]
 async fn test_v11_backfill_is_idempotent_when_migration_reruns() {
-    let (conn, _db, _dir) = create_v10_db().await;
+    let (conn, _dir) = create_v10_db().await;
     conn.execute(
         "INSERT INTO memory_decisions (text, reason, created_at, tags)
          VALUES ('Avoid duplicate facts', 'Content has a unique constraint', 1000, '[\"dedupe\"]')",
@@ -1019,7 +1022,7 @@ async fn test_v11_backfill_is_idempotent_when_migration_reruns() {
     .await
     .expect("failed to insert legacy code area");
 
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect("first v11 migration should succeed");
     assert_eq!(
@@ -1028,7 +1031,7 @@ async fn test_v11_backfill_is_idempotent_when_migration_reruns() {
     );
 
     set_user_version(&conn, 10).await;
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect("rerunning v11 migration should succeed");
 
@@ -1040,7 +1043,7 @@ async fn test_v11_backfill_is_idempotent_when_migration_reruns() {
 
 #[tokio::test]
 async fn test_v11_backfill_handles_malformed_and_blank_legacy_json() {
-    let (conn, _db, _dir) = create_v10_db().await;
+    let (conn, _dir) = create_v10_db().await;
     conn.execute(
         "INSERT INTO memory_decisions (text, reason, created_at, files, tags)
          VALUES ('Bad JSON is normalized', '', 1000, '[invalid json', 'not-an-array')",
@@ -1056,7 +1059,7 @@ async fn test_v11_backfill_handles_malformed_and_blank_legacy_json() {
     .await
     .expect("failed to insert blank legacy code area");
 
-    migrate(&conn)
+    migrate_connection(&conn)
         .await
         .expect("v11 migration should tolerate malformed legacy JSON");
 
@@ -1108,18 +1111,20 @@ async fn test_v11_backfill_handles_malformed_and_blank_legacy_json() {
 
 #[tokio::test]
 async fn test_v11_backfill_preserves_duplicate_legacy_content() {
-    let (conn, _db, _dir) = create_v10_db().await;
+    let (conn, _dir) = create_v10_db().await;
     for tag in ["rust", "performance"] {
         conn.execute(
             "INSERT INTO memory_decisions (text, reason, created_at, files, tags)
              VALUES ('Use Rust', 'same reason', 1000, '[]', json_array(?1))",
-            libsql::params![tag],
+            (tag,),
         )
         .await
         .expect("failed to insert duplicate legacy decision");
     }
 
-    migrate(&conn).await.expect("v11 migration should backfill");
+    migrate_connection(&conn)
+        .await
+        .expect("v11 migration should backfill");
 
     assert_eq!(
         scalar_i64(
@@ -1157,7 +1162,7 @@ async fn test_v11_backfill_preserves_duplicate_legacy_content() {
 /// dependent column first. Regression test for the "no such column" failure.
 #[tokio::test]
 async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     // Recreate the abandoned archive-revision shape, with superseded_by as a
     // VIRTUAL generated column that references merged_into.
@@ -1181,7 +1186,7 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
     .expect("failed to insert fixture fact");
     set_user_version(&conn, 12).await;
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("v13 must drop archive columns even with a generated-column dependency");
     assert!(migrated, "expected migrate() to run the v13 cleanup");
@@ -1213,7 +1218,7 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
 /// re-run after a partial upgrade).
 #[tokio::test]
 async fn test_v14_adds_access_tracking_and_oplog() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     // Rewind to the v13 shape: no access columns, no oplog table.
     conn.execute_batch(
@@ -1232,7 +1237,9 @@ async fn test_v14_adds_access_tracking_and_oplog() {
     .expect("failed to insert fixture fact");
     set_user_version(&conn, 13).await;
 
-    let migrated = migrate(&conn).await.expect("v14 must apply cleanly");
+    let migrated = migrate_connection(&conn)
+        .await
+        .expect("v14 must apply cleanly");
     assert!(migrated, "expected migrate() to run the v14 additions");
     assert_eq!(get_user_version(&conn).await, 24);
 
@@ -1256,7 +1263,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
     // Idempotence: re-running v14 against the already-upgraded shape must
     // not fail or duplicate anything.
     set_user_version(&conn, 13).await;
-    let migrated_again = migrate(&conn)
+    let migrated_again = migrate_connection(&conn)
         .await
         .expect("v14 must be idempotent on an already-upgraded schema");
     assert!(migrated_again);
@@ -1269,8 +1276,8 @@ async fn test_v14_adds_access_tracking_and_oplog() {
 
 #[tokio::test]
 async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
-    let (conn, _db, _dir) = create_schema_db().await;
-    let legacy_vector = vec![0.0_f64; tracedecay::memory::encoding::HolographicEncoder::DIMENSIONS];
+    let (conn, _dir) = create_schema_db().await;
+    let legacy_vector = vec![0.0_f64; crate::memory::encoding::HolographicEncoder::DIMENSIONS];
     let legacy_bytes = bincode::serialize(&legacy_vector).unwrap();
     assert_eq!(legacy_bytes.len(), 16_392);
 
@@ -1280,7 +1287,7 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
     conn.execute(
         "INSERT INTO memory_facts (content, category, hrr_vector, hrr_algebra, hrr_dim)
          VALUES ('Pre-v15 compact me', 'general', ?1, 'amari_fhrr', 2048)",
-        libsql::params![legacy_bytes],
+        (legacy_bytes,),
     )
     .await
     .expect("failed to seed legacy f64 vector");
@@ -1289,7 +1296,7 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
         .expect("failed to simulate a legacy database without incremental auto-vacuum");
     set_user_version(&conn, 14).await;
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("v15 must compact legacy vectors");
     assert!(migrated);
@@ -1311,7 +1318,7 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
     );
 
     set_user_version(&conn, 14).await;
-    let migrated_again = migrate(&conn)
+    let migrated_again = migrate_connection(&conn)
         .await
         .expect("v15 should be idempotent on compacted rows");
     assert!(migrated_again);
@@ -1328,7 +1335,7 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
 
 #[tokio::test]
 async fn test_latest_open_defers_incremental_vacuum_repair() {
-    let (conn, _db, _dir) = create_schema_db().await;
+    let (conn, _dir) = create_schema_db().await;
 
     conn.execute_batch(
         "PRAGMA auto_vacuum = NONE;
@@ -1343,7 +1350,7 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
         "fixture should start as an already-latest database without incremental auto_vacuum"
     );
 
-    let migrated = migrate(&conn)
+    let migrated = migrate_connection(&conn)
         .await
         .expect("latest-version open should defer incremental auto_vacuum repair");
 

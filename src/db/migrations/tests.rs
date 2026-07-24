@@ -1,11 +1,11 @@
-use std::fs;
 use std::path::Path;
 
-use libsql::{Builder, Connection, Database as LibsqlDatabase};
 use tempfile::TempDir;
-use tracedecay::db::migrations::create_schema;
 
-use crate::support;
+use crate::db::engine::{Connection, TestConnection};
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+
+use super::{create_schema_connection, migrate_connection};
 
 mod fts;
 mod memory_v2_v19_v23;
@@ -15,16 +15,11 @@ mod pre_v19;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Creates a raw libsql database in a temp directory.
-/// Returns (Connection, Database, TempDir) — all three must stay alive.
-async fn create_raw_db() -> (Connection, LibsqlDatabase, TempDir) {
+/// Creates a database owned by the engine test runtime.
+async fn create_raw_db() -> (TestConnection, TempDir) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
-    let db = Builder::new_local(&db_path)
-        .build()
-        .await
-        .expect("failed to build libsql database");
-    let conn = db.connect().expect("failed to connect");
+    let conn = TestConnection::open(&db_path);
     conn.execute_batch(
         "PRAGMA auto_vacuum = INCREMENTAL;
          PRAGMA journal_mode = WAL;
@@ -33,79 +28,31 @@ async fn create_raw_db() -> (Connection, LibsqlDatabase, TempDir) {
     )
     .await
     .expect("failed to apply pragmas");
-    (conn, db, dir)
+    (conn, dir)
 }
 
-/// Opens an existing database file raw, applying the per-connection pragmas
-/// tests rely on (foreign keys for cascade assertions, busy timeout).
-async fn open_raw(db_path: &Path) -> (Connection, LibsqlDatabase) {
-    let db = Builder::new_local(db_path)
-        .build()
+/// Creates a latest-schema database on the engine test runtime.
+async fn create_schema_db() -> (TestConnection, TempDir) {
+    let (conn, dir) = create_raw_db().await;
+    create_schema_connection(&conn)
         .await
-        .expect("failed to build libsql database");
-    let conn = db.connect().expect("failed to connect");
-    conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;",
-    )
-    .await
-    .expect("failed to apply pragmas");
-    (conn, db)
+        .expect("failed to create latest schema");
+    (conn, dir)
 }
 
-/// Copies the cached latest-schema template into a fresh temp dir and opens
-/// it raw — equivalent to `create_raw_db` + `create_schema`, without paying
-/// schema creation per test. The real `create_schema` path stays covered by
-/// `test_create_schema_fresh_db` and `test_create_schema_idempotent`.
-async fn create_schema_db() -> (Connection, LibsqlDatabase, TempDir) {
-    let dir = TempDir::new().expect("failed to create temp dir");
-    let db_path = dir.path().join("test.db");
-    support::seed_latest_graph_db(&db_path).await;
-    let (conn, db) = open_raw(&db_path).await;
-    (conn, db, dir)
+/// Creates the v10 legacy schema on the engine test runtime.
+async fn create_v10_db() -> (TestConnection, TempDir) {
+    let (conn, dir) = create_raw_db().await;
+    create_v10_schema_for_v11_tests(&conn).await;
+    (conn, dir)
 }
 
-/// Copies the cached v10 legacy-schema template (latest schema with the
-/// holographic memory tables swapped for the legacy `memory_decisions` /
-/// `memory_code_areas` tables, `user_version = 10`) into a fresh temp dir
-/// and opens it raw.
-async fn create_v10_db() -> (Connection, LibsqlDatabase, TempDir) {
-    // The v10 fixture schema is defined by SQL in this file, so fingerprint
-    // the whole file: editing it must invalidate the cached template.
-    let template = support::ensure_template_db(
-        "graph-v10-legacy",
-        include_bytes!("migration_test.rs"),
-        |path| async move {
-            let db = Builder::new_local(&path)
-                .build()
-                .await
-                .expect("failed to build v10 template database");
-            let conn = db.connect().expect("failed to connect to v10 template");
-            conn.execute_batch(
-                "PRAGMA auto_vacuum = INCREMENTAL;
-             PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
-            )
-            .await
-            .expect("failed to apply v10 template pragmas");
-            create_v10_schema_for_v11_tests(&conn).await;
-            // wal_checkpoint returns a result row, so it must go through query().
-            let mut rows = conn
-                .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
-                .await
-                .expect("failed to checkpoint v10 template");
-            rows.next()
-                .await
-                .expect("failed to read v10 checkpoint result");
-        },
-    )
-    .await;
-    let dir = TempDir::new().expect("failed to create temp dir");
-    let db_path = dir.path().join("test.db");
-    fs::copy(&template, &db_path).expect("failed to seed v10 database from template");
-    let (conn, db) = open_raw(&db_path).await;
-    (conn, db, dir)
+async fn publish_test_database(path: &Path, mode: TestDatabaseRuntimeMode) -> (Database, bool) {
+    let authority =
+        DatabaseAuthority::acquire_test(path, "migration test runtime").expect("test authority");
+    Database::publish_test_runtime(path, &authority, mode)
+        .await
+        .expect("publish canonical test runtime")
 }
 
 /// Sets PRAGMA user_version on the connection.
@@ -135,7 +82,7 @@ async fn table_exists(conn: &Connection, table_name: &str) -> bool {
     let mut rows = conn
         .query(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?1",
-            libsql::params![table_name],
+            (table_name,),
         )
         .await
         .expect("failed to query sqlite_master");
@@ -150,7 +97,7 @@ async fn index_exists(conn: &Connection, index_name: &str) -> bool {
     let mut rows = conn
         .query(
             "SELECT name FROM sqlite_master WHERE type='index' AND name=?1",
-            libsql::params![index_name],
+            (index_name,),
         )
         .await
         .expect("failed to query sqlite_master");
@@ -165,7 +112,7 @@ async fn trigger_exists(conn: &Connection, trigger_name: &str) -> bool {
     let mut rows = conn
         .query(
             "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?1",
-            libsql::params![trigger_name],
+            (trigger_name,),
         )
         .await
         .expect("failed to query sqlite_master");
@@ -268,10 +215,7 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         .await
         .expect("failed to query table_info");
     while let Some(row) = rows.next().await.expect("failed to read table_info row") {
-        let name: String = row
-            .get_str(1)
-            .expect("failed to read column name")
-            .to_string();
+        let name: String = row.get::<String>(1).expect("failed to read column name");
         if name == column {
             return true;
         }
@@ -286,15 +230,10 @@ async fn column_type_and_pk(conn: &Connection, table: &str, column: &str) -> (St
         .await
         .expect("failed to query table_info");
     while let Some(row) = rows.next().await.expect("failed to read table_info row") {
-        let name = row
-            .get_str(1)
-            .expect("failed to read column name")
-            .to_string();
+        let name = row.get::<String>(1).expect("failed to read column name");
         if name == column {
             return (
-                row.get_str(2)
-                    .expect("failed to read column type")
-                    .to_string(),
+                row.get::<String>(2).expect("failed to read column type"),
                 row.get(5).expect("failed to read primary key ordinal"),
             );
         }
@@ -441,7 +380,7 @@ async fn apply_v4(conn: &Connection) {
 
 /// Creates a latest pre-v11 schema with legacy memory tables but no holographic tables.
 async fn create_v10_schema_for_v11_tests(conn: &Connection) {
-    create_schema(conn)
+    create_schema_connection(conn)
         .await
         .expect("failed to create baseline schema");
     conn.execute_batch(
@@ -631,6 +570,65 @@ async fn create_v19_memory_schema_for_v20_test(conn: &Connection) {
     .await
     .expect("failed to create v19 PR7 memory fixture");
     set_user_version(conn, 19).await;
+}
+
+#[tokio::test]
+async fn empty_database_migrates_atomically_through_the_engine_runtime() {
+    let (conn, _dir) = create_raw_db().await;
+
+    assert_eq!(super::get_version(&*conn).await.unwrap(), 0);
+    assert!(migrate_connection(&conn).await.unwrap());
+    assert_eq!(
+        super::get_version(&*conn).await.unwrap(),
+        super::LATEST_VERSION
+    );
+    assert!(!migrate_connection(&conn).await.unwrap());
+}
+
+#[tokio::test]
+async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
+    let (conn, _dir) = create_raw_db().await;
+    super::configure_fresh_auto_vacuum(&conn, "test interrupted fresh schema")
+        .await
+        .unwrap();
+
+    let transaction = conn.schema_migration_transaction().await.unwrap();
+    super::create_schema_transaction(&transaction)
+        .await
+        .unwrap();
+    assert_eq!(
+        super::get_version(&transaction).await.unwrap(),
+        super::LATEST_VERSION
+    );
+    transaction.rollback().await.unwrap();
+
+    assert_eq!(get_user_version(&conn).await, 0);
+    assert!(!table_exists(&conn, "nodes").await);
+
+    assert!(migrate_connection(&conn).await.unwrap());
+    assert_eq!(get_user_version(&conn).await, super::LATEST_VERSION);
+    assert!(column_exists(&conn, "nodes", "branches").await);
+    assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
+}
+
+#[tokio::test]
+async fn exclusive_maintenance_completes_deferred_auto_vacuum_repair() {
+    let (conn, _dir) = create_raw_db().await;
+    create_schema_connection(&conn).await.unwrap();
+    conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+        .await
+        .unwrap();
+    assert_eq!(super::auto_vacuum_mode(&*conn, "test").await.unwrap(), 0);
+
+    assert!(!migrate_connection(&conn).await.unwrap());
+    assert_eq!(super::auto_vacuum_mode(&*conn, "test").await.unwrap(), 0);
+
+    assert!(
+        !super::migrate_with_exclusive_maintenance(&conn)
+            .await
+            .unwrap()
+    );
+    assert_eq!(super::auto_vacuum_mode(&*conn, "test").await.unwrap(), 2);
 }
 
 /// Creates the V20 current projection shape so V21's additive compatibility
