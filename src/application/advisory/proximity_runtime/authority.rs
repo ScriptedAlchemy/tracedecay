@@ -12,11 +12,12 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, ProximityAddressV1, ProximityBranchWorktreeIncompatibilityV1,
-    ProximityCoverageV1, ProximityRelationStrengthV1, ProximityRiskInputsV1,
-    ProximityWarningClassV1,
+    ProximityCoverageV1, ProximityRelationPathKindV1, ProximityRelationPathV1,
+    ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityWarningClassV1,
 };
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, FileOccurrenceId, ObservationScopeV1, UtcMicros,
+    CanonicalObservationEnvelopeV1, FileOccurrenceId, ObservationScopeV1, SourceSpan,
+    SymbolOccurrenceId, UtcMicros,
 };
 use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
 
@@ -24,17 +25,17 @@ use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
     CanonicalProximityEvidenceV1,
 };
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::{
-    GitRefFilter, SessionGitCorrelationHit, SessionsForQuery, normalize_worktree,
+    GitRefFilter, SessionGitCorrelationHit, SessionsForQuery, normalize_worktree, sessions_for,
 };
-use crate::store::GlobalDbObservationStore;
 use crate::tracedecay::TraceDecay;
 
 const MAX_ACTIVE_SESSIONS_V1: usize = 32;
 const MAX_ACTIVITY_ROWS_PER_SESSION_V1: usize = 64;
 const MAX_RECENT_OBSERVATIONS_V1: usize = 256;
 const MAX_PROXIMITY_EVIDENCE_V1: usize = 32;
+const MAX_EDITED_PATHS_V1: usize = 64;
 const ACTIVITY_HORIZON_SECONDS_V1: i64 = 300;
 const EVIDENCE_TTL_MICROS_V1: i64 = 30_000_000;
 
@@ -47,13 +48,21 @@ struct StoredAgentObservation {
     anchor: tracedecay_domain::RetrievalAnchorId,
 }
 
+struct ProximityCandidate {
+    path: String,
+    session_keys: BTreeSet<SessionKey>,
+    warning_class: ProximityWarningClassV1,
+    relation_kinds: Vec<ProximityRelationPathKindV1>,
+    relation_strength: ProximityRelationStrengthV1,
+}
+
 /// Owned production authority mounted by the PR13 registrar.
 ///
 /// `sessions` is the already-open canonical project session/observation
 /// database. `graph` is the already-open project graph for this exact
 /// worktree. The authority performs reads only and owns no cache or store.
 pub struct ProductionProximityEvidenceAuthorityV1 {
-    sessions: Arc<GlobalDb>,
+    sessions: Arc<RegisteredGlobalDb>,
     graph: Arc<TraceDecay>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
@@ -65,7 +74,7 @@ pub type SharedCanonicalProximityEvidenceAuthorityV1 =
 
 impl ProductionProximityEvidenceAuthorityV1 {
     pub fn new(
-        sessions: Arc<GlobalDb>,
+        sessions: Arc<RegisteredGlobalDb>,
         graph: Arc<TraceDecay>,
         scope: FeedbackScopeV1,
         worktree_root: PathBuf,
@@ -75,6 +84,13 @@ impl ProductionProximityEvidenceAuthorityV1 {
         if normalized_worktree.is_empty()
             || normalize_worktree(graph.project_root().to_str()?) != normalized_worktree
         {
+            return None;
+        }
+        if !matches!(
+            &sessions.binding().shard_id.scope,
+            tracedecay_store::StoreShardScopeV1::ProjectSessions { project_id }
+                if project_id == &scope.project_id
+        ) {
             return None;
         }
         Some(Self {
@@ -90,6 +106,14 @@ impl ProductionProximityEvidenceAuthorityV1 {
         &self,
         request: &ProximityEvaluationRequestV1,
     ) -> Option<CanonicalProximityEvidenceBatchV1> {
+        if self.graph.last_synced_commit().await.as_deref()
+            != Some(request.scope.head_commit_id.as_str())
+        {
+            return CanonicalProximityEvidenceBatchV1::new(
+                Vec::new(),
+                ProximityCoverageV1::Partial,
+            );
+        }
         let observed_seconds = request.observed_at.0.div_euclid(1_000_000);
         let since = observed_seconds.saturating_sub(ACTIVITY_HORIZON_SECONDS_V1);
         let branch = request
@@ -97,31 +121,31 @@ impl ProductionProximityEvidenceAuthorityV1 {
             .branch_ref
             .strip_prefix("refs/heads/")
             .unwrap_or(request.scope.branch_ref.as_str());
-        let hits = self
-            .sessions
-            .git_sessions_for(&SessionsForQuery {
+        let session_snapshot = self.sessions.read_snapshot().await.ok()?;
+        let hits = sessions_for(
+            &session_snapshot,
+            &SessionsForQuery {
                 git_ref: GitRefFilter::Worktree(self.normalized_worktree.clone()),
                 since: Some(since),
                 until: Some(observed_seconds),
                 limit: MAX_ACTIVE_SESSIONS_V1,
-            })
-            .await
-            .ok()?;
+            },
+        )
+        .await
+        .ok()?;
         let mut partial = hits.len() == MAX_ACTIVE_SESSIONS_V1;
         let mut active = BTreeMap::new();
         for hit in hits {
             if !hit_matches_scope(&hit, branch, &self.normalized_worktree) {
                 continue;
             }
-            let Some(session) = self
-                .sessions
-                .get_session(&hit.provider, &hit.session_id)
-                .await
+            let Some(project_path) =
+                session_project_path(&session_snapshot, &hit.provider, &hit.session_id).await
             else {
                 partial = true;
                 continue;
             };
-            if normalize_worktree(&session.project_path) != self.normalized_worktree {
+            if normalize_worktree(&project_path) != self.normalized_worktree {
                 partial = true;
                 continue;
             }
@@ -139,6 +163,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
         }
 
         let mut edits: BTreeMap<String, BTreeSet<SessionKey>> = BTreeMap::new();
+        let mut session_edits: BTreeMap<SessionKey, BTreeSet<String>> = BTreeMap::new();
         for key in active.keys() {
             let rows = self
                 .sessions
@@ -153,12 +178,25 @@ impl ProductionProximityEvidenceAuthorityV1 {
             partial |= rows.len() == MAX_ACTIVITY_ROWS_PER_SESSION_V1;
             for row in rows {
                 for path in edited_paths(row.metadata_json.as_deref(), &self.worktree_root) {
-                    edits.entry(path).or_default().insert(key.clone());
+                    edits.entry(path.clone()).or_default().insert(key.clone());
+                    session_edits.entry(key.clone()).or_default().insert(path);
                 }
             }
         }
+        if edits.len() > MAX_EDITED_PATHS_V1 {
+            partial = true;
+            let retained = edits
+                .keys()
+                .take(MAX_EDITED_PATHS_V1)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            edits.retain(|path, _| retained.contains(path));
+            for paths in session_edits.values_mut() {
+                paths.retain(|path| retained.contains(path));
+            }
+        }
 
-        let observation_store = GlobalDbObservationStore::new(self.sessions.as_ref());
+        let observation_store = self.sessions.observation_store();
         let checkpoint = observation_store.projection_checkpoint().await.ok()?;
         let after_sequence = checkpoint
             .last_sequence()
@@ -206,16 +244,112 @@ impl ProductionProximityEvidenceAuthorityV1 {
         }
         partial |= active.keys().any(|key| !observations.contains_key(key));
 
-        let mut overlapping = edits
-            .into_iter()
+        let mut graph_nodes = BTreeMap::<String, Vec<crate::types::Node>>::new();
+        let mut verified_graph_paths = BTreeSet::new();
+        for path in edits.keys() {
+            match self.graph.get_nodes_by_file(path).await {
+                Ok(nodes) => {
+                    graph_nodes.insert(path.clone(), nodes);
+                    let source = std::fs::read_to_string(self.worktree_root.join(path));
+                    let record = self.graph.db().get_file(path).await;
+                    if matches!(
+                        (source, record),
+                        (Ok(source), Ok(Some(record)))
+                            if crate::sync::content_hash(&source) == record.content_hash
+                    ) {
+                        verified_graph_paths.insert(path.clone());
+                    } else {
+                        partial = true;
+                    }
+                }
+                Err(_) => {
+                    partial = true;
+                }
+            }
+        }
+        let mut candidates = edits
+            .iter()
             .filter(|(_, sessions)| sessions.len() >= 2)
+            .map(|(path, sessions)| ProximityCandidate {
+                path: path.clone(),
+                session_keys: sessions.clone(),
+                warning_class: ProximityWarningClassV1::SameFile,
+                relation_kinds: Vec::new(),
+                relation_strength: ProximityRelationStrengthV1::Direct,
+            })
             .collect::<Vec<_>>();
-        partial |= overlapping.len() > MAX_PROXIMITY_EVIDENCE_V1;
-        overlapping.truncate(MAX_PROXIMITY_EVIDENCE_V1);
+        let session_keys = session_edits.keys().cloned().collect::<Vec<_>>();
+        let mut relation_cache = BTreeMap::<(String, String), (Option<GraphRelation>, bool)>::new();
+        'session_pairs: for left_index in 0..session_keys.len() {
+            for right_index in left_index.saturating_add(1)..session_keys.len() {
+                let left_key = &session_keys[left_index];
+                let right_key = &session_keys[right_index];
+                let Some(left_paths) = session_edits.get(left_key) else {
+                    continue;
+                };
+                let Some(right_paths) = session_edits.get(right_key) else {
+                    continue;
+                };
+                for left_path in left_paths {
+                    for right_path in right_paths {
+                        if candidates.len() > MAX_PROXIMITY_EVIDENCE_V1 {
+                            break 'session_pairs;
+                        }
+                        if left_path == right_path {
+                            continue;
+                        }
+                        let path_pair = if left_path < right_path {
+                            (left_path.clone(), right_path.clone())
+                        } else {
+                            (right_path.clone(), left_path.clone())
+                        };
+                        let (relation, relation_partial) = if let Some(cached) =
+                            relation_cache.get(&path_pair)
+                        {
+                            cached.clone()
+                        } else {
+                            let (Some(left_nodes), Some(right_nodes)) =
+                                (graph_nodes.get(&path_pair.0), graph_nodes.get(&path_pair.1))
+                            else {
+                                partial = true;
+                                continue;
+                            };
+                            let resolved =
+                                graph_relation(self.graph.as_ref(), left_nodes, right_nodes).await;
+                            relation_cache.insert(path_pair.clone(), resolved.clone());
+                            resolved
+                        };
+                        partial |= relation_partial;
+                        let Some(relation) = relation else {
+                            continue;
+                        };
+                        candidates.push(ProximityCandidate {
+                            path: path_pair.0,
+                            session_keys: BTreeSet::from([left_key.clone(), right_key.clone()]),
+                            warning_class: relation.warning_class,
+                            relation_kinds: relation.kinds,
+                            relation_strength: relation.strength,
+                        });
+                    }
+                }
+            }
+        }
+        candidates.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| {
+                    proximity_warning_rank(left.warning_class)
+                        .cmp(&proximity_warning_rank(right.warning_class))
+                })
+                .then_with(|| left.session_keys.cmp(&right.session_keys))
+        });
+        partial |= candidates.len() > MAX_PROXIMITY_EVIDENCE_V1;
+        candidates.truncate(MAX_PROXIMITY_EVIDENCE_V1);
         let expires_at = UtcMicros(request.observed_at.0.checked_add(EVIDENCE_TTL_MICROS_V1)?);
-        let mut evidence = Vec::with_capacity(overlapping.len());
-        for (path, session_keys) in overlapping {
-            let selected = session_keys
+        let mut evidence = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let selected = candidate
+                .session_keys
                 .iter()
                 .filter_map(|key| observations.get(key))
                 .collect::<Vec<_>>();
@@ -228,17 +362,15 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 partial = true;
                 continue;
             }
-            let graph_nodes = if let Ok(nodes) = self.graph.get_nodes_by_file(&path).await {
-                nodes
-            } else {
-                partial = true;
-                Vec::new()
-            };
-            let blast_radius_size = if graph_nodes.is_empty() {
+            let path_nodes = graph_nodes
+                .get(&candidate.path)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let blast_radius_size = if path_nodes.is_empty() {
                 partial = true;
                 1
             } else {
-                let seeds = graph_nodes
+                let seeds = path_nodes
                     .iter()
                     .map(|node| node.id.clone())
                     .collect::<Vec<_>>();
@@ -246,10 +378,11 @@ impl ProductionProximityEvidenceAuthorityV1 {
                     u32::try_from(nodes.len().max(1)).unwrap_or(u32::MAX)
                 } else {
                     partial = true;
-                    u32::try_from(graph_nodes.len()).unwrap_or(u32::MAX)
+                    u32::try_from(path_nodes.len()).unwrap_or(u32::MAX)
                 }
             };
-            let latest_activity = session_keys
+            let latest_activity = candidate
+                .session_keys
                 .iter()
                 .filter_map(|key| active.get(key))
                 .filter_map(|hit| hit.last_ts.or(hit.committed_at).or(hit.first_ts))
@@ -264,6 +397,26 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 )
                 .unwrap_or(10_000),
             );
+            let exact_address = verified_graph_paths
+                .contains(&candidate.path)
+                .then(|| exact_graph_address(&self.worktree_root, &candidate.path, path_nodes))
+                .flatten();
+            if candidate.warning_class == ProximityWarningClassV1::SameFile
+                && !path_nodes.is_empty()
+                && exact_address.is_none()
+            {
+                partial = true;
+            }
+            let warning_class = if exact_address.is_some()
+                && candidate.warning_class == ProximityWarningClassV1::SameFile
+            {
+                ProximityWarningClassV1::SameSymbol
+            } else {
+                candidate.warning_class
+            };
+            let relation_anchor = selected
+                .first()
+                .map(|observation| observation.anchor.clone());
             evidence.push(CanonicalProximityEvidenceV1 {
                 observations: selected
                     .iter()
@@ -275,21 +428,37 @@ impl ProductionProximityEvidenceAuthorityV1 {
                     .collect(),
                 address: ProximityAddressV1 {
                     scope: request.scope.clone(),
-                    file: FileOccurrenceId::new(path).ok()?,
-                    span: None,
-                    symbol: None,
+                    file: FileOccurrenceId::new(candidate.path).ok()?,
+                    span: exact_address.as_ref().map(|address| address.0),
+                    symbol: exact_address.map(|address| address.1),
                 },
-                relation_paths: Vec::new(),
+                relation_paths: candidate
+                    .relation_kinds
+                    .into_iter()
+                    .map(|kind| ProximityRelationPathV1 {
+                        kind,
+                        retrieval_anchor_id: relation_anchor.clone(),
+                    })
+                    .collect(),
                 risk_inputs: ProximityRiskInputsV1 {
                     overlap_size: u32::try_from(selected.len()).unwrap_or(u32::MAX),
                     blast_radius_size,
-                    relation_strength: ProximityRelationStrengthV1::Direct,
+                    relation_strength: candidate.relation_strength,
                     branch_worktree_incompatibility:
                         ProximityBranchWorktreeIncompatibilityV1::Compatible,
                     freshness_decay_basis_points: freshness,
                 },
-                warning_class: ProximityWarningClassV1::SameFile,
-                raw_risk_basis_points: 10_000,
+                warning_class,
+                raw_risk_basis_points: if matches!(
+                    warning_class,
+                    ProximityWarningClassV1::SameFile
+                        | ProximityWarningClassV1::OverlappingRange
+                        | ProximityWarningClassV1::SameSymbol
+                ) {
+                    10_000
+                } else {
+                    7_500
+                },
                 observed_at: request.observed_at,
                 expires_at,
                 coverage: if partial {
@@ -335,8 +504,8 @@ impl CanonicalProximityEvidenceAuthorityV1 for ProductionProximityEvidenceAuthor
 
 /// Constructor used by the PR13 registrar. Returning an owned trait-object
 /// keeps the already-open project authorities alive without a new store.
-pub fn production_proximity_evidence_authority_v1(
-    sessions: Arc<GlobalDb>,
+pub(crate) fn production_proximity_evidence_authority_v1(
+    sessions: Arc<RegisteredGlobalDb>,
     graph: Arc<TraceDecay>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
@@ -347,6 +516,245 @@ pub fn production_proximity_evidence_authority_v1(
         scope,
         worktree_root,
     )?))
+}
+
+#[derive(Clone)]
+struct GraphRelation {
+    warning_class: ProximityWarningClassV1,
+    kinds: Vec<ProximityRelationPathKindV1>,
+    strength: ProximityRelationStrengthV1,
+}
+
+async fn graph_relation(
+    graph: &TraceDecay,
+    left_nodes: &[crate::types::Node],
+    right_nodes: &[crate::types::Node],
+) -> (Option<GraphRelation>, bool) {
+    let left_ids = left_nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let right_ids = right_nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if left_ids.iter().any(|node_id| right_ids.contains(node_id)) {
+        return (
+            Some(GraphRelation {
+                warning_class: ProximityWarningClassV1::SameSymbol,
+                kinds: Vec::new(),
+                strength: ProximityRelationStrengthV1::Direct,
+            }),
+            false,
+        );
+    }
+
+    for node in left_nodes.iter().take(32) {
+        let Ok(edges) = graph.get_outgoing_edges(&node.id).await else {
+            return (None, true);
+        };
+        if edges.iter().any(|edge| {
+            edge.kind == crate::types::EdgeKind::Calls && right_ids.contains(edge.target.as_str())
+        }) {
+            return (
+                Some(GraphRelation {
+                    warning_class: ProximityWarningClassV1::Neighborhood,
+                    kinds: vec![ProximityRelationPathKindV1::DirectDependency],
+                    strength: ProximityRelationStrengthV1::Direct,
+                }),
+                false,
+            );
+        }
+    }
+    for node in right_nodes.iter().take(32) {
+        let Ok(edges) = graph.get_outgoing_edges(&node.id).await else {
+            return (None, true);
+        };
+        if edges.iter().any(|edge| {
+            edge.kind == crate::types::EdgeKind::Calls && left_ids.contains(edge.target.as_str())
+        }) {
+            return (
+                Some(GraphRelation {
+                    warning_class: ProximityWarningClassV1::Neighborhood,
+                    kinds: vec![ProximityRelationPathKindV1::DirectCaller],
+                    strength: ProximityRelationStrengthV1::Direct,
+                }),
+                false,
+            );
+        }
+    }
+
+    let Some((left_callers, left_dependencies, left_tests)) =
+        graph_neighborhood(graph, left_nodes).await
+    else {
+        return (None, true);
+    };
+    let Some((right_callers, right_dependencies, right_tests)) =
+        graph_neighborhood(graph, right_nodes).await
+    else {
+        return (None, true);
+    };
+    if !left_callers.is_disjoint(&right_callers) {
+        return (
+            Some(GraphRelation {
+                warning_class: ProximityWarningClassV1::SharedCaller,
+                kinds: vec![ProximityRelationPathKindV1::TransitiveCaller],
+                strength: ProximityRelationStrengthV1::Transitive,
+            }),
+            false,
+        );
+    }
+    if !left_dependencies.is_disjoint(&right_dependencies) {
+        return (
+            Some(GraphRelation {
+                warning_class: ProximityWarningClassV1::SharedDependency,
+                kinds: vec![ProximityRelationPathKindV1::TransitiveDependency],
+                strength: ProximityRelationStrengthV1::Transitive,
+            }),
+            false,
+        );
+    }
+    if !left_tests.is_disjoint(&right_tests) {
+        return (
+            Some(GraphRelation {
+                warning_class: ProximityWarningClassV1::SharedTest,
+                kinds: vec![ProximityRelationPathKindV1::AffectedTest],
+                strength: ProximityRelationStrengthV1::Transitive,
+            }),
+            false,
+        );
+    }
+    (None, false)
+}
+
+async fn graph_neighborhood(
+    graph: &TraceDecay,
+    nodes: &[crate::types::Node],
+) -> Option<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
+    let mut callers = BTreeSet::new();
+    let mut dependencies = BTreeSet::new();
+    for node in nodes.iter().take(32) {
+        callers.extend(
+            graph
+                .get_callers(&node.id, 2)
+                .await
+                .ok()?
+                .into_iter()
+                .map(|(caller, _)| caller.id),
+        );
+        dependencies.extend(
+            graph
+                .get_callees(&node.id, 2)
+                .await
+                .ok()?
+                .into_iter()
+                .map(|(dependency, _)| dependency.id),
+        );
+    }
+    let seeds = nodes
+        .iter()
+        .take(32)
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    let impacted = graph.get_impact_radius_multi(&seeds, 3).await.ok()?;
+    let impacted_ids = impacted
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    let tests = graph
+        .get_test_annotated_node_ids(&impacted_ids)
+        .await
+        .ok()?
+        .into_iter()
+        .collect();
+    Some((callers, dependencies, tests))
+}
+
+fn exact_graph_address(
+    worktree_root: &Path,
+    path: &str,
+    nodes: &[crate::types::Node],
+) -> Option<(SourceSpan, SymbolOccurrenceId)> {
+    let minimum_span = nodes
+        .iter()
+        .filter(|node| node.kind.is_callable_kind())
+        .map(|node| node.end_line.saturating_sub(node.start_line))
+        .min()?;
+    let mut candidates = nodes.iter().filter(|node| {
+        node.kind.is_callable_kind()
+            && node.end_line.saturating_sub(node.start_line) == minimum_span
+    });
+    let candidate = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some((
+        source_span_for_lines(
+            &worktree_root.join(path),
+            candidate.start_line,
+            candidate.end_line,
+        )?,
+        SymbolOccurrenceId::new(candidate.id.clone()).ok()?,
+    ))
+}
+
+fn source_span_for_lines(path: &Path, start_line: u32, end_line: u32) -> Option<SourceSpan> {
+    if start_line == 0 || end_line < start_line {
+        return None;
+    }
+    let source = std::fs::read(path).ok()?;
+    let mut line_starts = vec![0_usize];
+    line_starts.extend(
+        source
+            .iter()
+            .enumerate()
+            .filter_map(|(index, byte)| (*byte == b'\n').then_some(index.saturating_add(1))),
+    );
+    let start_index = usize::try_from(start_line.saturating_sub(1)).ok()?;
+    let end_index = usize::try_from(end_line.saturating_sub(1)).ok()?;
+    let start_byte = *line_starts.get(start_index)?;
+    let end_byte = line_starts
+        .get(end_index.saturating_add(1))
+        .copied()
+        .unwrap_or(source.len());
+    let span = SourceSpan {
+        start_byte: u64::try_from(start_byte).ok()?,
+        end_byte: u64::try_from(end_byte).ok()?,
+    };
+    span.validate().ok()?;
+    Some(span)
+}
+
+const fn proximity_warning_rank(warning: ProximityWarningClassV1) -> u8 {
+    match warning {
+        ProximityWarningClassV1::SameSymbol => 0,
+        ProximityWarningClassV1::OverlappingRange => 1,
+        ProximityWarningClassV1::SameFile => 2,
+        ProximityWarningClassV1::SharedCaller => 3,
+        ProximityWarningClassV1::SharedDependency => 4,
+        ProximityWarningClassV1::SharedTest => 5,
+        ProximityWarningClassV1::SamePackage => 6,
+        ProximityWarningClassV1::SameCrate => 7,
+        ProximityWarningClassV1::Neighborhood => 8,
+        ProximityWarningClassV1::IncompatibleBranchWorktree => 9,
+    }
+}
+
+async fn session_project_path(
+    snapshot: &crate::db::engine::ReadSnapshot,
+    provider: &str,
+    session_id: &str,
+) -> Option<String> {
+    let mut rows = snapshot
+        .query(
+            "SELECT project_path
+             FROM sessions
+             WHERE provider = ?1 AND session_id = ?2",
+            crate::db::engine::params![provider, session_id],
+        )
+        .await
+        .ok()?;
+    rows.next().await.ok()??.get(0).ok()
 }
 
 fn hit_matches_scope(hit: &SessionGitCorrelationHit, branch: &str, worktree: &str) -> bool {
