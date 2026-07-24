@@ -224,7 +224,10 @@ fn anchored_write_rejects_mismatched_source_generation_and_lineage() {
                 vec![],
                 1,
                 AnchorSourceGenerationV2::Observation(candidate.identity().generation()),
-                vec![other.observation_id().clone()],
+                vec![
+                    candidate.observation_id().clone(),
+                    other.observation_id().clone(),
+                ],
             ),
             projection_generation(),
         ),
