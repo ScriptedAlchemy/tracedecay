@@ -57,7 +57,7 @@ use crate::db::Database;
 use crate::db::engine::params;
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::mcp::response_handles::{
-    ResponseHandleLookup, retrieve_response_handle, store_response_handle,
+    ResponseHandleLookup, is_valid_response_handle, retrieve_response_handle, store_response_handle,
 };
 
 const PUBLICATION_LEDGER_METADATA_KEY: &str = "feedback.completed-publications.v1";
@@ -1259,6 +1259,9 @@ fn load_handle_content<T>(
 where
     T: for<'de> Deserialize<'de>,
 {
+    if !is_valid_response_handle(handle) {
+        return Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized);
+    }
     match retrieve_response_handle(project_root, handle, micros_to_seconds(observed_at))
         .map_err(|_| FeedbackReadRequestResolutionV1::Unavailable)?
     {
