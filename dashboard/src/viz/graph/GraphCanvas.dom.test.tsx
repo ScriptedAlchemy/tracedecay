@@ -21,6 +21,9 @@ vi.mock('./activation.ts', () => ({
   },
   cssColorToRgb: () => [128, 128, 128],
   lerpRgb: () => 'rgb(128, 128, 128)',
+  lerpRgbTuple: () => [128, 128, 128],
+  approach: (_current: number, target: number) => target,
+  settled: () => true,
 }));
 
 vi.mock('graphology-layout-forceatlas2', () => ({
@@ -90,8 +93,15 @@ describe('GraphCanvas', () => {
       zIndex: 0,
     };
 
-    expect(sigmaState.nodeReducer?.('__halo__node', companion)).toEqual(companion);
-    expect(sigmaState.nodeReducer?.('__pulse__edge', companion)).toEqual(companion);
+    for (const managed of [
+      '__halo__node',
+      '__bloom__node',
+      '__ring__node',
+      '__pulse__0',
+      '__way__0:1',
+    ]) {
+      expect(sigmaState.nodeReducer?.(managed, companion)).toEqual(companion);
+    }
   });
 
   it('states the missing WebGL context instead of constructing a renderer that throws', () => {

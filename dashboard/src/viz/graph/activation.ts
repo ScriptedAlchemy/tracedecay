@@ -58,6 +58,31 @@ export class ActivationField {
   }
 }
 
+/**
+ * Frame-rate-independent approach toward a target — the "settle" primitive.
+ *
+ * Renderers use this so a state change propagates over ~a tenth of a second
+ * instead of snapping between two frames. It is driven by elapsed time, so a
+ * slow frame does not overshoot, and it converges (never oscillates), which
+ * means a caller can stop its loop as soon as {@link settled} reports true.
+ * Motion here is always a response to a real event; nothing calls this on a
+ * timer of its own.
+ */
+export function approach(
+  current: number,
+  target: number,
+  deltaMs: number,
+  timeConstantMs: number,
+): number {
+  if (deltaMs <= 0 || timeConstantMs <= 0) return target;
+  return target + (current - target) * Math.exp(-deltaMs / timeConstantMs);
+}
+
+/** Whether an approach has converged closely enough to stop animating. */
+export function settled(current: number, target: number, epsilon = 0.004): boolean {
+  return Math.abs(current - target) <= epsilon;
+}
+
 const rgbCache = new Map<string, [number, number, number]>();
 
 /** Resolve any CSS color (incl. oklch) to rgb via the canvas parser, so heat
