@@ -21,7 +21,11 @@ fn read_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
     let mut i = start;
     while i < bytes.len() {
         let byte = bytes[i];
-        result |= u64::from(byte & 0x7f) << shift;
+        let payload = u64::from(byte & 0x7f);
+        if shift == 63 && payload > 1 {
+            return None;
+        }
+        result |= payload << shift;
         i += 1;
         if byte & 0x80 == 0 {
             return Some((result, i));
@@ -55,46 +59,54 @@ pub(crate) fn encode_hex(bytes: &[u8]) -> String {
 /// Extract length-delimited field-1 entries that are exactly 32 bytes long and
 /// hex-encode them — the content-addressed child ids of a DAG node blob. A
 /// light protobuf scanner that skips unrelated fields by wire type.
-fn protobuf_child_refs(bytes: &[u8]) -> Vec<String> {
+pub(crate) fn protobuf_child_refs(bytes: &[u8]) -> Option<Vec<String>> {
     let mut refs = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
         if refs.len() >= MAX_COMPOSER_STORE_BLOB_VISITS {
             break;
         }
-        let Some((tag, next)) = read_varint(bytes, i) else {
-            break;
-        };
+        let (tag, next) = read_varint(bytes, i)?;
         i = next;
         let field = tag >> 3;
         let wire = tag & 0x7;
+        if field == 0 {
+            return None;
+        }
         match wire {
             0 => {
-                let Some((_, next)) = read_varint(bytes, i) else {
-                    break;
-                };
+                let (_, next) = read_varint(bytes, i)?;
                 i = next;
             }
-            1 => i += 8,
-            5 => i += 4,
+            1 => {
+                i = i.checked_add(8)?;
+                if i > bytes.len() {
+                    return None;
+                }
+            }
+            5 => {
+                i = i.checked_add(4)?;
+                if i > bytes.len() {
+                    return None;
+                }
+            }
             2 => {
-                let Some((len, next)) = read_varint(bytes, i) else {
-                    break;
-                };
+                let (len, next) = read_varint(bytes, i)?;
                 i = next;
-                let len = len as usize;
-                if i + len > bytes.len() {
-                    break;
+                let len = usize::try_from(len).ok()?;
+                let end = i.checked_add(len)?;
+                if end > bytes.len() {
+                    return None;
                 }
                 if field == 1 && len == 32 {
-                    refs.push(encode_hex(&bytes[i..i + len]));
+                    refs.push(encode_hex(&bytes[i..end]));
                 }
-                i += len;
+                i = end;
             }
-            _ => break,
+            _ => return None,
         }
     }
-    refs
+    Some(refs)
 }
 
 /// A JSON message leaf is a JSON object carrying a `role` field.
@@ -117,19 +129,21 @@ fn fetch_store_blob_bounded_sync(
          CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data ELSE NULL END AS payload \
          FROM blobs WHERE id = ?2",
     ) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
     let Ok(mut rows) = stmt.query(rusqlite::params![effective_cap as i64, blob_id]) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
-    let Ok(Some(row)) = rows.next() else {
-        return BoundedSqliteValue::Missing;
+    let row = match rows.next() {
+        Ok(Some(row)) => row,
+        Ok(None) => return BoundedSqliteValue::Missing,
+        Err(_) => return BoundedSqliteValue::Corrupt,
     };
     let Ok(nbytes_i) = row.get::<_, i64>(0) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
     if nbytes_i < 0 {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Malformed { byte_len: 0 };
     }
     let byte_len = nbytes_i as u64;
     let data = row
@@ -141,7 +155,7 @@ fn fetch_store_blob_bounded_sync(
         Err(_) if remaining.is_some_and(|cap| byte_len > cap) => {
             BoundedSqliteValue::BudgetExceeded { byte_len }
         }
-        Err(_) => BoundedSqliteValue::Missing,
+        Err(_) => BoundedSqliteValue::Malformed { byte_len },
     }
 }
 
@@ -156,7 +170,7 @@ async fn fetch_store_blob_bounded(
     let blob_id = blob_id.to_string();
     conn.with(move |conn| fetch_store_blob_bounded_sync(conn, &blob_id, remaining))
         .await
-        .unwrap_or(BoundedSqliteValue::Missing)
+        .unwrap_or(BoundedSqliteValue::Corrupt)
 }
 
 pub(crate) async fn read_store_meta_bounded(
@@ -165,7 +179,7 @@ pub(crate) async fn read_store_meta_bounded(
 ) -> BoundedSqliteValue<StoreMeta> {
     conn.with(move |conn| read_store_meta_bounded_sync(conn, remaining))
         .await
-        .unwrap_or(BoundedSqliteValue::Missing)
+        .unwrap_or(BoundedSqliteValue::Corrupt)
 }
 
 fn read_store_meta_bounded_sync(
@@ -179,13 +193,15 @@ fn read_store_meta_bounded_sync(
          CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
          FROM meta WHERE key = '0'",
     ) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
     let Ok(mut rows) = stmt.query(rusqlite::params![encoded_cap as i64]) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
-    let Ok(Some(row)) = rows.next() else {
-        return BoundedSqliteValue::Missing;
+    let row = match rows.next() {
+        Ok(Some(row)) => row,
+        Ok(None) => return BoundedSqliteValue::Missing,
+        Err(_) => return BoundedSqliteValue::Corrupt,
     };
     let Some(encoded_bytes) = row
         .get::<_, i64>(0)
@@ -193,7 +209,7 @@ fn read_store_meta_bounded_sync(
         .filter(|n| *n >= 0)
         .map(|n| n as u64)
     else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Malformed { byte_len: 0 };
     };
     let decoded_bytes = encoded_bytes.saturating_add(1) / 2;
     if encoded_bytes > MAX_COMPOSER_STORE_META_HEX_BYTES {
@@ -342,6 +358,11 @@ pub(crate) async fn order_store_messages_bounded(
                     break;
                 }
             }
+            BoundedSqliteValue::Corrupt => {
+                byte_budget.defer();
+                deferred = true;
+                break;
+            }
             BoundedSqliteValue::Missing => {}
         }
     }
@@ -386,6 +407,10 @@ async fn walk_store_blob_bounded(
             byte_budget.defer();
             *deferred = true;
         }
+        BoundedSqliteValue::Corrupt => {
+            byte_budget.defer();
+            *deferred = true;
+        }
         BoundedSqliteValue::Ready { byte_len, value } => {
             if !byte_budget.try_consume(byte_len) {
                 *deferred = true;
@@ -395,7 +420,11 @@ async fn walk_store_blob_bounded(
                 ordered.push((role, content, byte_len));
                 return;
             }
-            let children = protobuf_child_refs(&value);
+            let Some(children) = protobuf_child_refs(&value) else {
+                byte_budget.defer();
+                *deferred = true;
+                return;
+            };
             for child in children.into_iter().take(MAX_COMPOSER_STORE_BLOB_VISITS) {
                 if *deferred {
                     return;

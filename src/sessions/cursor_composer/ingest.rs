@@ -40,6 +40,14 @@ use super::store::{
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
 
+pub(crate) fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
+    entry.file_type().is_ok_and(|kind| kind.is_dir())
+}
+
+pub(crate) fn path_is_regular_file_no_follow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
 struct ComposerIngestContext<'facade, 'db, 'root> {
     facade: &'facade HostAdmissionFacade<'db>,
     scope: ObservationScopeV1,
@@ -279,15 +287,34 @@ impl CursorComposerSource {
         // primary key reproduces the original index-ordered streaming scan
         // while holding at most one page of keys in memory.
         let mut ingested_this_pass = 0usize;
+        let mut scanned_this_pass = 0usize;
         let mut scan_after: Option<String> = None;
         'scan: loop {
             let page =
-                scan_composer_keys_page(conn, scan_after.as_deref(), COMPOSER_KEY_SCAN_PAGE).await;
+                match scan_composer_keys_page(conn, scan_after.as_deref(), COMPOSER_KEY_SCAN_PAGE)
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(error) => {
+                        tracing::debug!(
+                            state_db = %self.state_db_path.display(),
+                            error,
+                            "Cursor composer key scan failed closed"
+                        );
+                        byte_budget.defer();
+                        break;
+                    }
+                };
             let Some(last_key) = page.last().map(|(key, _)| key.clone()) else {
                 break;
             };
             let page_full = page.len() == COMPOSER_KEY_SCAN_PAGE;
             for (key, nbytes) in page {
+                if scanned_this_pass >= MAX_COMPOSER_STORE_BLOB_VISITS {
+                    byte_budget.defer();
+                    break 'scan;
+                }
+                scanned_this_pass += 1;
                 if nbytes > MAX_COMPOSER_ENVELOPE_BYTES {
                     if !byte_budget
                         .try_consume(nbytes.min(MAX_COMPOSER_ENVELOPE_BYTES.saturating_add(1)))
@@ -323,6 +350,10 @@ impl CursorComposerSource {
                     BoundedSqliteValue::Oversized { .. }
                     | BoundedSqliteValue::Malformed { .. }
                     | BoundedSqliteValue::Missing => continue,
+                    BoundedSqliteValue::Corrupt => {
+                        byte_budget.defer();
+                        break 'scan;
+                    }
                 };
                 if !byte_budget.try_consume(nbytes) {
                     break 'scan;
@@ -527,6 +558,10 @@ impl CursorComposerSource {
                             byte_budget.defer();
                             break;
                         }
+                        BoundedSqliteValue::Corrupt => {
+                            byte_budget.defer();
+                            break;
+                        }
                         BoundedSqliteValue::Ready {
                             byte_len,
                             value: bubble,
@@ -644,7 +679,7 @@ impl CursorComposerSource {
             return;
         };
         for ws_entry in ws_entries.flatten() {
-            if !ws_entry.path().is_dir() {
+            if !directory_entry_is_real_dir(&ws_entry) {
                 continue;
             }
             let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
@@ -668,8 +703,11 @@ impl CursorComposerSource {
                 continue;
             };
             for agent_entry in agent_entries.flatten() {
+                if !directory_entry_is_real_dir(&agent_entry) {
+                    continue;
+                }
                 let store_path = agent_entry.path().join("store.db");
-                if !store_path.is_file() {
+                if !path_is_regular_file_no_follow(&store_path) {
                     continue;
                 }
                 self.ingest_one_store_db(context, &store_path, &project_path, byte_budget, outcome)
@@ -704,6 +742,10 @@ impl CursorComposerSource {
             BoundedSqliteValue::Oversized { byte_len }
             | BoundedSqliteValue::Malformed { byte_len } => {
                 let _ = byte_budget.try_consume(composer_source_charge(byte_len));
+                return;
+            }
+            BoundedSqliteValue::Corrupt => {
+                byte_budget.defer();
                 return;
             }
             BoundedSqliteValue::Missing => return,

@@ -1,6 +1,8 @@
 use super::capture::*;
 #[cfg(windows)]
 use super::ingest::snapshot_generation;
+#[cfg(unix)]
+use super::ingest::{directory_entry_is_real_dir, path_is_regular_file_no_follow};
 use super::observation::normalize_cursor_composer_envelope_observation;
 use super::sqlite::*;
 use super::store::*;
@@ -637,10 +639,14 @@ async fn rusqlite_composer_key_scan_pages_without_gaps_or_duplicates() {
         .expect("blocking page-size read completed")
         .expect("read page size");
     assert_eq!(page_size, 65_536);
-    let first = scan_composer_keys_page(&ro.conn, None, COMPOSER_KEY_SCAN_PAGE).await;
+    let first = scan_composer_keys_page(&ro.conn, None, COMPOSER_KEY_SCAN_PAGE)
+        .await
+        .expect("first key page");
     assert_eq!(first.len(), COMPOSER_KEY_SCAN_PAGE);
     let first_last = first.last().unwrap().0.clone();
-    let second = scan_composer_keys_page(&ro.conn, Some(&first_last), COMPOSER_KEY_SCAN_PAGE).await;
+    let second = scan_composer_keys_page(&ro.conn, Some(&first_last), COMPOSER_KEY_SCAN_PAGE)
+        .await
+        .expect("second key page");
     assert_eq!(second.len(), 7);
 
     let keys = first
@@ -654,6 +660,73 @@ async fn rusqlite_composer_key_scan_pages_without_gaps_or_duplicates() {
         keys.iter().collect::<std::collections::BTreeSet<_>>().len(),
         keys.len()
     );
+}
+
+#[tokio::test]
+async fn composer_key_scan_reports_corrupt_or_incompatible_schema() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("state #?%.vscdb");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE incompatible (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    }
+
+    let ro = open_readonly_immutable(&path)
+        .await
+        .expect("open URI-metacharacter path");
+    let error = scan_composer_keys_page(&ro.conn, None, COMPOSER_KEY_SCAN_PAGE)
+        .await
+        .expect_err("missing required schema must not look like EOF");
+    assert!(error.contains("cursorDiskKV"), "{error}");
+}
+
+#[test]
+fn protobuf_child_refs_rejects_overflowing_or_truncated_lengths() {
+    let overflowing_length = [0x0a, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f];
+    assert!(protobuf_child_refs(&overflowing_length).is_none());
+
+    let truncated_length = [0x0a, 0xff, 0xff, 0xff, 0xff, 0x0f];
+    assert!(protobuf_child_refs(&truncated_length).is_none());
+
+    let mut valid_then_truncated = vec![0x0a, 32];
+    valid_then_truncated.extend([0x42; 32]);
+    valid_then_truncated.extend([0x09, 0x01]);
+    assert!(
+        protobuf_child_refs(&valid_then_truncated).is_none(),
+        "a corrupt protobuf must not expose refs parsed before the corruption"
+    );
+
+    let overflowing_varint = [0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02];
+    assert!(protobuf_child_refs(&overflowing_varint).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn composer_chat_discovery_does_not_follow_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let real_dir = tmp.path().join("real");
+    std::fs::create_dir(&real_dir).unwrap();
+    let linked_dir = tmp.path().join("linked");
+    symlink(&real_dir, &linked_dir).unwrap();
+    let entry = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .flatten()
+        .find(|entry| entry.file_name() == "linked")
+        .unwrap();
+    assert!(!directory_entry_is_real_dir(&entry));
+
+    let real_file = real_dir.join("store.db");
+    std::fs::write(&real_file, b"not opened").unwrap();
+    let linked_file = tmp.path().join("store.db");
+    symlink(&real_file, &linked_file).unwrap();
+    assert!(!path_is_regular_file_no_follow(&linked_file));
+    assert!(path_is_regular_file_no_follow(&real_file));
 }
 
 #[tokio::test]

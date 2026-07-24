@@ -22,6 +22,7 @@ pub(crate) enum BoundedSqliteValue<T> {
     Oversized { byte_len: u64 },
     BudgetExceeded { byte_len: u64 },
     Malformed { byte_len: u64 },
+    Corrupt,
 }
 
 pub(crate) fn effective_sqlite_cap(max_bytes: u64, remaining: Option<u64>) -> u64 {
@@ -104,7 +105,10 @@ pub(crate) async fn scan_composer_keys_page(
     conn: &CursorConn,
     after: Option<&str>,
     limit: usize,
-) -> Vec<(String, u64)> {
+) -> Result<Vec<(String, u64)>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let after = after.map(str::to_string);
     conn.with(move |conn| {
         let (sql, lower) = match &after {
@@ -129,29 +133,32 @@ pub(crate) async fn scan_composer_keys_page(
                 "composerData:",
             ),
         };
-        let Ok(mut stmt) = conn.prepare(sql) else {
-            return Vec::new();
-        };
-        let rows = stmt.query_map(
-            rusqlite::params![lower, MAX_COMPOSER_SQLITE_KEY_BYTES as i64, limit as i64],
-            |row| {
-                let key = row.get::<_, String>(0)?;
-                let nbytes = row.get::<_, i64>(1)?;
-                Ok((key, nbytes))
-            },
-        );
-        let Ok(rows) = rows else {
-            return Vec::new();
-        };
-        rows.filter_map(|row| {
-            let (key, nbytes) = row.ok()?;
-            let nbytes = u64::try_from(nbytes).ok()?;
-            Some((key, nbytes))
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|error| format!("could not prepare Cursor composer key scan: {error}"))?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| "Cursor composer key scan limit is invalid".to_string())?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![lower, MAX_COMPOSER_SQLITE_KEY_BYTES as i64, limit],
+                |row| {
+                    let key = row.get::<_, String>(0)?;
+                    let nbytes = row.get::<_, i64>(1)?;
+                    Ok((key, nbytes))
+                },
+            )
+            .map_err(|error| format!("could not query Cursor composer keys: {error}"))?;
+        rows.map(|row| {
+            let (key, nbytes) =
+                row.map_err(|error| format!("could not read Cursor composer key: {error}"))?;
+            let nbytes = u64::try_from(nbytes)
+                .map_err(|_| "Cursor composer value has invalid byte length".to_string())?;
+            Ok((key, nbytes))
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|| Err("Cursor composer key scan task failed".to_string()))
 }
 
 fn fetch_kv_text_bounded_sync(
@@ -166,19 +173,21 @@ fn fetch_kv_text_bounded_sync(
          CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
          FROM cursorDiskKV WHERE key = ?2",
     ) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
     let Ok(mut rows) = stmt.query(rusqlite::params![effective_cap as i64, key]) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
-    let Ok(Some(row)) = rows.next() else {
-        return BoundedSqliteValue::Missing;
+    let row = match rows.next() {
+        Ok(Some(row)) => row,
+        Ok(None) => return BoundedSqliteValue::Missing,
+        Err(_) => return BoundedSqliteValue::Corrupt,
     };
     let Ok(nbytes_i) = row.get::<_, i64>(0) else {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Corrupt;
     };
     if nbytes_i < 0 {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Malformed { byte_len: 0 };
     }
     let byte_len = nbytes_i as u64;
     match row.get::<_, String>(1) {
@@ -187,7 +196,7 @@ fn fetch_kv_text_bounded_sync(
         Err(_) if remaining.is_some_and(|cap| byte_len > cap) => {
             BoundedSqliteValue::BudgetExceeded { byte_len }
         }
-        Err(_) => BoundedSqliteValue::Missing,
+        Err(_) => BoundedSqliteValue::Malformed { byte_len },
     }
 }
 
@@ -200,7 +209,7 @@ pub(crate) async fn fetch_kv_text_bounded(
     let key = key.to_string();
     conn.with(move |conn| fetch_kv_text_bounded_sync(conn, &key, max_bytes, remaining))
         .await
-        .unwrap_or(BoundedSqliteValue::Missing)
+        .unwrap_or(BoundedSqliteValue::Corrupt)
 }
 
 pub(crate) async fn fetch_bubble_bounded(
@@ -220,6 +229,7 @@ pub(crate) async fn fetch_bubble_bounded(
             BoundedSqliteValue::BudgetExceeded { byte_len }
         }
         BoundedSqliteValue::Malformed { byte_len } => BoundedSqliteValue::Malformed { byte_len },
+        BoundedSqliteValue::Corrupt => BoundedSqliteValue::Corrupt,
         BoundedSqliteValue::Ready { byte_len, value } => {
             match serde_json::from_str::<Value>(&value) {
                 Ok(parsed) => BoundedSqliteValue::Ready {
