@@ -214,6 +214,7 @@ export function SessionsPage() {
                               heaviest > 0 ? Number(count) / heaviest : null
                             }
                             className="h-[3px] w-full"
+                            align="right"
                           />
                         </span>
                       ) : null}

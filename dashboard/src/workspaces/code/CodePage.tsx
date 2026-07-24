@@ -321,7 +321,7 @@ function SymbolRow({
 }) {
   return (
     <DataRow selected={selected} onSelect={onSelect}>
-      <span className="td-legend w-16 shrink-0 truncate">{node.kind}</span>
+      <span className="td-legend w-20 shrink-0 truncate">{node.kind}</span>
       <span className="td-value min-w-0 flex-1 truncate text-text-primary">
         {node.qualified_name ?? node.name ?? node.id}
       </span>
@@ -337,6 +337,7 @@ function SymbolRow({
           <Meter
             fraction={degreeCeiling > 0 ? node.degree / degreeCeiling : null}
             className="h-[3px] w-full"
+            align="right"
           />
         </span>
       ) : null}
@@ -344,7 +345,7 @@ function SymbolRow({
         className="td-value w-52 shrink-0 truncate text-right text-2xs text-text-muted"
         title={node.file_path ?? undefined}
       >
-        {elideStart(node.file_path, 32)}
+        {elideStart(node.file_path, 29)}
       </span>
     </DataRow>
   );

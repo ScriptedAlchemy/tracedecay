@@ -236,12 +236,17 @@ export function Meter({
   fraction,
   className,
   tone,
+  align = 'left',
   ariaLabel,
 }: {
   fraction: number | null | undefined;
   className?: string;
   /** Utility class for the fill, when the bar carries a state hue. */
   tone?: string;
+  /** Which edge the fill grows from. A meter under a right-aligned figure has
+   * to grow leftward, or the number and its own bar share no edge and the
+   * column reads as two unrelated ragged things instead of one measurement. */
+  align?: 'left' | 'right';
   ariaLabel?: string;
 }) {
   const clamped =
@@ -255,7 +260,7 @@ export function Meter({
     <span {...a11y} className={cn('td-meter h-1', className)}>
       {clamped != null ? (
         <span
-          className={cn('td-meter-fill', tone)}
+          className={cn('td-meter-fill', align === 'right' && 'left-auto right-0', tone)}
           style={{ width: `${clamped * 100}%` }}
         />
       ) : null}

@@ -296,6 +296,7 @@ function FactListRow({
         <Meter
           fraction={recallCeiling > 0 ? recalls / recallCeiling : null}
           className="h-[3px] w-full"
+          align="right"
           tone="bg-text-muted"
         />
       </span>
