@@ -535,7 +535,7 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
         .begin_write_transaction("normalize consolidated session store")
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::lcm::schema::ensure_lcm_schema(&transaction)
+    crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
     crate::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(&transaction)

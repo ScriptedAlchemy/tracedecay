@@ -1,7 +1,8 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 
 use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
 
+#[cfg(test)]
 use super::util;
 
 pub const LCM_SCHEMA_VERSION: i64 = 7;
@@ -42,8 +43,10 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
 /// v3 content-only structure. Pre-v3 objects mention `metadata_json` in
 /// their DDL; a missing table counts as current here because presence is
 /// checked separately (doctor) or guaranteed (migration runs the DDL).
-pub(crate) async fn raw_fts_structure_is_current(conn: &Connection) -> Option<bool> {
-    let stale = util::fetch_i64(
+pub(crate) async fn raw_fts_structure_is_current(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Option<bool> {
+    let stale = fetch_i64(
         conn,
         "SELECT COUNT(*) FROM sqlite_master
          WHERE name IN ('lcm_raw_messages_fts',
@@ -51,7 +54,6 @@ pub(crate) async fn raw_fts_structure_is_current(conn: &Connection) -> Option<bo
                         'lcm_raw_messages_fts_delete',
                         'lcm_raw_messages_fts_update')
            AND sql LIKE '%metadata_json%'",
-        (),
         "raw FTS structure query returned no rows",
     )
     .await
@@ -64,7 +66,7 @@ pub(crate) async fn raw_fts_structure_is_current(conn: &Connection) -> Option<bo
 /// `lcm_raw_messages` via the FTS5 `'rebuild'` command. Used by the schema
 /// migration and the doctor repair path; idempotent and data-preserving
 /// because the index is derived entirely from the content table.
-pub(crate) async fn rebuild_raw_fts(conn: &Connection) -> Option<()> {
+pub(crate) async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
          DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
@@ -83,23 +85,23 @@ pub(crate) async fn rebuild_raw_fts(conn: &Connection) -> Option<()> {
     Some(())
 }
 
-#[derive(Clone, Copy)]
-enum SchemaTransaction {
-    Managed,
-    CallerOwned,
-}
-
 pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
-    ensure_lcm_schema_with_transaction(conn, SchemaTransaction::Managed).await
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    match ensure_lcm_schema_in_transaction(&transaction).await {
+        Ok(()) => transaction.commit().await.map_err(Into::into),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(LcmError::Db(format!(
+                "{error}; rollback after LCM schema migration failed: {rollback_error}"
+            ))),
+        },
+    }
 }
 
-pub(crate) async fn ensure_lcm_schema_in_transaction(conn: &Connection) -> Result<(), LcmError> {
-    ensure_lcm_schema_with_transaction(conn, SchemaTransaction::CallerOwned).await
-}
-
-async fn ensure_lcm_schema_with_transaction(
-    conn: &Connection,
-    transaction: SchemaTransaction,
+pub(crate) async fn ensure_lcm_schema_in_transaction(
+    conn: &(impl Executor + ?Sized),
 ) -> Result<(), LcmError> {
     // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
     // monotonic, so a database written by a newer release is left untouched
@@ -311,10 +313,9 @@ async fn ensure_lcm_schema_with_transaction(
     // created by the rebuild, not the DDL batch above), so presence is
     // checked too — `raw_fts_structure_is_current` deliberately counts a
     // missing table as current.
-    let fts_exists = util::fetch_i64(
+    let fts_exists = fetch_i64(
         conn,
         "SELECT COUNT(*) FROM sqlite_master WHERE name = 'lcm_raw_messages_fts'",
-        (),
         "raw FTS presence query returned no rows",
     )
     .await?
@@ -339,12 +340,7 @@ async fn ensure_lcm_schema_with_transaction(
         )
         .await;
 
-    match transaction {
-        SchemaTransaction::Managed => carry_forward_legacy_messages(conn).await?,
-        SchemaTransaction::CallerOwned => {
-            carry_forward_legacy_messages_in_transaction(conn).await?;
-        }
-    }
+    carry_forward_legacy_messages_in_transaction(conn).await?;
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
@@ -357,7 +353,7 @@ async fn ensure_lcm_schema_with_transaction(
     Ok(())
 }
 
-pub(crate) async fn schema_version(conn: &Connection) -> Option<i64> {
+pub(crate) async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
@@ -369,7 +365,10 @@ pub(crate) async fn schema_version(conn: &Connection) -> Option<i64> {
 }
 
 #[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
-pub(crate) async fn get_gc_meta(conn: &Connection, key: &str) -> Result<Option<String>, LcmError> {
+pub(crate) async fn get_gc_meta(
+    conn: &(impl QueryExecutor + ?Sized),
+    key: &str,
+) -> Result<Option<String>, LcmError> {
     let mut rows = conn
         .query("SELECT value FROM lcm_gc_meta WHERE key = ?1", params![key])
         .await?;
@@ -380,7 +379,11 @@ pub(crate) async fn get_gc_meta(conn: &Connection, key: &str) -> Result<Option<S
 }
 
 #[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
-pub(crate) async fn set_gc_meta(conn: &Connection, key: &str, value: &str) -> Result<(), LcmError> {
+pub(crate) async fn set_gc_meta(
+    conn: &(impl Executor + ?Sized),
+    key: &str,
+    value: &str,
+) -> Result<(), LcmError> {
     conn.execute(
         "INSERT OR REPLACE INTO lcm_gc_meta (key, value) VALUES (?1, ?2)",
         params![key, value],
@@ -390,14 +393,17 @@ pub(crate) async fn set_gc_meta(conn: &Connection, key: &str, value: &str) -> Re
 }
 
 #[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
-pub(crate) async fn clear_gc_meta(conn: &Connection, key: &str) -> Result<(), LcmError> {
+pub(crate) async fn clear_gc_meta(
+    conn: &(impl Executor + ?Sized),
+    key: &str,
+) -> Result<(), LcmError> {
     conn.execute("DELETE FROM lcm_gc_meta WHERE key = ?1", params![key])
         .await?;
     Ok(())
 }
 
 pub(crate) async fn load_raw_message(
-    conn: &Connection,
+    conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     message_id: &str,
 ) -> Option<LcmRawMessage> {
@@ -433,26 +439,9 @@ pub(crate) async fn load_raw_message(
     })
 }
 
-async fn carry_forward_legacy_messages(conn: &Connection) -> Result<(), LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let carry_forward = carry_forward_legacy_messages_in_transaction(conn).await;
-    match carry_forward {
-        Ok(()) => {
-            if let Err(err) = conn.execute("COMMIT", ()).await {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err.into())
-            } else {
-                Ok(())
-            }
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
-        }
-    }
-}
-
-async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Result<(), LcmError> {
+async fn carry_forward_legacy_messages_in_transaction(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
     let mut rows = conn
         .query(
             "SELECT provider, message_id, session_id, role, timestamp, ordinal,
@@ -489,14 +478,14 @@ async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Resu
                 session_id.as_str(),
                 role.as_str(),
                 ordinal,
-                util::opt_i64(timestamp),
+                timestamp,
                 content.as_str(),
                 content_hash.as_str(),
                 LcmStorageKind::Inline.as_str(),
                 snippet_text.as_str(),
                 index_text.as_str(),
                 i64::from(legacy_truncated),
-                util::opt_text(metadata_json.as_deref()),
+                metadata_json.as_deref(),
             ],
         )
         .await?;
@@ -504,22 +493,29 @@ async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Resu
     Ok(())
 }
 
+async fn fetch_i64(
+    conn: &(impl QueryExecutor + ?Sized),
+    sql: &str,
+    empty_message: &str,
+) -> Result<i64, LcmError> {
+    let mut rows = conn.query(sql, ()).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db(empty_message.to_string()))?;
+    Ok(row.get(0)?)
+}
+
 #[cfg(test)]
 mod tests {
-    use libsql::Builder;
-
     use super::*;
+    use crate::db::engine::TestConnection;
 
     #[tokio::test]
     async fn ensure_lcm_schema_errors_and_rolls_back_failed_legacy_carry_forward()
     -> Result<(), String> {
-        // In-memory DB: the rollback behavior under test is purely
-        // transactional, so skip the on-disk sqlite file churn.
-        let db = Builder::new_local(":memory:")
-            .build()
-            .await
-            .map_err(|err| err.to_string())?;
-        let conn = db.connect().map_err(|err| err.to_string())?;
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(
             "CREATE TABLE sessions (
                 provider TEXT NOT NULL,
@@ -549,6 +545,13 @@ mod tests {
                 metadata_json TEXT,
                 PRIMARY KEY(provider, message_id)
             );
+            CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_schema_migrations(name, version, applied_at)
+            VALUES ('lcm', 2, 123);
             CREATE TABLE lcm_raw_messages (
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
@@ -584,13 +587,15 @@ mod tests {
         .await
         .map_err(|err| err.to_string())?;
 
+        let schema_before = sqlite_schema_fingerprint(&conn).await?;
         let Err(err) = ensure_lcm_schema(&conn).await else {
             return Err("failed carry-forward insert should propagate".to_string());
         };
         assert!(matches!(err, LcmError::Db(_)));
+        assert_eq!(sqlite_schema_fingerprint(&conn).await?, schema_before);
         assert_eq!(
             util::fetch_i64(
-                &conn,
+                &*conn,
                 "SELECT COUNT(*) FROM lcm_raw_messages",
                 (),
                 "raw count",
@@ -601,15 +606,62 @@ mod tests {
         );
         assert_eq!(
             util::fetch_i64(
-                &conn,
-                "SELECT COUNT(*) FROM session_schema_migrations WHERE name = 'lcm'",
+                &*conn,
+                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
                 (),
-                "migration marker count",
+                "migration marker version",
             )
             .await
             .map_err(|err| err.to_string())?,
-            0
+            2
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+                "migration marker applied_at",
+            )
+            .await
+            .map_err(|err| err.to_string())?,
+            123
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT COUNT(*) FROM session_messages",
+                (),
+                "legacy message count",
+            )
+            .await
+            .map_err(|err| err.to_string())?,
+            2
         );
         Ok(())
+    }
+
+    async fn sqlite_schema_fingerprint(
+        conn: &Connection,
+    ) -> Result<Vec<(String, String, String)>, String> {
+        let mut rows = conn
+            .query(
+                "SELECT type, name, COALESCE(sql, '')
+                 FROM sqlite_master
+                 WHERE name = 'session_schema_migrations'
+                    OR name LIKE 'lcm_%'
+                 ORDER BY type, name",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut fingerprint = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| error.to_string())? {
+            fingerprint.push((
+                row.get(0).map_err(|error| error.to_string())?,
+                row.get(1).map_err(|error| error.to_string())?,
+                row.get(2).map_err(|error| error.to_string())?,
+            ));
+        }
+        Ok(fingerprint)
     }
 }
