@@ -139,7 +139,7 @@ impl TraceDecay {
             let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
         }
 
-        let ts = Self {
+        let mut ts = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -156,6 +156,26 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
         };
+        // First-touch parity with the registered open path: daemon warm-up
+        // refuses to advertise an identity-bearing project whose Context
+        // Scout owner is absent, so init must start it too.
+        crate::hooks::publish_hook_v2_bindings(&ts.store_layout)?;
+        if let Some(project_id) = crate::hooks::hook_v2_project_id_for_layout(&ts.store_layout) {
+            ts.context_scout_owner =
+                crate::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                    ts.db.clone(),
+                    project_id,
+                    tracedecay_domain::UtcMicros(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(1, |duration| {
+                                duration.as_micros().min(i64::MAX as u128) as i64
+                            }),
+                    ),
+                    None,
+                )
+                .await;
+        }
         ts.register_project_store_in_global_registry().await?;
         Ok(ts)
     }
