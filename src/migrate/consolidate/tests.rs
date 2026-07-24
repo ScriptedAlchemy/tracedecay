@@ -758,6 +758,8 @@ async fn build_fixture_tree(project: &Path, profile: &Path) {
         true,
     )
     .await;
+    storage::remove_enrollment_marker(project, FIXTURE_SOURCE_ID)
+        .expect("remove historical source enrollment before target fixture");
     create_shard(
         profile,
         project,
