@@ -10,10 +10,36 @@ const DASHBOARD_EVENT_NAMES = [
 
 export type SseConnectionState = 'connecting' | 'live' | 'offline';
 
+/** How many accepted pulses the connection keeps for the live visualizations.
+ * Small on purpose: this is a decay window, not a log. */
+const MAX_ACTIVITY_PULSES = 64;
+
+/**
+ * One accepted live event projected to the identities a visualization can
+ * light up. Product semantics stay out of the reducer (it only sequences
+ * envelopes); this projection lives beside the dashboard-specific decoder that
+ * already knows the daemon's event shape.
+ */
+export interface LiveActivityPulse {
+  /** Registered project id from the event's exact scope, when profile-backed. */
+  projectId: string | null;
+  /** Event family (`heartbeat`, `project_registry_changed`, …). */
+  family: string;
+  /** Stream that carried it. */
+  streamId: string;
+  /** Client receipt time (ms since epoch). */
+  at: number;
+}
+
 export interface SseConnection {
   readonly reducer: SseReducer;
   state(): SseConnectionState;
   lastEventAt(): number | null;
+  /** Recent accepted pulses, oldest first. Non-consuming: reading this never
+   * disturbs the reducer's batch boundary. */
+  activity(): readonly LiveActivityPulse[];
+  /** Monotone counter — a stable `useSyncExternalStore` snapshot. */
+  activityRevision(): number;
   subscribe(listener: () => void): () => void;
   close(): void;
 }
@@ -36,6 +62,27 @@ export function connectEvents(url = '/api/events'): SseConnection {
     }
   };
 
+  let activity: LiveActivityPulse[] = [];
+  let activityRevision = 0;
+
+  /** Record an accepted event as a pulse. Only newly accepted events pulse —
+   * duplicates, stale generations, and superseded revisions must not light the
+   * visualization twice for one real occurrence. */
+  const recordActivity = (raw: unknown, streamId: string) => {
+    const scope = isRecord(raw) && isRecord(raw.scope) ? raw.scope : null;
+    const kind = isRecord(raw) && isRecord(raw.kind) ? raw.kind : null;
+    activity = [
+      ...activity,
+      {
+        projectId: typeof scope?.project_id === 'string' ? scope.project_id : null,
+        family: typeof kind?.family === 'string' ? kind.family : streamId,
+        streamId,
+        at: Date.now(),
+      },
+    ].slice(-MAX_ACTIVITY_PULSES);
+    activityRevision += 1;
+  };
+
   const source = new EventSource(url);
   source.onopen = () => setState('live');
   source.onerror = () =>
@@ -45,9 +92,10 @@ export function connectEvents(url = '/api/events'): SseConnection {
     lastEventAt = Date.now();
     setState('live');
     try {
-      const parsed = decodeDashboardEvent(JSON.parse(event.data));
+      const raw: unknown = JSON.parse(event.data);
+      const parsed = decodeDashboardEvent(raw);
       if (!parsed) return;
-      reducer.ingest(parsed);
+      if (reducer.ingest(parsed)) recordActivity(raw, parsed.stream.stream_id);
       notify();
     } catch {
       // Malformed frames are dropped; gap detection triggers a canonical
@@ -63,6 +111,8 @@ export function connectEvents(url = '/api/events'): SseConnection {
     reducer,
     state: () => state,
     lastEventAt: () => lastEventAt,
+    activity: () => activity,
+    activityRevision: () => activityRevision,
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

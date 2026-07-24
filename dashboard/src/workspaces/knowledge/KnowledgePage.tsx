@@ -11,7 +11,11 @@ import { Chart } from '../../viz/chart/Chart.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { MemoryOverviewPayloadSchema, type FactRow } from './contracts.ts';
+import {
+  MemoryOverviewPayloadSchema,
+  type FactRow,
+  type HrrCoverageRow,
+} from './contracts.ts';
 
 const BASE = '/api/plugins/holographic';
 
@@ -95,6 +99,18 @@ export function KnowledgePage() {
                         ],
                       }}
                     />
+                  </figure>
+                ) : null}
+                {(stats?.hrr_coverage ?? []).length > 0 ? (
+                  <figure className="flex flex-col gap-1">
+                    <figcaption className="text-2xs text-text-muted">
+                      HRR vector coverage by category
+                    </figcaption>
+                    <div className="flex flex-col gap-1">
+                      {(stats?.hrr_coverage ?? []).map((row) => (
+                        <HrrCoverageBar key={row.category} row={row} />
+                      ))}
+                    </div>
                   </figure>
                 ) : null}
               </div>
@@ -193,6 +209,38 @@ function FactListRow({
         {fact.retrieval_count ?? 0} recalls
       </span>
     </DataRow>
+  );
+}
+
+/** Per-category HRR coverage: fraction bar plus a truthful status label when
+ * the bank is missing, stale, or under-vectorized. */
+function HrrCoverageBar({ row }: { row: HrrCoverageRow }) {
+  const clamped = Math.max(0, Math.min(row.coverage, 1));
+  const degraded = row.status !== 'ready';
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-20 shrink-0 truncate text-2xs text-text-muted">{row.category}</span>
+      <span
+        className="relative h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-3"
+        role="img"
+        aria-label={`${row.category} HRR coverage ${(clamped * 100).toFixed(0)}% (${row.hrr_vectors}/${row.facts} facts), status ${row.status.replace('_', ' ')}`}
+      >
+        <span
+          className={cn(
+            'absolute inset-y-0 left-0 rounded-full',
+            degraded ? 'bg-accent/40' : 'bg-accent',
+          )}
+          style={{ width: `${clamped * 100}%` }}
+        />
+      </span>
+      <span className="tabular w-9 shrink-0 text-right text-2xs text-text-muted">
+        {degraded && row.status !== 'missing_vectors'
+          ? row.status === 'missing_bank'
+            ? 'no bank'
+            : 'stale'
+          : `${(clamped * 100).toFixed(0)}%`}
+      </span>
+    </div>
   );
 }
 

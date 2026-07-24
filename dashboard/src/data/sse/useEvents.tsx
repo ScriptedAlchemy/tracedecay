@@ -1,7 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { connectEvents, type SseConnection, type SseConnectionState } from './connect.ts';
+import {
+  connectEvents,
+  type LiveActivityPulse,
+  type SseConnection,
+  type SseConnectionState,
+} from './connect.ts';
 import type { SseBatch } from './types.ts';
 
 const EventsContext = createContext<SseConnection | null>(null);
@@ -70,6 +75,25 @@ export function useEventStreamState(): {
   );
   return { state, lastEventAt: connection?.lastEventAt() ?? null };
 }
+
+/**
+ * Live pulses for the activation visualizations. The revision is the render
+ * trigger (a number — a stable snapshot for `useSyncExternalStore`); callers
+ * read the pulse ring and apply only what is newer than what they last drew.
+ */
+export function useLiveActivity(): {
+  pulses: readonly LiveActivityPulse[];
+  revision: number;
+} {
+  const connection = useContext(EventsContext);
+  const revision = useSyncExternalStore(
+    (cb) => (connection ? connection.subscribe(cb) : () => {}),
+    () => (connection ? connection.activityRevision() : 0),
+  );
+  return { pulses: connection?.activity() ?? EMPTY_PULSES, revision };
+}
+
+const EMPTY_PULSES: readonly LiveActivityPulse[] = [];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

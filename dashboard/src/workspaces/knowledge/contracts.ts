@@ -43,6 +43,23 @@ export const TrustBucketSchema = z
   .object({ bucket: z.number(), label: z.string(), count: z.number() })
   .passthrough();
 
+/** One per-category HRR coverage row from overview_payload in facts.rs. */
+export const HrrCoverageRowSchema = z
+  .object({
+    category: z.string(),
+    facts: z.number(),
+    hrr_vectors: z.number(),
+    /** Fraction 0..1 (basis points / 10_000 on the wire producer). */
+    coverage: z.number(),
+    bank_name: z.string().nullable().optional(),
+    bank_fact_count: z.number().nullable().optional(),
+    dim: z.number().nullable().optional(),
+    updated_at: z.number().nullable().optional(),
+    status: z.enum(['ready', 'missing_vectors', 'missing_bank', 'stale_bank']),
+  })
+  .passthrough();
+export type HrrCoverageRow = z.infer<typeof HrrCoverageRowSchema>;
+
 export const MemoryOverviewPayloadSchema = z
   .object({
     query: z.string().optional(),
@@ -56,7 +73,7 @@ export const MemoryOverviewPayloadSchema = z
             facts: z.number().optional(),
             entities: z.number().optional(),
             banks: z.number().optional(),
-            hrr_coverage: z.number().optional(),
+            hrr_coverage: z.array(HrrCoverageRowSchema).optional(),
             trust_histogram: z.array(TrustBucketSchema).optional(),
           })
           .passthrough()

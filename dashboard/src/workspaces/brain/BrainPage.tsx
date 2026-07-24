@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
-import { useEventStreamState } from '../../data/sse/useEvents.tsx';
+import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -81,7 +81,11 @@ function SynapseMap({
   const selectProject = useScope((s) => s.selectProject);
   const scope = useScope((s) => s.scope);
   const activationRef = useRef(new ActivationField({ halfLifeMs: 4200 }));
-  const { state: sseState, lastEventAt } = useEventStreamState();
+  const { state: sseState } = useEventStreamState();
+  const { pulses, revision } = useLiveActivity();
+  // null until the first pass adopts the connection's current revision: the
+  // pulses already in the ring at mount are history, not activity to replay.
+  const drawnRevision = useRef<number | null>(null);
 
   const { nodes, edges } = useMemo(() => {
     const nodes = [] as Array<{ id: string; label: string; kind: string; degree: number }>;
@@ -107,17 +111,37 @@ function SynapseMap({
     return { nodes, edges };
   }, [groups]);
 
-  // The active brain breathes: every live SSE beat strikes the active
-  // project's neuron (and softly, its repository hub). Real liveness only —
-  // no signal, no light.
+  // The brain fires on real identities: each accepted event lights the neuron
+  // named by its own exact scope, at an intensity that reflects what actually
+  // happened. Only unseen pulses fire (the ring is a decay window, not a log),
+  // and a beat carrying no project scope falls back to the daemon's active
+  // project — which is precisely whose state that beat describes.
   useEffect(() => {
-    if (!activeProjectId || sseState !== 'live' || lastEventAt == null) return;
-    activationRef.current.strike([activeProjectId], 0.8);
-    const hub = groups.find((group) =>
-      group.projects.some((project) => project.project_id === activeProjectId),
-    );
-    if (hub) activationRef.current.strike([`repo:${hub.git_common_dir ?? hub.label}`], 0.35);
-  }, [activeProjectId, sseState, lastEventAt, groups]);
+    if (sseState !== 'live' || revision === drawnRevision.current) return;
+    if (drawnRevision.current === null) {
+      drawnRevision.current = revision;
+      return;
+    }
+    const unseen = Math.min(revision - drawnRevision.current, pulses.length);
+    drawnRevision.current = revision;
+    const field = activationRef.current;
+    for (const pulse of pulses.slice(pulses.length - unseen)) {
+      const projectId = pulse.projectId ?? activeProjectId;
+      if (!projectId) continue;
+      field.strike([projectId], strikeIntensity(pulse.family));
+      const hub = groups.find((group) =>
+        group.projects.some((project) => project.project_id === projectId),
+      );
+      // The hub carries its checkout's signal at a third the intensity, so a
+      // repository glows when any of its worktrees is working.
+      if (hub) {
+        field.strike(
+          [`repo:${hub.git_common_dir ?? hub.label}`],
+          strikeIntensity(pulse.family) / 3,
+        );
+      }
+    }
+  }, [pulses, revision, sseState, activeProjectId, groups]);
 
   return (
     <GraphCanvas
@@ -135,6 +159,17 @@ function SynapseMap({
       }}
     />
   );
+}
+
+/** Firing intensity by event family: structural change reads brightest, a
+ * heartbeat is only a breath. Unknown families fire at a middling default
+ * rather than going dark — a new event family is still real activity. */
+function strikeIntensity(family: string): number {
+  if (family === 'heartbeat') return 0.22;
+  if (family === 'project_registry_changed') return 0.95;
+  if (family === 'storage_telemetry_invalidated') return 0.6;
+  if (family.startsWith('code_index')) return 0.8;
+  return 0.5;
 }
 
 function RepoGroupCard({ group }: { group: ProjectRepoGroup }) {

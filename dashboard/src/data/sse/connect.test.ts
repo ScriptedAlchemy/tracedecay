@@ -91,4 +91,67 @@ describe("dashboard SSE wire bridge", () => {
     });
     connection.close();
   });
+
+  it("projects accepted events to live pulses carrying their own scope identity", () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const connection = connectEvents("/api/events");
+    const source = FakeEventSource.instances[0]!;
+    const frame = (revision: number, projectId: string) => ({
+      stream: "project_registry",
+      run_id: "run-1-1700000000000000",
+      event_revision: revision,
+      entity_revision: revision,
+      scope: {
+        project_id: projectId,
+        storage_mode: "profile_sharded",
+        store_root: `/stores/${projectId}`,
+      },
+      observation_time_micros: 1700000000000000 + revision,
+      source_watermark: null,
+      coverage: { completeness: "complete", denominator: 1 },
+      kind: { family: "project_registry_changed", project_count: 3 },
+    });
+
+    source.emit("project_registry", frame(1, "project.alpha"));
+    source.emit("project_registry", frame(2, "project.beta"));
+
+    expect(connection.activityRevision()).toBe(2);
+    expect(connection.activity()).toMatchObject([
+      { projectId: "project.alpha", family: "project_registry_changed" },
+      { projectId: "project.beta", family: "project_registry_changed" },
+    ]);
+
+    // A duplicate is one real occurrence: it must not pulse twice.
+    source.emit("project_registry", frame(2, "project.beta"));
+    expect(connection.activityRevision()).toBe(2);
+    expect(connection.activity()).toHaveLength(2);
+
+    // Reading pulses never disturbs the reducer's batch boundary.
+    expect(connection.reducer.takeBatch().events).toHaveLength(2);
+    expect(connection.activity()).toHaveLength(2);
+    connection.close();
+  });
+
+  it("keeps the pulse ring bounded so a long-lived tab cannot grow it", () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const connection = connectEvents("/api/events");
+    const source = FakeEventSource.instances[0]!;
+    for (let revision = 1; revision <= 80; revision += 1) {
+      source.emit("heartbeat", {
+        stream: "heartbeat",
+        run_id: "run-1-1700000000000000",
+        event_revision: revision,
+        entity_revision: null,
+        scope: { project_id: null, storage_mode: "project_local", store_root: "/s" },
+        observation_time_micros: 1700000000000000 + revision,
+        source_watermark: null,
+        coverage: { completeness: "complete", denominator: 1 },
+        kind: { family: "heartbeat" },
+      });
+    }
+    expect(connection.activityRevision()).toBe(80);
+    expect(connection.activity()).toHaveLength(64);
+    expect(connection.activity()[0]).toMatchObject({ projectId: null, family: "heartbeat" });
+    connection.close();
+  });
 });

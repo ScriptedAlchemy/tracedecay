@@ -304,12 +304,28 @@ function memoryPayload(query = ''): Record<string, unknown> {
           { entity_type: 'project', count: 41 },
           { entity_type: 'model', count: 23 },
         ],
-        // NB: facts.rs overview_payload emits `hrr_coverage` as an array of
-        // per-category coverage rows, but knowledge/contracts.ts types
-        // `overview.hrr_coverage` as a scalar `z.number()`. The consuming
-        // schema is the parse gate, and the field is optional and unused by
-        // KnowledgePage, so it is omitted here rather than emit a
-        // contract-violating array (divergence flagged in the report).
+        hrr_coverage: FACT_CATEGORIES.map((category, i) => {
+          const factCount = 900 - i * 120;
+          const vectors = i === 2 ? 0 : factCount - i * 40;
+          return {
+            category,
+            facts: factCount,
+            hrr_vectors: vectors,
+            coverage: factCount === 0 ? 0 : vectors / factCount,
+            bank_name: i === 2 ? null : category,
+            bank_fact_count: i === 2 ? null : 880 - i * 120,
+            dim: i === 2 ? null : 1024,
+            updated_at: i === 2 ? null : nowSecs - i * DAY,
+            status:
+              i === 2
+                ? 'missing_bank'
+                : i === 4
+                  ? 'stale_bank'
+                  : vectors < factCount
+                    ? 'missing_vectors'
+                    : 'ready',
+          };
+        }),
         memory_banks: FACT_CATEGORIES.map((category, i) => ({
           bank_name: category,
           dim: 1024,

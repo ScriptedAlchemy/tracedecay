@@ -84,7 +84,9 @@ async function waitForServer(baseURL: string, timeoutMs = 90_000): Promise<void>
   let lastErr: unknown;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(baseURL, { method: 'GET' });
+      // Per-attempt timeout: a wedged server that accepts but never responds
+      // must not hang the whole audit past the outer deadline.
+      const res = await fetch(baseURL, { method: 'GET', signal: AbortSignal.timeout(5_000) });
       if (res.ok || res.status === 304) return;
     } catch (err) {
       lastErr = err;

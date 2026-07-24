@@ -156,6 +156,8 @@ export function GraphCanvas({
     let nodeRgb = cssColorToRgb(colors.node);
     let hotRgb = cssColorToRgb(colors.nodeSelected);
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const HALO = '__halo__';
+    const PULSE = '__pulse__';
 
     const renderer = new Sigma(graph, container, {
       renderLabels: true,
@@ -165,6 +167,7 @@ export function GraphCanvas({
       labelColor: { color: colors.label },
       defaultEdgeColor: colors.edge,
       nodeReducer: (node, data) => {
+        if (node.startsWith(HALO) || node.startsWith(PULSE)) return data;
         const isSelected = node === selectedId;
         const isHovered = node === hovered;
         const isNeighbor =
@@ -251,8 +254,6 @@ export function GraphCanvas({
 
     // Bloom halos: each warm node carries a companion low-alpha disc behind
     // it (managed here, invisible to reducers) — shader-free glow.
-    const HALO = '__halo__';
-    const PULSE = '__pulse__';
     // Traveling light (Glass Brain grammar): while an edge is warm, one
     // bright point runs from the hotter endpoint to the cooler one. Pulse
     // nodes exist only while warm and the frozen bbox keeps them from ever
