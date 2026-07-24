@@ -1480,6 +1480,7 @@ fn display_anchors_for_chunk(
 ) -> Vec<String> {
     let mut anchors = BTreeSet::from([document.document_id.clone()]);
     if let Some(qualified_name) = qualified_name {
+        anchors.insert(qualified_name.clone());
         anchors.insert(display_qualified_anchor(document, qualified_name));
     }
     for term in &chunk.exact_terms {
@@ -1540,10 +1541,15 @@ fn display_qualified_anchor(document: &CorpusDocumentV1, qualified_name: &str) -
             }
             modules.join("::")
         });
-    let local_name = module_prefix
-        .as_deref()
-        .and_then(|prefix| qualified_name.strip_prefix(prefix))
+    let local_name = qualified_name
+        .strip_prefix(&document.source_path)
         .and_then(|suffix| suffix.strip_prefix("::"))
+        .or_else(|| {
+            module_prefix
+                .as_deref()
+                .and_then(|prefix| qualified_name.strip_prefix(prefix))
+                .and_then(|suffix| suffix.strip_prefix("::"))
+        })
         .unwrap_or(qualified_name);
     if local_name.is_empty() {
         document.document_id.clone()
@@ -1968,6 +1974,26 @@ mod tests {
 
     fn workload() -> CandidateWorkloadV1 {
         load_candidate_workload(&repo_root().join(WORKLOAD_RELATIVE)).expect("workload loads")
+    }
+
+    #[test]
+    fn qualified_display_anchor_strips_exact_source_identity() {
+        let document = CorpusDocumentV1 {
+            document_id: "watermark".to_owned(),
+            source_path: "crates/tracedecay-domain/src/research/watermark.rs".to_owned(),
+            path: "tests/fixtures/search_quality/corpus/watermark.rs".to_owned(),
+            scope: "research".to_owned(),
+            language: "rust".to_owned(),
+            eligibility: "eligible".to_owned(),
+        };
+
+        assert_eq!(
+            display_qualified_anchor(
+                &document,
+                "crates/tracedecay-domain/src/research/watermark.rs::VectorWatermark::merge_max"
+            ),
+            "watermark::VectorWatermark::merge_max"
+        );
     }
 
     #[test]
