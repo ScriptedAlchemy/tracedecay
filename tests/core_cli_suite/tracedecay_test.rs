@@ -92,7 +92,7 @@ fn source_edit_digest(value: &str) -> ManifestDigest {
 }
 
 #[derive(Clone)]
-struct FixtureSourceEditAuthorization(AuthorityReceipt);
+struct FixtureSourceEditAuthorization(tracedecay_application::SourceEditAuthorizationAdmissionV1);
 
 impl SourceEditAuthorizationPort for FixtureSourceEditAuthorization {
     fn admit<'a>(
@@ -108,7 +108,7 @@ impl SourceEditAuthorizationPort for FixtureSourceEditAuthorization {
         &'a self,
         _context: &'a RequestContext,
         _operation: &'a ApplicationOperation,
-        _admission: &'a AuthorityReceipt,
+        _admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
         _observed_at: UtcMicros,
     ) -> SourceEditAuthorizationFuture<'a> {
         Box::pin(async move { Ok(self.0.clone()) })
@@ -173,21 +173,35 @@ async fn run_authorized_source_edit(
         expected_state,
         proof: SourceEditEffectProofV1 {
             policy_digest: source_edit_digest(SOURCE_EDIT_SHA256_B),
+            configuration_revision_id:
+                tracedecay_domain::configuration::ConfigurationRevisionId::new(
+                    "configuration.core-cli-source-edit.v1",
+                )
+                .unwrap(),
             configuration_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
+            catalog_revision: 1,
             catalog_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
+            privacy_domain_id: tracedecay_domain::PrivacyDomainId::new(
+                "privacy.core-cli-source-edit",
+            )
+            .unwrap(),
+            privacy_key_epoch: 1,
             privacy_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
             external_proof: None,
         },
         observed_at: UtcMicros(3),
     };
-    execute_source_edit(
-        graph,
-        &operation,
-        request,
-        &FixtureSourceEditAuthorization(authority),
-    )
-    .await
-    .unwrap()
+    let authorization = FixtureSourceEditAuthorization(
+        tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+            authority,
+            request.proof.clone(),
+            request.context.scope(),
+        )
+        .unwrap(),
+    );
+    execute_source_edit(graph, &operation, request, &authorization)
+        .await
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------

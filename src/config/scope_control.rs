@@ -1,13 +1,54 @@
 //! Pure protected-change planning for source bindings, restrictive policy,
 //! and topology policy. Normal scalar setting changes do not enter this path.
 
+use std::path::Path;
+
 use thiserror::Error;
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, ChangePlanId, ConfigurationRevisionId, ProtectedApplyRequest,
-    ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1, RollbackModeV1,
-    SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ACCESS_RULES_SETTING_KEY, AuthorityRef, ChangePlanId, ConfigurationRevisionId,
+    ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
+    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId,
+    SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
-use tracedecay_domain::{AccessPolicyDigest, ActorId, DomainError, ManifestDigest, UtcMicros};
+use tracedecay_domain::{
+    AccessPolicyDigest, ActorId, DomainError, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
+};
+
+/// Canonical identifier of the one daemon-owned binding that authorizes the
+/// daemon to act on a project it registered. Project-open resolves the daemon's
+/// source access from exactly one binding keyed by
+/// `(SourceKindV1::Cursor, AuthorityRef::Project(project_id))`, so this id must
+/// stay stable: a second binding on that key is a contract violation, not an
+/// additive grant.
+pub const DAEMON_PROJECT_SOURCE_BINDING_ID: &str = "binding.tracedecay-daemon.project-open";
+
+/// The source kind the daemon owns for its own project-open access.
+pub const DAEMON_PROJECT_SOURCE_KIND: SourceKindV1 = SourceKindV1::Cursor;
+
+/// Build the daemon-owned source binding for a project the daemon has already
+/// registered.
+///
+/// This is not path-inferred authority. Both components restate identity the
+/// caller already holds: the authority is the project's own resolved id, and
+/// the locator digest is the same project-open locator digest the daemon
+/// derives for that registered root. It grants the daemon nothing it does not
+/// already own; it only makes the daemon's own binding durable so the
+/// project-open authority check has an exact binding to verify against.
+pub fn daemon_owned_project_source_binding(
+    project_id: &ProjectId,
+    project_root: &Path,
+) -> Result<ScopeSourceBinding, DomainError> {
+    let locator = crate::application::primitives::locator_digest_for_project(project_root)
+        .map_err(|_| DomainError::NonCanonical {
+            field: "daemon project source binding locator digest",
+        })?;
+    ScopeSourceBinding::new(
+        SourceBindingId::new(DAEMON_PROJECT_SOURCE_BINDING_ID.to_owned())?,
+        DAEMON_PROJECT_SOURCE_KIND,
+        LocatorDigest::new(locator.as_str().to_owned())?,
+        AuthorityRef::Project(project_id.clone()),
+    )
+}
 
 #[derive(Debug, Error)]
 pub enum ProtectedChangePlanningError {

@@ -46,7 +46,7 @@ type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send 
 /// Plan20 store handle and the one application operation facade used by every
 /// local transport.
 pub struct ProjectConfigurationRuntime {
-    configuration: PinnedRuntimeConfiguration,
+    target: RuntimeConfigurationTarget,
     configuration_database: Arc<RegisteredGlobalDb>,
     authorities: Arc<ConfigurationAuthoritySlots>,
     #[allow(dead_code)] // Plan 20 config control-plane — staged
@@ -56,11 +56,14 @@ pub struct ProjectConfigurationRuntime {
 }
 
 impl ProjectConfigurationRuntime {
-    pub(crate) fn open(opened: OpenedRuntimeConfiguration) -> Result<Self> {
+    pub(crate) fn open(
+        opened: OpenedRuntimeConfiguration,
+    ) -> Result<(Self, PinnedRuntimeConfiguration)> {
         let OpenedRuntimeConfiguration {
             configuration,
             registered_database,
         } = opened;
+        let target = configuration.target.clone();
         let mut registry =
             crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
                 TraceDecayError::Config {
@@ -86,18 +89,24 @@ impl ProjectConfigurationRuntime {
             store,
             control_plane: Arc::clone(&control_plane),
         });
-        Ok(Self {
+        Ok((
+            Self {
+                target,
+                configuration_database: registered_database,
+                authorities,
+                control_plane,
+                client,
+                semantic_runtime: OnceLock::new(),
+            },
             configuration,
-            configuration_database: registered_database,
-            authorities,
-            control_plane,
-            client,
-            semantic_runtime: OnceLock::new(),
-        })
+        ))
     }
 
-    pub(crate) fn configuration(&self) -> &PinnedRuntimeConfiguration {
-        &self.configuration
+    /// Immutable routing identity only. Effective values and revisions must be
+    /// read from [`Self::client`] so the retained store remains the sole
+    /// runtime configuration authority.
+    pub(crate) fn configuration_target(&self) -> &RuntimeConfigurationTarget {
+        &self.target
     }
 
     pub(crate) fn registered_database(&self) -> Arc<RegisteredGlobalDb> {
@@ -321,7 +330,7 @@ impl ProjectConfigurationRuntime {
 impl Drop for ProjectConfigurationRuntime {
     fn drop(&mut self) {
         crate::config::uninstall_configuration_daemon_client_for_project(
-            &self.configuration.target,
+            &self.target,
             &self.dyn_client(),
         );
     }
@@ -880,7 +889,15 @@ impl ConfigurationClock for SystemConfigurationClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use crate::application::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
+    use tracedecay_domain::configuration::{
+        ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
+        ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1,
+        DIAGNOSTICS_PREWARM_SETTING_KEY,
+    };
+    use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId};
 
     struct TestScopeResolution;
 
@@ -991,5 +1008,78 @@ mod tests {
                 ),
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_current_reads_the_store_after_startup_snapshot_drifts() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_root = directory.path().join("profile");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let project_id = ProjectId::new("project.configuration-runtime-drift").unwrap();
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        std::fs::create_dir_all(&layout.data_root).unwrap();
+        let host_runtime =
+            HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
+                .await
+                .unwrap();
+        let opened = crate::config::open_runtime_configuration_for_registered_database(
+            &project_root,
+            &layout,
+            host_runtime
+                .registered_database_arc(HostAdmissionScope::Project)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let (runtime, startup) = ProjectConfigurationRuntime::open(opened).unwrap();
+        let mutation = DirectConfigurationMutation::Set {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
+            value: ConfigurationValueV1::Boolean(true),
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                ConfigurationGrantReceiptId::new("configuration.grant-receipt.drift").unwrap(),
+                ConfigurationGrantId::new("configuration.grant.drift").unwrap(),
+                ActorId::new("actor.configuration-runtime-drift").unwrap(),
+                ConfigurationMutationOperationV1::DirectMutation,
+                mutation.target_scope_digest().unwrap(),
+                startup.revision_id.clone(),
+                1,
+                AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let store = runtime.configuration_store();
+        let receipt = super::super::ports::ConfigurationControlStore::commit_direct(
+            &store,
+            &authority,
+            &mutation,
+            &startup.revision_id,
+        )
+        .await
+        .unwrap();
+
+        let current = runtime.client().current().await.unwrap();
+        assert_eq!(current.revision_id, receipt.result_revision_id);
+        assert_ne!(current.revision_id, startup.revision_id);
+        assert!(!startup.config.diagnostics_prewarm);
+        assert!(current.config.diagnostics_prewarm);
+        assert_eq!(runtime.configuration_target(), &current.target);
     }
 }

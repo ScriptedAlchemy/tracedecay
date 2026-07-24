@@ -28,7 +28,8 @@ use tracedecay_policy::authorization::{
     SourceAuthorizationEvaluatorV1, SourceAuthorizationInputV1, SourceAuthorizationTruthTableV1,
 };
 use tracedecay_tool_catalog::{
-    CapabilityId, ProfileId, SchemaId, SchemaRef, SortContractId, UseCaseId,
+    CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef, SortContractId,
+    UseCaseId,
 };
 
 const SHA256_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -53,6 +54,10 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             let handler = handlers
                 .get(capability.use_case_id())
                 .expect("every declared capability has one callable handler descriptor");
+            assert_eq!(
+                handler.operation().capability_id(),
+                capability.capability_id()
+            );
             assert_eq!(handler.operation().use_case_id(), capability.use_case_id());
             assert_eq!(handler.request_schema(), capability.request_schema());
             assert_eq!(handler.result_schema(), capability.result_schema());
@@ -78,17 +83,8 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             .collect::<Vec<_>>(),
         vec![
             "capability.application.code-query.callees",
-            "capability.application.code-query.callers",
             "capability.application.code-query.exact-occurrence",
-            "capability.application.code-query.impact",
-            "capability.application.code-query.implementations",
-            "capability.application.code-query.module-api",
             "capability.application.code-query.phrase-search",
-            "capability.application.code-query.qualified-name",
-            "capability.application.code-query.signature-search",
-            "capability.application.code-query.source-metadata",
-            "capability.application.code-query.symbol-search",
-            "capability.application.code-query.type-hierarchy",
             "capability.application.configuration.audit",
             "capability.application.configuration.batch",
             "capability.application.configuration.explain",
@@ -120,6 +116,10 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.git.preview",
             "capability.application.git.status",
             "capability.application.primitive.call-chain",
+            "capability.application.primitive.code-callers",
+            "capability.application.primitive.code-implementations",
+            "capability.application.primitive.code-signature-search",
+            "capability.application.primitive.code-type-hierarchy",
             "capability.application.primitive.diagnostics-read",
             "capability.application.primitive.file-dependents",
             "capability.application.primitive.file-metadata",
@@ -131,9 +131,72 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.primitive.source-lines",
             "capability.application.primitive.source-outline",
             "capability.application.primitive.storage-status",
+            "capability.application.source-edit.ast-grep-rewrite",
+            "capability.application.source-edit.insert-at",
+            "capability.application.source-edit.insert-at-symbol",
+            "capability.application.source-edit.move-symbol",
+            "capability.application.source-edit.multi-str-replace",
+            "capability.application.source-edit.replace-symbol",
+            "capability.application.source-edit.reconcile",
+            "capability.application.source-edit.str-replace",
             "capability.retrieval.symbol-search",
         ]
     );
+}
+
+#[test]
+fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() {
+    let snapshot = build_application_catalog_snapshot().unwrap();
+    let expected_profiles = [
+        (
+            "profile.default",
+            ProfileKind::Default,
+            ProfileBudget::new(160, 32_000_000, 18_000).unwrap(),
+        ),
+        (
+            "profile.compact",
+            ProfileKind::Compact,
+            ProfileBudget::COMPACT,
+        ),
+        (
+            "profile.administrative",
+            ProfileKind::Administrative,
+            ProfileBudget::ADMINISTRATIVE,
+        ),
+        (
+            "profile.host-limited",
+            ProfileKind::HostLimited,
+            ProfileBudget::HOST_LIMITED,
+        ),
+    ];
+
+    assert_eq!(snapshot.profiles().count(), expected_profiles.len());
+    for (profile_id, kind, budget) in expected_profiles {
+        let profile_id = ProfileId::new(profile_id).unwrap();
+        let profile = snapshot
+            .profile(&profile_id)
+            .expect("every explicit application profile is composed");
+        let eligible_capability_ids = snapshot
+            .capabilities()
+            .filter(|capability| {
+                capability.availability().is_callable()
+                    && capability.profile_eligibility().contains(&profile_id)
+            })
+            .map(|capability| capability.capability_id().clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(profile.kind(), kind);
+        assert_eq!(profile.budget(), budget);
+        assert_eq!(profile.capability_ids(), eligible_capability_ids);
+        assert_eq!(
+            snapshot
+                .visible_capabilities(&profile_id, &BTreeSet::new())
+                .into_iter()
+                .map(|capability| capability.capability_id().clone())
+                .collect::<Vec<_>>(),
+            eligible_capability_ids,
+        );
+    }
 }
 
 #[test]
@@ -226,6 +289,23 @@ fn mismatched_descriptor_schema_is_rejected() {
             "descriptor mismatch for {field} must be rejected"
         );
     }
+}
+
+#[test]
+fn mismatched_descriptor_capability_is_rejected() {
+    let contribution = symbol_search_contribution().unwrap();
+    let handlers = ApplicationHandlerDescriptors::new([descriptor_with_contract(
+        "capability.retrieval.wrong-symbol-search",
+        "use-case.retrieval.symbol-search",
+        symbol_request_schema(),
+        symbol_result_schema(),
+    )])
+    .unwrap();
+
+    assert_eq!(
+        validate_application_catalog(std::slice::from_ref(&contribution), &handlers),
+        inconsistent("application capability/use-case mapping")
+    );
 }
 
 #[test]

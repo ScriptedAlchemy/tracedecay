@@ -10,9 +10,9 @@ use std::future::Future;
 use thiserror::Error;
 use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationSnapshotId, ConfigurationValueV1, SOURCE_BINDINGS_SETTING_KEY, SettingKey,
-    SettingScopeV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ACCESS_RULES_SETTING_KEY, AuthorityRef, ConfigurationLayerIdV1, ConfigurationRevisionId,
+    ConfigurationSnapshotId, ConfigurationValueV1, SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding,
+    SettingKey, SettingScopeV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{DomainError, ManifestDigest, UtcMicros};
 
@@ -167,6 +167,101 @@ impl ReadonlyLegacyConfigurationInputsV1 {
     }
 }
 
+/// Canonical authority contributed by the daemon when it creates a project's
+/// first configuration revision.
+///
+/// This is deliberately *not* a legacy input. Legacy `config.json`, host
+/// profile, and environment entries can never supply a source binding: a
+/// binding decoded from a path or host label is quarantined as
+/// [`ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority`]. Genesis
+/// bindings are different in kind — they are the project's own already-resolved
+/// identity restated by the daemon that registered it, not authority inferred
+/// from untrusted input — so they resolve at `Canonical` precedence instead.
+///
+/// A genesis contribution only ever appears in the initial migration. Once a
+/// project has a durable revision, every later binding change goes through the
+/// protected [`ProtectedChange::BindSource`] path.
+///
+/// [`ProtectedChange::BindSource`]: tracedecay_domain::configuration::ProtectedChange::BindSource
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalGenesisConfigurationV1 {
+    pub target_layer: ConfigurationLayerIdV1,
+    pub target_revision_id: ConfigurationRevisionId,
+    /// Every binding must name the same authority as `target_layer`, and no two
+    /// bindings may claim the same `(source_kind, authority)` key.
+    pub source_bindings: Vec<ScopeSourceBinding>,
+}
+
+impl CanonicalGenesisConfigurationV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.target_layer.validate()?;
+        self.target_revision_id.validate()?;
+        if self.source_bindings.is_empty() {
+            return Err(DomainError::Empty {
+                field: "canonical genesis source bindings",
+            });
+        }
+        let mut seen = BTreeSet::new();
+        for binding in &self.source_bindings {
+            binding.validate()?;
+            if !layer_owns_authority(&self.target_layer, &binding.authority) {
+                return Err(DomainError::NonCanonical {
+                    field: "canonical genesis binding authority",
+                });
+            }
+            if !seen.insert((binding.source_kind, binding.authority.clone())) {
+                return Err(DomainError::NonCanonical {
+                    field: "canonical genesis binding key",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn snapshot_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate()?;
+        canonical_sha256(&("tracedecay.configuration.canonical-genesis.v1", self))
+    }
+
+    fn resolution_input(&self) -> Result<ConfigurationResolutionInputV1, DomainError> {
+        self.validate()?;
+        let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)?;
+        Ok(ConfigurationResolutionInputV1 {
+            source: ConfigurationResolutionInputSourceV1::Canonical,
+            layer: ConfigurationLayerV1 {
+                layer: self.target_layer.clone(),
+                revision_id: self.target_revision_id.clone(),
+                entries: BTreeMap::from([(
+                    key,
+                    ConfigurationValueV1::SourceBindings(self.source_bindings.clone()),
+                )]),
+            },
+        })
+    }
+}
+
+/// A genesis binding may only be issued by the layer that already owns the
+/// authority it names. A project layer cannot mint a user-profile binding and
+/// vice versa.
+fn layer_owns_authority(layer: &ConfigurationLayerIdV1, authority: &AuthorityRef) -> bool {
+    match (layer, authority) {
+        (
+            ConfigurationLayerIdV1::Project {
+                project_id: layer_project,
+            },
+            AuthorityRef::Project(binding_project),
+        ) => layer_project == binding_project,
+        (
+            ConfigurationLayerIdV1::UserProfile {
+                profile_id: layer_profile,
+            },
+            AuthorityRef::ProjectlessHermes(binding_profile),
+        ) => layer_profile == binding_profile,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationMigrationQuarantineReasonV1 {
@@ -276,6 +371,7 @@ where
     migrate_legacy_configuration_inputs_with_digest(
         registry,
         std::slice::from_ref(input),
+        None,
         source_snapshot_digest,
         store,
         now,
@@ -301,6 +397,47 @@ where
     migrate_legacy_configuration_inputs_with_digest(
         registry,
         &inputs.inputs,
+        None,
+        source_snapshot_digest,
+        store,
+        now,
+    )
+    .await
+}
+
+/// Migrate explicitly ordered legacy snapshots together with the canonical
+/// genesis authority contributed by the daemon that registered the project.
+///
+/// The genesis contribution is not a legacy input and never widens what legacy
+/// input may express: legacy source-binding entries stay quarantined as
+/// [`ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority`]. It only
+/// records, at `Canonical` precedence, the binding whose authority the caller
+/// already holds, so a project's first durable revision states its own
+/// identity instead of leaving it unbound.
+pub async fn migrate_legacy_configuration_inputs_with_genesis<Store>(
+    registry: &ConfigurationRegistry,
+    inputs: &ReadonlyLegacyConfigurationInputsV1,
+    genesis: &CanonicalGenesisConfigurationV1,
+    store: &Store,
+    now: UtcMicros,
+) -> Result<ConfigurationMigrationOutcomeV1, ConfigurationMigrationError>
+where
+    Store: ConfigurationMigrationStore,
+{
+    inputs.validate()?;
+    genesis.validate()?;
+    // The receipt key covers the genesis contribution as well, so a project
+    // whose first revision was written before genesis existed is not mistaken
+    // for one that already recorded its own binding.
+    let source_snapshot_digest = canonical_sha256(&(
+        "tracedecay.configuration.legacy-inputs-with-genesis.v1",
+        inputs.snapshot_digest()?,
+        genesis.snapshot_digest()?,
+    ))?;
+    migrate_legacy_configuration_inputs_with_digest(
+        registry,
+        &inputs.inputs,
+        Some(genesis),
         source_snapshot_digest,
         store,
         now,
@@ -311,6 +448,7 @@ where
 async fn migrate_legacy_configuration_inputs_with_digest<Store>(
     registry: &ConfigurationRegistry,
     inputs: &[ReadonlyLegacyConfigurationInputV1],
+    genesis: Option<&CanonicalGenesisConfigurationV1>,
     source_snapshot_digest: ManifestDigest,
     store: &Store,
     now: UtcMicros,
@@ -330,9 +468,21 @@ where
     let initial_revision_id = inputs
         .first()
         .map(|input| input.target_revision_id.clone())
+        .or_else(|| genesis.map(|genesis| genesis.target_revision_id.clone()))
         .ok_or(DomainError::Empty {
             field: "legacy configuration inputs",
         })?;
+    if let Some(genesis) = genesis {
+        // Resolution rejects competing revisions for one layer; refusing here
+        // keeps the receipt's `initial_revision_id` truthful for the genesis
+        // contribution too.
+        if genesis.target_revision_id != initial_revision_id {
+            return Err(DomainError::NonCanonical {
+                field: "canonical genesis revision",
+            }
+            .into());
+        }
+    }
 
     let mut resolution_inputs = Vec::new();
     let mut imported_keys = BTreeSet::new();
@@ -447,6 +597,13 @@ where
                 entries,
             },
         });
+    }
+
+    if let Some(genesis) = genesis {
+        // Appended last so the canonical binding resolves above every legacy
+        // layer, whose own binding entries were already quarantined above.
+        resolution_inputs.push(genesis.resolution_input()?);
+        imported_keys.insert(SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)?);
     }
 
     let resolution = resolve_configuration_inputs(registry, &resolution_inputs)?;

@@ -707,6 +707,46 @@ impl DaemonInvocationClient {
         }
     }
 
+    pub async fn evaluate_and_publish_semantic_profile(
+        &self,
+        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+    ) -> crate::errors::Result<SemanticEvaluationPublicationResultV1> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(1_u128, |duration| duration.as_micros().max(1));
+        let response = self
+            .invoke(
+                crate::daemon::DaemonInvocationRequest::semantic_evaluate_and_publish(
+                    format!("request.semantic-evaluation.{now}"),
+                    candidate,
+                ),
+            )
+            .await?;
+        match response.outcome {
+            crate::daemon::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
+                scope,
+                profile_digest,
+                report_digest,
+                source_generation,
+                snapshot_digest,
+            } => Ok(SemanticEvaluationPublicationResultV1 {
+                project_id: scope.project_id.as_str().to_owned(),
+                profile_digest: profile_digest.as_str().to_owned(),
+                report_digest: report_digest.as_str().to_owned(),
+                source_generation: source_generation.as_str().to_owned(),
+                snapshot_digest: snapshot_digest.as_str().to_owned(),
+            }),
+            crate::daemon::DaemonInvocationOutcome::Problem { problem } => {
+                Err(crate::errors::TraceDecayError::Config {
+                    message: format!("semantic evaluation publication rejected: {problem:?}"),
+                })
+            }
+            _ => Err(crate::errors::TraceDecayError::Config {
+                message: "daemon returned an invalid semantic evaluation response".to_owned(),
+            }),
+        }
+    }
+
     pub(crate) async fn invoke_controlled(
         &self,
         request: crate::daemon::DaemonInvocationRequest,
@@ -763,6 +803,15 @@ impl DaemonInvocationClient {
         .await
         .map_err(|_| DaemonInvocationError::Unavailable)?
     }
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SemanticEvaluationPublicationResultV1 {
+    pub project_id: String,
+    pub profile_digest: String,
+    pub report_digest: String,
+    pub source_generation: String,
+    pub snapshot_digest: String,
 }
 
 fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {

@@ -842,6 +842,8 @@ mod tests {
     #[test]
     fn current_authorization_must_match_scope_and_policy_evidence() {
         let authorization = super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+            grant_revision: 1,
+            grant_digest: digest('c'),
             scope_digest: digest('a'),
             policy_epoch: 7,
             policy_digest: policy_digest('b'),
@@ -885,6 +887,8 @@ mod tests {
         };
         let authorization = Authorization {
             current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 1,
+                grant_digest: digest('c'),
                 scope_digest: scope_digest.clone(),
                 policy_epoch: 7,
                 policy_digest: policy_digest.clone(),

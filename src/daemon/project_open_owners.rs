@@ -21,15 +21,17 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::configuration::{
-    AuthorityRef, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+    ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    resolve_restrictive_capabilities,
 };
 use tracedecay_domain::feedback::{
     CiFailureParserIdentityV1, FeedbackScopeV1, FeedbackTriggerV1, GitHubPullRequestIdV1,
     GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, LocatorDigest, ProjectId, ProviderId, RefId, RepositoryId, UtcMicros,
-    canonical_sha256,
+    ActorId, CapabilityId as DomainCapabilityId, CommitId, LocatorDigest, ProjectId, ProviderId,
+    RefId, RepositoryId, UtcMicros, canonical_sha256,
 };
 use tracedecay_hooks::{HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookHostV1};
 use tracedecay_tool_catalog::CapabilityId;
@@ -44,24 +46,34 @@ use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
 };
-use crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1;
+
+const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
+use crate::agents::context_scout_v2::{
+    ContextScoutDeliverySelectionInputV1, ContextScoutOutcomeV1, ContextScoutServiceStateV1,
+    ContextScoutTriggerV1,
+};
 use crate::agents::host_bundle_v2::HostKindV1;
 use crate::application::advisory::github_runtime::{
-    GitHubExactCommitDiscoveryOutcomeV1, discover_exact_commit_pull_request_v1,
+    ConfiguredGitHubSourceAccessAuthorityV1, GitHubExactCommitDiscoveryOutcomeV1,
+    GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
+    discover_exact_commit_pull_request_v1, resolve_registered_github_read_only_credential_v1,
 };
 use crate::application::advisory::{
-    GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryCycleControlV1,
-    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
-    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
+    GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
+    GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
+    Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1,
+    Pr13AdvisoryHookNoticeQueueV1, Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
     Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
-    register_pr13_advisory_hook_notice_queue,
+    discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
 };
+use crate::application::configuration::ConfigurationControlStore;
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::{
-    Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput, ProductionFeedbackCycleOpenV1,
-    ProductionFeedbackRuntimeStateV1, resolve_production_feedback_cycle_parts,
+    Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
+    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
+    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
+    resolve_production_feedback_cycle_parts,
 };
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
@@ -71,13 +83,15 @@ use crate::application::primitives::{
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::daemon::lsp_gateway::{
-    ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, GatewayCapabilities,
+    ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
+    GatewayCapabilities, LspRuntimeFailure, LspRuntimeFuture,
 };
 use crate::daemon::service::invocation::daemon_operation_event_authority;
 use crate::diagnostics::lsp::broker::{AdmittedLspProvider, MountedLspProvider};
 use crate::diagnostics::lsp::client::LspRefreshTimeouts;
 use crate::diagnostics::lsp::semantic::graph_semantic_capabilities;
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::mcp::McpServer;
 
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
@@ -85,6 +99,528 @@ const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
 const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
+
+struct ProjectOpenAdvisoryFeedbackCycleV1 {
+    registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
+    lsp_input: Pr12FeedbackCycleLspInput,
+    feedback_scope: FeedbackScopeV1,
+    github_pull_request_id: Option<GitHubPullRequestIdV1>,
+    ci_discovery_config: Option<ProductionCiProviderConfigV1>,
+}
+
+impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
+    fn execute(
+        &self,
+        request: FeedbackCycleRequest,
+    ) -> LspRuntimeFuture<std::result::Result<(), LspRuntimeFailure>> {
+        let registration = Arc::clone(&self.registration);
+        let lsp_input = Arc::clone(&self.lsp_input);
+        let feedback_scope = self.feedback_scope.clone();
+        let github_pull_request_id = self.github_pull_request_id.clone();
+        let ci_discovery_config = self.ci_discovery_config.clone();
+        Box::pin(async move {
+            let invocation = lsp_input(request).await?;
+            let observed_at = invocation.request.input.observed_at;
+            let ci = match ci_discovery_config.as_ref() {
+                Some(config) => {
+                    discover_production_ci_failure_request_v1(
+                        &invocation.context,
+                        config,
+                        &feedback_scope,
+                    )
+                    .await
+                }
+                None => {
+                    crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
+                }
+            };
+            let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
+            let operation = daemon_operation_event_authority()
+                .begin(
+                    &invocation.context,
+                    OperationKind::FeedbackDiagnostics,
+                    observed_at,
+                )
+                .await
+                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-operation"))?;
+            let advisory = Pr13AdvisoryCycleRequestV1 {
+                feedback: invocation.request,
+                github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
+                    operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                    scope: feedback_scope.clone(),
+                    pull_request_id,
+                }),
+                ci,
+                proximity: Some(ProximityEvaluationRequestV1 {
+                    scope: feedback_scope,
+                    observed_at,
+                }),
+                validity: tracedecay_application::AdvisoryFindingValidityWindowV1 {
+                    valid_at: observed_at,
+                    expires_at,
+                },
+            };
+            registration
+                .runtime()
+                .run_once(
+                    &invocation.context,
+                    Pr13AdvisoryCycleControlV1 {
+                        operation,
+                        deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+                    },
+                    advisory,
+                )
+                .await
+                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))?;
+            Ok(())
+        })
+    }
+}
+
+struct ProjectOpenFeedbackCycleAuthorizationV1 {
+    project_root: std::path::PathBuf,
+    scope: ResolvedScope,
+    configuration: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
+}
+
+#[derive(Clone)]
+struct ProjectOpenSourceEditAuthorizationV1 {
+    project_root: std::path::PathBuf,
+    scope: ResolvedScope,
+    configuration: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
+}
+
+struct CurrentSourceEditAuthorityV1 {
+    receipt: tracedecay_application::AuthorityReceipt,
+    proof: tracedecay_application::SourceEditEffectProofV1,
+}
+
+impl ProjectOpenSourceEditAuthorizationV1 {
+    async fn current_access(
+        &self,
+        observed_at: UtcMicros,
+    ) -> std::result::Result<ProjectSourceAccessSnapshot, tracedecay_application::ApplicationProblem>
+    {
+        let current = self
+            .configuration
+            .client()
+            .current()
+            .await
+            .map_err(|_| concealed_source_edit_problem())?;
+        daemon_owned_project_source_access_at(
+            &self.scope,
+            &self.project_root,
+            &current,
+            observed_at,
+        )
+        .map_err(|_| concealed_source_edit_problem())
+    }
+
+    async fn current_authority(
+        &self,
+        context: &tracedecay_application::RequestContext,
+        operation: &tracedecay_application::ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> std::result::Result<CurrentSourceEditAuthorityV1, tracedecay_application::ApplicationProblem>
+    {
+        let access = self.current_access(observed_at).await?;
+        if context.admission_at(observed_at) != tracedecay_application::RequestAdmission::Admitted
+            || !access.allows(context, operation, observed_at)
+        {
+            return Err(concealed_source_edit_problem());
+        }
+        let catalog = crate::catalog_composition::build_application_catalog_snapshot()
+            .map_err(|_| concealed_source_edit_problem())?;
+        let manifest = catalog
+            .capability(operation.capability_id())
+            .ok_or_else(concealed_source_edit_problem)?;
+        let catalog_digest = tracedecay_domain::ManifestDigest::new(catalog.digest().to_string())
+            .map_err(|_| concealed_source_edit_problem())?;
+        let privacy_domain_id = tracedecay_domain::PrivacyDomainId::new(format!(
+            "privacy.local-source-edit.{}",
+            access.scope.project_id.as_str()
+        ))
+        .map_err(|_| concealed_source_edit_problem())?;
+        let privacy_digest = canonical_sha256(&(
+            "tracedecay.daemon.source-edit-privacy.v1",
+            &privacy_domain_id,
+            SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1,
+            manifest.privacy(),
+            manifest.denied_disclosure(),
+            manifest.scope(),
+            &access.binding,
+            &access.configuration_provenance_digest,
+        ))
+        .map_err(|_| concealed_source_edit_problem())?;
+        let policy_digest = canonical_sha256(&(
+            "tracedecay.daemon.source-edit-policy.v1",
+            &access.scope,
+            &access.requester,
+            &access.binding,
+            &access.configuration_digest,
+            &access.configuration_provenance_digest,
+            operation.capability_id(),
+            operation.use_case_id(),
+            &catalog_digest,
+            &privacy_digest,
+        ))
+        .map_err(|_| concealed_source_edit_problem())?;
+        let policy = tracedecay_application::PolicyDecisionRef::new(
+            "policy.daemon.source-edit.v1",
+            POLICY_REVISION_V1,
+            policy_digest,
+            tracedecay_domain::ComponentVersion::new("tracedecay.daemon.source-edit-policy.v1")
+                .map_err(|_| concealed_source_edit_problem())?,
+        )
+        .map_err(|_| concealed_source_edit_problem())?;
+        let receipt =
+            tracedecay_application::AuthorityReceipt::from_context(context, policy, observed_at)
+                .map_err(|_| concealed_source_edit_problem())?;
+        let proof = tracedecay_application::SourceEditEffectProofV1 {
+            policy_digest: receipt.policy.digest.clone(),
+            configuration_revision_id: access.configuration_revision,
+            configuration_digest: access.configuration_digest,
+            catalog_revision: manifest.routing().revision(),
+            catalog_digest,
+            privacy_domain_id,
+            privacy_key_epoch: SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1,
+            privacy_digest,
+            external_proof: None,
+        };
+        proof
+            .validate_for(&receipt)
+            .map_err(|_| concealed_source_edit_problem())?;
+        Ok(CurrentSourceEditAuthorityV1 { receipt, proof })
+    }
+}
+
+impl tracedecay_application::SourceEditAuthorizationPort for ProjectOpenSourceEditAuthorizationV1 {
+    fn admit<'a>(
+        &'a self,
+        context: &'a tracedecay_application::RequestContext,
+        operation: &'a tracedecay_application::ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> tracedecay_application::SourceEditAuthorizationFuture<'a> {
+        Box::pin(async move {
+            self.current_authority(context, operation, observed_at)
+                .await
+                .and_then(|current| {
+                    tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+                        current.receipt,
+                        current.proof,
+                        context.scope(),
+                    )
+                    .map_err(|_| concealed_source_edit_problem())
+                })
+        })
+    }
+
+    fn recheck_effect<'a>(
+        &'a self,
+        context: &'a tracedecay_application::RequestContext,
+        operation: &'a tracedecay_application::ApplicationOperation,
+        admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
+        observed_at: UtcMicros,
+    ) -> tracedecay_application::SourceEditAuthorizationFuture<'a> {
+        Box::pin(async move {
+            let current = self
+                .current_authority(context, operation, observed_at)
+                .await?;
+            if current.receipt.grant_id != admission.receipt.grant_id
+                || current.receipt.grant_revision != admission.receipt.grant_revision
+                || current.receipt.grant_digest != admission.receipt.grant_digest
+                || current.receipt.authorized_scope_digest
+                    != admission.receipt.authorized_scope_digest
+                || current.receipt.disclosure != admission.receipt.disclosure
+                || current.receipt.policy != admission.receipt.policy
+                || current.proof != admission.proof
+            {
+                return Err(concealed_source_edit_problem());
+            }
+            tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+                current.receipt,
+                current.proof,
+                context.scope(),
+            )
+            .map_err(|_| concealed_source_edit_problem())
+        })
+    }
+}
+
+fn concealed_source_edit_problem() -> tracedecay_application::ApplicationProblem {
+    tracedecay_application::ApplicationProblem::not_found_or_not_authorized(
+        tracedecay_application::RetryDirective::Never,
+    )
+}
+
+async fn invoke_project_open_source_edit(
+    graph: Arc<crate::tracedecay::TraceDecay>,
+    authorization: ProjectOpenSourceEditAuthorizationV1,
+    invocation: crate::mcp::server::SourceEditInvocationV1,
+) -> Result<crate::application::edit::SourceEditApplicationResult> {
+    let observed_at = now_micros();
+    let operation = tracedecay_application::source_edit_operation(invocation.edit.kind())
+        .map_err(source_edit_contract_error)?;
+    let access = authorization
+        .current_access(observed_at)
+        .await
+        .map_err(|_| source_edit_authority_error())?;
+    let context = source_edit_request_context(
+        &access,
+        invocation.request_id,
+        &operation,
+        observed_at,
+        invocation.deadline.clone(),
+        invocation.cancellation.context(),
+    )?;
+    let effect_control = crate::application::edit::SourceEditEffectControlV1::new(
+        context.deadline().clone(),
+        invocation.cancellation.clone(),
+    );
+    let current = authorization
+        .current_authority(&context, &operation, observed_at)
+        .await
+        .map_err(|_| source_edit_authority_error())?;
+    let dry_run = invocation.edit.dry_run();
+    let idempotency_key = match invocation.idempotency_key {
+        Some(key) => key,
+        None if dry_run => tracedecay_application::IdempotencyKey::new(format!(
+            "preview.{}",
+            context.request_id().as_str()
+        ))
+        .map_err(source_edit_contract_error)?,
+        None => {
+            return Err(TraceDecayError::Config {
+                message: "source edit apply requires an idempotency key".to_owned(),
+            });
+        }
+    };
+    let expected_state = match invocation.expected_state {
+        Some(state) => state,
+        None if dry_run => canonical_sha256(&(
+            "tracedecay.source-edit-preview-unbound-state.v1",
+            context.request_id(),
+            &invocation.edit,
+        ))
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("source edit preview state identity failed: {error}"),
+        })?,
+        None => {
+            return Err(TraceDecayError::Config {
+                message: "source edit apply requires an expected state".to_owned(),
+            });
+        }
+    };
+    let request = tracedecay_application::SourceEditEffectRequestV1 {
+        context,
+        authority: current.receipt.clone(),
+        edit: invocation.edit,
+        idempotency_key,
+        expected_state,
+        proof: current.proof,
+        observed_at,
+    };
+    crate::application::edit::execute_source_edit_with_control(
+        &graph,
+        &operation,
+        request,
+        &authorization,
+        &effect_control,
+    )
+    .await
+}
+
+async fn invoke_project_open_source_edit_reconciliation(
+    graph: Arc<crate::tracedecay::TraceDecay>,
+    authorization: ProjectOpenSourceEditAuthorizationV1,
+    invocation: crate::mcp::server::SourceEditReconciliationInvocationV1,
+) -> Result<crate::application::edit::SourceEditApplicationResult> {
+    let observed_at = now_micros();
+    let effect_control = crate::application::edit::SourceEditEffectControlV1::new(
+        invocation.deadline.clone(),
+        invocation.cancellation.clone(),
+    );
+    let operation = tracedecay_application::source_edit_reconciliation_operation()
+        .map_err(source_edit_contract_error)?;
+    let access = authorization
+        .current_access(observed_at)
+        .await
+        .map_err(|_| source_edit_authority_error())?;
+    let context = source_edit_request_context(
+        &access,
+        invocation.request_id,
+        &operation,
+        observed_at,
+        invocation.deadline,
+        invocation.cancellation.context(),
+    )?;
+    let current = authorization
+        .current_authority(&context, &operation, observed_at)
+        .await
+        .map_err(|_| source_edit_authority_error())?;
+    let request = tracedecay_application::SourceEditReconciliationRequestV1 {
+        context,
+        authority: current.receipt.clone(),
+        kind: invocation.kind,
+        effect_id: invocation.effect_id,
+        idempotency_key: invocation.idempotency_key,
+        attempt_idempotency_key: invocation.attempt_idempotency_key,
+        input_digest: invocation.input_digest,
+        disposition: invocation.disposition,
+        proof: current.proof,
+        observed_at,
+    };
+    crate::application::edit::reconcile_source_edit_effect_unknown_with_control(
+        &graph,
+        request,
+        &authorization,
+        &effect_control,
+    )
+    .await
+}
+
+fn install_project_open_source_edit_owners(
+    server: &McpServer,
+    graph: Arc<crate::tracedecay::TraceDecay>,
+    authorization: ProjectOpenSourceEditAuthorizationV1,
+) -> Result<()> {
+    let source_edit_graph = Arc::clone(&graph);
+    let source_edit_reconciliation_authorization = authorization.clone();
+    server
+        .install_source_edit_executor(Arc::new(move |request| {
+            let graph = Arc::clone(&source_edit_graph);
+            let authorization = authorization.clone();
+            Box::pin(
+                async move { invoke_project_open_source_edit(graph, authorization, request).await },
+            )
+        }))
+        .map_err(|_| TraceDecayError::Config {
+            message: "project-open source edit authority was already installed".to_owned(),
+        })?;
+    server
+        .install_source_edit_reconciliation_executor(Arc::new(move |request| {
+            let graph = Arc::clone(&graph);
+            let authorization = source_edit_reconciliation_authorization.clone();
+            Box::pin(async move {
+                invoke_project_open_source_edit_reconciliation(graph, authorization, request).await
+            })
+        }))
+        .map_err(|_| TraceDecayError::Config {
+            message: "project-open source edit reconciliation authority was already installed"
+                .to_owned(),
+        })?;
+    Ok(())
+}
+
+#[cfg(feature = "test-transport")]
+pub(crate) async fn install_project_open_source_edit_owners_for_test(
+    server: &McpServer,
+) -> Result<()> {
+    let graph = server.cg().await;
+    let project_root = graph.project_root().to_path_buf();
+    let project_id = graph
+        .configuration_runtime()
+        .configuration_target()
+        .project_id
+        .clone();
+    let scope = resolved_scope_for_project(&project_root, &project_id).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("test project-open resolved scope denied: {error}"),
+        }
+    })?;
+    let authorization = ProjectOpenSourceEditAuthorizationV1 {
+        project_root,
+        scope,
+        configuration: Arc::clone(graph.configuration_runtime()),
+    };
+    install_project_open_source_edit_owners(server, graph, authorization)
+}
+
+fn source_edit_request_context(
+    access: &ProjectSourceAccessSnapshot,
+    request_id: tracedecay_application::RequestId,
+    operation: &tracedecay_application::ApplicationOperation,
+    observed_at: UtcMicros,
+    deadline: tracedecay_application::Deadline,
+    cancellation: tracedecay_application::CancellationContext,
+) -> Result<tracedecay_application::RequestContext> {
+    if cancellation.is_cancelled() || deadline.is_elapsed_at(observed_at) {
+        return Err(source_edit_authority_error());
+    }
+    let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
+    if expires_at.0 <= observed_at.0 {
+        return Err(source_edit_authority_error());
+    }
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.daemon.source-edit-grant.v1",
+        &access.scope,
+        &access.requester,
+        &access.configuration_digest,
+        operation.capability_id(),
+        operation.use_case_id(),
+        request_id.as_str(),
+    ))
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("source edit route grant unavailable: {error}"),
+    })?;
+    let grant = tracedecay_application::CapabilityGrantSnapshot::new(
+        tracedecay_application::CapabilityGrantId::new(format!(
+            "grant.daemon.source-edit.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))
+        .map_err(source_edit_contract_error)?,
+        POLICY_REVISION_V1,
+        grant_digest,
+        access.requester.clone(),
+        observed_at,
+        expires_at,
+        access.scope.clone(),
+        BTreeSet::from([operation.capability_id().clone()]),
+        BTreeSet::from([operation.use_case_id().clone()]),
+        tracedecay_application::DisclosureClass::Sensitive,
+    )
+    .map_err(source_edit_contract_error)?;
+    tracedecay_application::RequestContext::new(
+        access.requester.clone(),
+        access.scope.clone(),
+        grant,
+        request_id,
+        tracedecay_application::Deadline::new(expires_at).map_err(source_edit_contract_error)?,
+        cancellation,
+    )
+    .map_err(source_edit_contract_error)
+}
+
+fn source_edit_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("source edit invocation contract is invalid: {error}"),
+    }
+}
+
+fn source_edit_authority_error() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "source edit was not found or is not authorized".to_owned(),
+    }
+}
+
+impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthorizationV1 {
+    fn authorize(&self, observed_at: UtcMicros) -> ProductionFeedbackCycleAuthorizationFuture<'_> {
+        Box::pin(async move {
+            let current = self.configuration.client().current().await.map_err(|_| {
+                crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-authorization")
+            })?;
+            daemon_owned_project_source_access_at(
+                &self.scope,
+                &self.project_root,
+                &current,
+                observed_at,
+            )
+            .map_err(|_| {
+                crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-authorization")
+            })
+        })
+    }
+}
 
 fn unavailable_advisory_hook_notice(
     _notice: &Pr13AdvisoryHookLookupNoticeV1,
@@ -133,7 +669,14 @@ pub(crate) async fn register_project_open_production_owners(
             "PR9 search authority unavailable; non-search project surfaces remain mounted"
         );
     }
-    let configuration = graph.configuration_runtime().configuration().clone();
+    let configuration = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open configuration currentness failed: {error}"),
+        })?;
     let scout_configuration = crate::application::configuration::ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
@@ -199,11 +742,17 @@ pub(crate) async fn register_project_open_production_owners(
             });
         }
     };
-    let access = daemon_owned_project_source_access(&scope, project_root, &configuration).map_err(
-        |error| TraceDecayError::Config {
+    let access =
+        daemon_owned_project_source_access_at(&scope, project_root, &configuration, now_micros())
+            .map_err(|error| TraceDecayError::Config {
             message: format!("project-open source access denied: {error}"),
-        },
-    )?;
+        })?;
+    let source_edit_authorization = ProjectOpenSourceEditAuthorizationV1 {
+        project_root: project_root.to_path_buf(),
+        scope: scope.clone(),
+        configuration: Arc::clone(graph.configuration_runtime()),
+    };
+    install_project_open_source_edit_owners(server, Arc::clone(&graph), source_edit_authorization)?;
     let configuration_digest = access.configuration_digest.clone();
     let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
@@ -253,6 +802,7 @@ pub(crate) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             scope.clone(),
             access.clone(),
+            Arc::clone(graph.configuration_runtime()),
         )
         .await
     {
@@ -317,7 +867,6 @@ pub(crate) async fn register_project_open_production_owners(
         scope.clone(),
         configuration,
         requester,
-        grant_expires_at,
         mounted_providers.clone(),
     )
     .await?;
@@ -339,6 +888,7 @@ pub(crate) async fn register_project_open_production_owners(
         session_db,
         Arc::clone(&graph),
         scope,
+        access,
         feedback_scope,
         feedback_cycle,
         feedback_lsp_input,
@@ -429,7 +979,6 @@ async fn register_production_feedback_cycle(
     scope: ResolvedScope,
     configuration: crate::config::PinnedRuntimeConfiguration,
     requester: ActorId,
-    grant_expires_at: UtcMicros,
     mounted_providers: Vec<MountedLspProvider>,
 ) -> Result<(
     Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
@@ -450,6 +999,12 @@ async fn register_production_feedback_cycle(
         configuration_digest.clone(),
         policy_digest,
     ));
+    let authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort> =
+        Arc::new(ProjectOpenFeedbackCycleAuthorizationV1 {
+            project_root: project_root.to_path_buf(),
+            scope: scope.clone(),
+            configuration: Arc::clone(graph.configuration_runtime()),
+        });
     let parts = resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
         project_root: project_root.to_path_buf(),
         project_runtime_db,
@@ -459,7 +1014,7 @@ async fn register_production_feedback_cycle(
             snapshot: configuration.snapshot,
         },
         requester,
-        grant_expires_at,
+        authorization,
         graph: Arc::clone(&graph),
         runtime_state: Arc::clone(&runtime_state) as _,
         document_identity: Arc::new(invocation.code_index_schedulers.clone()),
@@ -553,6 +1108,7 @@ async fn register_production_advisory_owner(
     project_runtime_db: Arc<crate::global_db::RegisteredGlobalDb>,
     graph: Arc<crate::tracedecay::TraceDecay>,
     resolved_scope: ResolvedScope,
+    source_access: ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
     feedback_cycle: Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
     feedback_lsp_input: Pr12FeedbackCycleLspInput,
@@ -579,15 +1135,22 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open Context Scout configuration failed: {error}"),
         })?;
-    let github = resolve_production_github_review_config(
+    let (github, github_source_access) = match resolve_production_github_review_config(
         project_root,
         database.clone(),
+        Arc::clone(&project_runtime_db),
         resolved_scope.clone(),
+        &source_access,
         feedback_scope.clone(),
     )
-    .await;
+    .await
+    {
+        Some((github, source_access)) => (Some(github), Some(source_access)),
+        None => (None, None),
+    };
     let (github, ci_config, github_pull_request_id) =
-        optional_remote_provider_configuration(github)?;
+        optional_remote_provider_configuration(github, github_source_access.as_ref());
+    let ci_discovery_config = ci_config.clone();
     let ci_retained = Arc::new(
         ProjectCiRetainedObservationStoreV1::new(database.clone(), feedback_scope.clone())
             .ok_or_else(|| TraceDecayError::Config {
@@ -633,6 +1196,7 @@ async fn register_production_advisory_owner(
         github,
         feedback_cycle,
     };
+    let scout_claim_graph = Arc::clone(&graph);
     let production = Pr13AdvisoryProductionOpenV1 {
         database,
         project_runtime_db,
@@ -640,6 +1204,7 @@ async fn register_production_advisory_owner(
         project_root: project_root.to_path_buf(),
         feedback_scope,
         ci_config,
+        github_source_access,
         ci_retained,
         ci_code_anchors,
         hook_v2,
@@ -663,16 +1228,33 @@ async fn register_production_advisory_owner(
             });
         }
     };
+    invocation
+        .feedback_runtime_registrar()
+        .install_advisory_cycle_input(
+            project_root,
+            Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
+                registration: Arc::clone(&registration),
+                lsp_input: Arc::clone(&feedback_lsp_input),
+                feedback_scope: feedback_scope_for_work.clone(),
+                github_pull_request_id: github_pull_request_id.clone(),
+                ci_discovery_config: ci_discovery_config.clone(),
+            }),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open advisory LSP cycle registration failed: {error}"),
+        })?;
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();
     let work = move |request: Pr13HookOrchestrationRequestV1| {
         let registration = Arc::clone(&registration);
         let feedback_lsp_input = Arc::clone(&feedback_lsp_input);
+        let graph = Arc::clone(&scout_claim_graph);
         let scout_owner = Arc::clone(&scout_owner);
         let scout_registry = Arc::clone(&scout_registry);
-        let scout_configuration = scout_configuration.clone();
         let feedback_runtime = Arc::clone(&feedback_runtime);
         let github_pull_request_id = github_pull_request_id.clone();
+        let ci_discovery_config = ci_discovery_config.clone();
         let feedback_scope = feedback_scope_for_work.clone();
         let project_root = work_root.clone();
         let root_uri = root_uri.clone();
@@ -682,11 +1264,12 @@ async fn register_production_advisory_owner(
                 request,
                 registration,
                 feedback_lsp_input,
+                graph,
                 scout_owner,
                 scout_registry,
-                scout_configuration,
                 feedback_runtime,
                 github_pull_request_id,
+                ci_discovery_config,
                 feedback_scope,
                 project_root,
                 root_uri,
@@ -719,11 +1302,12 @@ async fn run_production_pr13_hook_cycle(
     request: Pr13HookOrchestrationRequestV1,
     registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
     feedback_lsp_input: Pr12FeedbackCycleLspInput,
+    graph: Arc<crate::tracedecay::TraceDecay>,
     scout_owner: Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    scout_configuration: ContextScoutConfigurationPinV1,
     feedback_runtime: Arc<crate::application::feedback::concrete::Pr12FeedbackRuntime>,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
+    ci_discovery_config: Option<ProductionCiProviderConfigV1>,
     feedback_scope: FeedbackScopeV1,
     project_root: std::path::PathBuf,
     root_uri: String,
@@ -770,6 +1354,13 @@ async fn run_production_pr13_hook_cycle(
     else {
         return;
     };
+    let ci = match ci_discovery_config.as_ref() {
+        Some(config) => {
+            discover_production_ci_failure_request_v1(&invocation.context, config, &feedback_scope)
+                .await
+        }
+        None => crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
+    };
     let advisory = Pr13AdvisoryCycleRequestV1 {
         feedback: invocation.request,
         github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
@@ -777,7 +1368,7 @@ async fn run_production_pr13_hook_cycle(
             scope: feedback_scope.clone(),
             pull_request_id,
         }),
-        ci: None,
+        ci,
         proximity: Some(ProximityEvaluationRequestV1 {
             scope: feedback_scope.clone(),
             observed_at,
@@ -787,6 +1378,8 @@ async fn run_production_pr13_hook_cycle(
             expires_at,
         },
     };
+    let feedback_configuration_digest =
+        advisory.feedback.input.request.configuration_digest.clone();
     let host = host_kind_for_hook(request.hook.envelope().producer);
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: request.hook_configuration_revision,
@@ -805,6 +1398,26 @@ async fn run_production_pr13_hook_cycle(
         )
         .await
         .is_err()
+    {
+        return;
+    }
+    let Ok(pinned_configuration) = graph.configuration_runtime().client().current().await else {
+        return;
+    };
+    let current_configuration = crate::application::configuration::ConfigurationCurrentStateV1 {
+        revision_id: pinned_configuration.revision_id,
+        snapshot: pinned_configuration.snapshot,
+    };
+    let Some(scout_configuration) =
+        ContextScoutConfigurationPinV1::from_current(&current_configuration)
+    else {
+        return;
+    };
+    if scout_configuration.configuration_digest() != &feedback_configuration_digest
+        || scout_owner
+            .install_configuration(scout_configuration.clone(), None)
+            .await
+            .is_err()
     {
         return;
     }
@@ -827,7 +1440,7 @@ async fn run_production_pr13_hook_cycle(
         .bind_and_assemble(
             &request.hook,
             &pin,
-            lifecycle,
+            lifecycle.clone(),
             &invocation.context,
             observed_at,
         )
@@ -835,21 +1448,72 @@ async fn run_production_pr13_hook_cycle(
     else {
         return;
     };
-    let window = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => ContextScoutDeliveryWindowV1::NextBoundary,
-        Pr13HookOrchestrationTriggerV1::Stop => ContextScoutDeliveryWindowV1::Immediate,
-        Pr13HookOrchestrationTriggerV1::Explicit => ContextScoutDeliveryWindowV1::OnRequest,
+    let trigger = match request.trigger {
+        Pr13HookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
+        Pr13HookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
+        Pr13HookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
     };
-    let Some(selection) = canonical.selection_input(&request.hook, observed_at, window) else {
+    let recent = scout_owner.recent_exact(canonical.address, 32).await.ok();
+    let has_recent_delivery = recent
+        .as_ref()
+        .is_some_and(|recent| !recent.deliveries.is_empty());
+    let has_unresolved_interaction = recent.as_ref().is_some_and(|recent| {
+        !recent.pending.is_empty()
+            || recent.deliveries.iter().any(|delivery| {
+                delivery.feedback.is_none()
+                    && matches!(
+                        delivery.receipt.outcome,
+                        ContextScoutOutcomeV1::Attempted
+                            | ContextScoutOutcomeV1::Delayed
+                            | ContextScoutOutcomeV1::Displayed
+                            | ContextScoutOutcomeV1::Expanded
+                            | ContextScoutOutcomeV1::Unknown
+                    )
+            })
+    });
+    let Some(selection) = canonical.selection_input(
+        &request.hook,
+        observed_at,
+        ContextScoutDeliverySelectionInputV1 {
+            trigger,
+            quiet_mode: canonical.control.state != ContextScoutServiceStateV1::Active,
+            has_recent_delivery,
+            has_unresolved_interaction,
+            critical_safety_evidence: false,
+            delivered_dedupe_keys: recent
+                .as_ref()
+                .into_iter()
+                .flat_map(|recent| recent.deliveries.iter())
+                .map(|delivery| delivery.entry.envelope.candidate.dedupe_key)
+                .collect(),
+        },
+    ) else {
         return;
     };
-    let _ = scout_owner
+    let outcome = scout_owner
         .prepare_configured(
             &selection,
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             CancellationToken::new(),
         )
         .await;
+    if matches!(
+        outcome,
+        Ok(crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Enqueued { .. })
+    ) {
+        let _ = graph
+            .mount_current_context_scout_claim_authority(
+                scout_registry,
+                &request.hook,
+                pin,
+                invocation.context,
+                lifecycle,
+                canonical.address,
+                selection.input_watermark,
+                observed_at,
+            )
+            .await;
+    }
 }
 
 fn hook_feedback_document_uri(
@@ -881,34 +1545,51 @@ fn hash16(value: &[u8]) -> [u8; 16] {
 
 fn optional_remote_provider_configuration(
     github: Option<GitHubReviewRuntimeOwnerConfigV1>,
-) -> Result<(
+    github_source_access: Option<&Arc<dyn GitHubSourceAccessAuthorityV1>>,
+) -> (
     Option<GitHubReviewRuntimeOwnerConfigV1>,
     Option<ProductionCiProviderConfigV1>,
     Option<GitHubPullRequestIdV1>,
-)> {
+) {
     let ci_config = github
         .as_ref()
-        .map(|github| {
-            Ok::<ProductionCiProviderConfigV1, TraceDecayError>(ProductionCiProviderConfigV1 {
-                provider: ProviderId::new("provider.github-actions").map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!("project-open CI provider identity failed: {error}"),
-                    }
-                })?,
-                parser: CiFailureParserIdentityV1 {
-                    parser_id: "parser.github-actions.v1".to_owned(),
-                    parser_version: "1".to_owned(),
-                },
-                target: github.target.clone(),
-                credential: github.credential.clone(),
-                http: github.http.clone(),
-            })
+        .filter(|github| {
+            github.credential.permits(GitHubReadPermissionV1::Actions)
+                && github.credential.permits(GitHubReadPermissionV1::Checks)
         })
-        .transpose()?;
+        .and_then(|github| {
+            let source_access = github_source_access.map(Arc::clone)?;
+            Some(production_ci_provider_configuration(
+                github.target.clone(),
+                github.credential.clone(),
+                github.http.clone(),
+                source_access,
+            ))
+        });
     let github_pull_request_id = github
         .as_ref()
         .map(|github| github.target.pull_request_id.clone());
-    Ok((github, ci_config, github_pull_request_id))
+    (github, ci_config, github_pull_request_id)
+}
+
+fn production_ci_provider_configuration(
+    target: GitHubRepositoryTargetV1,
+    credential: GitHubReadOnlyCredentialV1,
+    http: GitHubHttpReadConfigV1,
+    source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+) -> ProductionCiProviderConfigV1 {
+    ProductionCiProviderConfigV1 {
+        provider: ProviderId::new("provider.github-actions")
+            .expect("static GitHub Actions provider id"),
+        parser: CiFailureParserIdentityV1 {
+            parser_id: "parser.github-actions.v1".to_owned(),
+            parser_version: "1".to_owned(),
+        },
+        target,
+        credential,
+        http,
+        source_access,
+    }
 }
 
 const fn host_kind_for_hook(host: HookHostV1) -> HostKindV1 {
@@ -930,35 +1611,190 @@ const fn host_kind_for_hook(host: HookHostV1) -> HostKindV1 {
 async fn resolve_production_github_review_config(
     project_root: &Path,
     database: crate::db::Database,
+    project_runtime_db: Arc<crate::global_db::RegisteredGlobalDb>,
     resolved_scope: ResolvedScope,
+    project_source_access: &ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
-) -> Option<GitHubReviewRuntimeOwnerConfigV1> {
+) -> Option<(
+    GitHubReviewRuntimeOwnerConfigV1,
+    Arc<dyn GitHubSourceAccessAuthorityV1>,
+)> {
     let (owner, repository) =
         github_repository_from_remote(&crate::tracedecay::git_remote_url(project_root)?)?;
+    let credential = match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
+        crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Verified(
+            credential,
+        ) => credential,
+        crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Missing => {
+            GitHubReadOnlyCredentialV1::anonymous()
+        }
+        crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Rejected => {
+            return None;
+        }
+    };
+    let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
+        project_runtime_db,
+    );
+    let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> =
+        Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
+            configuration,
+            resolved_scope.clone(),
+            &owner,
+            &repository,
+        )?);
+    let authorization_context =
+        github_discovery_authorization_context(project_source_access, &feedback_scope)?;
+    let discovery_request = github_discovery_source_access_request(&feedback_scope)?;
     let head_commit_id = feedback_scope.head_commit_id.clone();
     let http = GitHubHttpReadConfigV1::default();
     let discovery_http = http.clone();
-    let discovery = tokio::task::spawn_blocking(move || {
-        discover_exact_commit_pull_request_v1(&owner, &repository, &head_commit_id, &discovery_http)
-    })
-    .await
-    .ok()?;
+    let discovery_credential = credential.clone();
+    let discovery = discover_github_pull_request_after_authorization(
+        || source_access.authorize(&authorization_context, &discovery_request),
+        move || {
+            discover_exact_commit_pull_request_v1(
+                &owner,
+                &repository,
+                &head_commit_id,
+                &discovery_http,
+                &discovery_credential,
+            )
+        },
+    )
+    .await?;
     let GitHubExactCommitDiscoveryOutcomeV1::Found(pull) = discovery else {
         return None;
     };
     let target = pull.target.clone();
-    let credential = resolve_production_github_credential()?;
+    let exact_request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+        scope: feedback_scope.clone(),
+        pull_request_id: target.pull_request_id.clone(),
+    };
+    if source_access
+        .authorize(&authorization_context, &exact_request)
+        .await
+        != GitHubProviderLifecycleV1::Ready
+    {
+        return None;
+    }
     let identity =
         resolve_production_github_identity(project_root, &feedback_scope, &target, pull)?;
-    Some(GitHubReviewRuntimeOwnerConfigV1 {
-        database,
-        resolved_scope,
-        feedback_scope,
-        target,
-        credential,
-        http,
-        identity,
-    })
+    Some((
+        GitHubReviewRuntimeOwnerConfigV1 {
+            database,
+            resolved_scope,
+            feedback_scope,
+            target,
+            credential,
+            http,
+            identity,
+        },
+        source_access,
+    ))
+}
+
+async fn discover_github_pull_request_after_authorization<A, AF, F>(
+    authorize: A,
+    discover: F,
+) -> Option<GitHubExactCommitDiscoveryOutcomeV1>
+where
+    A: FnOnce() -> AF,
+    AF: std::future::Future<Output = GitHubProviderLifecycleV1>,
+    F: FnOnce() -> GitHubExactCommitDiscoveryOutcomeV1 + Send + 'static,
+{
+    if authorize().await != GitHubProviderLifecycleV1::Ready {
+        return None;
+    }
+    tokio::task::spawn_blocking(discover).await.ok()
+}
+
+fn github_discovery_source_access_request(
+    feedback_scope: &FeedbackScopeV1,
+) -> Option<GitHubReviewReadRequestV1> {
+    let request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+        scope: feedback_scope.clone(),
+        // Authorization binds repository access to this exact commit before
+        // discovery; this authorization-only identifier is never sent.
+        pull_request_id: GitHubPullRequestIdV1::new(format!(
+            "discovery.commit.{}",
+            feedback_scope.head_commit_id.as_str()
+        ))
+        .ok()?,
+    };
+    request.validate().is_ok().then_some(request)
+}
+
+fn github_discovery_authorization_context(
+    access: &ProjectSourceAccessSnapshot,
+    feedback_scope: &FeedbackScopeV1,
+) -> Option<tracedecay_application::RequestContext> {
+    let observed_at = now_micros();
+    if feedback_scope.validate().is_err()
+        || access.scope.project_id != feedback_scope.project_id
+        || access.scope.repository_id != feedback_scope.repository_id
+        || access.scope.worktree_id != feedback_scope.worktree_id
+        || access.scope.reference.as_ref().map(RefId::as_str)
+            != Some(feedback_scope.branch_ref.as_str())
+        || observed_at >= access.grant_expires_at
+    {
+        return None;
+    }
+    let capability = CapabilityId::new(GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1.to_owned()).ok()?;
+    if !access.effective_capabilities.contains(&capability) {
+        return None;
+    }
+    let use_case = tracedecay_tool_catalog::UseCaseId::new(
+        tracedecay_application::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1.to_owned(),
+    )
+    .ok()?;
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.project-open.github-discovery-grant.v1",
+        &access.scope,
+        &access.requester,
+        &access.configuration_digest,
+        &feedback_scope.head_commit_id,
+        &capability,
+        &use_case,
+        observed_at,
+        access.grant_expires_at,
+    ))
+    .ok()?;
+    let grant = tracedecay_application::CapabilityGrantSnapshot::new(
+        tracedecay_application::CapabilityGrantId::new(format!(
+            "grant.tracedecay-daemon.project-open.github-discovery.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))
+        .ok()?,
+        POLICY_REVISION_V1,
+        grant_digest,
+        access.requester.clone(),
+        observed_at,
+        access.grant_expires_at,
+        access.scope.clone(),
+        BTreeSet::from([capability]),
+        BTreeSet::from([use_case]),
+        tracedecay_application::DisclosureClass::Evidence,
+    )
+    .ok()?;
+    tracedecay_application::RequestContext::new(
+        access.requester.clone(),
+        access.scope.clone(),
+        grant,
+        tracedecay_application::RequestId::new(format!(
+            "request.project-open.github-discovery.{}",
+            feedback_scope.head_commit_id.as_str()
+        ))
+        .ok()?,
+        tracedecay_application::Deadline::new(access.grant_expires_at).ok()?,
+        tracedecay_application::CancellationContext::active(format!(
+            "cancel.project-open.github-discovery.{}",
+            feedback_scope.head_commit_id.as_str()
+        ))
+        .ok()?,
+    )
+    .ok()
 }
 
 fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
@@ -1003,15 +1839,6 @@ fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
         .then_some((target.owner, target.repository))
 }
 
-fn resolve_production_github_credential() -> Option<GitHubReadOnlyCredentialV1> {
-    // `gh auth token` does not prove the token's effective GitHub permissions.
-    // Relabeling it with locally declared read scopes could admit a
-    // write-capable credential. Public-repository anonymous reads are the only
-    // production credential posture until a registered authority supplies
-    // verified provider permissions.
-    Some(GitHubReadOnlyCredentialV1::anonymous())
-}
-
 fn resolve_production_github_identity(
     project_root: &Path,
     feedback_scope: &FeedbackScopeV1,
@@ -1052,10 +1879,11 @@ fn resolve_production_github_identity(
     identity.validate().then_some(identity)
 }
 
-fn daemon_owned_project_source_access(
+pub(super) fn daemon_owned_project_source_access_at(
     scope: &ResolvedScope,
     project_root: &Path,
     configuration: &crate::config::PinnedRuntimeConfiguration,
+    observed_at: UtcMicros,
 ) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
     let locator = locator_digest_for_project(project_root)?;
     let locator = LocatorDigest::new(locator.as_str().to_owned()).map_err(|_| {
@@ -1087,13 +1915,91 @@ fn daemon_owned_project_source_access(
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open configuration snapshot",
         })?;
+    let requester = ActorId::new(DAEMON_REQUESTER.to_owned()).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "project-open requester",
+        }
+    })?;
+    let authority = AuthorityRef::Project(scope.project_id.clone());
+    let bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "project-open source bindings key",
+        }
+    })?;
+    let Some(ConfigurationValueV1::SourceBindings(bindings)) =
+        configuration.snapshot.effective_values.get(&bindings_key)
+    else {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "project-open source bindings",
+        });
+    };
+    let configured_bindings = bindings
+        .iter()
+        .filter(|candidate| {
+            candidate.source_kind == binding.source_kind && candidate.authority == authority
+        })
+        .collect::<Vec<_>>();
+    if configured_bindings.len() != 1
+        || configured_bindings.first().is_none_or(|candidate| {
+            candidate.source_locator_digest != binding.source_locator_digest
+        })
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "project-open source binding authority",
+        });
+    }
+    let binding = configured_bindings
+        .first()
+        .map(|configured| (**configured).clone())
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "project-open source binding authority",
+        })?;
+    let access_rules_key = SettingKey::new(ACCESS_RULES_SETTING_KEY).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "project-open access rules key",
+        }
+    })?;
+    let Some(ConfigurationValueV1::AccessRules(access_rules)) = configuration
+        .snapshot
+        .effective_values
+        .get(&access_rules_key)
+    else {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "project-open access rules",
+        });
+    };
+    let granted_capabilities = production_owner_capabilities()?
+        .into_iter()
+        .map(|capability| DomainCapabilityId::new(capability.as_str().to_owned()))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open granted capabilities",
+        })?;
+    let resolution = resolve_restrictive_capabilities(
+        granted_capabilities,
+        access_rules,
+        &CapabilityResolutionContextV1 {
+            actor: requester.clone(),
+            operation: None,
+            source_kind: binding.source_kind,
+            authority,
+            evaluated_at: observed_at,
+        },
+    )
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open capability resolution",
+    })?;
+    let effective_capabilities = resolution
+        .effective
+        .into_iter()
+        .map(|capability| CapabilityId::new(capability.as_str().to_owned()))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open effective capabilities",
+        })?;
     Ok(ProjectSourceAccessSnapshot {
         scope: scope.clone(),
-        requester: ActorId::new(DAEMON_REQUESTER.to_owned()).map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "project-open requester",
-            }
-        })?,
+        requester,
         binding,
         configuration_revision: configuration.revision_id.clone(),
         configuration_digest: configuration.snapshot.effective_behavior_digest.clone(),
@@ -1101,9 +2007,9 @@ fn daemon_owned_project_source_access(
             .snapshot
             .resolution_provenance_digest
             .clone(),
-        effective_capabilities: production_owner_capabilities()?,
+        effective_capabilities,
         grant_expires_at: UtcMicros(
-            now_micros()
+            observed_at
                 .0
                 .saturating_add(i64::try_from(GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX)),
         ),
@@ -1114,6 +2020,7 @@ fn production_owner_capabilities()
 -> std::result::Result<BTreeSet<CapabilityId>, ApplicationContractError> {
     let mut capabilities = BTreeSet::new();
     for capability in [
+        "capability.diagnostics.current",
         FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
         FEEDBACK_GET_CAPABILITY_ID_V1,
         FEEDBACK_EXPAND_CAPABILITY_ID_V1,
@@ -1121,6 +2028,14 @@ fn production_owner_capabilities()
         "capability.application.feedback.impact",
         "capability.application.feedback.affected-tests",
         "capability.application.feedback.test-results",
+        "capability.application.code-query.exact-occurrence",
+        "capability.application.code-query.phrase-search",
+        "capability.application.code-query.callees",
+        "capability.retrieval.symbol-search",
+        "capability.application.primitive.code-signature-search",
+        "capability.application.primitive.code-implementations",
+        "capability.application.primitive.code-type-hierarchy",
+        "capability.application.primitive.code-callers",
         GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
         CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
         PROXIMITY_CAPABILITY_ID_V1,
@@ -1136,6 +2051,14 @@ fn production_owner_capabilities()
         "capability.application.primitive.health-read",
         "capability.application.primitive.storage-status",
         "capability.application.primitive.diagnostics-read",
+        "capability.application.source-edit.ast-grep-rewrite",
+        "capability.application.source-edit.insert-at",
+        "capability.application.source-edit.insert-at-symbol",
+        "capability.application.source-edit.move-symbol",
+        "capability.application.source-edit.multi-str-replace",
+        "capability.application.source-edit.replace-symbol",
+        "capability.application.source-edit.reconcile",
+        "capability.application.source-edit.str-replace",
         "capability.git.stage-hunks",
         "capability.git.unstage-hunks",
         "capability.git.commit-index",
@@ -1240,6 +2163,15 @@ mod tests {
                     "cycle.{suffix}"
                 ))
                 .expect("cycle"),
+                generation_id: tracedecay_domain::CodeGenerationId::new(format!(
+                    "generation.{suffix}"
+                ))
+                .expect("generation"),
+                generation_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "b".repeat(64)
+                ))
+                .expect("generation digest"),
                 returned_findings: 0,
                 omitted_findings: 0,
             }
@@ -1260,11 +2192,73 @@ mod tests {
 
     #[test]
     fn non_github_project_keeps_remote_provider_configuration_optional() {
-        let (github, ci, pull_request) =
-            optional_remote_provider_configuration(None).expect("optional provider config");
+        let (github, ci, pull_request) = optional_remote_provider_configuration(None, None);
 
         assert!(github.is_none());
         assert!(ci.is_none());
         assert!(pull_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn denied_or_stale_github_source_access_makes_zero_discovery_network_calls() {
+        for lifecycle in [
+            GitHubProviderLifecycleV1::Denied,
+            GitHubProviderLifecycleV1::Stale,
+        ] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_for_discovery = Arc::clone(&calls);
+
+            let discovery = discover_github_pull_request_after_authorization(
+                || async { lifecycle },
+                move || {
+                    calls_for_discovery.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    GitHubExactCommitDiscoveryOutcomeV1::Unavailable
+                },
+            )
+            .await;
+
+            assert!(discovery.is_none());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn configured_github_mounts_real_ci_provider_configuration() {
+        struct ReadyGitHubSourceAccess;
+
+        impl GitHubSourceAccessAuthorityV1 for ReadyGitHubSourceAccess {
+            fn authorize<'a>(
+                &'a self,
+                _context: &'a tracedecay_application::RequestContext,
+                _request: &'a GitHubReviewReadRequestV1,
+            ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, GitHubProviderLifecycleV1>
+            {
+                Box::pin(async { GitHubProviderLifecycleV1::Ready })
+            }
+        }
+
+        let target = GitHubRepositoryTargetV1 {
+            owner: "ScriptedAlchemy".to_owned(),
+            repository: "tracedecay".to_owned(),
+            pull_request_number: 421,
+            pull_request_id: GitHubPullRequestIdV1::new("pull-request.421").expect("pull request"),
+        };
+        let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> =
+            Arc::new(ReadyGitHubSourceAccess);
+        let ci = production_ci_provider_configuration(
+            target.clone(),
+            GitHubReadOnlyCredentialV1::anonymous(),
+            GitHubHttpReadConfigV1::default(),
+            Arc::clone(&source_access),
+        );
+
+        assert_eq!(
+            ci.provider,
+            ProviderId::new("provider.github-actions").expect("provider")
+        );
+        assert_eq!(ci.parser.parser_id, "parser.github-actions.v1");
+        assert_eq!(ci.parser.parser_version, "1");
+        assert_eq!(ci.target, target);
+        assert!(Arc::ptr_eq(&ci.source_access, &source_access));
     }
 }

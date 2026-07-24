@@ -460,6 +460,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
     pub code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
     pub git_read_executor: Option<crate::mcp::server::GitReadExecutor>,
+    pub source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
+    pub source_edit_reconciliation_executor:
+        Option<crate::mcp::server::SourceEditReconciliationExecutor>,
     pub code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     pub retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     pub session_authorities: SessionAuthorities<'a>,
@@ -485,6 +488,8 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_cancellation: None,
             code_index_search_executor: None,
             git_read_executor: None,
+            source_edit_executor: None,
+            source_edit_reconciliation_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             session_authorities: SessionAuthorities::default(),
@@ -599,6 +604,9 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     if let Some(result) = dispatch_application_surface_tools(tool_name, cg, &args, &options).await {
         return result;
     }
+    if let Some(result) = dispatch_context_scout_read_tools(tool_name, cg, &args).await {
+        return result;
+    }
     if let Some(result) = dispatch_graph_tools(
         tool_name,
         cg,
@@ -638,7 +646,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     if let Some(result) = dispatch_git_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) = dispatch_edit_tools(tool_name, cg, &args).await {
+    if let Some(result) = dispatch_edit_tools(tool_name, cg, &args, &options).await {
         return result;
     }
     if let Some(result) = dispatch_health_tools(
@@ -872,6 +880,23 @@ async fn dispatch_application_surface_tools(
     )
 }
 
+async fn dispatch_context_scout_read_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+) -> Option<Result<ToolResult>> {
+    if !matches!(
+        tool_name,
+        "tracedecay_context_scout_recent"
+            | "tracedecay_context_scout_explain"
+            | "tracedecay_context_scout_capability"
+            | "tracedecay_context_scout_budget"
+    ) {
+        return None;
+    }
+    Some(hook_runtime::handle_context_scout_read_surface(cg, args.clone(), tool_name).await)
+}
+
 /// Dispatch static-analysis report tools (`tracedecay_dead_code`,
 /// `tracedecay_complexity`, `tracedecay_diagnostics`, ...).
 async fn dispatch_analysis_tools(
@@ -1008,15 +1033,34 @@ async fn dispatch_edit_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
+    options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
+    let invocation = || edit::SourceEditInvocationContext {
+        executor: options.source_edit_executor.clone(),
+        reconciliation_executor: options.source_edit_reconciliation_executor.clone(),
+        request_id: options.application_request_id.clone(),
+        deadline: options.application_deadline.clone(),
+        cancellation: options.application_cancellation.clone(),
+    };
     let result = match tool_name {
-        "tracedecay_str_replace" => edit::handle_str_replace(cg, args.clone()).await,
-        "tracedecay_multi_str_replace" => edit::handle_multi_str_replace(cg, args.clone()).await,
-        "tracedecay_insert_at" => edit::handle_insert_at(cg, args.clone()).await,
-        "tracedecay_ast_grep_rewrite" => edit::handle_ast_grep_rewrite(cg, args.clone()).await,
-        "tracedecay_replace_symbol" => edit::handle_replace_symbol(cg, args.clone()).await,
-        "tracedecay_insert_at_symbol" => edit::handle_insert_at_symbol(cg, args.clone()).await,
-        "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args.clone()).await,
+        "tracedecay_str_replace" => edit::handle_str_replace(cg, args.clone(), invocation()).await,
+        "tracedecay_multi_str_replace" => {
+            edit::handle_multi_str_replace(cg, args.clone(), invocation()).await
+        }
+        "tracedecay_insert_at" => edit::handle_insert_at(cg, args.clone(), invocation()).await,
+        "tracedecay_ast_grep_rewrite" => {
+            edit::handle_ast_grep_rewrite(cg, args.clone(), invocation()).await
+        }
+        "tracedecay_replace_symbol" => {
+            edit::handle_replace_symbol(cg, args.clone(), invocation()).await
+        }
+        "tracedecay_insert_at_symbol" => {
+            edit::handle_insert_at_symbol(cg, args.clone(), invocation()).await
+        }
+        "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args.clone(), invocation()).await,
+        "tracedecay_source_edit_reconcile" => {
+            edit::handle_source_edit_reconcile(cg, args.clone(), invocation()).await
+        }
         _ => return None,
     };
     Some(result)
@@ -1137,7 +1181,12 @@ async fn dispatch_session_workflow_tools(
     let result = match tool_name {
         "tracedecay_diagnose" => workflow::handle_diagnose(cg, args.clone()).await,
         "tracedecay_run_affected_tests" => {
-            workflow::handle_run_affected_tests(cg, args.clone()).await
+            workflow::handle_run_affected_tests(
+                cg,
+                args.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
         }
         "tracedecay_dashboard" => {
             dashboard::handle_dashboard(
@@ -1872,6 +1921,7 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_replace_symbol"));
         assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
         assert!(tool_names.contains(&"tracedecay_move_symbol"));
+        assert!(tool_names.contains(&"tracedecay_source_edit_reconcile"));
         assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
     }
 
@@ -1924,6 +1974,23 @@ mod tests {
     }
 
     #[test]
+    fn every_application_surface_advertises_canonical_markdown_and_json() {
+        let tools = get_tool_definitions();
+        for operation in APPLICATION_SURFACE_OPERATIONS {
+            let tool_name = format!("tracedecay_{}", operation.as_str());
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .unwrap_or_else(|| panic!("{tool_name} missing tool definition"));
+            assert_eq!(
+                tool.input_schema["properties"]["format"]["enum"],
+                json!(["markdown", "json"]),
+                "{tool_name} must expose the canonical output formats"
+            );
+        }
+    }
+
+    #[test]
     fn redundancy_tool_definition_describes_ranking_contract() {
         let tools = get_tool_definitions();
         let tool = tools
@@ -1956,6 +2023,7 @@ mod tests {
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
             "tracedecay_ast_grep_rewrite",
+            "tracedecay_source_edit_reconcile",
             "tracedecay_git_apply",
             "tracedecay_run_affected_tests",
             "tracedecay_session_start",

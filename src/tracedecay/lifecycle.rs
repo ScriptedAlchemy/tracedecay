@@ -111,17 +111,18 @@ impl TraceDecay {
             DatabaseAccessMode::ReadWrite,
         )
         .await?;
-        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+        let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database(
                 project_root,
                 &store_layout,
                 configuration_database,
             )
             .await?,
-        )?);
-        let config = configuration_runtime.configuration().config.clone();
+        )?;
+        let configuration_runtime = Arc::new(configuration_runtime);
+        let config = configuration.config.clone();
         install_configuration_daemon_client_for_project(
-            &configuration_runtime.configuration().target,
+            &configuration.target,
             configuration_runtime.client(),
         );
         let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
@@ -155,6 +156,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only: false,
             context_scout_owner: None,
+            context_scout_claim_authorities: Default::default(),
         };
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
@@ -749,17 +751,18 @@ impl TraceDecay {
             }
         }
 
-        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+        let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database(
                 project_root,
                 &store_layout,
                 configuration_database,
             )
             .await?,
-        )?);
-        let config = configuration_runtime.configuration().config.clone();
+        )?;
+        let configuration_runtime = Arc::new(configuration_runtime);
+        let config = configuration.config.clone();
         install_configuration_daemon_client_for_project(
-            &configuration_runtime.configuration().target,
+            &configuration.target,
             configuration_runtime.client(),
         );
         let mut ts = Self {
@@ -778,6 +781,7 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             context_scout_owner: None,
+            context_scout_claim_authorities: Default::default(),
         };
 
         crate::hooks::publish_hook_v2_bindings(&ts.store_layout)?;
@@ -864,17 +868,18 @@ impl TraceDecay {
             DatabaseAccessMode::ReadOnly,
         )
         .await?;
-        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+        let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database_read_only(
                 project_root,
                 &store_layout,
                 configuration_database,
             )
             .await?,
-        )?);
-        let config = configuration_runtime.configuration().config.clone();
+        )?;
+        let configuration_runtime = Arc::new(configuration_runtime);
+        let config = configuration.config.clone();
         install_configuration_daemon_client_for_project(
-            &configuration_runtime.configuration().target,
+            &configuration.target,
             configuration_runtime.client(),
         );
         Ok(Self {
@@ -893,6 +898,7 @@ impl TraceDecay {
             fallback_warning,
             read_only: true,
             context_scout_owner: None,
+            context_scout_claim_authorities: Default::default(),
         })
     }
 
@@ -995,6 +1001,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only: false,
             context_scout_owner: None,
+            context_scout_claim_authorities: Default::default(),
         };
 
         let mut attempts = 0;
@@ -1241,17 +1248,18 @@ impl TraceDecay {
             DatabaseAccessMode::ReadOnly,
         )
         .await?;
-        let configuration_runtime = Arc::new(ProjectConfigurationRuntime::open(
+        let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database_read_only(
                 project_root,
                 &store_layout,
                 configuration_database,
             )
             .await?,
-        )?);
-        let config = configuration_runtime.configuration().config.clone();
+        )?;
+        let configuration_runtime = Arc::new(configuration_runtime);
+        let config = configuration.config.clone();
         install_configuration_daemon_client_for_project(
-            &configuration_runtime.configuration().target,
+            &configuration.target,
             configuration_runtime.client(),
         );
         Ok(Self {
@@ -1270,6 +1278,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only: true,
             context_scout_owner: None,
+            context_scout_claim_authorities: Default::default(),
         })
     }
 

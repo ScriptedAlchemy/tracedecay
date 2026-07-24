@@ -1,15 +1,149 @@
 //! Edit/refactor tool definitions.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{def, def_rw};
 use crate::mcp::tools::ToolDefinition;
+
+fn source_edit_schema(mut schema: Value) -> Value {
+    let root = schema
+        .as_object_mut()
+        .expect("source edit input schema must be an object");
+    let properties = root
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("source edit input schema must define object properties");
+    properties.insert(
+        "idempotency_key".to_owned(),
+        json!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Stable caller-provided key for this edit effect. Reusing the key reconciles retries with the original effect."
+        }),
+    );
+    properties.insert(
+        "expected_state".to_owned(),
+        json!({
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Caller-observed digest of every file the edit may touch. Applying the edit is rejected if the current state differs."
+        }),
+    );
+    if let Some(dry_run) = properties.get_mut("dry_run").and_then(Value::as_object_mut) {
+        dry_run.insert("default".to_owned(), Value::Bool(false));
+    }
+    if let Some(verify) = properties.get_mut("verify").and_then(Value::as_object_mut) {
+        verify.insert("default".to_owned(), Value::Bool(false));
+    }
+    root.insert("additionalProperties".to_owned(), Value::Bool(false));
+    root.insert(
+        "allOf".to_owned(),
+        json!([
+            {
+                "if": {
+                    "properties": {
+                        "dry_run": {"const": false}
+                    }
+                },
+                "then": {
+                    "required": ["idempotency_key", "expected_state"]
+                }
+            }
+        ]),
+    );
+    schema
+}
+
+pub(super) fn def_source_edit_reconcile() -> ToolDefinition {
+    def_rw(
+        "tracedecay_source_edit_reconcile",
+        "Reconcile Source Edit",
+        "ADMIN: conclude one retained source-edit EffectUnknown after independently inspecting the exact current candidate-file state. This never retries the edit. It requires the original durable effect identity and explicit confirmation.",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "str_replace",
+                        "multi_str_replace",
+                        "insert_at",
+                        "ast_grep_rewrite",
+                        "replace_symbol",
+                        "insert_at_symbol",
+                        "move_symbol"
+                    ],
+                    "description": "Original source-edit operation kind retained in the uncertain journal."
+                },
+                "effect_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "Exact effect ID from the EffectUnknown receipt."
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "Original caller-provided idempotency key."
+                },
+                "attempt_idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt."
+                },
+                "input_digest": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "description": "Exact input digest from the EffectUnknown receipt."
+                },
+                "disposition": {
+                    "type": "string",
+                    "enum": ["confirm_committed", "confirm_rolled_back"],
+                    "description": "Independent inspection conclusion. Reconciliation verifies the live candidate-file digest."
+                },
+                "committed_state": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "description": "Exact independently observed committed-state digest; required only for confirm_committed."
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "const": true,
+                    "description": "Explicit acknowledgement that this concludes a retained uncertain effect without retrying it."
+                }
+            },
+            "required": [
+                "kind",
+                "effect_id",
+                "idempotency_key",
+                "attempt_idempotency_key",
+                "input_digest",
+                "disposition",
+                "confirm"
+            ],
+            "allOf": [{
+                "if": {
+                    "properties": {
+                        "disposition": {"const": "confirm_committed"}
+                    },
+                    "required": ["disposition"]
+                },
+                "then": {"required": ["committed_state"]},
+                "else": {"not": {"required": ["committed_state"]}}
+            }]
+        }),
+    )
+}
 
 pub(super) fn def_str_replace() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_str_replace".to_string(),
         description: "Replace a unique string in a file with new content. Fails if the old string is not found or matches more than once. This is the safest edit primitive — use this instead of sed/awk.".to_string(),
-        input_schema: json!({
+        input_schema: source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -34,7 +168,7 @@ pub(super) fn def_str_replace() -> ToolDefinition {
                 }
             },
             "required": ["path", "old_str", "new_str"]
-        }),
+        })),
         annotations: Some(json!({
             "readOnlyHint": false,
             "title": "Edit File"
@@ -47,7 +181,7 @@ pub(super) fn def_multi_str_replace() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_multi_str_replace".to_string(),
         description: "Apply multiple string replacements atomically in a single file. All replacements must match exactly once. If any replacement fails (0 or >1 matches), the entire operation is aborted and no changes are made.".to_string(),
-        input_schema: json!({
+        input_schema: source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -74,7 +208,7 @@ pub(super) fn def_multi_str_replace() -> ToolDefinition {
                 }
             },
             "required": ["path", "replacements"]
-        }),
+        })),
         annotations: Some(json!({
             "readOnlyHint": false,
             "title": "Multi-Edit File"
@@ -87,7 +221,7 @@ pub(super) fn def_insert_at() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_insert_at".to_string(),
         description: "Insert content before or after a unique anchor in a file. The anchor can be a unique string or a 1-indexed line number. Fails if the anchor matches more than one line.".to_string(),
-        input_schema: json!({
+        input_schema: source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -104,6 +238,7 @@ pub(super) fn def_insert_at() -> ToolDefinition {
                 },
                 "before": {
                     "type": "boolean",
+                    "default": false,
                     "description": "If true, insert before the anchor line; if false, insert after (default: false)"
                 },
                 "dry_run": {
@@ -116,7 +251,7 @@ pub(super) fn def_insert_at() -> ToolDefinition {
                 }
             },
             "required": ["path", "anchor", "content"]
-        }),
+        })),
         annotations: Some(json!({
             "readOnlyHint": false,
             "title": "Insert Into File"
@@ -196,7 +331,7 @@ pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_ast_grep_rewrite".to_string(),
         description: "Perform structural code rewrite using the host ast-grep CLI. The pattern and rewrite use ast-grep's SGPattern syntax. This tool is advertised only when that CLI is available.".to_string(),
-        input_schema: json!({
+        input_schema: source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -221,7 +356,7 @@ pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
                 }
             },
             "required": ["path", "pattern", "rewrite"]
-        }),
+        })),
         annotations: Some(json!({
             "readOnlyHint": false,
             "title": "AST Structural Rewrite"
@@ -245,7 +380,7 @@ pub(super) fn def_replace_symbol() -> ToolDefinition {
          out (docs/attrs included) so you can recover them; a `message` note \
          flags when the old span had docs/attrs the replacement appears to omit. \
          Preserves the surrounding file untouched and reindexes after writing.",
-        json!({
+        source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "symbol": {
@@ -266,7 +401,7 @@ pub(super) fn def_replace_symbol() -> ToolDefinition {
                 }
             },
             "required": ["symbol", "new_source"]
-        }),
+        })),
     )
 }
 
@@ -288,28 +423,36 @@ pub(super) fn def_move_symbol() -> ToolDefinition {
          inserts it at the destination, and auto-inserts unambiguous needed \
          imports (returned in `applied_imports`). Caller references are never \
          auto-edited in v1; the exact change rides in each hint.",
-        json!({
-            "type": "object",
-            "properties": {
-                "symbol": {
-                    "type": "string",
-                    "description": "Symbol to move. Prefer a fully qualified name for disambiguation; on ambiguity callable kinds win, else the move is refused."
+        {
+            let mut schema = source_edit_schema(json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol to move. Prefer a fully qualified name for disambiguation; on ambiguity callable kinds win, else the move is refused."
+                    },
+                    "dest_file": {
+                        "type": "string",
+                        "description": "Destination file (project-relative or absolute, within the project). May be a new module file; parent directories are created on apply."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true (DEFAULT), compute the move, the combined preview diff, and the impact report but write nothing. Set false to apply the move."
+                    },
+                    "update_references": {
+                        "type": "boolean",
+                        "description": "Reserved for a future version. In v1 callers are never auto-edited; the exact change is reported as a hint instead (default: false)."
+                    }
                 },
-                "dest_file": {
-                    "type": "string",
-                    "description": "Destination file (project-relative or absolute, within the project). May be a new module file; parent directories are created on apply."
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true (DEFAULT), compute the move, the combined preview diff, and the impact report but write nothing. Set false to apply the move."
-                },
-                "update_references": {
-                    "type": "boolean",
-                    "description": "Reserved for a future version. In v1 callers are never auto-edited; the exact change is reported as a hint instead (default: false)."
-                }
-            },
-            "required": ["symbol", "dest_file"]
-        }),
+                "required": ["symbol", "dest_file"]
+            }));
+            // Unlike the other edit tools, move_symbol defaults to preview.
+            // Only an explicit dry_run=false therefore selects the apply branch.
+            schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
+            schema["properties"]["dry_run"]["default"] = json!(true);
+            schema["properties"]["update_references"]["default"] = json!(false);
+            schema
+        },
     )
 }
 
@@ -320,7 +463,7 @@ pub(super) fn def_insert_at_symbol() -> ToolDefinition {
         "Insert content immediately before or after a named symbol's source \
          range. Same resolution semantics as `tracedecay_replace_symbol`. \
          Use `position=\"before\"` or `position=\"after\"` (default: after).",
-        json!({
+        source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "symbol": {
@@ -334,6 +477,7 @@ pub(super) fn def_insert_at_symbol() -> ToolDefinition {
                 "position": {
                     "type": "string",
                     "enum": ["before", "after"],
+                    "default": "after",
                     "description": "Where to insert relative to the symbol's range. Default: after."
                 },
                 "dry_run": {
@@ -346,6 +490,110 @@ pub(super) fn def_insert_at_symbol() -> ToolDefinition {
                 }
             },
             "required": ["symbol", "content"]
-        }),
+        })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_application::SourceEditKind;
+
+    fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 7] {
+        [
+            (def_str_replace(), SourceEditKind::StrReplace),
+            (def_multi_str_replace(), SourceEditKind::MultiStrReplace),
+            (def_insert_at(), SourceEditKind::InsertAt),
+            (def_ast_grep_rewrite(), SourceEditKind::AstGrepRewrite),
+            (def_replace_symbol(), SourceEditKind::ReplaceSymbol),
+            (def_insert_at_symbol(), SourceEditKind::InsertAtSymbol),
+            (def_move_symbol(), SourceEditKind::MoveSymbol),
+        ]
+    }
+
+    #[test]
+    fn source_edit_schemas_are_strict_defaulted_and_exactly_paired() {
+        for (definition, kind) in source_edit_definitions() {
+            let schema = definition.input_schema;
+            assert_eq!(
+                definition.name,
+                format!("tracedecay_{}", kind.operation_name())
+            );
+            assert_eq!(schema["additionalProperties"], json!(false));
+            assert_eq!(schema["properties"]["idempotency_key"]["minLength"], 1);
+            assert_eq!(schema["properties"]["idempotency_key"]["maxLength"], 512);
+            assert_eq!(
+                schema["properties"]["expected_state"]["pattern"],
+                "^sha256:[0-9a-f]{64}$"
+            );
+            assert_eq!(
+                schema["properties"]["dry_run"]["default"],
+                json!(kind == SourceEditKind::MoveSymbol)
+            );
+        }
+    }
+
+    #[test]
+    fn source_edit_effect_inputs_are_required_only_for_apply() {
+        for definition in [
+            def_str_replace(),
+            def_multi_str_replace(),
+            def_insert_at(),
+            def_ast_grep_rewrite(),
+            def_replace_symbol(),
+            def_insert_at_symbol(),
+        ] {
+            let schema = definition.input_schema;
+            assert!(schema["properties"]["idempotency_key"].is_object());
+            assert!(schema["properties"]["expected_state"].is_object());
+            assert_eq!(
+                schema["allOf"][0]["then"]["required"],
+                json!(["idempotency_key", "expected_state"])
+            );
+            assert_eq!(
+                schema["allOf"][0]["if"]["properties"]["dry_run"]["const"],
+                json!(false)
+            );
+        }
+        let move_schema = def_move_symbol().input_schema;
+        assert_eq!(
+            move_schema["allOf"][0]["if"]["required"],
+            json!(["dry_run"])
+        );
+        assert_eq!(
+            move_schema["allOf"][0]["then"]["required"],
+            json!(["idempotency_key", "expected_state"])
+        );
+    }
+
+    #[test]
+    fn source_edit_reconciliation_requires_exact_identity_and_confirmation() {
+        let schema = def_source_edit_reconcile().input_schema;
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(
+            schema["required"],
+            json!([
+                "kind",
+                "effect_id",
+                "idempotency_key",
+                "attempt_idempotency_key",
+                "input_digest",
+                "disposition",
+                "confirm"
+            ])
+        );
+        assert_eq!(schema["properties"]["confirm"]["const"], json!(true));
+        assert_eq!(
+            schema["allOf"][0]["then"]["required"],
+            json!(["committed_state"])
+        );
+        assert_eq!(
+            schema["allOf"][0]["if"]["properties"]["disposition"]["const"],
+            json!("confirm_committed")
+        );
+        assert_eq!(
+            schema["allOf"][0]["else"]["not"]["required"],
+            json!(["committed_state"])
+        );
+    }
 }

@@ -363,6 +363,7 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
             "path": "src/main.rs",
             "old_str": "fn missing() {}",
             "new_str": "fn replaced() {}",
+            "dry_run": true,
             "_meta": { "sessionId": "mcp-session-9005" }
         }),
     )

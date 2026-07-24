@@ -1,9 +1,13 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
-use tracedecay_application::{ApplicationProblemKind, CancellationSignal, Deadline, RequestId};
+use tracedecay_application::{
+    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, RequestId,
+};
+use tracedecay_domain::UtcMicros;
+use tracedecay_tool_catalog::BindingId;
 
-use super::rendered_tool_json;
+use crate::application_output::view::CanonicalHumanView;
 use crate::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
     parse_application_surface_request,
@@ -16,6 +20,7 @@ use crate::mcp::tools::dispatch::{
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
 static NEXT_SURFACE_REQUEST: AtomicU64 = AtomicU64::new(1);
+const DEFAULT_SURFACE_DEADLINE_MICROS: i64 = 30_000_000;
 
 fn request_id() -> Result<RequestId> {
     let sequence = NEXT_SURFACE_REQUEST.fetch_add(1, Ordering::Relaxed);
@@ -24,6 +29,39 @@ fn request_id() -> Result<RequestId> {
             message: "could not allocate an application surface request id".to_owned(),
         }
     })
+}
+
+fn complete_protocol_controls(
+    request_id: &RequestId,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
+) -> Result<Option<(Deadline, CancellationSignal)>> {
+    match (deadline, cancellation) {
+        (None, None) => Ok(None),
+        (deadline, cancellation) => {
+            // Match the canonical application dispatch's 30-second default
+            // when protocol cancellation exists without a deadline.
+            let deadline = match deadline {
+                Some(deadline) => deadline,
+                None => Deadline::new(UtcMicros(
+                    current_timestamp()
+                        .saturating_mul(1_000_000)
+                        .saturating_add(DEFAULT_SURFACE_DEADLINE_MICROS),
+                ))
+                .map_err(|error| TraceDecayError::Config {
+                    message: error.to_string(),
+                })?,
+            };
+            let cancellation = match cancellation {
+                Some(cancellation) => cancellation,
+                None => CancellationSignal::active(format!("cancellation.{}", request_id.as_str()))
+                    .map_err(|error| TraceDecayError::Config {
+                        message: error.to_string(),
+                    })?,
+            };
+            Ok(Some((deadline, cancellation)))
+        }
+    }
 }
 
 pub(super) async fn handle_application_surface(
@@ -67,8 +105,10 @@ pub(super) async fn handle_application_surface(
             });
         }
     };
-    let result = match (protocol_deadline, protocol_cancellation) {
-        (Some(deadline), Some(cancellation)) => {
+    let controls =
+        complete_protocol_controls(&request_id, protocol_deadline, protocol_cancellation)?;
+    let result = match controls {
+        Some((deadline, cancellation)) => {
             resolve_mcp_application_surface_with_controls(
                 operation,
                 request_id,
@@ -80,7 +120,7 @@ pub(super) async fn handle_application_surface(
             )
             .await
         }
-        _ => {
+        None => {
             resolve_mcp_application_surface(
                 operation,
                 request_id,
@@ -103,11 +143,8 @@ fn render_result(
     args: &Value,
     result: ApplicationSurfaceInvocationResult,
 ) -> Result<crate::mcp::tools::ToolResult> {
-    match result.result {
-        Ok(application) => {
-            let value = serde_json::to_value(application)?;
-            Ok(rendered_tool_json(Some(cg.project_root()), args, &value))
-        }
+    let (value, failure_message) = match &result.result {
+        Ok(application) => (serde_json::to_value(application)?, None),
         Err(problem) => {
             let failure_message = match problem.problem.kind() {
                 ApplicationProblemKind::NotFoundOrNotAuthorized => {
@@ -116,10 +153,126 @@ fn render_result(
                 ApplicationProblemKind::Unavailable => "application surface unavailable",
                 _ => "application surface request failed",
             };
-            let value = serde_json::to_value(problem)?;
-            Ok(rendered_tool_json(Some(cg.project_root()), args, &value)
-                .with_semantic_error(true)
-                .with_failure_message(failure_message))
+            (serde_json::to_value(problem)?, Some(failure_message))
         }
+    };
+    let markdown = if super::super::render::wants_json(args) {
+        None
+    } else {
+        Some(render_canonical_markdown(
+            result.operation.as_str(),
+            &result.binding_id,
+            &result.result,
+        )?)
+    };
+    let text = super::super::render::finalize(Some(cg.project_root()), args, &value, || {
+        markdown.unwrap_or_default()
+    });
+    let rendered = super::text_tool_result(&text);
+    Ok(match failure_message {
+        Some(failure_message) => rendered
+            .with_semantic_error(true)
+            .with_failure_message(failure_message),
+        None => rendered,
+    })
+}
+
+fn render_canonical_markdown(
+    operation: &str,
+    binding_id: &BindingId,
+    result: &ApplicationResult<Value>,
+) -> serde_json::Result<String> {
+    let view = CanonicalHumanView::from_application_result(operation, binding_id, result)?;
+    Ok(crate::application_output::markdown::render(view)
+        .as_str()
+        .to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+    use tracedecay_application::{
+        ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancellationSignal,
+        Deadline, RequestId, ResultContractRef, SafeDiagnostic,
+    };
+    use tracedecay_domain::UtcMicros;
+    use tracedecay_tool_catalog::{BindingId, SchemaId};
+
+    use super::{complete_protocol_controls, render_canonical_markdown};
+
+    #[test]
+    fn preserves_a_supplied_deadline_when_cancellation_is_missing() {
+        let request_id = RequestId::new("request.mcp.controls.deadline").unwrap();
+        let deadline = Deadline::new(UtcMicros(91)).unwrap();
+
+        let (actual_deadline, cancellation) =
+            complete_protocol_controls(&request_id, Some(deadline.clone()), None)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(actual_deadline, deadline);
+        assert_eq!(
+            cancellation.context().token_id.as_str(),
+            "cancellation.request.mcp.controls.deadline"
+        );
+    }
+
+    #[test]
+    fn preserves_a_supplied_live_cancellation_when_deadline_is_missing() {
+        let request_id = RequestId::new("request.mcp.controls.cancellation").unwrap();
+        let cancellation = CancellationSignal::active("cancel.protocol.exact").unwrap();
+        let observer = cancellation.clone();
+
+        let (_deadline, actual_cancellation) =
+            complete_protocol_controls(&request_id, None, Some(cancellation))
+                .unwrap()
+                .unwrap();
+        actual_cancellation.cancel(UtcMicros(41));
+
+        assert_eq!(
+            observer.context().token_id.as_str(),
+            "cancel.protocol.exact"
+        );
+        assert!(observer.is_cancelled());
+    }
+
+    #[test]
+    fn leaves_default_controls_to_the_canonical_dispatch_when_both_are_missing() {
+        let request_id = RequestId::new("request.mcp.controls.default").unwrap();
+        assert!(
+            complete_protocol_controls(&request_id, None, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn canonical_problem_markdown_matches_the_cli_contract() {
+        let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 3).unwrap(),
+            RequestId::new("request.mcp.golden").unwrap(),
+            ApplicationProblem::unavailable(
+                SafeDiagnostic::new(
+                    "daemon_unavailable",
+                    "The owning TraceDecay daemon is unavailable",
+                )
+                .unwrap(),
+            ),
+        ));
+
+        let rendered = render_canonical_markdown(
+            "feedback_list",
+            &BindingId::new("binding.mcp.feedback-list.v1").unwrap(),
+            &result,
+        )
+        .unwrap();
+
+        assert!(rendered.starts_with("## feedback\\_list\n"));
+        assert!(rendered.contains("\n- Operation: `feedback_list`"));
+        assert!(rendered.contains("\n- Binding: `binding.mcp.feedback-list.v1`"));
+        assert!(rendered.contains("\n- Status: `problem`"));
+        assert!(rendered.contains("\n- Problem: `daemon_unavailable`"));
+        assert!(rendered.contains("\n- Retry: `after_delay`"));
+        assert!(!rendered.contains("### contract"));
     }
 }
