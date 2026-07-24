@@ -198,6 +198,8 @@ pub enum HookSpoolError {
     SpoolFull,
     #[error("hook envelope is invalid for the supplied daemon binding")]
     EnvelopeRejected(HookContractError),
+    #[error("hook event ID conflicts with a different pending envelope")]
+    EventIdConflict,
     #[error("hook spool acknowledgement is unknown or conflicts with prior receipt evidence")]
     AckConflict,
     #[error("hook spool replay claim is unknown")]
@@ -423,9 +425,11 @@ impl HookSpoolV1 {
         Ok(())
     }
 
-    /// Append one validated envelope. The append intent is persisted before
-    /// frame publication, and the frame + containing directory are fsynced
-    /// before the sequence is advanced.
+    /// Append one validated envelope. An exact pending `event_id` duplicate
+    /// returns its existing record; reusing that ID for a different envelope
+    /// is rejected. The append intent is persisted before frame publication,
+    /// and the frame + containing directory are fsynced before the sequence is
+    /// advanced.
     pub fn append(
         &mut self,
         envelope: HookEventEnvelopeV2,
@@ -445,6 +449,17 @@ impl HookSpoolV1 {
             canonical_json_bytes(&envelope).map_err(|_| HookSpoolError::RecordTooLarge)?;
         if encoded.is_empty() || encoded.len() > MAX_HOOK_PAYLOAD_BYTES {
             return Err(HookSpoolError::RecordTooLarge);
+        }
+        if let Some(existing) = self
+            .pending
+            .iter()
+            .find(|record| record.envelope.event_id == envelope.event_id)
+        {
+            return if existing.envelope == envelope {
+                Ok(existing.clone())
+            } else {
+                Err(HookSpoolError::EventIdConflict)
+            };
         }
         let sequence = self.meta.next_sequence;
         let frame = encode_frame(sequence, now, envelope.protected_session_id, &encoded)?;
@@ -1414,6 +1429,53 @@ mod tests {
         assert_eq!(report.committed_through, 2);
         assert!(spool.pending.is_empty());
         assert_eq!(fs::metadata(records_path(&root.0)).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn identical_event_id_and_envelope_reuses_pending_record_after_reopen() {
+        let root = TestDir::new("dedupe");
+        let mut config = config();
+        config.limits.max_session_records = 1;
+        let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+        let first = spool
+            .append(envelope(1, 9), &binding(), UtcMicros(10))
+            .unwrap();
+        let physical_len = spool.physical_len;
+        drop(spool);
+        let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+
+        let duplicate = spool
+            .append(envelope(1, 9), &binding(), UtcMicros(11))
+            .unwrap();
+
+        assert_eq!(duplicate, first);
+        assert_eq!(spool.pending, [first]);
+        assert_eq!(spool.meta.next_sequence, 2);
+        assert_eq!(spool.physical_len, physical_len);
+    }
+
+    #[test]
+    fn reused_event_id_with_different_envelope_is_rejected_after_reopen() {
+        let root = TestDir::new("event-id-conflict");
+        let mut config = config();
+        config.limits.max_session_records = 1;
+        let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+        spool
+            .append(envelope(1, 9), &binding(), UtcMicros(10))
+            .unwrap();
+        drop(spool);
+        let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+        let mut conflicting = envelope(1, 9);
+        conflicting.observed_at = UtcMicros(11);
+
+        assert_eq!(
+            spool
+                .append(conflicting, &binding(), UtcMicros(11))
+                .unwrap_err(),
+            HookSpoolError::EventIdConflict
+        );
+        assert_eq!(spool.pending.len(), 1);
+        assert_eq!(spool.meta.next_sequence, 2);
     }
 
     #[test]
