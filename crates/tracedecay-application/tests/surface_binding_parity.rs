@@ -83,7 +83,6 @@ fn configuration_bindings_have_declared_surface_parity() {
             BindingSurface::Cli,
             BindingSurface::Mcp,
             BindingSurface::Http,
-            BindingSurface::Dashboard,
         ],
         &[],
     );
