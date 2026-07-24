@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -51,7 +51,9 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
-    retained_project_session_db: Option<&Arc<GlobalDb>>,
+    retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
 ) -> Result<ToolResult> {
@@ -104,15 +106,26 @@ pub(super) async fn handle_dashboard(
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
+            let retained_cg = retained_project_graph_resolver.as_ref().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "retained dashboard project graph resolver is unavailable".to_string(),
+                }
+            })?(cg.project_root().to_path_buf())
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "retained dashboard project graph is unavailable".to_string(),
+            })?;
             let state = build_state_with_automation_reconciler(
-                cg,
-                retained_project_session_db.cloned(),
+                Arc::clone(&retained_cg),
+                retained_project_graph_resolver,
+                registered_project_session_db,
+                registered_savings_db,
                 automation_scheduler_reconciler,
                 automation_writer,
             )
             .await?;
 
-            let app = router(cg, state).await?;
+            let app = router(retained_cg.as_ref(), state).await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
             let url = format!("http://{addr}/");
 

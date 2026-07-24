@@ -445,6 +445,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub global_db: Option<&'a RegisteredGlobalDb>,
     pub accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub profile_root: Option<&'a Path>,
     pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
@@ -470,6 +471,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             global_db: None,
             accounting_db: None,
             registered_project_session_db: None,
+            registered_savings_db: None,
             profile_root: None,
             allow_default_registry_fallback: true,
             implicit_project_path: None,
@@ -1141,7 +1143,9 @@ async fn dispatch_session_workflow_tools(
             dashboard::handle_dashboard(
                 cg,
                 args.clone(),
-                active_project_session_db,
+                options.retained_project_graph_resolver.clone(),
+                options.registered_project_session_db.clone(),
+                options.registered_savings_db.clone(),
                 options.automation_scheduler_reconciler.clone(),
                 options.automation_writer.clone(),
             )
