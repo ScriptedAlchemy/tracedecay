@@ -120,6 +120,13 @@ pub enum SourceCaptureModeV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum SourceRefreshCauseV1 {
+    Event,
+    Poll,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceRefetchStrategyV1 {
     WholeRoot,
     IncrementalRevision,
@@ -133,6 +140,15 @@ impl SourceRefetchStrategyV1 {
             Self::WholeRoot | Self::IncrementalWithWholeRootFallback
         )
     }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceEnvelopeKindV1 {
+    WholeRoot,
+    Incremental,
+    WholeRootFallback,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -459,6 +475,691 @@ impl SourceBindingV1 {
             privacy_domain,
             native_root,
         ))
+    }
+}
+
+/// Stable, content-free identity for one external wake-up signal.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct SourceEventKeyV1(ManifestDigest);
+
+impl SourceEventKeyV1 {
+    pub fn derive(
+        binding: &SourceBindingIdentityV1,
+        stable_signal_digest: &ManifestDigest,
+    ) -> Result<Self, DomainError> {
+        binding.validate()?;
+        stable_signal_digest.validate()?;
+        Ok(Self(canonical_sha256(&(
+            "tracedecay.external-source.event-key.v1",
+            binding,
+            stable_signal_digest,
+        ))?))
+    }
+
+    pub fn digest(&self) -> &ManifestDigest {
+        &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.0.validate()
+    }
+}
+
+/// Content-free wake-up evidence. Native payload, paths, URLs, and rendered
+/// provider fields cannot cross this boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceEventV1 {
+    binding: SourceBindingIdentityV1,
+    stable_signal_digest: ManifestDigest,
+    event_key: SourceEventKeyV1,
+}
+
+impl SourceEventV1 {
+    pub fn new(
+        binding: SourceBindingIdentityV1,
+        stable_signal_digest: ManifestDigest,
+    ) -> Result<Self, DomainError> {
+        let event_key = SourceEventKeyV1::derive(&binding, &stable_signal_digest)?;
+        let event = Self {
+            binding,
+            stable_signal_digest,
+            event_key,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    pub fn binding(&self) -> &SourceBindingIdentityV1 {
+        &self.binding
+    }
+
+    pub fn stable_signal_digest(&self) -> &ManifestDigest {
+        &self.stable_signal_digest
+    }
+
+    pub fn event_key(&self) -> &SourceEventKeyV1 {
+        &self.event_key
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.binding.validate()?;
+        self.stable_signal_digest.validate()?;
+        self.event_key.validate()?;
+        if self.event_key != SourceEventKeyV1::derive(&self.binding, &self.stable_signal_digest)? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Acquisition-owned durable evidence for one canonical provider refresh.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRefreshReceiptV1 {
+    binding: SourceBindingIdentityV1,
+    provider: ProviderId,
+    refresh_id: ManifestDigest,
+    cause: SourceRefreshCauseV1,
+    capture_mode: SourceCaptureModeV1,
+    refetch_strategy: SourceRefetchStrategyV1,
+    receipt_digest: ManifestDigest,
+}
+
+impl SourceRefreshReceiptV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        binding: SourceBindingIdentityV1,
+        provider: ProviderId,
+        refresh_id: ManifestDigest,
+        cause: SourceRefreshCauseV1,
+        capture_mode: SourceCaptureModeV1,
+        refetch_strategy: SourceRefetchStrategyV1,
+    ) -> Result<Self, DomainError> {
+        binding.validate()?;
+        provider.validate()?;
+        refresh_id.validate()?;
+        let receipt_digest = canonical_sha256(&(
+            "tracedecay.external-source.refresh-receipt.v1",
+            &binding,
+            &provider,
+            &refresh_id,
+            cause,
+            capture_mode,
+            refetch_strategy,
+        ))?;
+        let receipt = Self {
+            binding,
+            provider,
+            refresh_id,
+            cause,
+            capture_mode,
+            refetch_strategy,
+            receipt_digest,
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    pub fn binding(&self) -> &SourceBindingIdentityV1 {
+        &self.binding
+    }
+
+    pub fn provider(&self) -> &ProviderId {
+        &self.provider
+    }
+
+    pub fn refresh_id(&self) -> &ManifestDigest {
+        &self.refresh_id
+    }
+
+    pub fn cause(&self) -> SourceRefreshCauseV1 {
+        self.cause
+    }
+
+    pub fn capture_mode(&self) -> SourceCaptureModeV1 {
+        self.capture_mode
+    }
+
+    pub fn refetch_strategy(&self) -> SourceRefetchStrategyV1 {
+        self.refetch_strategy
+    }
+
+    pub fn receipt_digest(&self) -> &ManifestDigest {
+        &self.receipt_digest
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.binding.validate()?;
+        self.provider.validate()?;
+        self.refresh_id.validate()?;
+        self.receipt_digest.validate()?;
+        let digest = canonical_sha256(&(
+            "tracedecay.external-source.refresh-receipt.v1",
+            &self.binding,
+            &self.provider,
+            &self.refresh_id,
+            self.cause,
+            self.capture_mode,
+            self.refetch_strategy,
+        ))?;
+        if digest != self.receipt_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceEventAdmissionDispositionV1 {
+    Enqueued,
+    Coalesced,
+    Duplicate,
+}
+
+/// Stable content-free event receipt. Coalesced and duplicate deliveries retain
+/// the first event and refresh rather than manufacturing another refresh.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceEventAdmissionReceiptV1 {
+    binding: SourceBindingIdentityV1,
+    event_key: SourceEventKeyV1,
+    original_event_key: SourceEventKeyV1,
+    original_refresh: SourceRefreshReceiptV1,
+    disposition: SourceEventAdmissionDispositionV1,
+    receipt_digest: ManifestDigest,
+}
+
+impl SourceEventAdmissionReceiptV1 {
+    pub fn new(
+        event: &SourceEventV1,
+        original_event_key: SourceEventKeyV1,
+        original_refresh: SourceRefreshReceiptV1,
+        disposition: SourceEventAdmissionDispositionV1,
+    ) -> Result<Self, DomainError> {
+        event.validate()?;
+        original_event_key.validate()?;
+        original_refresh.validate()?;
+        if original_refresh.binding() != event.binding() {
+            return Err(DomainError::SnapshotMismatch {
+                field: "external source event refresh binding",
+            });
+        }
+        if disposition == SourceEventAdmissionDispositionV1::Enqueued
+            && original_event_key != *event.event_key()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "external source original event",
+            });
+        }
+        let receipt_digest = canonical_sha256(&(
+            "tracedecay.external-source.event-admission-receipt.v1",
+            event.binding(),
+            event.event_key(),
+            &original_event_key,
+            &original_refresh,
+            disposition,
+        ))?;
+        let receipt = Self {
+            binding: event.binding().clone(),
+            event_key: event.event_key().clone(),
+            original_event_key,
+            original_refresh,
+            disposition,
+            receipt_digest,
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    pub fn binding(&self) -> &SourceBindingIdentityV1 {
+        &self.binding
+    }
+
+    pub fn event_key(&self) -> &SourceEventKeyV1 {
+        &self.event_key
+    }
+
+    pub fn original_event_key(&self) -> &SourceEventKeyV1 {
+        &self.original_event_key
+    }
+
+    pub fn original_refresh(&self) -> &SourceRefreshReceiptV1 {
+        &self.original_refresh
+    }
+
+    pub fn disposition(&self) -> SourceEventAdmissionDispositionV1 {
+        self.disposition
+    }
+
+    pub fn receipt_digest(&self) -> &ManifestDigest {
+        &self.receipt_digest
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.binding.validate()?;
+        self.event_key.validate()?;
+        self.original_event_key.validate()?;
+        self.original_refresh.validate()?;
+        self.receipt_digest.validate()?;
+        if self.original_refresh.binding() != &self.binding
+            || (self.disposition == SourceEventAdmissionDispositionV1::Enqueued
+                && self.original_event_key != self.event_key)
+        {
+            return Err(DomainError::NonCanonical {
+                field: "external source event admission receipt",
+            });
+        }
+        let digest = canonical_sha256(&(
+            "tracedecay.external-source.event-admission-receipt.v1",
+            &self.binding,
+            &self.event_key,
+            &self.original_event_key,
+            &self.original_refresh,
+            self.disposition,
+        ))?;
+        if digest != self.receipt_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Sanitized provider-page metadata. The native provider payload remains
+/// transient and is represented only by its privacy-safe digest.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceProviderEnvelopeV1 {
+    binding: SourceBindingIdentityV1,
+    provider: ProviderId,
+    refresh_id: ManifestDigest,
+    cause: SourceRefreshCauseV1,
+    capture_mode: SourceCaptureModeV1,
+    refetch_strategy: SourceRefetchStrategyV1,
+    kind: SourceEnvelopeKindV1,
+    partition: SourcePartitionIdV1,
+    page_sequence: u32,
+    expected_cursor: Option<SourceCursorV1>,
+    next_cursor: Option<SourceCursorV1>,
+    snapshot: Option<SourceSnapshotIdV1>,
+    coverage: SourceCoverageV1,
+    sanitized_envelope_digest: ManifestDigest,
+    envelope_digest: ManifestDigest,
+}
+
+impl SourceProviderEnvelopeV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        binding: SourceBindingIdentityV1,
+        provider: ProviderId,
+        refresh_id: ManifestDigest,
+        cause: SourceRefreshCauseV1,
+        capture_mode: SourceCaptureModeV1,
+        refetch_strategy: SourceRefetchStrategyV1,
+        kind: SourceEnvelopeKindV1,
+        partition: SourcePartitionIdV1,
+        page_sequence: u32,
+        expected_cursor: Option<SourceCursorV1>,
+        next_cursor: Option<SourceCursorV1>,
+        snapshot: Option<SourceSnapshotIdV1>,
+        coverage: SourceCoverageV1,
+        sanitized_envelope_digest: ManifestDigest,
+    ) -> Result<Self, DomainError> {
+        let envelope_digest = Self::compute_digest(
+            &binding,
+            &provider,
+            &refresh_id,
+            cause,
+            capture_mode,
+            refetch_strategy,
+            kind,
+            &partition,
+            page_sequence,
+            expected_cursor.as_ref(),
+            next_cursor.as_ref(),
+            snapshot.as_ref(),
+            coverage,
+            &sanitized_envelope_digest,
+        )?;
+        let envelope = Self {
+            binding,
+            provider,
+            refresh_id,
+            cause,
+            capture_mode,
+            refetch_strategy,
+            kind,
+            partition,
+            page_sequence,
+            expected_cursor,
+            next_cursor,
+            snapshot,
+            coverage,
+            sanitized_envelope_digest,
+            envelope_digest,
+        };
+        envelope.validate()?;
+        Ok(envelope)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute_digest(
+        binding: &SourceBindingIdentityV1,
+        provider: &ProviderId,
+        refresh_id: &ManifestDigest,
+        cause: SourceRefreshCauseV1,
+        capture_mode: SourceCaptureModeV1,
+        refetch_strategy: SourceRefetchStrategyV1,
+        kind: SourceEnvelopeKindV1,
+        partition: &SourcePartitionIdV1,
+        page_sequence: u32,
+        expected_cursor: Option<&SourceCursorV1>,
+        next_cursor: Option<&SourceCursorV1>,
+        snapshot: Option<&SourceSnapshotIdV1>,
+        coverage: SourceCoverageV1,
+        sanitized_envelope_digest: &ManifestDigest,
+    ) -> Result<ManifestDigest, DomainError> {
+        canonical_sha256(&(
+            "tracedecay.external-source.provider-envelope.v1",
+            binding,
+            provider,
+            refresh_id,
+            cause,
+            capture_mode,
+            refetch_strategy,
+            kind,
+            partition,
+            page_sequence,
+            expected_cursor,
+            next_cursor,
+            snapshot,
+            coverage,
+            sanitized_envelope_digest,
+        ))
+    }
+
+    pub fn binding(&self) -> &SourceBindingIdentityV1 {
+        &self.binding
+    }
+
+    pub fn provider(&self) -> &ProviderId {
+        &self.provider
+    }
+
+    pub fn refresh_id(&self) -> &ManifestDigest {
+        &self.refresh_id
+    }
+
+    pub fn cause(&self) -> SourceRefreshCauseV1 {
+        self.cause
+    }
+
+    pub fn capture_mode(&self) -> SourceCaptureModeV1 {
+        self.capture_mode
+    }
+
+    pub fn refetch_strategy(&self) -> SourceRefetchStrategyV1 {
+        self.refetch_strategy
+    }
+
+    pub fn kind(&self) -> SourceEnvelopeKindV1 {
+        self.kind
+    }
+
+    pub fn partition(&self) -> &SourcePartitionIdV1 {
+        &self.partition
+    }
+
+    pub fn page_sequence(&self) -> u32 {
+        self.page_sequence
+    }
+
+    pub fn expected_cursor(&self) -> Option<&SourceCursorV1> {
+        self.expected_cursor.as_ref()
+    }
+
+    pub fn next_cursor(&self) -> Option<&SourceCursorV1> {
+        self.next_cursor.as_ref()
+    }
+
+    pub fn snapshot(&self) -> Option<&SourceSnapshotIdV1> {
+        self.snapshot.as_ref()
+    }
+
+    pub fn coverage(&self) -> SourceCoverageV1 {
+        self.coverage
+    }
+
+    pub fn sanitized_envelope_digest(&self) -> &ManifestDigest {
+        &self.sanitized_envelope_digest
+    }
+
+    pub fn envelope_digest(&self) -> &ManifestDigest {
+        &self.envelope_digest
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.binding.validate()?;
+        self.provider.validate()?;
+        self.refresh_id.validate()?;
+        self.partition.validate()?;
+        self.expected_cursor
+            .as_ref()
+            .map_or(Ok(()), SourceCursorV1::validate)?;
+        self.next_cursor
+            .as_ref()
+            .map_or(Ok(()), SourceCursorV1::validate)?;
+        self.snapshot
+            .as_ref()
+            .map_or(Ok(()), SourceSnapshotIdV1::validate)?;
+        self.sanitized_envelope_digest.validate()?;
+        self.envelope_digest.validate()?;
+        if self.page_sequence == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "external source provider page sequence",
+            });
+        }
+        match self.kind {
+            SourceEnvelopeKindV1::Incremental => {
+                if self.snapshot.is_some()
+                    || self.expected_cursor.is_none()
+                    || self.next_cursor.is_none()
+                    || self.expected_cursor == self.next_cursor
+                    || self.coverage == SourceCoverageV1::Complete
+                {
+                    return Err(DomainError::NonCanonical {
+                        field: "incremental external source envelope",
+                    });
+                }
+            }
+            SourceEnvelopeKindV1::WholeRoot | SourceEnvelopeKindV1::WholeRootFallback => {
+                if self.expected_cursor.is_some()
+                    || self.snapshot.is_none()
+                    || self.coverage == SourceCoverageV1::Unknown
+                    || (self.coverage == SourceCoverageV1::Partial && self.next_cursor.is_none())
+                    || (self.coverage == SourceCoverageV1::Complete && self.next_cursor.is_some())
+                {
+                    return Err(DomainError::NonCanonical {
+                        field: "whole-root external source envelope",
+                    });
+                }
+            }
+            SourceEnvelopeKindV1::Unavailable => {
+                if self.expected_cursor.is_some()
+                    || self.next_cursor.is_some()
+                    || self.snapshot.is_some()
+                    || self.coverage != SourceCoverageV1::Unknown
+                {
+                    return Err(DomainError::NonCanonical {
+                        field: "unavailable external source envelope",
+                    });
+                }
+            }
+        }
+        let digest = Self::compute_digest(
+            &self.binding,
+            &self.provider,
+            &self.refresh_id,
+            self.cause,
+            self.capture_mode,
+            self.refetch_strategy,
+            self.kind,
+            &self.partition,
+            self.page_sequence,
+            self.expected_cursor.as_ref(),
+            self.next_cursor.as_ref(),
+            self.snapshot.as_ref(),
+            self.coverage,
+            &self.sanitized_envelope_digest,
+        )?;
+        if digest != self.envelope_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Payload-free whole-root staging state accumulated across provider pages.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceWholeRootStageV1 {
+    binding: SourceBindingIdentityV1,
+    refresh_id: ManifestDigest,
+    partition: SourcePartitionIdV1,
+    snapshot: SourceSnapshotIdV1,
+    last_page_sequence: u32,
+    complete: bool,
+    present_objects: BTreeSet<SourceNativeObjectIdV1>,
+    stage_digest: ManifestDigest,
+}
+
+impl SourceWholeRootStageV1 {
+    pub fn advance(
+        previous: Option<&Self>,
+        envelope: &SourceProviderEnvelopeV1,
+        page_objects: BTreeSet<SourceNativeObjectIdV1>,
+    ) -> Result<Self, DomainError> {
+        envelope.validate()?;
+        if !matches!(
+            envelope.kind(),
+            SourceEnvelopeKindV1::WholeRoot | SourceEnvelopeKindV1::WholeRootFallback
+        ) {
+            return Err(DomainError::NonCanonical {
+                field: "external source whole-root staging envelope",
+            });
+        }
+        for object in &page_objects {
+            object.validate()?;
+        }
+        let snapshot = envelope
+            .snapshot()
+            .cloned()
+            .ok_or(DomainError::NonCanonical {
+                field: "external source whole-root staging snapshot",
+            })?;
+        let mut present_objects = page_objects;
+        if let Some(previous) = previous {
+            previous.validate()?;
+            if previous.complete {
+                return Err(DomainError::NonCanonical {
+                    field: "completed external source whole-root stage",
+                });
+            }
+            if previous.binding != *envelope.binding()
+                || previous.refresh_id != *envelope.refresh_id()
+                || previous.partition != *envelope.partition()
+                || previous.snapshot != snapshot
+            {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "external source whole-root staging",
+                });
+            }
+            if envelope.page_sequence() != previous.last_page_sequence + 1 {
+                return Err(DomainError::NonCanonical {
+                    field: "external source whole-root page gap",
+                });
+            }
+            present_objects.extend(previous.present_objects.iter().cloned());
+        } else if envelope.page_sequence() != 1 {
+            return Err(DomainError::NonCanonical {
+                field: "external source whole-root first page",
+            });
+        }
+        let stage_digest = canonical_sha256(&(
+            "tracedecay.external-source.whole-root-stage.v1",
+            envelope.binding(),
+            envelope.refresh_id(),
+            envelope.partition(),
+            &snapshot,
+            envelope.page_sequence(),
+            envelope.coverage() == SourceCoverageV1::Complete,
+            &present_objects,
+        ))?;
+        let stage = Self {
+            binding: envelope.binding().clone(),
+            refresh_id: envelope.refresh_id().clone(),
+            partition: envelope.partition().clone(),
+            snapshot,
+            last_page_sequence: envelope.page_sequence(),
+            complete: envelope.coverage() == SourceCoverageV1::Complete,
+            present_objects,
+            stage_digest,
+        };
+        stage.validate()?;
+        Ok(stage)
+    }
+
+    pub fn present_objects(&self) -> &BTreeSet<SourceNativeObjectIdV1> {
+        &self.present_objects
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn completion(&self) -> Result<SourceSnapshotCompletionV1, DomainError> {
+        if !self.complete {
+            return Err(DomainError::NonCanonical {
+                field: "incomplete external source whole-root stage",
+            });
+        }
+        SourceSnapshotCompletionV1::new(
+            self.partition.clone(),
+            self.snapshot.clone(),
+            self.present_objects.clone(),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.binding.validate()?;
+        self.refresh_id.validate()?;
+        self.partition.validate()?;
+        self.snapshot.validate()?;
+        self.stage_digest.validate()?;
+        if self.last_page_sequence == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "external source whole-root stage sequence",
+            });
+        }
+        for object in &self.present_objects {
+            object.validate()?;
+        }
+        let digest = canonical_sha256(&(
+            "tracedecay.external-source.whole-root-stage.v1",
+            &self.binding,
+            &self.refresh_id,
+            &self.partition,
+            &self.snapshot,
+            self.last_page_sequence,
+            self.complete,
+            &self.present_objects,
+        ))?;
+        if digest != self.stage_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -886,5 +1587,114 @@ impl SourceSnapshotCompletionV1 {
             return Err(DomainError::DigestMismatch);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(seed: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
+    }
+
+    fn binding_identity() -> SourceBindingIdentityV1 {
+        SourceBindingIdentityV1 {
+            binding_id: SourceBindingId::new("external-source.fixture").unwrap(),
+            source_id: SourceInstanceId::new("source.fixture").unwrap(),
+            owner: SourceBindingOwnerV1::Project(ProjectId::new("project.fixture").unwrap()),
+            privacy_domain: PrivacyDomainId::new("privacy.fixture").unwrap(),
+            native_root: LocatorDigest::new(digest('a').as_str()).unwrap(),
+        }
+    }
+
+    fn envelope(
+        page_sequence: u32,
+        coverage: SourceCoverageV1,
+        continuation: Option<SourceCursorV1>,
+    ) -> SourceProviderEnvelopeV1 {
+        SourceProviderEnvelopeV1::new(
+            binding_identity(),
+            ProviderId::new("fixture-provider").unwrap(),
+            digest('b'),
+            SourceRefreshCauseV1::Poll,
+            SourceCaptureModeV1::Poll,
+            SourceRefetchStrategyV1::WholeRoot,
+            SourceEnvelopeKindV1::WholeRoot,
+            SourcePartitionIdV1::new(digest('c')),
+            page_sequence,
+            None,
+            continuation,
+            Some(SourceSnapshotIdV1::new(digest('d'))),
+            coverage,
+            digest(char::from_digit(page_sequence, 10).unwrap()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn event_wire_shape_is_content_free_and_key_is_stable() {
+        let first = SourceEventV1::new(binding_identity(), digest('e')).unwrap();
+        let replay = SourceEventV1::new(binding_identity(), digest('e')).unwrap();
+        let json = serde_json::to_value(&first).unwrap();
+        let fields = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(first.event_key(), replay.event_key());
+        assert_eq!(
+            fields,
+            BTreeSet::from([
+                "binding".to_owned(),
+                "event_key".to_owned(),
+                "stable_signal_digest".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn whole_root_stage_accumulates_pages_before_payload_free_completion() {
+        let first_object = SourceNativeObjectIdV1::new(digest('f'));
+        let second_object = SourceNativeObjectIdV1::new(digest('1'));
+        let first = SourceWholeRootStageV1::advance(
+            None,
+            &envelope(
+                1,
+                SourceCoverageV1::Partial,
+                Some(SourceCursorV1::new(digest('2'))),
+            ),
+            BTreeSet::from([first_object.clone()]),
+        )
+        .unwrap();
+        let second = SourceWholeRootStageV1::advance(
+            Some(&first),
+            &envelope(2, SourceCoverageV1::Complete, None),
+            BTreeSet::from([second_object.clone()]),
+        )
+        .unwrap();
+        let completion = second.completion().unwrap();
+
+        assert_eq!(
+            completion.present_objects(),
+            &BTreeSet::from([first_object, second_object])
+        );
+        let completion_json = serde_json::to_value(completion).unwrap();
+        assert_eq!(
+            completion_json
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "completion_digest".to_owned(),
+                "partition".to_owned(),
+                "present_objects".to_owned(),
+                "snapshot".to_owned(),
+            ])
+        );
     }
 }
