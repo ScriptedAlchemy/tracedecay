@@ -128,9 +128,12 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         .unwrap();
     }
 
-    let db = crate::global_db::GlobalDb::open_at(&db_dir.path().join("global.db"))
-        .await
-        .unwrap();
+    let runtime = DoctorTestRuntime::open(
+        &db_dir.path().join("profile"),
+        "doctor orphan reporting test",
+    )
+    .await;
+    let db = runtime.database();
     db.upsert_code_project(
         "proj_conflict",
         &conflicting_registered_root,
@@ -140,7 +143,7 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
     )
     .await
     .unwrap();
-    let (count, warnings) = orphan_store_manifest_report(&db, &profile_root).await;
+    let (count, warnings) = orphan_store_manifest_report(db, &profile_root).await;
 
     assert_eq!(count, 1, "{warnings:?}");
     assert!(
@@ -177,7 +180,7 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
     batch_left.graph_scopes.clear();
     batch_left.artifacts.clear();
     let batch_diff = crate::migrate::registry::diff_registry_reconstruction_report(
-        &db,
+        db,
         &crate::migrate::registry::RegistryReconstructionReport {
             plans: vec![batch_left, batch_right],
             issues: Vec::new(),
@@ -193,46 +196,44 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         "{:?}",
         batch_diff.issues
     );
-    let applied = crate::migrate::registry::apply_registry_reconstruction_report(&db, &eligible)
+    let applied = crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
         .await
         .unwrap();
     assert_eq!(applied.projects, 1);
     assert_eq!(
-        orphan_store_manifest_report(&db, &profile_root).await.0,
+        orphan_store_manifest_report(db, &profile_root).await.0,
         0,
         "a complete reconstruction registry is healthy without a legacy projects.path row"
     );
     assert_eq!(
-        crate::migrate::registry::apply_registry_reconstruction_report(&db, &eligible)
+        crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
             .await
             .unwrap(),
         crate::migrate::registry::RegistryReconstructionApplyReport::default()
     );
 
     db.writer_connection()
-        .await
         .unwrap()
         .execute(
             "DELETE FROM store_artifacts WHERE store_id=?1",
-            libsql::params![eligible.plans[0].store.store_id.as_str()],
+            crate::db::engine::params![eligible.plans[0].store.store_id.as_str()],
         )
         .await
         .unwrap();
-    assert_eq!(orphan_store_manifest_report(&db, &profile_root).await.0, 1);
-    crate::migrate::registry::apply_registry_reconstruction_report(&db, &eligible)
+    assert_eq!(orphan_store_manifest_report(db, &profile_root).await.0, 1);
+    crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
         .await
         .unwrap();
 
     db.writer_connection()
-        .await
         .unwrap()
         .execute(
             "DELETE FROM store_instances WHERE store_id=?1",
-            libsql::params![eligible.plans[0].store.store_id.as_str()],
+            crate::db::engine::params![eligible.plans[0].store.store_id.as_str()],
         )
         .await
         .unwrap();
-    assert_eq!(orphan_store_manifest_report(&db, &profile_root).await.0, 1);
+    assert_eq!(orphan_store_manifest_report(db, &profile_root).await.0, 1);
 }
 
 #[test]
@@ -348,10 +349,7 @@ async fn database_check_is_read_only_while_a_writer_is_live()
     };
     let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
     let db_path = ts.db_path();
-    drop(ts);
-
-    let authority = crate::db::DatabaseAuthority::acquire_test(&db_path, "doctor test")?;
-    let (writer, _) = crate::db::Database::open(&db_path, &authority).await?;
+    let writer = ts.db();
     writer
         .execute_write_batch(
             "seed doctor freelist fixture",
@@ -462,10 +460,10 @@ async fn current_project_store_resolves_profile_shard_via_registry_alias()
         b"graph",
     )?;
 
-    let global_db_path = dir.path().join("global.db");
-    let db = crate::global_db::GlobalDb::open_at(&global_db_path)
-        .await
-        .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+    let runtime =
+        DoctorTestRuntime::open(&profile_root, "doctor current project resolution test").await;
+    let db = runtime.database();
+    let global_db_path = db.db_path().to_path_buf();
     db.upsert_code_project(
         "proj_doctor_current",
         &project_root,
@@ -574,6 +572,8 @@ async fn current_project_store_surfaces_split_identity_conflict()
         .status()?;
     assert!(status.success());
 
+    let runtime =
+        DoctorTestRuntime::open(&profile_root, "doctor split identity resolution test").await;
     for (project_id, node_id) in [
         ("proj_doctor_selected", "selected-node"),
         ("proj_doctor_legacy", "legacy-node"),
@@ -590,7 +590,16 @@ async fn current_project_store_surfaces_split_identity_conflict()
             &layout.graph_db_path,
             "doctor identity test",
         )?;
-        let (db, _) = crate::db::Database::initialize(&layout.graph_db_path, &authority).await?;
+        let db = runtime
+            ._registry
+            .code_graph_worktree(
+                &project_root,
+                tracedecay_store::ProjectId::new(project_id.to_string())?,
+                layout.graph_db_path.clone(),
+                authority,
+                crate::db::DatabaseAccessMode::ReadWrite,
+            )
+            .await?;
         db.insert_node(&crate::types::Node {
             id: node_id.to_string(),
             kind: crate::types::NodeKind::Function,
@@ -625,7 +634,7 @@ async fn current_project_store_surfaces_split_identity_conflict()
 
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(dir.path().join("global.db")),
+        global_db_path: Some(runtime.database().db_path().to_path_buf()),
     };
     let selected_db = profile_root.join("projects/proj_doctor_selected/tracedecay.db");
     let legacy_db = profile_root.join("projects/proj_doctor_legacy/tracedecay.db");
@@ -671,9 +680,9 @@ async fn registry_backed_profile_shard_is_not_stale_without_marker()
     std::fs::create_dir_all(&shard_root)?;
     let project_root = canonical_temp_path(&project_root);
     std::fs::write(shard_root.join("tracedecay.db"), b"graph")?;
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+    let runtime =
+        DoctorTestRuntime::open(&profile_root, "doctor registry storage classification test").await;
+    let db = runtime.database();
     db.upsert(&project_root, 42).await;
     db.upsert_code_project("proj_doctor", &project_root, None, None, Some("main"))
         .await
@@ -696,7 +705,7 @@ async fn registry_backed_profile_shard_is_not_stale_without_marker()
         DoctorStorageStatus::Stale
     );
     assert_eq!(
-        classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
+        classify_project_storage_with_registry(&project_root, db, Some(&profile_root)).await,
         DoctorStorageStatus::ProfileSharded
     );
     #[cfg(unix)]
@@ -706,7 +715,7 @@ async fn registry_backed_profile_shard_is_not_stale_without_marker()
         assert_eq!(
             classify_project_storage_with_registry(
                 &project_root,
-                &db,
+                db,
                 Some(&symlinked_profile_root)
             )
             .await,
@@ -728,9 +737,12 @@ async fn registry_backed_profile_shard_manifest_relpath_uses_profile_root()
     std::fs::create_dir_all(&project_root)?;
     std::fs::create_dir_all(&shard_root)?;
     std::fs::write(profile_root.join(&manifest_relpath), b"manifest")?;
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+    let runtime = DoctorTestRuntime::open(
+        &profile_root,
+        "doctor registry manifest classification test",
+    )
+    .await;
+    let db = runtime.database();
     db.upsert(&project_root, 42).await;
     db.upsert_code_project(
         "proj_doctor_manifest",
@@ -755,7 +767,7 @@ async fn registry_backed_profile_shard_manifest_relpath_uses_profile_root()
     .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
 
     assert_eq!(
-        classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
+        classify_project_storage_with_registry(&project_root, db, Some(&profile_root)).await,
         DoctorStorageStatus::ManifestReconstructable
     );
     Ok(())
@@ -772,9 +784,12 @@ async fn registry_backed_profile_shard_rejects_unsafe_store_relpath()
     std::fs::create_dir_all(&outside_root)?;
     let project_root = canonical_temp_path(&project_root);
     std::fs::write(outside_root.join("tracedecay.db"), b"graph")?;
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+    let runtime = DoctorTestRuntime::open(
+        &profile_root,
+        "doctor unsafe registry storage classification test",
+    )
+    .await;
+    let db = runtime.database();
     db.upsert(&project_root, 42).await;
     db.upsert_code_project(
         "proj_doctor_escape",
@@ -799,7 +814,7 @@ async fn registry_backed_profile_shard_rejects_unsafe_store_relpath()
     .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
 
     assert_eq!(
-        classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
+        classify_project_storage_with_registry(&project_root, db, Some(&profile_root)).await,
         DoctorStorageStatus::Stale
     );
     Ok(())
@@ -836,9 +851,9 @@ async fn registry_drift_findings_report_manifest_identity_mismatches()
         serde_json::to_string_pretty(&manifest)?,
     )?;
 
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+    let runtime =
+        DoctorTestRuntime::open(&profile_root, "doctor registry drift findings test").await;
+    let db = runtime.database();
     db.upsert_code_project("proj_registry", &registry_root, None, None, Some("main"))
         .await
         .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
@@ -860,7 +875,7 @@ async fn registry_drift_findings_report_manifest_identity_mismatches()
     .await
     .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
 
-    let findings = registry_drift::registry_drift_findings(&db, &profile_root).await;
+    let findings = registry_drift::registry_drift_findings(db, &profile_root).await;
     let fields: Vec<_> = findings.iter().map(|finding| finding.field).collect();
     assert!(
         fields.contains(&"project_id"),
@@ -1220,9 +1235,15 @@ fn temporal_health_diagnosis_is_bounded_and_redacts_payload_keys_and_text() {
 #[tokio::test]
 async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
-    // Immutable path diagnosis cannot observe an open WAL; checkpoint first.
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor temporal health adapter",
+    )
+    .await;
+    let db = runtime.database();
+    let db_path = db.db_path().to_path_buf();
+    // Keep the byte-level assertion stable while diagnosis runs through the
+    // retained registered reader pool.
     db.checkpoint_result().await.unwrap();
     let before = std::fs::read(&db_path).unwrap();
     let before_family = temporal_family_manifest(&db_path);
@@ -1290,29 +1311,35 @@ fn temporal_family_manifest(db_path: &Path) -> BTreeMap<String, (u64, Option<Sys
 #[tokio::test]
 async fn temporal_health_path_api_creates_no_authority_wal_shm_or_schema_artifacts() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    {
-        let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
-        let before_open = temporal_family_manifest(&db_path);
-        assert!(
-            before_open.keys().any(|name| name.ends_with("-wal")),
-            "open GlobalDb should leave a WAL sidecar for this contract probe"
-        );
-        let live = db.session_temporal_doctor_health().await;
-        assert_eq!(
-            live.status(),
-            crate::global_db::SessionTemporalHealthStatus::Unavailable
-        );
-        assert_eq!(live.reason(), Some("uncheckpointed_wal"));
-        assert_eq!(
-            temporal_family_manifest(&db_path),
-            before_open,
-            "uncheckpointed_wal refusal must not mutate the live family"
-        );
-        db.checkpoint_result().await.unwrap();
-    }
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor temporal health family test",
+    )
+    .await;
+    let db = runtime.database();
+    let db_path = db.db_path().to_path_buf();
+    let before_open = temporal_family_manifest(&db_path);
+    assert!(
+        before_open.keys().any(|name| name.ends_with("-wal")),
+        "registered runtime should leave a WAL sidecar for this contract probe"
+    );
+    let live = db.session_temporal_doctor_health().await;
+    assert_eq!(
+        live.status(),
+        crate::global_db::SessionTemporalHealthStatus::Complete
+    );
+    assert!(live.findings().is_empty());
+    assert!(live.reason().is_none());
+    assert_eq!(
+        temporal_family_manifest(&db_path),
+        before_open,
+        "registered health snapshot must not mutate the live family"
+    );
+    db.checkpoint_result().await.unwrap();
+    drop(runtime);
+
     // Drop the authority-held handle, then diagnose solely through the
-    // immutable path API — the cold Doctor/transport surface.
+    // immutable path API — the cold foreign Doctor/transport surface.
     let before_bytes = std::fs::read(&db_path).unwrap();
     let before_family = temporal_family_manifest(&db_path);
     let lock_root = db_path.parent().unwrap().join(".tracedecay-database-locks");
@@ -1386,9 +1413,13 @@ async fn temporal_health_missing_store_is_unavailable_without_artifacts() {
 #[tokio::test]
 async fn temporal_health_detects_index_and_column_migration_gaps() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
-    let writer = db.writer_connection().await.unwrap();
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor temporal migration gap test",
+    )
+    .await;
+    let db = runtime.database();
+    let writer = db.writer_connection().unwrap();
     writer
         .execute(
             "DROP INDEX IF EXISTS idx_session_occurrences_generation_order",
@@ -1404,12 +1435,8 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
         .await
         .unwrap();
     drop(writer);
-    drop(db);
 
-    let report = serde_json::to_value(
-        crate::global_db::session_temporal::session_temporal_doctor_health_at(&db_path).await,
-    )
-    .unwrap();
+    let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
     assert_eq!(report["status"], "partial");
     let findings = report["findings"].as_array().unwrap();
     assert!(
@@ -1420,7 +1447,7 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
     );
 }
 
-async fn temporal_health_test_count(db: &crate::global_db::GlobalDb, sql: &str) -> i64 {
+async fn temporal_health_test_count(db: &crate::global_db::RegisteredGlobalDb, sql: &str) -> i64 {
     let read = db.read_snapshot().await.unwrap();
     let mut rows = read.query(sql, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
@@ -1429,9 +1456,14 @@ async fn temporal_health_test_count(db: &crate::global_db::GlobalDb, sql: &str) 
 #[tokio::test]
 async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
-    let writer = db.writer_connection().await.unwrap();
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor temporal FTS repair test",
+    )
+    .await;
+    let db = runtime.database();
+    let db_path = db.db_path().to_path_buf();
+    let writer = db.writer_connection().unwrap();
     writer
         .execute(
             "INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
@@ -1523,10 +1555,13 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
 #[tokio::test]
 async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let writer = db.writer_connection().await.unwrap();
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor exact temporal FTS repair test",
+    )
+    .await;
+    let db = runtime.database();
+    let writer = db.writer_connection().unwrap();
     writer
         .execute(
             "INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
@@ -1567,9 +1602,13 @@ async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
 #[tokio::test]
 async fn temporal_health_detects_cross_session_ownership() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
-    let writer = db.writer_connection().await.unwrap();
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor temporal ownership drift test",
+    )
+    .await;
+    let db = runtime.database();
+    let writer = db.writer_connection().unwrap();
     writer
         .execute("PRAGMA foreign_keys = OFF", ())
         .await

@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
@@ -55,10 +55,720 @@ const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
     "project route open is backed off after an invariant rejection";
 
+fn retained_project_graph_resolver(
+    administration: StoreAdministration,
+) -> crate::mcp::server::RetainedProjectGraphResolver {
+    Arc::new(move |root: PathBuf| {
+        let administration = administration.clone();
+        Box::pin(async move {
+            let requested = authority::canonical_identity_path(&root).ok()?;
+            let mut matches = administration
+                .mounted_project_graphs()
+                .await
+                .into_iter()
+                .filter(|graph| {
+                    authority::canonical_identity_path(graph.project_root()).ok()
+                        == Some(requested.clone())
+                });
+            let graph = matches.next()?;
+            matches.next().is_none().then_some(graph)
+        })
+    })
+}
+
+struct McpSemanticExecutionControlV1 {
+    started: std::time::Instant,
+    admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+impl McpSemanticExecutionControlV1 {
+    fn request_termination(
+        &self,
+    ) -> Option<crate::mcp::server::CodeIndexSearchUnavailableReasonV1> {
+        mcp_search_request_termination(
+            self.deadline.as_ref(),
+            self.cancellation.as_ref(),
+            mcp_now_micros(),
+        )
+    }
+}
+
+fn mcp_now_micros() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_micros()).ok())
+        .unwrap_or(i64::MAX)
+}
+
+fn mcp_search_request_termination(
+    deadline: Option<&tracedecay_application::Deadline>,
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    now_micros: i64,
+) -> Option<crate::mcp::server::CodeIndexSearchUnavailableReasonV1> {
+    if cancellation.is_some_and(tracedecay_application::CancellationSignal::is_cancelled) {
+        return Some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Cancelled);
+    }
+    deadline
+        .is_some_and(|deadline| now_micros >= deadline.expires_at.0)
+        .then_some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::TimedOut)
+}
+
+fn code_index_scope_unavailable() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+    crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+            code_generation: None,
+            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                reason: "scope_unavailable",
+            },
+        },
+    )
+}
+
+impl crate::query::retrieval::semantic::SemanticExecutionControl for McpSemanticExecutionControlV1 {
+    fn is_cancelled(&self) -> bool {
+        !self.admission_provider.route_is_registered() || self.request_termination().is_some()
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+}
+
+fn code_index_search_executor(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    project_id: tracedecay_domain::ProjectId,
+    admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
+) -> crate::mcp::server::CodeIndexSearchExecutor {
+    Arc::new(move |request| {
+        let schedulers = schedulers.clone();
+        let project_id = project_id.clone();
+        let admission_provider = admission_provider.clone();
+        Box::pin(async move {
+            let scope = match project_open_owners::resolved_scope_for_project(
+                &request.project_root,
+                &project_id,
+            ) {
+                Ok(scope) => scope,
+                Err(_) => return code_index_scope_unavailable(),
+            };
+            let admission = match admission_provider.admit_current(&scope) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason:
+                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: error.reason(),
+                            },
+                        },
+                    );
+                }
+            };
+            let current_authority = admission.search_authority();
+            let authority = match admission.authorize(&scope, Some(&current_authority)) {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason:
+                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: error.reason(),
+                            },
+                        },
+                    );
+                }
+            };
+            let terminal_expected_authority = authority.clone();
+            let policy = match (
+                tracedecay_domain::SanitizerRevision::new("query-sanitizer.daemon.v1"),
+                tracedecay_domain::QueryNormalizationRevision::new("query-normalization.daemon.v1"),
+                tracedecay_domain::ExactAdmissionRuleRevision::new("exact-rules.daemon.v1"),
+                tracedecay_domain::ComponentRevision::new("lexical-profile.daemon.v1"),
+                tracedecay_domain::ScoreDomainId::new("score.lexical.daemon.v1"),
+            ) {
+                (
+                    Ok(sanitizer_revision),
+                    Ok(normalization_revision),
+                    Ok(exact_rule_revision),
+                    Ok(lexical_profile_revision),
+                    Ok(lexical_score_domain),
+                ) => code_index_scheduler::pr9_runtime::Pr9SearchExecutionPolicyV1 {
+                    principal: authority.principal,
+                    authorization_revision: authority.authorization_revision,
+                    sanitizer_revision,
+                    normalization_revision,
+                    exact_rule_revision,
+                    lexical_profile_revision,
+                    lexical_score_domain,
+                    fuzzy_budget: crate::query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+                    graph_edge_kinds: vec![tracedecay_domain::RelationEdgeKindV1::Calls],
+                    graph_max_depth: 1,
+                    page_size: request.limit,
+                    cursor: None,
+                },
+                _ => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "invalid_request",
+                            },
+                        },
+                    );
+                }
+            };
+            let project_root = request.project_root;
+            let mode = request.mode;
+            let deadline = request.deadline;
+            let cancellation = request.cancellation;
+            let semantic_mode = match mode {
+                crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed => {
+                    crate::query::retrieval::semantic::SemanticQueryModeV1::FallbackAllowed
+                }
+                crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic => {
+                    crate::query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
+                }
+            };
+            let control = Arc::new(McpSemanticExecutionControlV1 {
+                started: std::time::Instant::now(),
+                admission_provider: admission_provider.clone(),
+                deadline,
+                cancellation,
+            });
+            if let Some(reason) = control.request_termination() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: None,
+                        reason,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: reason.as_str(),
+                        },
+                    },
+                );
+            }
+            if !admission_provider.route_is_registered() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: None,
+                        reason:
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "route_revoked",
+                        },
+                    },
+                );
+            }
+            let execution_result = {
+                let execution_schedulers = schedulers.clone();
+                let execution_project_root = project_root.clone();
+                let execution_scope = scope.clone();
+                let execution_control = Arc::clone(&control);
+                let execution_request =
+                    code_index_scheduler::pr9_runtime::Pr9SearchExecutionRequestV1::new(
+                        request.query,
+                        policy,
+                    );
+                let runtime = tokio::runtime::Handle::current();
+                let mut execution = tokio::task::spawn_blocking(move || {
+                    runtime.block_on(async move {
+                        execution_schedulers
+                            .execute_pr9_with_semantic(
+                                &execution_project_root,
+                                &execution_scope,
+                                execution_request,
+                                execution_control.as_ref(),
+                                semantic_mode,
+                            )
+                            .await
+                    })
+                });
+                let mut control_poll = tokio::time::interval(std::time::Duration::from_millis(10));
+                control_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        result = &mut execution => match result {
+                            Ok(result) => break result,
+                            Err(_) => return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                                crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                                    code_generation: None,
+                                    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
+                                    semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                        reason: "search_task_failed",
+                                    },
+                                },
+                            ),
+                        },
+                        _ = control_poll.tick() => {
+                            if let Some(reason) = control.request_termination() {
+                                execution.abort();
+                                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                                        code_generation: None,
+                                        reason,
+                                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                            reason: reason.as_str(),
+                                        },
+                                    },
+                                );
+                            }
+                            if !admission_provider.route_is_registered() {
+                                execution.abort();
+                                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                                        code_generation: None,
+                                        reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                            reason: "route_revoked",
+                                        },
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            };
+            if let Some(reason) = control.request_termination() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: None,
+                        reason,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: reason.as_str(),
+                        },
+                    },
+                );
+            }
+            if !admission_provider.route_is_registered() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: None,
+                        reason:
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "route_revoked",
+                        },
+                    },
+                );
+            }
+            let executed = match execution_result {
+                Ok(executed) => executed,
+                Err(error) => {
+                    use code_index_scheduler::pr9_runtime::Pr9SearchExecutionErrorV1;
+                    use code_index_scheduler::semantic_query_runtime::Pr9SemanticSearchExecutionErrorV1;
+                    if let Pr9SemanticSearchExecutionErrorV1::Semantic(
+                        crate::query::retrieval::semantic::SemanticQueryServiceError::StrictUnavailable(
+                            abstention,
+                        ),
+                    ) = &error
+                    {
+                        let status = schedulers.semantic_mcp_abstention(&project_root).await;
+                        return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                            crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                                code_generation: status.code_generation,
+                                reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
+                                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                    reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(abstention),
+                                },
+                            },
+                        );
+                    }
+                    let reason = match error {
+                        Pr9SemanticSearchExecutionErrorV1::Pr9(error) => match error {
+                        Pr9SearchExecutionErrorV1::AuthorityUnavailable
+                        | Pr9SearchExecutionErrorV1::Authority(
+                            crate::query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable,
+                        ) => crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        Pr9SearchExecutionErrorV1::GenerationUnavailable => {
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                        }
+                        Pr9SearchExecutionErrorV1::InvalidScope(_)
+                        | Pr9SearchExecutionErrorV1::InvalidPolicy(_) => {
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::InvalidRequest
+                        }
+                        Pr9SearchExecutionErrorV1::Retrieval(_)
+                        | Pr9SearchExecutionErrorV1::Authority(_) => {
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
+                        }
+                        },
+                        Pr9SemanticSearchExecutionErrorV1::Semantic(_) => {
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
+                        }
+                    };
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "semantic_unavailable",
+                            },
+                        },
+                    );
+                }
+            };
+            if let Some(reason) = control.request_termination() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        reason,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: reason.as_str(),
+                        },
+                    },
+                );
+            }
+            if !admission_provider.route_is_registered() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        reason:
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "route_revoked",
+                        },
+                    },
+                );
+            }
+            let terminal_scope = match project_open_owners::resolved_scope_for_project(
+                &project_root,
+                &project_id,
+            ) {
+                Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
+                _ => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            reason:
+                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "scope_changed_before_publication",
+                            },
+                        },
+                    );
+                }
+            };
+            let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            reason:
+                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: error.reason(),
+                            },
+                        },
+                    );
+                }
+            };
+            let terminal_authority = terminal_admission.search_authority();
+            if terminal_authority != terminal_expected_authority
+                || terminal_admission
+                    .authorize(&terminal_scope, Some(&terminal_authority))
+                    .is_err()
+            {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        reason:
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "authorization_changed_before_publication",
+                        },
+                    },
+                );
+            }
+            let (semantic, ordered_candidates) = match &executed.semantic {
+                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented {
+                    composition,
+                    ..
+                } => (
+                    crate::mcp::server::CodeIndexSemanticStatusV1::Complete,
+                    composition.ranked_candidates.clone(),
+                ),
+                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
+                    abstention,
+                    ..
+                } => (
+                    crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                        reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
+                            abstention,
+                        ),
+                    },
+                    executed.pr9.authorized.fallback.ordered_candidates.clone(),
+                ),
+            };
+            if let Some(reason) = control.request_termination() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        reason,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: reason.as_str(),
+                        },
+                    },
+                );
+            }
+            if !admission_provider.route_is_registered() {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        reason:
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "route_revoked_before_publication",
+                        },
+                    },
+                );
+            }
+            let publication_scope = match project_open_owners::resolved_scope_for_project(
+                &project_root,
+                &project_id,
+            ) {
+                Ok(publication_scope) if publication_scope == terminal_scope => publication_scope,
+                _ => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            reason:
+                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "scope_changed_during_publication",
+                            },
+                        },
+                    );
+                }
+            };
+            let publication_admission = match admission_provider.admit_current(&publication_scope) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                            crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                                code_generation: Some(
+                                    executed.pr9.generation.as_str().to_owned(),
+                                ),
+                                reason:
+                                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                                semantic:
+                                    crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                        reason: error.reason(),
+                                    },
+                            },
+                        );
+                }
+            };
+            let publication_authority = publication_admission.search_authority();
+            if publication_authority != terminal_expected_authority
+                || publication_admission
+                    .authorize(&publication_scope, Some(&publication_authority))
+                    .is_err()
+            {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        reason:
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "authorization_changed_during_publication",
+                        },
+                    },
+                );
+            }
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(
+                crate::mcp::server::CodeIndexSearchCompletedV1 {
+                    code_generation: executed.pr9.generation.as_str().to_owned(),
+                    ordered_candidates,
+                    pr9_fallback: executed.pr9.authorized.fallback,
+                    semantic,
+                },
+            )
+        })
+    })
+}
+
+fn git_read_executor(
+    project_id: tracedecay_domain::ProjectId,
+    admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
+) -> crate::mcp::server::GitReadExecutor {
+    Arc::new(move |request| {
+        let project_id = project_id.clone();
+        let admission_provider = admission_provider.clone();
+        Box::pin(async move {
+            let scope = match project_open_owners::resolved_scope_for_project(
+                &request.project_root,
+                &project_id,
+            ) {
+                Ok(scope) => scope,
+                Err(_) => {
+                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                    };
+                }
+            };
+            let admission = match admission_provider.admit_current(&scope) {
+                Ok(admission) => admission,
+                Err(_) => {
+                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                    };
+                }
+            };
+            let authority_receipt = admission.search_authority();
+            if admission
+                .authorize_git_read(&scope, Some(&authority_receipt), &request.request)
+                .is_err()
+            {
+                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                    reason:
+                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                };
+            }
+            let now_micros = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_micros()).ok())
+                .unwrap_or(u64::MAX);
+            let deadline_micros = request
+                .deadline
+                .as_ref()
+                .and_then(|deadline| u64::try_from(deadline.expires_at.0).ok())
+                .unwrap_or_else(|| now_micros.saturating_add(30_000_000));
+            if deadline_micros <= now_micros {
+                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
+                };
+            }
+
+            let cancellation = request.cancellation;
+            let cancel =
+                Arc::new(AtomicBool::new(cancellation.as_ref().is_some_and(
+                    tracedecay_application::CancellationSignal::is_cancelled,
+                )));
+            let mut bounds = request.bounds;
+            let deadline_at =
+                Instant::now() + Duration::from_micros(deadline_micros.saturating_sub(now_micros));
+            bounds.deadline = Some(deadline_at);
+            bounds.cancel = Some(Arc::clone(&cancel));
+            let project_root = request.project_root;
+            let git_request = request.request;
+            let revalidation_request = git_request.clone();
+            let selected_scope = scope.clone();
+            let authority =
+                crate::application::git_reads::GitReadAuthorityV1::new(project_root.clone(), scope);
+            let mut execution = tokio::task::spawn_blocking(move || {
+                crate::application::git_reads::execute_git_read(
+                    Some(&authority),
+                    &selected_scope,
+                    &git_request,
+                    &bounds,
+                )
+            });
+            let outcome = loop {
+                tokio::select! {
+                    result = &mut execution => {
+                        break result.unwrap_or(
+                            crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::ReadFailed,
+                            },
+                        );
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {
+                        if !admission_provider.route_is_registered() {
+                            cancel.store(true, Ordering::Release);
+                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                            };
+                        }
+                        if cancellation
+                            .as_ref()
+                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                        {
+                            cancel.store(true, Ordering::Release);
+                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
+                            };
+                        }
+                        if Instant::now() >= deadline_at {
+                            cancel.store(true, Ordering::Release);
+                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
+                            };
+                        }
+                    }
+                }
+            };
+            if !admission_provider.route_is_registered() {
+                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                    reason:
+                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                };
+            }
+            if cancellation
+                .as_ref()
+                .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            {
+                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
+                };
+            }
+            if Instant::now() >= deadline_at {
+                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
+                };
+            }
+            let current_scope = match project_open_owners::resolved_scope_for_project(
+                &project_root,
+                &project_id,
+            ) {
+                Ok(scope) => scope,
+                Err(_) => {
+                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                    };
+                }
+            };
+            let terminal_admission = match admission_provider.admit_current(&current_scope) {
+                Ok(admission) => admission,
+                Err(_) => {
+                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                    };
+                }
+            };
+            let terminal_authority = terminal_admission.search_authority();
+            if terminal_authority != authority_receipt
+                || terminal_admission
+                    .authorize_git_read(
+                        &current_scope,
+                        Some(&terminal_authority),
+                        &revalidation_request,
+                    )
+                    .is_err()
+            {
+                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+                    reason:
+                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
+                };
+            }
+            outcome
+        })
+    })
+}
+
 mod authority;
 mod branch_add;
 mod branch_admin;
-mod code_index_scheduler;
+pub(crate) mod code_index_scheduler;
+pub(crate) mod context_scout_lifecycle;
 mod core_admission;
 mod core_client;
 mod core_doctor;
@@ -68,7 +778,8 @@ mod core_lifecycle;
 mod core_logging;
 mod core_proxy;
 pub(crate) mod doctor_kernel;
-mod project_open_owners;
+pub(crate) mod pr9_authority_provider;
+pub(crate) mod project_open_owners;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
@@ -80,26 +791,42 @@ pub use core_proxy::*;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;
+mod http_application;
 pub mod lsp_gateway;
 #[cfg(unix)]
 mod memory_repair_scheduler;
+mod pr9_mcp_admission;
 #[cfg(unix)]
 pub mod pr_autotrack;
 mod profile_host_admission_replay;
+pub(crate) mod profile_identity;
 #[cfg(unix)]
 mod scheduler;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
+
+/// Enables background maintenance only for long-lived daemon/MCP processes.
+///
+/// Session-store mounts retain the registered database authority for the
+/// lifetime of each maintenance task. One-shot commands never enable it.
+pub fn mark_process_long_lived_for_session_maintenance() {
+    store_runtime::session_registry::mark_process_long_lived_for_session_maintenance();
+}
+pub(crate) mod store_size_telemetry;
 pub(crate) mod transport;
 pub(crate) use service::invocation::{
-    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonAdvisoryRuntimeRegistrar,
-    DaemonAdvisoryRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
+    BoundedPr13HookOrchestratorV1, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
+    DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
+    DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
+    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationOutcome, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationService,
     DaemonLspOwnerRegistrar, DaemonLspSessionAccess, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrationError, daemon_operation_event_authority,
+    DaemonSemanticRuntimeRegistrationError, Pr13HookOrchestrationAdmissionV1,
+    Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
+    admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
     parse_daemon_invocation_request,
 };
 pub use service::{
@@ -140,8 +867,25 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     authority.publish_endpoint(&endpoint)?;
     log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
 
+    let store_administration =
+        StoreAdministration::default().with_profile_identity(authority.profile_identity().clone());
+    let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
+    install_http_application_cold_resolver(
+        &http_application_registry,
+        store_administration.clone(),
+    )?;
+    let http_application_service = http_application::DaemonHttpApplicationService::bind(
+        http_application_registry.clone(),
+        authority.auth_token(),
+    )
+    .await?;
+    authority.publish_http_application_endpoint(http_application_service.endpoint())?;
+    log_daemon_event(
+        "daemon_http_application_listening",
+        &[("endpoint", http_application_service.endpoint().to_string())],
+    );
+
     let lifecycle = DaemonLifecycle::default();
-    let store_administration = StoreAdministration::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation = DaemonInvocationState::default();
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
@@ -171,6 +915,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         let store_administration = store_administration.clone();
         let project_open_gates = Arc::clone(&project_open_gates);
         let invocation = invocation.clone();
+        let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
         clients.spawn(async move {
             let _permit = permit;
@@ -181,6 +926,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 store_administration,
                 project_open_gates,
                 invocation,
+                http_application_registry,
                 per_client_admission,
                 admission_class,
                 #[cfg(test)]
@@ -190,6 +936,11 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         });
     }
     lifecycle.begin_draining();
+    let _ = timeout(
+        DAEMON_TASK_ABORT_DEADLINE,
+        http_application_service.shutdown(),
+    )
+    .await;
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
     invocation.shutdown().await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
@@ -266,7 +1017,24 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_listening",
         &[("endpoint", bound_endpoint.to_string())],
     );
-    let engine = DaemonEngine::default();
+    let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
+    let engine = DaemonEngine::default()
+        .with_profile_identity(authority.profile_identity().clone())
+        .with_http_application_registry(http_application_registry.clone());
+    install_http_application_cold_resolver(
+        &http_application_registry,
+        engine.store_administration.clone(),
+    )?;
+    let http_application_service = http_application::DaemonHttpApplicationService::bind(
+        http_application_registry.clone(),
+        authority.auth_token(),
+    )
+    .await?;
+    authority.publish_http_application_endpoint(http_application_service.endpoint())?;
+    log_daemon_event(
+        "daemon_http_application_listening",
+        &[("endpoint", http_application_service.endpoint().to_string())],
+    );
     // Install the git-metadata watcher (design D3/D5). The daemon has no single
     // project root, so it uses the default `[sync]` config plus env overrides.
     // When `auto_watch` is off the watcher is inert. The watcher shares the
@@ -276,7 +1044,13 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         engine.store_administration.clone(),
         profile_root.clone(),
     );
-    git_watcher.spawn(crate::global_db::global_db_path()).await;
+    if git_watcher.is_enabled() {
+        let profile_database = engine
+            .store_administration
+            .registered_profile_database()
+            .await?;
+        git_watcher.spawn(profile_database).await;
+    }
     // PR-branch auto-tracking runs independently of the metadata watcher: it is
     // gated per-project on `sync.auto_track_pr_branches` (default off), so this
     // loop is inert unless a project opts in.
@@ -326,6 +1100,11 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         });
     }
     engine.lifecycle.begin_draining();
+    let _ = timeout(
+        DAEMON_TASK_ABORT_DEADLINE,
+        http_application_service.shutdown(),
+    )
+    .await;
     engine.shutdown_project_open_tasks().await;
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
@@ -488,6 +1267,9 @@ struct DaemonInvocationState {
     lsp_session_registry: Arc<tokio::sync::Mutex<lsp_gateway::LspSessionRegistry>>,
     service: DaemonInvocationService,
     code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    pr9_authority_provider: pr9_authority_provider::DaemonPr9AuthorityProviderV1,
+    semantic_projection_scheduler:
+        crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
 
 impl Default for DaemonInvocationState {
@@ -500,6 +1282,10 @@ impl Default for DaemonInvocationState {
             code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
                 MAX_CACHED_PROJECT_SERVERS,
             ),
+            pr9_authority_provider:
+                pr9_authority_provider::DaemonPr9AuthorityProviderV1::default(),
+            semantic_projection_scheduler:
+                crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
         }
     }
 }
@@ -513,8 +1299,16 @@ impl DaemonInvocationState {
         DaemonFeedbackRuntimeRegistrar::new(&self.service)
     }
 
+    fn context_scout_runtime_registrar(&self) -> DaemonContextScoutRuntimeRegistrar {
+        DaemonContextScoutRuntimeRegistrar::new(&self.service)
+    }
+
     fn primitive_runtime_registrar(&self) -> DaemonPrimitiveRuntimeRegistrar {
         DaemonPrimitiveRuntimeRegistrar::new(&self.service)
+    }
+
+    fn configuration_runtime_registrar(&self) -> DaemonConfigurationRuntimeRegistrar {
+        DaemonConfigurationRuntimeRegistrar::new(&self.service)
     }
 
     fn semantic_runtime_registrar(&self) -> DaemonSemanticRuntimeRegistrar {
@@ -523,6 +1317,31 @@ impl DaemonInvocationState {
 
     fn lsp_owner_registrar(&self) -> DaemonLspOwnerRegistrar {
         DaemonLspOwnerRegistrar::new(&self.service)
+    }
+
+    async fn mount_pr9_authority_for_project(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> std::result::Result<(), code_index_scheduler::pr9_runtime::Pr9RuntimeMountErrorV1> {
+        code_index_scheduler::pr9_runtime::mount_pr9_query_authority_on_project_open(
+            &self.code_index_schedulers,
+            project_root,
+            scope,
+            &self.pr9_authority_provider,
+        )
+        .await
+    }
+
+    fn pr9_activation_registrar(
+        &self,
+        project_root: &Path,
+    ) -> Arc<dyn crate::application::semantic_runtime::RetrievalProfileActivationObserverV1> {
+        Arc::new(pr9_authority_provider::DaemonPr9ActivationRegistrarV1::new(
+            self.pr9_authority_provider.clone(),
+            self.code_index_schedulers.clone(),
+            project_root.to_path_buf(),
+        ))
     }
 
     async fn mount_code_index(
@@ -534,19 +1353,6 @@ impl DaemonInvocationState {
         semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
         semantic_resources: Option<crate::config::SemanticResourceCeilings>,
     ) -> Result<()> {
-        let semantic_schedule = semantic_runtime
-            .zip(semantic_database)
-            .zip(semantic_lifecycle)
-            .zip(semantic_resources)
-            .map(|(((handle, database), lifecycle), resources)| {
-                crate::application::semantic_runtime::production_saved_generation_schedule_hook(
-                    project_root.to_path_buf(),
-                    handle.clone(),
-                    database,
-                    lifecycle,
-                    resources,
-                )
-            });
         // Code-index identity is anchored on the project root's own git
         // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the
         // root, no upward discovery). A non-git project has no code-index
@@ -562,6 +1368,24 @@ impl DaemonInvocationState {
             );
             return Ok(());
         }
+        let semantic_schedule = semantic_runtime
+            .zip(semantic_database)
+            .zip(semantic_lifecycle)
+            .zip(semantic_resources)
+            .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
+            .map(
+                |((((handle, database), lifecycle), resources), worktree_id)| {
+                    crate::application::semantic_runtime::production_saved_generation_schedule_hook(
+                        project_root.to_path_buf(),
+                        worktree_id,
+                        handle.clone(),
+                        database,
+                        lifecycle,
+                        resources,
+                        self.semantic_projection_scheduler.clone(),
+                    )
+                },
+            );
         self.code_index_schedulers
             .mount_worktree(project_root, store_root, semantic_schedule)
             .await
@@ -586,6 +1410,9 @@ struct DaemonEngine {
     /// Git and feedback remain unavailable until their authoritative request
     /// owners register daemon-minted handles; no client-side fallback exists.
     invocation: DaemonInvocationState,
+    /// Project-scoped canonical application routers served by the daemon's
+    /// standalone authenticated loopback HTTP listener.
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     /// Lightweight per-proxy leases keep one reconnecting client from
     /// consuming every bulk slot while preserving reserved control capacity.
     per_client_admission: DaemonPerClientAdmission,
@@ -636,7 +1463,7 @@ struct DaemonEngine {
 /// the same database is rejected by the registry.
 async fn ensure_git_index_transactions_before_advertising(
     store_administration: &StoreAdministration,
-    session_db: Arc<crate::global_db::GlobalDb>,
+    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     project_root: &Path,
     project_id: Option<&str>,
 ) -> Result<()> {
@@ -1122,6 +1949,10 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn values(&self) -> impl Iterator<Item = &Server> {
         self.servers.values().map(|entry| &entry.server)
     }
+
+    fn keys(&self) -> impl Iterator<Item = &ProjectServerKey> {
+        self.servers.keys()
+    }
 }
 
 fn project_server_capacity_error() -> TraceDecayError {
@@ -1193,6 +2024,30 @@ fn project_route_for_handshake(handshake: &DaemonHandshake) -> Result<(PathBuf, 
         .unwrap_or_else(|_| project_path.clone());
     let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
     Ok((canonical_project_path, route))
+}
+
+async fn bind_authenticated_profile_identity(
+    handshake: &mut DaemonHandshake,
+    store_administration: &StoreAdministration,
+) -> Result<()> {
+    let profile_identity = store_administration.profile_identity()?;
+    let profile_root = authority::canonical_identity_path(profile_identity.profile_root())?;
+    let profile_database = store_administration.registered_profile_database().await?;
+    let global_db_path = authority::canonical_identity_path(profile_database.db_path())?;
+    let supplied_profile_root =
+        authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
+    if supplied_profile_root != profile_root {
+        return Err(TraceDecayError::Config {
+            message:
+                "daemon client profile identity does not match the authenticated daemon profile"
+                    .to_owned(),
+        });
+    }
+    handshake.client_identity = DaemonClientIdentity {
+        profile_root,
+        global_db_path,
+    };
+    Ok(())
 }
 
 async fn project_open_gate(
@@ -1282,8 +2137,12 @@ fn portable_database_owner_reconciler(
                 return;
             };
             if rekeyed
+                && let Some(project_id) = new_owner.project_id.as_deref()
                 && let Ok(database) = store_administration
-                    .global_database(&fresh.store_layout().sessions_db_path)
+                    .registered_project_session_database(
+                        project_id,
+                        [fresh.project_root().to_path_buf()],
+                    )
                     .await
             {
                 store_administration
@@ -1336,8 +2195,100 @@ impl ProjectServerKey {
     }
 }
 
+fn build_http_application_router(project_id: &str, project_path: &Path) -> Result<axum::Router> {
+    let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("daemon HTTP project identity is invalid: {error}"),
+        }
+    })?;
+    let handshake =
+        DaemonHandshake::for_current_client(Some(project_path.to_path_buf()), None, false, false)?;
+    let client = crate::daemon_client::DaemonInvocationClient::for_current(handshake)?;
+    crate::application_surface::http_application_router(
+        client,
+        daemon_operation_event_authority(),
+        project_id.clone(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("could not mount daemon HTTP application routes: {error}"),
+    })
+}
+
+fn install_http_application_cold_resolver(
+    registry: &http_application::DaemonHttpApplicationRegistry,
+    store_administration: StoreAdministration,
+) -> Result<()> {
+    registry.install_resolver(move |project_id| {
+        let store_administration = store_administration.clone();
+        async move {
+            let database = store_administration.registered_profile_database().await?;
+            let Some(context) = database
+                .project_registry_context_by_id(project_id.as_str())
+                .await?
+            else {
+                return Ok(None);
+            };
+            if context.project.project_id != project_id.as_str() {
+                return Err(TraceDecayError::Config {
+                    message: "daemon HTTP project registry identity changed".to_owned(),
+                });
+            }
+            let registered_root = PathBuf::from(&context.project.canonical_root);
+            if !registered_root.is_absolute() {
+                return Err(TraceDecayError::Config {
+                    message: "daemon HTTP registered project root is not absolute".to_owned(),
+                });
+            }
+            let canonical_root =
+                registered_root
+                    .canonicalize()
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "daemon HTTP registered project root is unavailable: {error}"
+                        ),
+                    })?;
+            if canonical_root != registered_root {
+                return Err(TraceDecayError::Config {
+                    message: "daemon HTTP registered project root is not canonical".to_owned(),
+                });
+            }
+            build_http_application_router(project_id.as_str(), &canonical_root).map(Some)
+        }
+    })
+}
+
+async fn mount_http_application_router(
+    registry: &http_application::DaemonHttpApplicationRegistry,
+    project_id: &str,
+    project_path: &Path,
+) -> Result<()> {
+    if !registry.is_active() {
+        return Ok(());
+    }
+    let router = build_http_application_router(project_id, project_path)?;
+    registry.mount(project_id, router).await
+}
+
 #[cfg(unix)]
 impl DaemonEngine {
+    fn with_profile_identity(
+        mut self,
+        profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
+    ) -> Self {
+        self.store_administration = self
+            .store_administration
+            .with_profile_identity(profile_identity);
+        self
+    }
+
+    fn with_http_application_registry(
+        mut self,
+        registry: http_application::DaemonHttpApplicationRegistry,
+    ) -> Self {
+        self.http_application_registry = registry;
+        self
+    }
+
     /// Installs the config-driven git-metadata watcher on this engine. Called
     /// once by `run_foreground_unix` before the accept loop.
     fn with_git_watcher(mut self, watcher: git_watch::GitWatcher) -> Self {
@@ -1616,10 +2567,11 @@ impl DaemonEngine {
         let cg = Box::pin(open_project_for_handshake(
             &canonical_project_path,
             handshake,
+            &self.store_administration,
         ))
         .await?;
         ensure_context_scout_owner_before_advertising(&cg)?;
-        cg.register_project_store_in_global_registry().await;
+        cg.register_project_store_in_global_registry().await?;
         let key = ProjectServerKey::from_open_project(&cg, handshake)?;
         let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
         let semantic_resources = cg
@@ -1660,31 +2612,49 @@ impl DaemonEngine {
             return Ok((key, canonical_project_path, server, false));
         }
 
-        let registry_db = self
+        let authoritative_project_id =
+            key.owner
+                .project_id
+                .as_deref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "project session runtime requires an authoritative project identity"
+                        .to_owned(),
+                })?;
+        let registered_project_session_db = self
             .store_administration
-            .global_database(&handshake.client_identity.global_db_path)
-            .await?;
-        let session_db = self
-            .store_administration
-            .global_database(&cg.store_layout().sessions_db_path)
+            .registered_project_session_database(
+                authoritative_project_id,
+                [
+                    canonical_project_path.clone(),
+                    cg.project_root().to_path_buf(),
+                ],
+            )
             .await?;
         ensure_git_index_transactions_before_advertising(
             &self.store_administration,
-            Arc::clone(&session_db),
+            Arc::clone(&registered_project_session_db),
             cg.project_root(),
             key.owner.project_id.as_deref(),
         )
         .await?;
+        let registered_user_session_db = self
+            .store_administration
+            .registered_profile_session_database()
+            .await?;
+        let registered_profile_db = self
+            .store_administration
+            .registered_profile_database()
+            .await?;
+        let registry_db = Arc::clone(&registered_profile_db);
+        let session_db = Arc::clone(&registered_project_session_db);
+        let user_session_db = Arc::clone(&registered_user_session_db);
         let host_admission_broker = self
             .store_administration
             .host_admission_broker(&session_db)
             .await?
             .broker()
             .cloned();
-        let user_session_db = self
-            .store_administration
-            .user_session_database(&handshake.client_identity.global_db_path)
-            .await?;
+        let profile_identity = self.store_administration.profile_identity()?.clone();
         let project_session_refresh_wake = self
             .store_administration
             .session_temporal_refresh_schedulers()
@@ -1698,8 +2668,8 @@ impl DaemonEngine {
                 Arc::clone(&user_session_db),
             )
             .await;
-        let accounting_db =
-            crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
+        let accounting_db = crate::global_db::global_accounting_enabled()
+            .then(|| Arc::clone(&registered_profile_db));
         let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
         let current_project_path =
             Arc::new(tokio::sync::Mutex::new(canonical_project_path.clone()));
@@ -1726,16 +2696,55 @@ impl DaemonEngine {
                 let schedulers = code_index_schedulers.clone();
                 Box::pin(async move { schedulers.notify_hook_paths(&root, &rel_paths).await })
             });
+        let code_search_project_id = tracedecay_domain::ProjectId::new(
+            authoritative_project_id.to_owned(),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project search identity is invalid: {error}"),
+        })?;
+        let code_search_scope = project_open_owners::resolved_scope_for_project(
+            cg.project_root(),
+            &code_search_project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project search scope is invalid: {error:?}"),
+        })?;
+        let code_search_admission = pr9_mcp_admission::admit_pr9_mcp_read(
+            Some(&profile_identity),
+            &code_search_project_id,
+            &code_search_scope,
+            Arc::clone(&route_registered),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project search admission is unavailable: {error}"),
+        })?;
+        let code_search_authority = code_search_admission.search_authority();
+        let read_admission_provider = pr9_mcp_admission::Pr9McpReadAdmissionProviderV1::new(
+            profile_identity.clone(),
+            code_search_project_id.clone(),
+            Arc::clone(&route_registered),
+        );
+        let git_read_executor = git_read_executor(
+            code_search_project_id.clone(),
+            read_admission_provider.clone(),
+        );
+        let code_index_search_executor = code_index_search_executor(
+            self.invocation.code_index_schedulers.clone(),
+            code_search_project_id,
+            read_admission_provider,
+        );
         let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
             cg,
             handshake.scope_prefix.clone(),
             crate::mcp::server::McpServerDaemonAuthority {
-                profile_root: handshake.client_identity.profile_root.clone(),
+                profile_identity,
                 databases: crate::mcp::server::McpServerDaemonDatabases {
                     accounting: accounting_db,
                     registry: registry_db,
                     project_sessions: session_db,
                     user_sessions: user_session_db,
+                    registered_project_sessions: registered_project_session_db,
+                    registered_user_sessions: registered_user_session_db,
                 },
                 host_admission_broker,
                 project_session_refresh_wake,
@@ -1749,7 +2758,13 @@ impl DaemonEngine {
             },
         )
         .with_automation_scheduler_reconciler(reconciler)
-        .with_code_index_hook_sink(code_index_hook_sink);
+        .with_code_index_hook_sink(code_index_hook_sink)
+        .with_code_index_search_executor(code_index_search_executor)
+        .with_git_read_executor(git_read_executor)
+        .with_code_index_search_authority(code_search_authority)
+        .with_retained_project_graph_resolver(retained_project_graph_resolver(
+            self.store_administration.clone(),
+        ));
         let candidate = crate::mcp::McpServer::new_with_context(context).await;
         let resolved = self
             .store_administration
@@ -1796,9 +2811,16 @@ impl DaemonEngine {
                     })?;
             project_open_owners::register_project_open_production_owners(
                 &self.invocation,
+                self.store_administration.git_index_transaction_services(),
                 &canonical_project_path,
                 project_id,
                 server.as_ref(),
+            )
+            .await?;
+            mount_http_application_router(
+                &self.http_application_registry,
+                project_id,
+                &canonical_project_path,
             )
             .await?;
             self.spawn_project_maintenance_activation(
@@ -1987,11 +3009,17 @@ impl DaemonEngine {
                             route_registered.store(false, Ordering::Release);
                         }
                         let project_path = fresh.project_root().to_path_buf();
-                        let new_session_db = engine
-                            .store_administration
-                            .global_database(&fresh.store_layout().sessions_db_path)
-                            .await
-                            .ok();
+                        let new_session_db = match new_key.owner.project_id.as_deref() {
+                            Some(project_id) => engine
+                                .store_administration
+                                .registered_project_session_database(
+                                    project_id,
+                                    [fresh.project_root().to_path_buf()],
+                                )
+                                .await
+                                .ok(),
+                            None => None,
+                        };
                         *current_project_path.lock().await = project_path;
                         *current = new_key.clone();
                         Some((
@@ -2095,10 +3123,10 @@ async fn shutdown_project_servers(store_administration: &StoreAdministration) {
 /// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).
 async fn ensure_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
-    client_identity: &DaemonClientIdentity,
+    _client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
     let Ok(user_session_db) = store_administration
-        .user_session_database(&client_identity.global_db_path)
+        .registered_profile_session_database()
         .await
     else {
         eprintln!("[tracedecay] user-profile host admission disposition: authority_unavailable");
@@ -2196,11 +3224,9 @@ async fn apply_daemon_initialize_route(
     if request.method != "initialize" {
         return Ok(None);
     }
-    let registry = store_administration
-        .global_database(&handshake.client_identity.global_db_path)
-        .await?;
+    let registry = store_administration.registered_profile_database().await?;
     let Some(route) =
-        resolve_daemon_initialize_route(request.params.as_ref(), Some(&registry)).await
+        resolve_daemon_initialize_route(request.params.as_ref(), Some(&registry)).await?
     else {
         return Ok(None);
     };
@@ -2382,6 +3408,7 @@ async fn begin_portable_project_open(
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     invocation: DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     handshake: DaemonHandshake,
     canonical_project_path: PathBuf,
     route: ProjectRouteKey,
@@ -2404,6 +3431,7 @@ async fn begin_portable_project_open(
                         &store_administration,
                         open_gates.as_ref(),
                         &invocation,
+                        &http_application_registry,
                         &open_project_path,
                         &handshake,
                         #[cfg(test)]
@@ -2422,6 +3450,7 @@ async fn schedule_portable_project_server_warmup(
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     invocation: DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     handshake: DaemonHandshake,
     initialize_request: JsonRpcRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
@@ -2438,6 +3467,7 @@ async fn schedule_portable_project_server_warmup(
         store_administration,
         project_open_gates,
         invocation,
+        http_application_registry,
         handshake,
         canonical_project_path,
         route,
@@ -2459,6 +3489,7 @@ async fn portable_project_server_for_request(
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     invocation: DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     handshake: &DaemonHandshake,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
@@ -2474,6 +3505,7 @@ async fn portable_project_server_for_request(
         store_administration.clone(),
         project_open_gates,
         invocation,
+        http_application_registry,
         handshake.clone(),
         canonical_project_path.clone(),
         route,
@@ -2533,6 +3565,7 @@ async fn portable_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
     invocation: &DaemonInvocationState,
+    http_application_registry: &http_application::DaemonHttpApplicationRegistry,
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
     #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
@@ -2565,10 +3598,11 @@ async fn portable_project_server(
     let cg = Box::pin(open_project_for_handshake(
         canonical_project_path,
         handshake,
+        store_administration,
     ))
     .await?;
     ensure_context_scout_owner_before_advertising(&cg)?;
-    cg.register_project_store_in_global_registry().await;
+    cg.register_project_store_in_global_registry().await?;
     let key = ProjectServerKey::from_open_project(&cg, handshake)?;
     let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
     let semantic_resources = cg
@@ -2614,27 +3648,40 @@ async fn portable_project_server(
         Arc::clone(&route_registered),
         handshake.clone(),
     );
-    let registry_db = store_administration
-        .global_database(&handshake.client_identity.global_db_path)
-        .await?;
-    let session_db = store_administration
-        .global_database(&cg.store_layout().sessions_db_path)
+    let authoritative_project_id =
+        key.owner
+            .project_id
+            .as_deref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project session runtime requires an authoritative project identity"
+                    .to_owned(),
+            })?;
+    let registered_project_session_db = store_administration
+        .registered_project_session_database(
+            authoritative_project_id,
+            [cg.project_root().to_path_buf()],
+        )
         .await?;
     ensure_git_index_transactions_before_advertising(
         store_administration,
-        Arc::clone(&session_db),
+        Arc::clone(&registered_project_session_db),
         cg.project_root(),
         key.owner.project_id.as_deref(),
     )
     .await?;
+    let registered_user_session_db = store_administration
+        .registered_profile_session_database()
+        .await?;
+    let registered_profile_db = store_administration.registered_profile_database().await?;
+    let registry_db = Arc::clone(&registered_profile_db);
+    let session_db = Arc::clone(&registered_project_session_db);
+    let user_session_db = Arc::clone(&registered_user_session_db);
     let host_admission_broker = store_administration
         .host_admission_broker(&session_db)
         .await?
         .broker()
         .cloned();
-    let user_session_db = store_administration
-        .user_session_database(&handshake.client_identity.global_db_path)
-        .await?;
+    let profile_identity = store_administration.profile_identity()?.clone();
     let project_session_refresh_wake = store_administration
         .session_temporal_refresh_schedulers()
         .ensure_project(key.owner.clone(), Arc::clone(&session_db))
@@ -2647,7 +3694,7 @@ async fn portable_project_server(
         )
         .await;
     let accounting_db =
-        crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
+        crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registered_profile_db));
     // Route after-edit hooks into the code-index scheduler queue on the
     // portable broker path too (mirrors the Unix `open_project_server`).
     let code_index_schedulers = invocation.code_index_schedulers.clone();
@@ -2656,16 +3703,53 @@ async fn portable_project_server(
             let schedulers = code_index_schedulers.clone();
             Box::pin(async move { schedulers.notify_hook_paths(&root, &rel_paths).await })
         });
+    let code_search_project_id = tracedecay_domain::ProjectId::new(
+        authoritative_project_id.to_owned(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project search identity is invalid: {error}"),
+    })?;
+    let code_search_scope =
+        project_open_owners::resolved_scope_for_project(cg.project_root(), &code_search_project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project search scope is invalid: {error:?}"),
+            })?;
+    let code_search_admission = pr9_mcp_admission::admit_pr9_mcp_read(
+        Some(&profile_identity),
+        &code_search_project_id,
+        &code_search_scope,
+        Arc::clone(&route_registered),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project search admission is unavailable: {error}"),
+    })?;
+    let code_search_authority = code_search_admission.search_authority();
+    let read_admission_provider = pr9_mcp_admission::Pr9McpReadAdmissionProviderV1::new(
+        profile_identity.clone(),
+        code_search_project_id.clone(),
+        Arc::clone(&route_registered),
+    );
+    let git_read_executor = git_read_executor(
+        code_search_project_id.clone(),
+        read_admission_provider.clone(),
+    );
+    let code_index_search_executor = code_index_search_executor(
+        invocation.code_index_schedulers.clone(),
+        code_search_project_id,
+        read_admission_provider,
+    );
     let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
         crate::mcp::server::McpServerDaemonAuthority {
-            profile_root: handshake.client_identity.profile_root.clone(),
+            profile_identity,
             databases: crate::mcp::server::McpServerDaemonDatabases {
                 accounting: accounting_db,
                 registry: registry_db,
                 project_sessions: session_db,
                 user_sessions: user_session_db,
+                registered_project_sessions: registered_project_session_db,
+                registered_user_sessions: registered_user_session_db,
             },
             host_admission_broker,
             project_session_refresh_wake,
@@ -2678,7 +3762,13 @@ async fn portable_project_server(
             ),
         },
     )
-    .with_code_index_hook_sink(code_index_hook_sink);
+    .with_code_index_hook_sink(code_index_hook_sink)
+    .with_code_index_search_executor(code_index_search_executor)
+    .with_git_read_executor(git_read_executor)
+    .with_code_index_search_authority(code_search_authority)
+    .with_retained_project_graph_resolver(retained_project_graph_resolver(
+        store_administration.clone(),
+    ));
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
     let project_id = key
         .owner
@@ -2724,9 +3814,16 @@ async fn portable_project_server(
         }
         project_open_owners::register_project_open_production_owners(
             invocation,
+            store_administration.git_index_transaction_services(),
             canonical_project_path,
             &project_id,
             resolved.as_ref(),
+        )
+        .await?;
+        mount_http_application_router(
+            http_application_registry,
+            &project_id,
+            canonical_project_path,
         )
         .await?;
     }
@@ -2793,6 +3890,7 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
+    bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
     let first_request_line = tokio::select! {
         result = read_line_handling_wire_oversized(&mut transport) => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
@@ -2828,7 +3926,13 @@ async fn serve_broker_socket_client(
     };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
         drop(setup_activity);
-        write_doctor_runtime_response(&mut transport, &handshake, request).await?;
+        write_doctor_runtime_response(
+            &mut transport,
+            &handshake,
+            &engine.store_administration,
+            request,
+        )
+        .await?;
         return Ok(());
     }
     engine.log_client_version_skew(&handshake).await;
@@ -3051,6 +4155,7 @@ async fn serve_windows_broker_client_with_class(
         store_administration,
         project_open_gates,
         DaemonInvocationState::default(),
+        http_application::DaemonHttpApplicationRegistry::default(),
         per_client_admission,
         admission_class,
         #[cfg(test)]
@@ -3069,6 +4174,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     invocation: DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     per_client_admission: DaemonPerClientAdmission,
     admission_class: DaemonClientAdmissionClass,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
@@ -3093,6 +4199,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
+    bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
@@ -3121,7 +4228,8 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
         drop(setup_activity);
-        write_doctor_runtime_response(&mut transport, &handshake, request).await?;
+        write_doctor_runtime_response(&mut transport, &handshake, &store_administration, request)
+            .await?;
         return Ok(());
     }
     ensure_user_profile_host_admission_replay_for_identity(
@@ -3162,6 +4270,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                         Arc::clone(&project_open_gates),
                         &handshake,
                         &invocation,
+                        http_application_registry.clone(),
                         request,
                         #[cfg(test)]
                         project_open_attempts.clone(),
@@ -3218,6 +4327,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                             store_administration.clone(),
                             Arc::clone(&project_open_gates),
                             invocation.clone(),
+                            http_application_registry.clone(),
                             handshake.clone(),
                             request.clone(),
                             #[cfg(test)]
@@ -3251,6 +4361,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
             store_administration.clone(),
             Arc::clone(&project_open_gates),
             invocation.clone(),
+            http_application_registry,
             &handshake,
             #[cfg(test)]
             project_open_attempts.clone(),
@@ -3304,6 +4415,7 @@ async fn execute_portable_daemon_invocation(
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     handshake: &DaemonHandshake,
     invocation: &DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     request: DaemonInvocationRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> DaemonInvocationResponse {
@@ -3320,6 +4432,7 @@ async fn execute_portable_daemon_invocation(
             store_administration.clone(),
             project_open_gates,
             invocation.clone(),
+            http_application_registry,
             handshake,
             #[cfg(test)]
             project_open_attempts,
@@ -3401,35 +4514,136 @@ async fn write_tool_list_changed_notification(transport: &mut impl McpTransport)
 async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
+    store_administration: &StoreAdministration,
 ) -> Result<crate::tracedecay::TraceDecay> {
     let open_options = handshake.open_options();
-    match Box::pin(open_existing_project_with_options(
+    let registry_database = store_administration.registered_profile_database().await?;
+    let (store_layout, first_touch) =
+        match crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_path,
+            &open_options,
+            registry_database.as_ref(),
+            true,
+        )
+        .await
+        {
+            Ok(layout) => (layout, false),
+            // A brand-new project has no enrollment marker, registry match, or
+            // legacy shard, so identity resolution fails closed. When the client
+            // explicitly asked to initialize (first-touch `tracedecay init`),
+            // mint a fresh path-derived identity and let the missing-index
+            // fallback below bootstrap it. Existing-but-unresolvable stores
+            // raise their own identity-cutover errors instead of this one and
+            // still fail closed.
+            Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
+                crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout(
+                    project_path,
+                    &open_options,
+                    registry_database.as_ref(),
+                    true,
+                )
+                .await?,
+                true,
+            ),
+            Err(err) => return Err(err),
+        };
+    let project_id =
+        store_layout
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "registered project open requires an authoritative project identity"
+                    .to_owned(),
+            })?;
+    // First-touch enrollment: the daemon's registered session runtime resolves
+    // a project's store through its on-disk enrollment marker, which a
+    // never-seen project does not yet have. Persist it now — under the same
+    // minted identity the layout carries — so the session store can mount
+    // before init bootstraps the graph. This is the honest first enrollment
+    // step, not a bypass: it only runs on the explicit allow_init first-touch
+    // path, and a subsequent open resolves this same marker deterministically.
+    if first_touch {
+        crate::storage::write_enrollment_marker(
+            project_path,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )?;
+    }
+    let configuration_database = store_administration
+        .registered_project_session_database(
+            project_id,
+            [
+                project_path.to_path_buf(),
+                store_layout.project_root.clone(),
+            ],
+        )
+        .await?;
+    let runtime_registry = store_administration.registered_runtime_registry().await?;
+    match crate::tracedecay::TraceDecay::open_with_registered_configuration(
         project_path,
         open_options.clone(),
-    ))
+        store_layout.clone(),
+        Arc::clone(&configuration_database),
+        Arc::clone(&registry_database),
+        Arc::clone(&runtime_registry),
+    )
     .await
     {
         Ok(cg) => Ok(cg),
-        Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
-            match crate::tracedecay::TraceDecay::init_and_index_with_options(
+        Err(open_err) if is_readonly_database_error(&open_err) => {
+            match crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
                 project_path,
-                open_options.clone(),
+                open_options,
+                store_layout,
+                configuration_database,
+                registry_database,
+                runtime_registry,
             )
             .await
             {
                 Ok(cg) => {
-                    cg.close();
-                    Box::pin(open_existing_project_with_options(
-                        project_path,
-                        open_options,
-                    ))
-                    .await
+                    cg.ensure_schema_current().await?;
+                    Ok(cg)
                 }
                 Err(_) => Err(open_err),
             }
         }
+        Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
+            // First-touch (or not-yet-indexed) bootstrap: create and index the
+            // store under the daemon's authority. Surface the bootstrap error
+            // itself on failure — the original "no index found" open error is a
+            // misleading symptom that hides the real reason init could not
+            // complete.
+            crate::tracedecay::TraceDecay::init_and_index_with_registered_configuration(
+                project_path,
+                open_options,
+                store_layout,
+                configuration_database,
+                registry_database,
+                runtime_registry,
+            )
+            .await
+        }
         Err(open_err) => Err(open_err),
     }
+}
+
+/// Whether `err` is the specific fail-closed error raised when identity
+/// resolution finds no enrollment marker, registry match, or legacy shard for a
+/// project — i.e. a genuinely never-enrolled project. Conflicting or ambiguous
+/// *existing* stores raise distinct identity-cutover errors and are excluded, so
+/// first-touch bootstrap never masks a real conflict.
+fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
+    matches!(
+        err,
+        TraceDecayError::Config { message }
+            if message.contains(
+                "registered configuration layout requires an enrolled or registry-resolved project identity"
+            )
+    )
 }
 
 fn is_missing_index_error(err: &TraceDecayError) -> bool {
@@ -3457,41 +4671,6 @@ fn is_readonly_database_error(err: &TraceDecayError) -> bool {
             .to_ascii_lowercase()
             .contains("readonly database"),
         _ => false,
-    }
-}
-
-fn missing_index_error(project_path: &Path) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "no TraceDecay index found at '{}' — run 'tracedecay init' first",
-            project_path.display()
-        ),
-    }
-}
-
-async fn open_existing_project_with_options(
-    project_path: &Path,
-    open_options: crate::tracedecay::TraceDecayOpenOptions,
-) -> Result<crate::tracedecay::TraceDecay> {
-    match crate::tracedecay::TraceDecay::open_with_options(project_path, open_options.clone()).await
-    {
-        Ok(cg) => Ok(cg),
-        Err(open_err) if is_readonly_database_error(&open_err) => {
-            match crate::tracedecay::TraceDecay::open_read_only_with_options(
-                project_path,
-                open_options,
-            )
-            .await
-            {
-                Ok(cg) => {
-                    cg.ensure_schema_current().await?;
-                    Ok(cg)
-                }
-                Err(_) => Err(open_err),
-            }
-        }
-        Err(error) if is_missing_index_error(&error) => Err(missing_index_error(project_path)),
-        Err(error) => Err(error),
     }
 }
 
@@ -3803,20 +4982,30 @@ async fn projectless_tools_call_response(
         );
     }
     if tool_name == "tracedecay_hook_runtime" {
-        let global_db = match store_administration
-            .global_database(&client_identity.global_db_path)
-            .await
-        {
+        let global_db = match store_administration.registered_profile_database().await {
             Ok(global_db) => global_db,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
+        let session_runtime_registry =
+            match store_administration.registered_runtime_registry().await {
+                Ok(registry) => registry,
+                Err(error) => {
+                    return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+                }
+            };
         let user_session_db = match store_administration
-            .user_session_database(&client_identity.global_db_path)
+            .registered_profile_session_database()
             .await
         {
-            Ok(user_session_db) => user_session_db,
+            Ok(database) => database,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        let profile_identity = match store_administration.profile_identity() {
+            Ok(identity) => identity,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
@@ -3844,8 +5033,11 @@ async fn projectless_tools_call_response(
         return match crate::mcp::tools::handle_projectless_hook_runtime(
             arguments,
             &client_identity.profile_root,
+            session_runtime_registry,
             global_db.as_ref(),
-            crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db)),
+            crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
+                .with_profile_identity(Some(profile_identity))
+                .with_registered_databases(None, Some(user_session_db.as_ref())),
             host_admission_broker,
         )
         .await
@@ -3858,11 +5050,14 @@ async fn projectless_tools_call_response(
         };
     }
     if tool_name == "tracedecay_admin_cli" {
-        let global_db = match store_administration
-            .global_database(&client_identity.global_db_path)
-            .await
-        {
+        let global_db = match store_administration.registered_profile_database().await {
             Ok(global_db) => global_db,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        let accounting_db = match store_administration.registered_profile_database().await {
+            Ok(database) => database,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
@@ -3870,6 +5065,7 @@ async fn projectless_tools_call_response(
         return match crate::mcp::tools::handle_projectless_admin_cli(
             arguments,
             &global_db,
+            crate::global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
             &client_identity.profile_root,
         )
         .await
@@ -3903,9 +5099,16 @@ async fn projectless_tools_call_response(
                 "projectless memory dispatch requires memory_scope=user".to_string(),
             );
         }
+        let runtime_registry = match store_administration.retained_runtime_registry().await {
+            Ok(registry) => registry,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
         return match crate::mcp::tools::handle_user_memory_tool(
             tool_name,
             arguments,
+            runtime_registry.as_ref(),
             &client_identity.profile_root,
         )
         .await
@@ -3940,10 +5143,16 @@ async fn projectless_user_lcm_tools_call_response(
         );
     }
     let user_session_db = match store_administration
-        .user_session_database(&client_identity.global_db_path)
+        .registered_profile_session_database()
         .await
     {
-        Ok(user_session_db) => user_session_db,
+        Ok(database) => database,
+        Err(error) => {
+            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+        }
+    };
+    let profile_identity = match store_administration.profile_identity() {
+        Ok(identity) => identity,
         Err(error) => {
             return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
         }
@@ -3957,8 +5166,10 @@ async fn projectless_user_lcm_tools_call_response(
         .await;
     let retrieval_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
+        .and_then(|root| root.with_profile_runtime_shard(profile_identity))
         .and_then(|root| {
-            crate::mcp::server::DaemonSessionRetrievalService::new(
+            crate::mcp::server::DaemonSessionRetrievalService::new_registered(
+                Arc::clone(&user_session_db),
                 Arc::clone(&user_session_db),
                 root,
                 Arc::clone(&retrieval_calls),
@@ -4049,6 +5260,10 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod http_application_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]

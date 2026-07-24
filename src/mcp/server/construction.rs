@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::hook_writes::{
@@ -31,10 +31,15 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) cg: TraceDecay,
     pub(crate) scope_prefix: Option<String>,
     pub(crate) profile_root: Option<PathBuf>,
-    pub(crate) global_db: Option<Arc<GlobalDb>>,
-    pub(crate) registry_db: Option<Arc<GlobalDb>>,
-    pub(crate) session_db: Option<Arc<GlobalDb>>,
-    pub(crate) user_session_db: Option<Arc<GlobalDb>>,
+    pub(crate) profile_identity:
+        Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    pub(crate) global_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) accounting_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) registry_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) user_session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) registered_session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) registered_user_session_db: Option<Arc<RegisteredGlobalDb>>,
     pub(crate) host_admission_broker:
         Option<crate::application::host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
@@ -52,6 +57,13 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
+    pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
+    pub(crate) git_read_executor: Option<super::GitReadExecutor>,
+    pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
+    pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    #[cfg(any(test, feature = "test-transport"))]
+    pub(crate) host_admission_test_runtime:
+        Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
 }
 
 pub(crate) struct McpServerWriters {
@@ -61,14 +73,16 @@ pub(crate) struct McpServerWriters {
 }
 
 pub(crate) struct McpServerDaemonDatabases {
-    pub(crate) accounting: Option<Arc<GlobalDb>>,
-    pub(crate) registry: Arc<GlobalDb>,
-    pub(crate) project_sessions: Arc<GlobalDb>,
-    pub(crate) user_sessions: Arc<GlobalDb>,
+    pub(crate) accounting: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) registry: Arc<RegisteredGlobalDb>,
+    pub(crate) project_sessions: Arc<RegisteredGlobalDb>,
+    pub(crate) user_sessions: Arc<RegisteredGlobalDb>,
+    pub(crate) registered_project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub(crate) registered_user_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
 }
 
 pub(crate) struct McpServerDaemonAuthority {
-    pub(crate) profile_root: PathBuf,
+    pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker:
         Option<crate::application::host_admission::SharedHostAdmissionBroker>,
@@ -100,10 +114,14 @@ impl McpServerConstructionContext {
             cg,
             scope_prefix,
             profile_root: None,
+            profile_identity: None,
             global_db: None,
+            accounting_db: None,
             registry_db: None,
             session_db: None,
             user_session_db: None,
+            registered_session_db: None,
+            registered_user_session_db: None,
             host_admission_broker: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
@@ -115,21 +133,30 @@ impl McpServerConstructionContext {
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
+            code_index_search_executor: None,
+            git_read_executor: None,
+            code_index_search_authority: None,
+            retained_project_graph_resolver: None,
+            #[cfg(any(test, feature = "test-transport"))]
+            host_admission_test_runtime: None,
         }
     }
 
     pub(crate) fn with_direct_databases(
         mut self,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Option<Arc<GlobalDb>>,
-        session_db: Option<Arc<GlobalDb>>,
-        user_session_db: Option<Arc<GlobalDb>>,
+        global_db: Option<Arc<RegisteredGlobalDb>>,
+        registry_db: Option<Arc<RegisteredGlobalDb>>,
+        session_db: Option<Arc<RegisteredGlobalDb>>,
+        user_session_db: Option<Arc<RegisteredGlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Self {
         self.global_db = global_db;
+        self.accounting_db = self.global_db.clone();
         self.registry_db = registry_db;
-        self.session_db = session_db;
-        self.user_session_db = user_session_db;
+        self.session_db = session_db.clone();
+        self.user_session_db = user_session_db.clone();
+        self.registered_session_db = session_db;
+        self.registered_user_session_db = user_session_db;
         self.allow_default_registry_fallback = allow_default_registry_fallback;
         self
     }
@@ -140,7 +167,7 @@ impl McpServerConstructionContext {
         authority: McpServerDaemonAuthority,
     ) -> Self {
         let McpServerDaemonAuthority {
-            profile_root,
+            profile_identity,
             databases,
             host_admission_broker,
             project_session_refresh_wake,
@@ -148,14 +175,20 @@ impl McpServerConstructionContext {
             database_owner_reconciler,
             writers,
         } = authority;
+        let profile_root = profile_identity.profile_root().to_path_buf();
+        let registry = databases.registry;
         Self {
             cg,
             scope_prefix,
             profile_root: Some(profile_root),
-            global_db: databases.accounting,
-            registry_db: Some(databases.registry),
+            profile_identity: Some(profile_identity),
+            global_db: Some(Arc::clone(&registry)),
+            accounting_db: databases.accounting,
+            registry_db: Some(registry),
             session_db: Some(databases.project_sessions),
             user_session_db: Some(databases.user_sessions),
+            registered_session_db: Some(databases.registered_project_sessions),
+            registered_user_session_db: Some(databases.registered_user_sessions),
             host_admission_broker,
             project_session_refresh_wake: Some(project_session_refresh_wake),
             user_session_refresh_wake: Some(user_session_refresh_wake),
@@ -167,6 +200,12 @@ impl McpServerConstructionContext {
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
+            code_index_search_executor: None,
+            git_read_executor: None,
+            code_index_search_authority: None,
+            retained_project_graph_resolver: None,
+            #[cfg(any(test, feature = "test-transport"))]
+            host_admission_test_runtime: None,
         }
     }
 
@@ -174,6 +213,35 @@ impl McpServerConstructionContext {
     /// deliver touched paths into the incremental indexing queue.
     pub(crate) fn with_code_index_hook_sink(mut self, sink: super::CodeIndexHookSink) -> Self {
         self.code_index_hook_sink = Some(sink);
+        self
+    }
+
+    pub(crate) fn with_code_index_search_executor(
+        mut self,
+        executor: super::CodeIndexSearchExecutor,
+    ) -> Self {
+        self.code_index_search_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_git_read_executor(mut self, executor: super::GitReadExecutor) -> Self {
+        self.git_read_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_code_index_search_authority(
+        mut self,
+        authority: super::CodeIndexSearchAuthorityV1,
+    ) -> Self {
+        self.code_index_search_authority = Some(authority);
+        self
+    }
+
+    pub(crate) fn with_retained_project_graph_resolver(
+        mut self,
+        resolver: super::RetainedProjectGraphResolver,
+    ) -> Self {
+        self.retained_project_graph_resolver = Some(resolver);
         self
     }
 
@@ -214,5 +282,36 @@ impl McpServerConstructionContext {
     ) -> Self {
         self.background_refresh_writer = writer;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn direct_context_installs_only_the_explicit_search_executor() {
+        let project = tempfile::tempdir().expect("project");
+        let cg = TraceDecay::open(project.path()).await.expect("graph");
+        let executor: crate::mcp::server::CodeIndexSearchExecutor = Arc::new(|_| {
+            Box::pin(async {
+                crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: None,
+                        reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "authority_unavailable",
+                        },
+                    },
+                )
+            })
+        });
+        let context = McpServerConstructionContext::direct(cg, None)
+            .with_code_index_search_executor(executor);
+        assert!(context.code_index_search_executor.is_some());
+        assert!(
+            context.code_index_search_authority.is_none(),
+            "installing an executor must not fabricate route admission"
+        );
     }
 }

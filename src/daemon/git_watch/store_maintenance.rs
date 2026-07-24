@@ -8,12 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::Connection;
-
 use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
-use crate::global_db::GlobalDb;
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::tracedecay::TraceDecay;
 
 use super::super::{branch_admin::StoreAdministration, log_daemon_event};
 use super::GitWatcherInner;
@@ -29,8 +26,7 @@ const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 /// `indexing::stamp_last_synced_commit`), so this awaits them directly on the
 /// caller's task under the daemon-wide sync semaphore — no nested runtime.
 pub(super) async fn sync_project(
-    root: &Path,
-    opts: &TraceDecayOpenOptions,
+    cg: &TraceDecay,
     escalation: usize,
     administration: &StoreAdministration,
 ) -> bool {
@@ -39,9 +35,6 @@ pub(super) async fn sync_project(
     // or unlinking the SQLite family while a watcher sync owns it.
     administration
         .with_writer(|| async {
-            let Ok(cg) = TraceDecay::open_with_options(root, opts.clone()).await else {
-                return false;
-            };
             let base = cg.last_synced_commit().await;
             let result = match base {
                 Some(base) => match cg.stale_files_since_commit(&base, escalation) {
@@ -56,7 +49,6 @@ pub(super) async fn sync_project(
                 result,
                 Ok(()) | Err(crate::errors::TraceDecayError::SyncLock { .. })
             );
-            drop(cg);
             synced
         })
         .await
@@ -66,16 +58,16 @@ pub(super) async fn sync_project(
 /// [`crate::branch::BranchAddOutcome`] name for logging, or `None` on error.
 pub(super) async fn track_worktree_branch(
     administration: &StoreAdministration,
+    cg: &TraceDecay,
     wt_root: PathBuf,
     branch: String,
-    opts: TraceDecayOpenOptions,
 ) -> Option<String> {
     administration
-        .with_writer(move || async move {
-            match TraceDecay::add_branch_tracking_with_options(&wt_root, &branch, opts).await {
-                Ok(outcome) => Some(format!("{outcome:?}")),
-                Err(_) => None,
-            }
+        .with_writer(|| async {
+            cg.track_worktree_branch(&wt_root, &branch)
+                .await
+                .ok()
+                .map(|outcome| format!("{outcome:?}"))
         })
         .await
 }
@@ -97,28 +89,9 @@ pub(super) fn resolve_worktree(common: &Path, name: &str) -> Option<(PathBuf, St
 /// coordinator, logging what it removed. Returns `false` when layout resolution
 /// or administration fails so the backstop keeps the GC cadence eligible for a
 /// retry.
-pub(super) async fn run_gc(
-    inner: &Arc<GitWatcherInner>,
-    root: &Path,
-    opts: &TraceDecayOpenOptions,
-) -> bool {
-    // Layout discovery is read-only and deliberately stays outside both writer
-    // gates. Only the coordinator performs the destructive administration.
-    let data_root = match TraceDecay::try_initialized_store_layout_with_options(root, opts).await {
-        Ok(Some(layout)) => layout.data_root,
-        Ok(None) => return true,
-        Err(error) => {
-            log_daemon_event(
-                "git_watch_degraded",
-                &[
-                    ("project", root.display().to_string()),
-                    ("reason", "branch_gc_layout_failed".to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-            return false;
-        }
-    };
+pub(super) async fn run_gc(inner: &Arc<GitWatcherInner>, cg: &TraceDecay) -> bool {
+    let root = cg.project_root();
+    let data_root = &cg.store_layout().data_root;
 
     // Preserve the sync-semaphore → administration-gate acquisition order used
     // by sync and worktree tracking. The coordinator owns the writer gate and
@@ -128,7 +101,7 @@ pub(super) async fn run_gc(
         .administration
         .execute_branch_admin_in_layout(
             root,
-            &data_root,
+            data_root,
             BranchAdminAction::Gc,
             inner.config.branch_gc_days,
             inner.config.orphan_db_gc_days,
@@ -136,13 +109,13 @@ pub(super) async fn run_gc(
         .await;
     let report = match report {
         Ok(report) => report,
-        Err(error) => {
+        Err(_) => {
             log_daemon_event(
                 "git_watch_degraded",
                 &[
-                    ("project", root.display().to_string()),
+                    ("scope", "project".to_string()),
                     ("reason", "branch_gc_deferred".to_string()),
-                    ("error", error.to_string()),
+                    ("failure", "branch_administration_failed".to_string()),
                 ],
             );
             return false;
@@ -153,7 +126,7 @@ pub(super) async fn run_gc(
         log_daemon_event(
             "git_watch_synced",
             &[
-                ("project", root.display().to_string()),
+                ("scope", "project".to_string()),
                 ("action", "gc".to_string()),
                 ("removed_tracked", report.removed_branches.len().to_string()),
                 (
@@ -174,45 +147,15 @@ fn now_secs_i64() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-/// Reads a single-value integer `PRAGMA` off `conn`, defaulting to zero when the
-/// pragma is unavailable. Best-effort: compaction sampling never fails a tick.
-async fn pragma_u64(conn: &Connection, pragma: &str) -> u64 {
-    let sql = format!("PRAGMA {pragma}");
-    let Ok(mut rows) = conn.query(&sql, ()).await else {
-        return 0;
-    };
-    match rows.next().await {
-        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
-        _ => 0,
-    }
-}
-
-/// Runs the profile session-store retention passes (Plan 38 §3/§4/§6): LCM
-/// session retention, observation-evidence retention, then a compaction
-/// (incremental-vacuum) reclaim of the pages the passes freed. Every pass is
-/// individually config-gated and inert unless the owner opened a window, so a
-/// default configuration performs no work here. Fail-open: a store that cannot
-/// be opened (never ingested, migrating) is skipped without degrading the tick.
-///
-/// Applied off the hot path from the backstop cadence; each engine is bounded
-/// per run by its own `max_batch_size`/`max_pages_per_tick`, so a single tick
-/// never competes with foreground writes (Plan 38 non-goal).
-pub(super) async fn run_session_retention(profile_root: &Path, config: &RetentionConfig) {
-    // No opened window anywhere ⇒ nothing to open or scan.
-    if !config.session_lcm.enabled && !config.observation.enabled && config.compaction.is_none() {
-        return;
-    }
-    let sessions_db_path = profile_root.join(crate::storage::SESSIONS_DB_FILENAME);
-    if !sessions_db_path.exists() {
-        return;
-    }
-    let Some(db) = GlobalDb::open_at(&sessions_db_path).await else {
-        return;
-    };
+pub(super) async fn run_session_retention(
+    database: &crate::global_db::RegisteredGlobalDb,
+    config: &RetentionConfig,
+) -> bool {
     let now = now_secs_i64();
+    let mut succeeded = true;
 
     if config.session_lcm.enabled {
-        match db
+        match database
             .run_session_lcm_retention(
                 "all",
                 None,
@@ -224,29 +167,33 @@ pub(super) async fn run_session_retention(profile_root: &Path, config: &Retentio
         {
             Ok(report) => {
                 let reclaimed = report.bytes_reclaimed();
+                succeeded &= report.errors.is_empty();
                 if reclaimed > 0 || !report.errors.is_empty() {
                     log_daemon_event(
                         "retention_session_lcm",
                         &[
-                            ("store", sessions_db_path.display().to_string()),
+                            ("store", "mounted_sessions".to_string()),
                             ("bytes_reclaimed", reclaimed.to_string()),
                             ("errors", report.errors.len().to_string()),
                         ],
                     );
                 }
             }
-            Err(error) => log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "session_lcm".to_string()),
-                    ("error", error.to_string()),
-                ],
-            ),
+            Err(_) => {
+                succeeded = false;
+                log_daemon_event(
+                    "retention_degraded",
+                    &[
+                        ("pass", "session_lcm".to_string()),
+                        ("failure", "retention_pass_failed".to_string()),
+                    ],
+                );
+            }
         }
     }
 
     if config.observation.enabled {
-        match db
+        match database
             .run_observation_retention(
                 None,
                 &config.observation,
@@ -257,29 +204,89 @@ pub(super) async fn run_session_retention(profile_root: &Path, config: &Retentio
         {
             Ok(report) => {
                 let reclaimed = report.bytes_reclaimed();
+                succeeded &= report.errors.is_empty();
                 if reclaimed > 0 || !report.errors.is_empty() {
                     log_daemon_event(
                         "retention_observation",
                         &[
-                            ("store", sessions_db_path.display().to_string()),
+                            ("store", "mounted_sessions".to_string()),
                             ("bytes_reclaimed", reclaimed.to_string()),
                             ("errors", report.errors.len().to_string()),
                         ],
                     );
                 }
             }
-            Err(error) => log_daemon_event(
-                "retention_degraded",
-                &[
-                    ("pass", "observation".to_string()),
-                    ("error", error.to_string()),
-                ],
-            ),
+            Err(_) => {
+                succeeded = false;
+                log_daemon_event(
+                    "retention_degraded",
+                    &[
+                        ("pass", "observation".to_string()),
+                        ("failure", "retention_pass_failed".to_string()),
+                    ],
+                );
+            }
         }
     }
 
     if let Some(compaction) = &config.compaction {
-        run_compaction(&db, &sessions_db_path, compaction).await;
+        succeeded &= run_compaction(
+            RetainedCompactionStore::Registered(database),
+            "mounted_sessions",
+            compaction,
+        )
+        .await;
+    }
+    succeeded
+}
+
+pub(super) async fn run_global_compaction(
+    database: &crate::global_db::RegisteredGlobalDb,
+    config: &CompactionThresholdConfig,
+) -> bool {
+    run_compaction(
+        RetainedCompactionStore::Registered(database),
+        "global.db",
+        config,
+    )
+    .await
+}
+
+pub(super) async fn run_project_compaction(
+    database: &crate::db::Database,
+    config: &CompactionThresholdConfig,
+) -> bool {
+    run_compaction(
+        RetainedCompactionStore::Project(database),
+        crate::config::DB_FILENAME,
+        config,
+    )
+    .await
+}
+
+enum RetainedCompactionStore<'a> {
+    Registered(&'a crate::global_db::RegisteredGlobalDb),
+    Project(&'a crate::db::Database),
+}
+
+impl RetainedCompactionStore<'_> {
+    async fn storage_page_counts(&self) -> crate::errors::Result<(u64, u64, u64)> {
+        match self {
+            Self::Registered(database) => database.storage_page_counts(),
+            Self::Project(database) => database.storage_page_counts().await,
+        }
+    }
+
+    async fn run_bounded_incremental_compaction(
+        &self,
+        max_pages: u64,
+    ) -> crate::errors::Result<()> {
+        match self {
+            Self::Registered(database) => {
+                database.run_bounded_incremental_compaction(max_pages).await
+            }
+            Self::Project(database) => database.run_incremental_vacuum(max_pages).await,
+        }
     }
 }
 
@@ -287,7 +294,63 @@ pub(super) async fn run_session_retention(profile_root: &Path, config: &Retentio
 /// is met, schedules a bounded incremental vacuum in the deferred background
 /// lane (Plan 38 §6). The placement is structurally forbidden from competing
 /// with foreground writes; the page cap keeps the reclaim off the hot path.
-async fn run_compaction(db: &GlobalDb, store: &Path, config: &CompactionThresholdConfig) {
+async fn run_compaction(
+    store: RetainedCompactionStore<'_>,
+    store_name: &'static str,
+    config: &CompactionThresholdConfig,
+) -> bool {
+    let Ok((page_size, page_count, freelist)) = store.storage_page_counts().await else {
+        log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "compaction".to_string()),
+                ("failure", "store_size_sample_failed".to_string()),
+            ],
+        );
+        return false;
+    };
+    let Ok(scheduled) = compaction_is_scheduled(page_size, page_count, freelist, config) else {
+        return false;
+    };
+    if !scheduled {
+        return true;
+    }
+    let pages = config.max_pages_per_tick.max(1);
+    let freelist_before = freelist;
+    if store
+        .run_bounded_incremental_compaction(u64::from(pages))
+        .await
+        .is_err()
+    {
+        log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "compaction".to_string()),
+                ("failure", "incremental_vacuum_failed".to_string()),
+            ],
+        );
+        return false;
+    }
+    let Ok((_, _, freelist_after)) = store.storage_page_counts().await else {
+        log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "compaction".to_string()),
+                ("failure", "post_compaction_sample_failed".to_string()),
+            ],
+        );
+        return false;
+    };
+    log_compaction(store_name, freelist_before, freelist_after);
+    true
+}
+
+fn compaction_is_scheduled(
+    page_size: u64,
+    page_count: u64,
+    freelist: u64,
+    config: &CompactionThresholdConfig,
+) -> Result<bool, ()> {
     use tracedecay_application::storage::compaction::CompactionTriggerPolicyV1;
     use tracedecay_application::storage::identity::{
         FreePageRatioV1, StorageByteSizeV1, StoreKeyV1,
@@ -295,23 +358,11 @@ async fn run_compaction(db: &GlobalDb, store: &Path, config: &CompactionThreshol
     use tracedecay_application::storage::telemetry::StoreSizeSampleV1;
     use tracedecay_domain::UtcMicros;
 
-    let conn = db.read_connection();
-    let page_size = pragma_u64(conn, "page_size").await;
-    let page_count = pragma_u64(conn, "page_count").await;
-    let freelist = pragma_u64(conn, "freelist_count").await;
     if page_size == 0 || page_count == 0 {
-        return;
+        return Ok(false);
     }
-    let store_key = store
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| StoreKeyV1::new(name).ok());
-    let Some(store_key) = store_key else {
-        return;
-    };
-    let Ok(page_size_bytes) = u32::try_from(page_size) else {
-        return;
-    };
+    let store_key = StoreKeyV1::new("store.db").map_err(|_| ())?;
+    let page_size_bytes = u32::try_from(page_size).map_err(|_| ())?;
     let sample = StoreSizeSampleV1 {
         store: store_key,
         page_size_bytes,
@@ -319,39 +370,22 @@ async fn run_compaction(db: &GlobalDb, store: &Path, config: &CompactionThreshol
         freelist_pages: freelist,
         observed_at: UtcMicros(now_secs_i64().saturating_mul(1_000_000)),
     };
-    let Ok(threshold) = FreePageRatioV1::new(config.free_page_ratio_threshold) else {
-        return;
-    };
+    let threshold = FreePageRatioV1::new(config.free_page_ratio_threshold).map_err(|_| ())?;
     let policy = CompactionTriggerPolicyV1 {
         free_page_ratio_threshold: threshold,
         minimum_reclaimable_bytes: StorageByteSizeV1(config.minimum_reclaimable_bytes),
     };
-    let Ok(decision) = policy.decide(&sample) else {
-        return;
-    };
-    if !decision.is_scheduled() {
-        return;
-    }
-    let pages = config.max_pages_per_tick.max(1);
-    let freelist_before = freelist;
-    if let Err(error) = conn
-        .execute_batch(&format!("PRAGMA incremental_vacuum({pages})"))
-        .await
-    {
-        log_daemon_event(
-            "retention_degraded",
-            &[
-                ("pass", "compaction".to_string()),
-                ("error", error.to_string()),
-            ],
-        );
-        return;
-    }
-    let freelist_after = pragma_u64(conn, "freelist_count").await;
+    policy
+        .decide(&sample)
+        .map(|decision| decision.is_scheduled())
+        .map_err(|_| ())
+}
+
+fn log_compaction(store_name: &'static str, freelist_before: u64, freelist_after: u64) {
     log_daemon_event(
         "retention_compaction",
         &[
-            ("store", store.display().to_string()),
+            ("store", store_name.to_string()),
             (
                 "freed_pages",
                 freelist_before.saturating_sub(freelist_after).to_string(),
@@ -360,37 +394,34 @@ async fn run_compaction(db: &GlobalDb, store: &Path, config: &CompactionThreshol
     );
 }
 
-/// Sweeps profile-sharded stores whose project identity no longer resolves to a
-/// live repository root and collects those older than the owner-configured
-/// window (Plan 38 §2). Re-linkable (moved-repository) stores are never
-/// collected — they are surfaced for reconciliation. Fail-open: a registry that
-/// cannot be opened is skipped. Applied from the backstop cadence off the hot
-/// path; the Doctor surface reports the same findings read-only.
 pub(super) async fn run_orphan_store_sweep(
-    global_db_path: Option<&Path>,
+    database: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
     orphan_store_gc_days: u64,
-) {
-    let db = match global_db_path {
-        Some(path) => GlobalDb::open_at(path).await,
-        None => GlobalDb::open().await,
-    };
-    let Some(db) = db else {
-        return;
-    };
+) -> bool {
     let retention_secs = (orphan_store_gc_days as i64).saturating_mul(SECONDS_PER_DAY);
+    let now = now_secs_i64();
     let report = crate::retention::orphan_stores::sweep_orphan_stores(
-        &db,
+        database,
         profile_root,
         retention_secs,
-        now_secs_i64(),
+        now,
         true,
     )
     .await;
-    // Route the classified findings through the typed Doctor Storage-finding
-    // constructor (the daemon is the legitimate registry owner; the external
-    // `doctor` client never opens the global DB). Re-linkable and still-immature
-    // orphans are surfaced even though this apply pass never collects them.
+    let report = match report {
+        Ok(report) => report,
+        Err(_) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "orphan_store_sweep".to_string()),
+                    ("failure", "registry_read_failed".to_string()),
+                ],
+            );
+            return false;
+        }
+    };
     let doctor_findings = report
         .plan
         .collect
@@ -399,6 +430,36 @@ pub(super) async fn run_orphan_store_sweep(
         .chain(report.plan.relink.iter())
         .filter_map(crate::doctor::registry_drift::orphan_store_doctor_finding)
         .count();
+    let orphaned = report
+        .plan
+        .collect
+        .len()
+        .saturating_add(report.plan.retained_immature.len());
+    let orphan_bytes = report
+        .plan
+        .collect
+        .iter()
+        .chain(report.plan.retained_immature.iter())
+        .fold(0u64, |total, finding| {
+            total.saturating_add(finding.size_bytes)
+        });
+    let oldest_orphan_age_secs = report
+        .plan
+        .collect
+        .iter()
+        .chain(report.plan.retained_immature.iter())
+        .map(|finding| finding.age_secs)
+        .max()
+        .unwrap_or(0);
+    let failure_count = |kind| {
+        report
+            .outcome
+            .errors
+            .iter()
+            .filter(|failure| failure.kind == kind)
+            .count()
+    };
+    let registry_retirement_failed = report.retired_registry_rows < report.outcome.collected.len();
 
     if !report.outcome.collected.is_empty()
         || !report.plan.relink.is_empty()
@@ -409,18 +470,88 @@ pub(super) async fn run_orphan_store_sweep(
             "retention_orphan_stores",
             &[
                 ("collected", report.outcome.collected.len().to_string()),
+                ("orphaned", orphaned.to_string()),
+                ("orphan_bytes", orphan_bytes.to_string()),
+                ("oldest_orphan_age_secs", oldest_orphan_age_secs.to_string()),
                 (
                     "reclaimed_bytes",
                     report.outcome.reclaimed_bytes.to_string(),
                 ),
                 ("relinkable", report.plan.relink.len().to_string()),
+                (
+                    "relinked_registry_rows",
+                    report.relinked_registry_rows.to_string(),
+                ),
                 ("doctor_findings", doctor_findings.to_string()),
                 (
                     "retired_registry_rows",
                     report.retired_registry_rows.to_string(),
                 ),
+                (
+                    "registry_retirement_failed",
+                    registry_retirement_failed.to_string(),
+                ),
+                (
+                    "outside_profile_failures",
+                    failure_count(
+                        crate::retention::orphan_stores::CollectionFailureKind::OutsideProfile,
+                    )
+                    .to_string(),
+                ),
+                (
+                    "inspect_failures",
+                    failure_count(
+                        crate::retention::orphan_stores::CollectionFailureKind::InspectFailed,
+                    )
+                    .to_string(),
+                ),
+                (
+                    "remove_failures",
+                    failure_count(
+                        crate::retention::orphan_stores::CollectionFailureKind::RemoveFailed,
+                    )
+                    .to_string(),
+                ),
                 ("errors", report.outcome.errors.len().to_string()),
             ],
         );
     }
+
+    let debris_report =
+        match crate::retention::orphan_stores::build_store_census(database, profile_root).await {
+            Ok(census) => crate::retention::incident_debris::sweep_incident_debris(
+                &census,
+                profile_root,
+                retention_secs,
+                now,
+            ),
+            Err(_) => {
+                log_daemon_event(
+                    "retention_degraded",
+                    &[
+                        ("pass", "incident_debris".to_string()),
+                        ("failure", "registry_read_failed".to_string()),
+                    ],
+                );
+                return false;
+            }
+        };
+    if debris_report.quarantined > 0
+        || debris_report.collected > 0
+        || !debris_report.errors.is_empty()
+    {
+        log_daemon_event(
+            "retention_incident_debris",
+            &[
+                ("quarantined", debris_report.quarantined.to_string()),
+                ("collected", debris_report.collected.to_string()),
+                ("retained", debris_report.retained.to_string()),
+                ("reclaimed_bytes", debris_report.reclaimed_bytes.to_string()),
+                ("errors", debris_report.errors.len().to_string()),
+            ],
+        );
+    }
+    report.outcome.errors.is_empty()
+        && !registry_retirement_failed
+        && debris_report.errors.is_empty()
 }

@@ -103,12 +103,15 @@ pub(super) struct RegistryDriftFinding {
 }
 
 pub(super) async fn registry_drift_findings(
-    global_db: &crate::global_db::GlobalDb,
+    global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
 ) -> Vec<RegistryDriftFinding> {
     let mut findings = Vec::new();
-    for project in global_db.list_code_projects(usize::MAX).await {
-        let Some(context) = global_db
+    let Ok(projects) = global_db.list_code_projects(usize::MAX).await else {
+        return findings;
+    };
+    for project in projects {
+        let Ok(Some(context)) = global_db
             .project_registry_context_by_id(&project.project_id)
             .await
         else {
@@ -168,7 +171,7 @@ pub struct ReconciledStoreRoot {
 
 #[cfg(test)]
 async fn reconcile_drifted_store_roots(
-    global_db: &crate::global_db::GlobalDb,
+    global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
 ) -> (Vec<ReconciledStoreRoot>, Vec<String>) {
     let findings = registry_drift_findings(global_db, profile_root).await;
@@ -287,7 +290,7 @@ fn resolve_registry_manifest_path(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::global_db::{GlobalDb, StoreInstanceUpsert};
+    use crate::global_db::StoreInstanceUpsert;
     use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 
     const STORE_ID: &str = "store_reconcile_test";
@@ -301,6 +304,11 @@ mod tests {
             disposition,
             age_secs: 1_000_000,
             size_bytes: 42_000,
+            expected_store_relpath: "stores/store_orphan".to_string(),
+            expected_created_at: 0,
+            expected_last_write_at: None,
+            expected_payload_mtime_secs: 0,
+            expected_manifest_bytes: None,
         }
     }
 
@@ -335,13 +343,13 @@ mod tests {
     }
 
     struct Fixture {
+        runtime: crate::doctor::DoctorTestRuntime,
         _tmp: tempfile::TempDir,
         profile_root: PathBuf,
         current_root: PathBuf,
         stale_root: PathBuf,
         manifest_path: PathBuf,
         config_path: PathBuf,
-        global_db: GlobalDb,
     }
 
     async fn build_fixture() -> Fixture {
@@ -378,9 +386,9 @@ mod tests {
         };
         std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
-        let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
-            .await
-            .unwrap();
+        let runtime =
+            crate::doctor::DoctorTestRuntime::open(&profile_root, "registry-drift-tests").await;
+        let global_db = runtime.database();
         global_db
             .upsert_code_project(PROJECT_ID, &current_root, None, None, None)
             .await
@@ -400,13 +408,13 @@ mod tests {
             .unwrap();
 
         Fixture {
+            runtime,
             _tmp: tmp,
             profile_root,
             current_root,
             stale_root,
             manifest_path,
             config_path,
-            global_db,
         }
     }
 
@@ -434,7 +442,7 @@ mod tests {
     async fn detection_does_not_mutate() {
         let fx = build_fixture().await;
 
-        let findings = registry_drift_findings(&fx.global_db, &fx.profile_root).await;
+        let findings = registry_drift_findings(fx.runtime.database(), &fx.profile_root).await;
         let root_drift: Vec<_> = findings
             .iter()
             .filter(|f| f.field == "project_root")
@@ -454,7 +462,7 @@ mod tests {
         let legacy_config_before = std::fs::read_to_string(&fx.config_path).unwrap();
 
         let (reconciled, warnings) =
-            reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
+            reconcile_drifted_store_roots(fx.runtime.database(), &fx.profile_root).await;
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(reconciled.len(), 1, "one store should be reconciled");
         assert_eq!(reconciled[0].store_id, STORE_ID);
@@ -481,13 +489,13 @@ mod tests {
             PathBuf::from(crate::config::DB_FILENAME)
         );
 
-        let post = registry_drift_findings(&fx.global_db, &fx.profile_root).await;
+        let post = registry_drift_findings(fx.runtime.database(), &fx.profile_root).await;
         assert!(
             post.iter().all(|f| f.field != "project_root"),
             "project_root drift should be resolved: {post:?}"
         );
         let (again, warnings) =
-            reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
+            reconcile_drifted_store_roots(fx.runtime.database(), &fx.profile_root).await;
         assert!(again.is_empty(), "second run must be a no-op: {again:?}");
         assert!(
             warnings.is_empty(),
@@ -502,7 +510,7 @@ mod tests {
         std::fs::write(&fx.config_path, "{ not json").unwrap();
 
         let (reconciled, warnings) =
-            reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
+            reconcile_drifted_store_roots(fx.runtime.database(), &fx.profile_root).await;
         assert_eq!(
             reconciled.len(),
             1,
@@ -534,7 +542,7 @@ mod tests {
         std::fs::remove_dir_all(&fx.current_root).unwrap();
 
         let (reconciled, warnings) =
-            reconcile_drifted_store_roots(&fx.global_db, &fx.profile_root).await;
+            reconcile_drifted_store_roots(fx.runtime.database(), &fx.profile_root).await;
         assert!(reconciled.is_empty(), "must not heal a nonexistent root");
         assert!(
             warnings.is_empty(),

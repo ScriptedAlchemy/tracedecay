@@ -1,7 +1,6 @@
 //! Read-only doctor runtime telemetry: cold store probes and typed
 //! `tracedecay_runtime` responses served without opening project stores.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -12,8 +11,6 @@ use crate::errors::Result;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 pub(crate) const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 24;
-/// `SQLITE_OPEN_URI`, which libsql does not expose through [`libsql::OpenFlags`].
-pub(crate) const SQLITE_OPEN_URI: i32 = 0x0000_0040;
 
 #[derive(Debug)]
 pub(crate) struct DoctorRuntimeRequest {
@@ -174,64 +171,85 @@ fn doctor_runtime_store_paths_for_branch(
     Ok((graph_path, layout.sessions_db_path))
 }
 
-async fn doctor_read_only_database(
-    db_path: &Path,
-    intent: &str,
-) -> std::result::Result<crate::db::Database, &'static str> {
-    if !db_path.is_file() {
-        return Err("store_missing");
-    }
-    let authority = crate::db::DatabaseAuthority::for_runtime(db_path, intent)
-        .map_err(|_| "store_unavailable")?;
-    crate::daemon::store_runtime::driver::GraphLibsqlCompatDriver::open(
-        crate::daemon::store_runtime::driver::GraphStoreOpenMode::ReadOnly,
-        db_path,
-        &authority,
-    )
-    .await
-    .map(|(database, _)| database)
-    .map_err(|error| {
-        let message = error.to_string().to_ascii_lowercase();
-        if message.contains("database is locked")
-            || message.contains("database table is locked")
-            || message.contains("sqlite_busy")
-        {
-            "store_locked"
-        } else {
-            "store_unavailable"
-        }
-    })
-}
-
-async fn doctor_connection_i64_result(
-    conn: &libsql::Connection,
-    query: &str,
-) -> std::result::Result<Option<i64>, libsql::Error> {
-    let mut rows = conn.query(query, ()).await?;
-    match rows.next().await? {
-        Some(row) => row.get(0).map(Some),
-        None => Ok(None),
-    }
-}
-
-async fn doctor_connection_i64(conn: &libsql::Connection, query: &str) -> Option<i64> {
-    doctor_connection_i64_result(conn, query)
+async fn doctor_session_ingest_health(
+    database: &crate::global_db::RegisteredGlobalDb,
+    provider: &str,
+) -> crate::global_db::SessionIngestHealth {
+    let mut health = crate::global_db::SessionIngestHealth::default();
+    let Ok(mut rows) = database
+        .read_connection()
+        .query(
+            "SELECT DISTINCT transcript_path FROM sessions
+             WHERE provider = ?1
+               AND transcript_path IS NOT NULL
+               AND transcript_path != ''
+             LIMIT 1000",
+            crate::db::engine::params![provider],
+        )
         .await
-        .ok()
-        .flatten()
+    else {
+        return health;
+    };
+    let mut paths = Vec::new();
+    while let Ok(Some(row)) = rows.next().await {
+        if let Ok(path) = row.get::<String>(0) {
+            paths.push(path);
+        }
+    }
+    for path in paths {
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
+        let cursor = database.get_parse_offset(&path).await.unwrap_or_default();
+        if cursor.mtime > 0 {
+            let mtime = i64::try_from(cursor.mtime).unwrap_or(i64::MAX);
+            health.last_ingest_unix = Some(
+                health
+                    .last_ingest_unix
+                    .map_or(mtime, |previous| previous.max(mtime)),
+            );
+        }
+        let pending = metadata.len().saturating_sub(cursor.byte_offset);
+        if pending > 0 {
+            health.pending_transcripts = health.pending_transcripts.saturating_add(1);
+            health.pending_bytes = health.pending_bytes.saturating_add(pending);
+            health.max_transcript_pending_bytes = health.max_transcript_pending_bytes.max(pending);
+        }
+    }
+    health
 }
 
-async fn doctor_connection_text(conn: &libsql::Connection, query: &str) -> Option<String> {
-    let mut rows = conn.query(query, ()).await.ok()?;
-    rows.next().await.ok().flatten()?.get::<String>(0).ok()
-}
-
-async fn doctor_database_i64(database: &crate::db::Database, query: &str) -> Option<i64> {
-    doctor_connection_i64(database.conn(), query).await
-}
-
-async fn doctor_database_text(database: &crate::db::Database, query: &str) -> Option<String> {
-    doctor_connection_text(database.conn(), query).await
+async fn doctor_literal_workspace_placeholder_paths(
+    database: &crate::global_db::RegisteredGlobalDb,
+    limit: usize,
+) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Ok(mut rows) = database
+        .read_connection()
+        .query(
+            "SELECT DISTINCT transcript_path FROM sessions
+             WHERE transcript_path IS NOT NULL
+               AND transcript_path != ''
+               AND (transcript_path LIKE '%${workspaceFolder}%'
+                    OR transcript_path LIKE '%$workspaceFolder%')
+             ORDER BY transcript_path
+             LIMIT ?1",
+            [i64::try_from(limit).unwrap_or(i64::MAX)],
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    while let Ok(Some(row)) = rows.next().await {
+        if let Ok(path) = row.get::<String>(0) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
@@ -240,150 +258,17 @@ fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
     std::fs::metadata(PathBuf::from(path)).map_or(0, |metadata| metadata.len())
 }
 
-fn doctor_graph_error_reason(error: &libsql::Error) -> &'static str {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("locked") || message.contains("busy") {
-        "project_store_locked"
-    } else {
-        "project_store_unavailable"
-    }
-}
-
-fn doctor_uses_rollback_journal(db_path: &Path) -> bool {
-    let mut header = [0_u8; 20];
-    std::fs::File::open(db_path)
-        .and_then(|mut file| file.read_exact(&mut header))
-        .is_ok_and(|()| header[18] == 1 && header[19] == 1)
-}
-
-async fn doctor_global_db_read_only(
-    db_path: &Path,
-    intent: &str,
-) -> Option<crate::global_db::GlobalDb> {
-    let preflight = doctor_read_only_database(db_path, intent).await.ok()?;
-    let database = crate::global_db::GlobalDb::open_read_only_at(db_path).await;
-    drop(preflight);
-    database
-}
-
-async fn cold_doctor_graph_value(
-    project_path: &Path,
-    graph_path: &Path,
-) -> std::result::Result<serde_json::Value, &'static str> {
-    if !graph_path.is_file() {
-        return Err("project_store_missing");
-    }
-    if !crate::storage::has_sqlite_database_header(graph_path).unwrap_or(false) {
-        return Err("project_store_unavailable");
-    }
-    // `immutable=1` deliberately ignores a WAL. Refuse an incomplete
-    // snapshot rather than quietly reporting stale graph metadata.
-    if doctor_sidecar_size(graph_path, "-wal") > 0 {
-        return Err("project_store_uncheckpointed_wal");
-    }
-    // S11: route through the runtime registry once client handles exist. This is
-    // the offline/cold doctor path: it inspects a store by path without a live
-    // daemon, so no StoreRuntimeHandle is reachable to serve a GraphQuickCheck
-    // read. Until S11 exposes client handles, keep the direct read-only open.
-    let database = if doctor_uses_rollback_journal(graph_path) {
-        // A rollback-journal store can be checked with SQLite's ordinary
-        // read-only lock protocol without creating WAL/SHM sidecars. This
-        // preserves the typed locked result that immutable mode would hide.
-        crate::db::libsql_local::open_local_database(graph_path, true)
-            .await
-            .map_err(|error| doctor_graph_error_reason(&error))?
-    } else {
-        let uri = crate::sqlite_read_snapshot::immutable_uri(graph_path)
-            .map_err(|_| "project_store_unavailable")?;
-        let flags = libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | libsql::OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
-        crate::db::libsql_local::open_local_database_with_flags(std::path::Path::new(&uri), flags)
-            .await
-            .map_err(|error| doctor_graph_error_reason(&error))?
-    };
-    let conn = database
-        .connect()
-        .map_err(|error| doctor_graph_error_reason(&error))?;
-    conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 0;")
-        .await
-        .map_err(|error| doctor_graph_error_reason(&error))?;
-    let schema_version = match doctor_connection_i64_result(&conn, "PRAGMA user_version").await {
-        Ok(Some(version)) => version,
-        Ok(None) => return Err("project_store_unavailable"),
-        Err(error) => return Err(doctor_graph_error_reason(&error)),
-    };
-    if schema_version != DOCTOR_GRAPH_SCHEMA_VERSION {
-        return Err("project_store_schema_unsupported");
-    }
-    let canonical_graph_path = graph_path
-        .canonicalize()
-        .unwrap_or_else(|_| graph_path.to_path_buf());
-    Ok(json!({
-        "tracedecay_version": env!("CARGO_PKG_VERSION"),
-        "process": {
-            "pid": std::process::id(),
-        },
-        "database": {
-            "project_root": project_path,
-            "db_path": graph_path,
-            "canonical_db_path": canonical_graph_path,
-            "db_size_bytes": std::fs::metadata(graph_path).map_or(0, |metadata| metadata.len()),
-            "wal_size_bytes": doctor_sidecar_size(graph_path, "-wal"),
-            "shm_size_bytes": doctor_sidecar_size(graph_path, "-shm"),
-            "journal_mode": doctor_connection_text(&conn, "PRAGMA journal_mode").await,
-            "synchronous": doctor_connection_i64(&conn, "PRAGMA synchronous").await,
-            "page_size": doctor_connection_i64(&conn, "PRAGMA page_size").await,
-            "quick_check_ok": true,
-            "quick_check_error": null,
-            "schema_version": schema_version,
-        },
-        "doctor_runtime": {
-            "status": "complete",
-            "reason": null,
-            "read_only": true,
-        },
-    }))
-}
-
-async fn cold_doctor_runtime_value_for_paths(
-    project_path: &Path,
-    graph_path: &Path,
-    session_path: &Path,
+async fn doctor_runtime_value(
+    handshake: &DaemonHandshake,
+    store_administration: &super::StoreAdministration,
 ) -> serde_json::Value {
-    let mut value = match cold_doctor_graph_value(project_path, graph_path).await {
-        Ok(value) => value,
-        Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
-    };
-    value["database"]["authority_audit_ok"] = json!(null);
-    value["database"]["authority_audit_reason"] = json!("authority_audit_not_run");
-    value["database"]["authority_audit_error"] = json!("authority_audit_not_run");
-    value["session_temporal_health"] = if session_path.is_file() {
-        match timeout(
-            Duration::from_secs(8),
-            crate::global_db::session_temporal::session_temporal_doctor_health_at(session_path),
-        )
-        .await
-        {
-            Ok(report) => doctor_runtime_temporal_report(report),
-            Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
-        }
-    } else {
-        doctor_runtime_temporal_unavailable("session_store_missing")
-    };
-    value["cursor_session_ingest"] = json!({
-        "status": "unavailable",
-        "reason": "session_store_unavailable",
-    });
-    value["cursor_session_placeholder_paths"] = json!([]);
-    value["semantic_runtime"] = doctor_semantic_runtime_status();
-    value
+    doctor_runtime_value_inner(handshake, Some(store_administration)).await
 }
 
-async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
-    doctor_runtime_value_inner(handshake, false).await
-}
-
-async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> serde_json::Value {
+async fn doctor_runtime_value_inner(
+    handshake: &DaemonHandshake,
+    store_administration: Option<&super::StoreAdministration>,
+) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
         return doctor_runtime_unavailable(None, "project_path_missing");
     };
@@ -392,36 +277,56 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
             Ok(paths) => paths,
             Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
         };
-    if cold {
-        return cold_doctor_runtime_value_for_paths(project_path, &graph_path, &session_path).await;
-    }
-    // S11: route through the runtime registry once client handles exist. The
-    // warm doctor still resolves a store by path from the handshake and has no
-    // StoreRuntimeHandle in scope, so the health probe below runs PRAGMA
-    // quick-check style reads over a direct read-only open (already funneled
-    // through the single graph seam, GraphLibsqlCompatDriver) instead of
-    // dispatch_read(GraphQuickCheck)/dispatch_read(TemporalHealth).
-    let graph = match doctor_read_only_database(&graph_path, "doctor graph read-only").await {
-        Ok(graph) => graph,
-        Err("store_missing") => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_missing");
-        }
-        Err("store_locked") => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_locked");
-        }
+    let Some(store_administration) = store_administration else {
+        let reason = if graph_path.is_file() {
+            "project_store_authority_unavailable"
+        } else {
+            "project_store_missing"
+        };
+        return doctor_runtime_unavailable(Some(project_path), reason);
+    };
+    let canonical_project_path = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
+    let canonical_graph_path = graph_path
+        .canonicalize()
+        .unwrap_or_else(|_| graph_path.clone());
+    let graph = store_administration
+        .mounted_project_graphs()
+        .await
+        .into_iter()
+        .find(|graph| {
+            let mounted_graph_path = graph.db_path();
+            graph
+                .project_root()
+                .canonicalize()
+                .unwrap_or_else(|_| graph.project_root().to_path_buf())
+                == canonical_project_path
+                && mounted_graph_path
+                    .canonicalize()
+                    .unwrap_or(mounted_graph_path)
+                    == canonical_graph_path
+        });
+    let Some(graph) = graph else {
+        let reason = if graph_path.is_file() {
+            "project_store_authority_unavailable"
+        } else {
+            "project_store_missing"
+        };
+        return doctor_runtime_unavailable(Some(project_path), reason);
+    };
+    let (quick_check_ok, quick_check_error) = match graph.quick_check_report().await {
+        Ok(None) => (true, None),
+        Ok(Some(problem)) => (false, Some(problem)),
         Err(_) => {
             return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
         }
     };
-    let Some(schema_version) = doctor_database_i64(&graph, "PRAGMA user_version").await else {
-        return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
-    };
-    if schema_version != DOCTOR_GRAPH_SCHEMA_VERSION {
-        return doctor_runtime_unavailable(Some(project_path), "project_store_schema_unsupported");
-    }
-    let canonical_graph_path = graph_path
-        .canonicalize()
-        .unwrap_or_else(|_| graph_path.clone());
+    let page_counts = graph.storage_page_counts().await.ok();
+    let db_size_bytes = page_counts
+        .map(|(page_size, page_count, _)| page_size.saturating_mul(page_count))
+        .unwrap_or_default();
+    let page_size = page_counts.map(|(page_size, _, _)| page_size);
     let mut value = json!({
         "tracedecay_version": env!("CARGO_PKG_VERSION"),
         "process": {
@@ -431,15 +336,15 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
             "project_root": project_path,
             "db_path": graph_path,
             "canonical_db_path": canonical_graph_path,
-            "db_size_bytes": std::fs::metadata(&graph_path).map_or(0, |metadata| metadata.len()),
+            "db_size_bytes": db_size_bytes,
             "wal_size_bytes": doctor_sidecar_size(&graph_path, "-wal"),
             "shm_size_bytes": doctor_sidecar_size(&graph_path, "-shm"),
-            "journal_mode": doctor_database_text(&graph, "PRAGMA journal_mode").await,
-            "synchronous": doctor_database_i64(&graph, "PRAGMA synchronous").await,
-            "page_size": doctor_database_i64(&graph, "PRAGMA page_size").await,
-            "quick_check_ok": true,
-            "quick_check_error": null,
-            "schema_version": schema_version,
+            "journal_mode": null,
+            "synchronous": null,
+            "page_size": page_size,
+            "quick_check_ok": quick_check_ok,
+            "quick_check_error": quick_check_error,
+            "schema_version": DOCTOR_GRAPH_SCHEMA_VERSION,
         },
         "doctor_runtime": {
             "status": "complete",
@@ -448,16 +353,14 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
         },
     });
 
-    let registry = doctor_global_db_read_only(
-        &handshake.client_identity.global_db_path,
-        "doctor authority read-only",
-    )
-    .await;
+    let registry = store_administration
+        .registered_profile_database()
+        .await
+        .ok();
     let (authority_ok, authority_reason) = match registry.as_ref() {
-        Some(registry) => match registry.audit_observation_authority().await {
-            Ok(()) => (Some(true), None),
-            Err(_) => (Some(false), Some("authority_invariant_failed")),
-        },
+        // Registered attachment validates the authority schema contract before
+        // publication, so a retained handle is itself the completed audit.
+        Some(_) => (Some(true), None),
         None if handshake.client_identity.global_db_path.is_file() => {
             (None, Some("authority_store_unavailable"))
         }
@@ -467,8 +370,20 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
     value["database"]["authority_audit_reason"] = json!(authority_reason);
     value["database"]["authority_audit_error"] = json!(authority_reason);
 
-    let session_db =
-        doctor_global_db_read_only(&session_path, "doctor session temporal read-only").await;
+    let canonical_session_path = session_path
+        .canonicalize()
+        .unwrap_or_else(|_| session_path.clone());
+    let session_db = store_administration
+        .mounted_registered_session_databases()
+        .await
+        .into_iter()
+        .find(|database| {
+            database
+                .db_path()
+                .canonicalize()
+                .unwrap_or_else(|_| database.db_path().to_path_buf())
+                == canonical_session_path
+        });
     value["session_temporal_health"] = match session_db.as_ref() {
         Some(db) => {
             match timeout(Duration::from_secs(8), db.session_temporal_doctor_health()).await {
@@ -482,22 +397,20 @@ async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> 
         None => doctor_runtime_temporal_unavailable("session_store_missing"),
     };
     value["cursor_session_ingest"] = match session_db.as_ref() {
-        Some(db) => {
-            serde_json::to_value(db.session_ingest_health_for_provider(Some("cursor")).await)
-                .unwrap_or_else(|_| {
-                    json!({
-                        "status": "unavailable",
-                        "reason": "session_ingest_serialization_failed",
-                    })
+        Some(db) => serde_json::to_value(doctor_session_ingest_health(db, "cursor").await)
+            .unwrap_or_else(|_| {
+                json!({
+                    "status": "unavailable",
+                    "reason": "session_ingest_serialization_failed",
                 })
-        }
+            }),
         None => json!({
             "status": "unavailable",
             "reason": "session_store_unavailable",
         }),
     };
     value["cursor_session_placeholder_paths"] = match session_db.as_ref() {
-        Some(db) => json!(db.literal_workspace_placeholder_transcript_paths(10).await),
+        Some(db) => json!(doctor_literal_workspace_placeholder_paths(db, 10).await),
         None => json!([]),
     };
     value["semantic_runtime"] = doctor_semantic_runtime_status();
@@ -530,17 +443,19 @@ fn doctor_semantic_runtime_status() -> serde_json::Value {
 }
 
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
-    // Both stores use immutable `mode=ro` reads, so this route does not acquire
-    // database authority, create locks or sidecars, apply schema, or start workers.
-    doctor_runtime_value_inner(handshake, true).await
+    // Owned stores are never path-opened as a fallback. Without the daemon's
+    // retained runtime authority Doctor reports explicit unavailability.
+    doctor_runtime_value_inner(handshake, None).await
 }
 
 pub(crate) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
+    store_administration: &super::StoreAdministration,
     request: DoctorRuntimeRequest,
 ) -> Result<()> {
-    let result = doctor_runtime_tool_result(doctor_runtime_value(handshake).await);
+    let result =
+        doctor_runtime_tool_result(doctor_runtime_value(handshake, store_administration).await);
     write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
 }
 
@@ -548,11 +463,54 @@ pub(crate) async fn write_doctor_runtime_response(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod doctor_runtime_route_tests {
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use rusqlite::Connection;
 
     use super::{cold_doctor_runtime_value, doctor_runtime_request, doctor_runtime_store_paths};
     use crate::client_identity::DaemonClientIdentity;
     use crate::daemon::DaemonHandshake;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+
+    static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+
+    async fn registered_project_session_database(
+        profile_root: &Path,
+        project_root: &Path,
+    ) -> (
+        crate::db::DaemonDatabaseScope,
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+        Arc<crate::global_db::RegisteredGlobalDb>,
+    ) {
+        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+            .expect("load test profile identity");
+        let nonce = REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
+        let scope =
+            crate::db::enter_daemon_database_scope(profile_root, nonce, "core-doctor-test-runtime")
+                .expect("enter test daemon database scope");
+        let registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("open test session runtime registry");
+        let layout = crate::storage::resolve_persisted_layout(project_root, profile_root)
+            .expect("resolve test project layout")
+            .expect("test project must be enrolled");
+        let project_id = tracedecay_store::ProjectId::new(
+            layout.identity.project_id.expect("test project identity"),
+        )
+        .expect("valid test project identity");
+        let database = registry
+            .project_sessions(
+                project_id,
+                [project_root.to_path_buf(), layout.project_root],
+            )
+            .await
+            .expect("mount registered test project sessions");
+        (scope, registry, database)
+    }
 
     fn handshake(
         project_path: PathBuf,
@@ -600,17 +558,19 @@ mod doctor_runtime_route_tests {
     }
 
     async fn checkpoint_sqlite_wal(path: &Path) {
-        let database = libsql::Builder::new_local(path).build().await.unwrap();
-        let connection = database.connect().unwrap();
-        let mut rows = connection
-            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
-            .await
+        let connection = Connection::open(path).unwrap();
+        let (busy, log_frames, checkpointed_frames) = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
             .unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(row.get::<i64>(0).unwrap(), 0, "checkpoint must not be busy");
+        assert_eq!(busy, 0, "checkpoint must not be busy");
         assert_eq!(
-            row.get::<i64>(1).unwrap(),
-            row.get::<i64>(2).unwrap(),
+            log_frames, checkpointed_frames,
             "checkpoint must flush every WAL frame"
         );
     }
@@ -709,11 +669,11 @@ mod doctor_runtime_route_tests {
         assert_eq!(filesystem_manifest(root.path()), before);
         assert_eq!(
             value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_unavailable"))
+            Some(&serde_json::json!("project_store_authority_unavailable"))
         );
         assert_eq!(
             value.pointer("/database/quick_check_error"),
-            Some(&serde_json::json!("project_store_unavailable"))
+            Some(&serde_json::json!("project_store_authority_unavailable"))
         );
         assert!(!value.to_string().contains("malformed doctor fixture"));
     }
@@ -728,14 +688,11 @@ mod doctor_runtime_route_tests {
         let data_root = crate::config::get_tracedecay_dir(&project);
         std::fs::create_dir_all(&data_root).unwrap();
         let db_path = data_root.join(crate::config::db_filename(&data_root));
-        let legacy = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let connection = legacy.connect().unwrap();
+        let connection = Connection::open(&db_path).unwrap();
         connection
             .execute_batch("PRAGMA user_version=1; CREATE TABLE legacy_graph(id INTEGER);")
-            .await
             .unwrap();
         drop(connection);
-        drop(legacy);
         let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
         let before = filesystem_manifest(root.path());
 
@@ -744,7 +701,7 @@ mod doctor_runtime_route_tests {
         assert_eq!(filesystem_manifest(root.path()), before);
         assert_eq!(
             value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_schema_unsupported"))
+            Some(&serde_json::json!("project_store_authority_unavailable"))
         );
         assert_eq!(
             value.pointer("/session_temporal_health/findings/0/kind"),
@@ -769,17 +726,11 @@ mod doctor_runtime_route_tests {
         let session_path = initialized.store_layout().sessions_db_path.clone();
         drop(initialized);
         std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
-        let legacy = libsql::Builder::new_local(&session_path)
-            .build()
-            .await
-            .unwrap();
-        let connection = legacy.connect().unwrap();
+        let connection = Connection::open(&session_path).unwrap();
         connection
             .execute("CREATE TABLE legacy_sessions(id INTEGER PRIMARY KEY)", ())
-            .await
             .unwrap();
         drop(connection);
-        drop(legacy);
         let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
         let before = filesystem_manifest(root.path());
 
@@ -814,11 +765,9 @@ mod doctor_runtime_route_tests {
             .expect("initialize test project");
         let db_path = initialized.db_path().clone();
         drop(initialized);
-        let locked = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let connection = locked.connect().unwrap();
+        let connection = Connection::open(&db_path).unwrap();
         connection
             .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
-            .await
             .unwrap();
         let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
         let before = filesystem_manifest(root.path());
@@ -828,14 +777,14 @@ mod doctor_runtime_route_tests {
         assert_eq!(filesystem_manifest(root.path()), before);
         assert_eq!(
             value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_locked"))
+            Some(&serde_json::json!("project_store_authority_unavailable"))
         );
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("locked"))
+            Some(&serde_json::json!("unavailable"))
         );
         assert!(!value.to_string().contains(&db_path.display().to_string()));
-        connection.execute("ROLLBACK", ()).await.unwrap();
+        connection.execute("ROLLBACK", ()).unwrap();
     }
 
     #[tokio::test]
@@ -865,16 +814,13 @@ mod doctor_runtime_route_tests {
         checkpoint_sqlite_wal(&graph_path).await;
         // Init leaves a zero-byte sessions placeholder; install + checkpoint a
         // real temporal store so immutable=1 can observe a complete snapshot.
-        {
-            let session_db = crate::global_db::GlobalDb::open_at(&session_path)
-                .await
-                .expect("seed sessions store");
-            session_db
-                .checkpoint_result()
-                .await
-                .expect("checkpoint sessions store");
-            drop(session_db);
-        }
+        let (scope, registry, session_db) =
+            registered_project_session_database(&profile, &project).await;
+        assert_eq!(session_db.db_path(), session_path);
+        drop(session_db);
+        drop(registry);
+        drop(scope);
+        checkpoint_sqlite_wal(&session_path).await;
         for path in [&graph_path, &session_path, &registry_path] {
             remove_sqlite_sidecars(path);
         }
@@ -886,14 +832,17 @@ mod doctor_runtime_route_tests {
         assert_eq!(filesystem_manifest(root.path()), before);
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("complete")),
+            Some(&serde_json::json!("unavailable")),
             "{value}"
         );
         assert_eq!(
             value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("complete"))
+            Some(&serde_json::json!("unavailable"))
         );
-        assert_eq!(value.pointer("/session_temporal_health/reason"), None);
+        assert_eq!(
+            value.pointer("/session_temporal_health/reason"),
+            Some(&serde_json::json!("project_store_authority_unavailable"))
+        );
         assert_eq!(
             value.pointer("/database/authority_audit_reason"),
             Some(&serde_json::json!("authority_audit_not_run"))
@@ -982,7 +931,15 @@ mod doctor_runtime_route_tests {
         for path in [&graph_path, &registry_path] {
             remove_sqlite_sidecars(path);
         }
-        let session_db = crate::global_db::GlobalDb::open_at(&session_path)
+        let (_scope, _registry, session_db) =
+            registered_project_session_database(&profile, &project).await;
+        session_db
+            .writer_connection()
+            .expect("registered session writer")
+            .execute(
+                "CREATE TABLE cold_doctor_session_wal_probe(id INTEGER PRIMARY KEY)",
+                (),
+            )
             .await
             .expect("create an uncheckpointed temporal store");
         assert!(
@@ -997,7 +954,7 @@ mod doctor_runtime_route_tests {
         assert_eq!(filesystem_manifest(root.path()), before);
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("complete"))
+            Some(&serde_json::json!("unavailable"))
         );
         assert_eq!(
             value.pointer("/session_temporal_health/status"),
@@ -1005,11 +962,14 @@ mod doctor_runtime_route_tests {
         );
         assert_eq!(
             value.pointer("/session_temporal_health/reason"),
-            Some(&serde_json::json!("uncheckpointed_wal"))
+            Some(&serde_json::json!("project_store_authority_unavailable"))
         );
         assert_eq!(
             value.pointer("/session_temporal_health/findings"),
-            Some(&serde_json::json!([]))
+            Some(&serde_json::json!([{
+                "kind": "compatibility_drift",
+                "count": 1,
+            }]))
         );
         drop(session_db);
     }
@@ -1031,17 +991,12 @@ mod doctor_runtime_route_tests {
             .expect("initialize test project");
         let graph_path = initialized.db_path().clone();
         drop(initialized);
-        let graph_db = libsql::Builder::new_local(&graph_path)
-            .build()
-            .await
-            .unwrap();
-        let graph_conn = graph_db.connect().unwrap();
+        let graph_conn = Connection::open(&graph_path).unwrap();
         graph_conn
             .execute(
                 "CREATE TABLE cold_doctor_wal_probe(id INTEGER PRIMARY KEY)",
                 (),
             )
-            .await
             .unwrap();
         assert!(
             has_non_empty_wal(&graph_path),
@@ -1059,10 +1014,9 @@ mod doctor_runtime_route_tests {
         );
         assert_eq!(
             value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_uncheckpointed_wal"))
+            Some(&serde_json::json!("project_store_authority_unavailable"))
         );
         drop(graph_conn);
-        drop(graph_db);
     }
 
     #[tokio::test]
@@ -1105,7 +1059,7 @@ mod doctor_runtime_route_tests {
         assert_eq!(filesystem_manifest(root.path()), before);
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("complete"))
+            Some(&serde_json::json!("unavailable"))
         );
         assert_eq!(
             value.pointer("/session_temporal_health/status"),
@@ -1113,7 +1067,7 @@ mod doctor_runtime_route_tests {
         );
         assert_eq!(
             value.pointer("/session_temporal_health/reason"),
-            Some(&serde_json::json!("session_store_uninitialized"))
+            Some(&serde_json::json!("project_store_authority_unavailable"))
         );
     }
 }

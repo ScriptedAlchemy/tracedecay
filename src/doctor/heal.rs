@@ -28,9 +28,12 @@
 //! Everything else (orphan store manifests, stale rows outside the temp
 //! directory, registry/manifest identity drift) is only reported.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use crate::global_db::{CodeProjectRecord, GlobalDb};
+use crate::global_db::{CodeProjectRecord, RegisteredGlobalDb};
 use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_code_projects};
 use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 
@@ -97,7 +100,38 @@ pub async fn run_post_update_health_pass_under_lease(
             return report;
         }
     };
-    run_post_update_health_pass_for_profile(&profile_root).await
+    let profile_identity = match crate::daemon::profile_identity::load_or_create(&profile_root) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let report = HealthPassReport {
+                warnings: vec![format!(
+                    "could not load the profile identity for the post-update health pass: {error}"
+                )],
+                ..HealthPassReport::default()
+            };
+            render_warnings(&report.warnings);
+            return report;
+        }
+    };
+    let runtime_registry =
+        match crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity,
+        )
+        .await
+        {
+            Ok(registry) => registry,
+            Err(error) => {
+                let report = HealthPassReport {
+                    warnings: vec![format!(
+                        "could not mount the profile runtime for the post-update health pass: {error}"
+                    )],
+                    ..HealthPassReport::default()
+                };
+                render_warnings(&report.warnings);
+                return report;
+            }
+        };
+    run_post_update_health_pass_for_profile(&profile_root, &runtime_registry).await
 }
 
 fn health_pass_lease_error(
@@ -119,21 +153,23 @@ fn health_pass_lease_error(
     })
 }
 
-async fn run_post_update_health_pass_for_profile(profile_root: &Path) -> HealthPassReport {
+async fn run_post_update_health_pass_for_profile(
+    profile_root: &Path,
+    runtime_registry: &crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+) -> HealthPassReport {
     eprintln!("\n\x1b[1mPost-update health pass\x1b[0m (skip with --no-heal)");
-    let report = compute_health_pass_report(profile_root).await;
+    let report = compute_health_pass_report(profile_root, runtime_registry).await;
     render_health_pass_report(&report);
     report
 }
 
 /// Applies the safe remedies and gathers everything the pass has to say into
 /// a [`HealthPassReport`], without printing anything.
-async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
+async fn compute_health_pass_report(
+    profile_root: &Path,
+    runtime_registry: &crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+) -> HealthPassReport {
     let mut report = HealthPassReport::default();
-
-    // The post-update command holds the exclusive lifecycle lease around this
-    // entire pass, so manifest retirement cannot race daemon or hook opens.
-    retire_completed_consolidation_manifests(profile_root, &mut report).await;
 
     let (quarantined, warnings) = quarantine_corrupt_branch_meta(profile_root);
     report.quarantined_branch_meta = quarantined;
@@ -142,37 +178,74 @@ async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
     if let Ok(project_root) = std::env::current_dir()
         && let Ok(layout) = crate::storage::resolve_layout(&project_root, profile_root)
         && layout.sessions_db_path.is_file()
-        && let Err(error) =
-            crate::global_db::repair_session_temporal_store(&layout.sessions_db_path).await
+        && let Some(project_id) = layout.identity.project_id.as_deref()
     {
-        report.warnings.push(format!(
-            "could not repair the current project session store: {error}"
-        ));
+        match tracedecay_store::ProjectId::new(project_id.to_owned()) {
+            Ok(project_id) => {
+                match runtime_registry
+                    .project_sessions(
+                        project_id,
+                        [project_root.clone(), layout.project_root.clone()],
+                    )
+                    .await
+                {
+                    Ok(session_database) => {
+                        if let Err(error) =
+                            crate::global_db::repair_session_temporal_store(&session_database).await
+                        {
+                            report.warnings.push(format!(
+                                "could not repair the current project session store: {error}"
+                            ));
+                        }
+                    }
+                    Err(error) => report.warnings.push(format!(
+                        "could not mount the current project session store for repair: {error}"
+                    )),
+                }
+            }
+            Err(error) => report.warnings.push(format!(
+                "could not repair the current project session store because its identity is invalid: {error}"
+            )),
+        }
     }
 
-    // Opening the global DB applies its idempotent schema migrations — the
-    // same lazy upgrade every normal open path performs.
-    let global_db = match GlobalDb::try_open().await {
-        Ok(Some(global_db)) => global_db,
-        Ok(None) => {
-            report
-                .warnings
-                .push("could not open the global DB for the health pass".to_string());
-            return report;
-        }
+    let global_db = match runtime_registry.profile_database().await {
+        Ok(global_db) => global_db,
         Err(error) => {
             report.warnings.push(format!(
-                "could not open the global DB for the health pass: {error}"
+                "could not mount the global DB for the health pass: {error}"
             ));
             return report;
         }
     };
 
+    // The post-update command holds the exclusive lifecycle lease around this
+    // entire pass, so manifest retirement cannot race daemon or hook opens.
+    retire_completed_consolidation_manifests(profile_root, &global_db, &mut report).await;
+
     // One registry snapshot for the whole pass: the GC and the remaining
     // findings below both work from this list.
-    let projects = global_db.list_code_projects(usize::MAX).await;
-    let (purged, purged_ids) = gc_stale_temp_registry_rows(&global_db, &projects).await;
-    report.purged_temp_registry_rows = Some(purged);
+    let projects = match global_db.list_code_projects(usize::MAX).await {
+        Ok(projects) => projects,
+        Err(error) => {
+            report.warnings.push(format!(
+                "could not read the global project registry: {error}"
+            ));
+            return report;
+        }
+    };
+    let purged_ids = match gc_stale_temp_registry_rows(&global_db, &projects).await {
+        Ok((purged, purged_ids)) => {
+            report.purged_temp_registry_rows = Some(purged);
+            purged_ids
+        }
+        Err(error) => {
+            report
+                .warnings
+                .push(format!("could not purge stale temp registry rows: {error}"));
+            Vec::new()
+        }
+    };
 
     let registry_drift =
         super::registry_drift::registry_drift_findings(&global_db, profile_root).await;
@@ -198,10 +271,11 @@ async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
 
 async fn retire_completed_consolidation_manifests(
     profile_root: &Path,
+    global_db: &RegisteredGlobalDb,
     report: &mut HealthPassReport,
 ) {
     let retirement =
-        crate::migrate::consolidate::retire_applied_input_manifests(profile_root).await;
+        crate::migrate::consolidate::retire_applied_input_manifests(profile_root, global_db).await;
     report.retired_consolidation_manifests = retirement.retired;
     report.retired_consolidation_registry_projects = retirement.retired_registry_projects;
     report.warnings.extend(retirement.warnings);
@@ -275,9 +349,9 @@ fn quarantine_corrupt_branch_meta(profile_root: &Path) -> (Vec<BranchMetaQuarant
 /// Returns the purged row count plus the candidate ids, so the remaining
 /// findings can exclude them from the shared pre-purge registry snapshot.
 async fn gc_stale_temp_registry_rows(
-    global_db: &GlobalDb,
+    global_db: &Arc<RegisteredGlobalDb>,
     projects: &[CodeProjectRecord],
-) -> (usize, Vec<String>) {
+) -> crate::errors::Result<(usize, Vec<String>)> {
     let stale_ids: Vec<String> = stale_code_projects(
         projects,
         &temp_dir_prefixes(),
@@ -287,10 +361,31 @@ async fn gc_stale_temp_registry_rows(
     .map(|project| project.project_id.clone())
     .collect();
     if stale_ids.is_empty() {
-        return (0, stale_ids);
+        return Ok((0, stale_ids));
     }
-    let purged = global_db.delete_code_projects(&stale_ids).await;
-    (purged, stale_ids)
+    let transaction = global_db.begin_write_transaction().await?;
+    let mut purged = 0_usize;
+    for project_id in &stale_ids {
+        let deleted = transaction
+            .execute(
+                "DELETE FROM code_projects WHERE project_id=?1",
+                crate::db::engine::params![project_id],
+            )
+            .await
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "purge stale temporary project registry row".to_string(),
+                message: error.to_string(),
+            })?;
+        purged = purged.saturating_add(usize::try_from(deleted).unwrap_or(usize::MAX));
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| crate::errors::TraceDecayError::Database {
+            operation: "commit stale temporary project registry purge".to_string(),
+            message: error.to_string(),
+        })?;
+    Ok((purged, stale_ids))
 }
 
 /// The system temp directory in both its literal and canonicalized spellings,
@@ -312,7 +407,7 @@ fn temp_dir_prefixes() -> Vec<PathBuf> {
 ///
 /// Returns the findings and any warnings.
 async fn collect_remaining_findings(
-    global_db: &GlobalDb,
+    global_db: &Arc<RegisteredGlobalDb>,
     profile_root: &Path,
     projects: &[CodeProjectRecord],
     purged_ids: &[String],
@@ -711,9 +806,9 @@ mod tests {
         )
         .unwrap();
 
-        let global = crate::global_db::GlobalDb::open_at(&profile.join("global.db"))
-            .await
-            .unwrap();
+        let runtime =
+            crate::doctor::DoctorTestRuntime::open(&profile, "doctor-heal-retirement-test").await;
+        let global = runtime.database_arc();
         for project_id in [source_id, target_id, destination_id.as_str()] {
             global
                 .upsert_code_project(
@@ -747,7 +842,6 @@ mod tests {
             .await
             .unwrap();
         global.checkpoint().await;
-        global.close();
 
         let pause = profile
             .join("migration-inventory")
@@ -757,9 +851,15 @@ mod tests {
             .join(".registry-retirement-paused");
         std::fs::write(&pause, b"pause").unwrap();
         let profile_for_retirement = profile.clone();
+        let global_for_retirement = Arc::clone(&global);
         let interrupted = tokio::spawn(async move {
             let mut report = HealthPassReport::default();
-            retire_completed_consolidation_manifests(&profile_for_retirement, &mut report).await;
+            retire_completed_consolidation_manifests(
+                &profile_for_retirement,
+                &global_for_retirement,
+                &mut report,
+            )
+            .await;
             report
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -784,13 +884,12 @@ mod tests {
                     .exists()
             );
         }
-        let global = crate::global_db::GlobalDb::open_at(&profile.join("global.db"))
-            .await
-            .unwrap();
-        assert_eq!(global.list_code_projects(usize::MAX).await.len(), 3);
+        assert_eq!(
+            global.list_code_projects(usize::MAX).await.unwrap().len(),
+            3
+        );
         global
             .writer_connection()
-            .await
             .unwrap()
             .execute(
                 // Registry retirement is keyed by repository identity (the git
@@ -799,13 +898,12 @@ mod tests {
                 // source row to another repository by rebinding both its root and
                 // its git common dir.
                 "UPDATE code_projects SET canonical_root=?1, git_common_dir=?2 WHERE project_id=?3",
-                libsql::params!["/moved/elsewhere", "/moved/elsewhere/.git", source_id],
+                crate::db::engine::params!["/moved/elsewhere", "/moved/elsewhere/.git", source_id],
             )
             .await
             .unwrap();
-        global.close();
         let mut moved = HealthPassReport::default();
-        retire_completed_consolidation_manifests(&profile, &mut moved).await;
+        retire_completed_consolidation_manifests(&profile, &global, &mut moved).await;
         assert!(moved.warnings.is_empty(), "{:?}", moved.warnings);
         assert_eq!(moved.retired_consolidation_manifests.len(), 2);
         assert_eq!(moved.retired_consolidation_registry_projects, 1);
@@ -821,15 +919,12 @@ mod tests {
         }
 
         let mut retried = HealthPassReport::default();
-        retire_completed_consolidation_manifests(&profile, &mut retried).await;
+        retire_completed_consolidation_manifests(&profile, &global, &mut retried).await;
         assert!(retried.warnings.is_empty(), "{:?}", retried.warnings);
         assert!(retried.retired_consolidation_manifests.is_empty());
         assert_eq!(retried.retired_consolidation_registry_projects, 0);
 
-        let global = crate::global_db::GlobalDb::open_at(&profile.join("global.db"))
-            .await
-            .unwrap();
-        let owners = global.list_code_projects(usize::MAX).await;
+        let owners = global.list_code_projects(usize::MAX).await.unwrap();
         assert_eq!(owners.len(), 2);
         assert!(owners.iter().any(|project| {
             project.project_id == source_id && project.canonical_root == "/moved/elsewhere"

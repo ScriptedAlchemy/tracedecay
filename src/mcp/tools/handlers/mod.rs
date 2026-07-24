@@ -55,7 +55,7 @@ use serde_json::{Value, json};
 use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
 use crate::application_surface::ApplicationSurfaceOperation;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
@@ -74,7 +74,7 @@ pub(crate) async fn handle_user_lcm_tool_with_retained_authority(
     tool_name: &str,
     args: Value,
     profile_root: &Path,
-    retained_session_db: &Arc<GlobalDb>,
+    retained_session_db: &Arc<RegisteredGlobalDb>,
     retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
 ) -> Result<crate::mcp::tools::ToolResult> {
     handle_user_lcm_tool_with_db(
@@ -93,9 +93,9 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
     tool_name: &str,
     args: Value,
     profile_root: &Path,
-    retained_session_db: Option<&Arc<GlobalDb>>,
-    _registry_db: Option<&GlobalDb>,
-    _allow_owned_session_db: bool,
+    retained_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    _registry_db: Option<&RegisteredGlobalDb>,
+    allow_owned_session_db: bool,
     retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
 ) -> Result<crate::mcp::tools::ToolResult> {
     if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
@@ -130,7 +130,8 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
     }
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     let context =
-        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service);
+        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service)
+            .with_direct_open(allow_owned_session_db);
     dispatch_lcm_tool(tool_name, args, context).await
 }
 
@@ -163,8 +164,12 @@ async fn dispatch_lcm_tool(
 /// reopen a session database while dispatching an action.
 #[derive(Clone, Copy, Default)]
 pub struct SessionAuthorities<'a> {
-    pub(crate) project: Option<&'a Arc<GlobalDb>>,
-    pub(crate) user: Option<&'a Arc<GlobalDb>>,
+    pub(crate) project: Option<&'a Arc<RegisteredGlobalDb>>,
+    pub(crate) user: Option<&'a Arc<RegisteredGlobalDb>>,
+    pub(crate) profile_identity:
+        Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    pub(crate) project_registered: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    pub(crate) profile_registered: Option<&'a crate::global_db::RegisteredGlobalDb>,
     project_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
     profile_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
     project_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
@@ -172,15 +177,41 @@ pub struct SessionAuthorities<'a> {
 }
 
 impl<'a> SessionAuthorities<'a> {
-    pub const fn new(project: Option<&'a Arc<GlobalDb>>, user: Option<&'a Arc<GlobalDb>>) -> Self {
+    pub const fn new(
+        project: Option<&'a Arc<RegisteredGlobalDb>>,
+        user: Option<&'a Arc<RegisteredGlobalDb>>,
+    ) -> Self {
         Self {
             project,
             user,
+            profile_identity: None,
+            project_registered: None,
+            profile_registered: None,
             project_refresh: None,
             profile_refresh: None,
             project_retrieval: None,
             profile_retrieval: None,
         }
+    }
+
+    pub(crate) const fn with_registered_databases(
+        mut self,
+        project: Option<&'a crate::global_db::RegisteredGlobalDb>,
+        profile: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    ) -> Self {
+        self.project_registered = project;
+        self.profile_registered = profile;
+        self
+    }
+
+    pub(crate) const fn with_profile_identity(
+        mut self,
+        profile_identity: Option<
+            &'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+        >,
+    ) -> Self {
+        self.profile_identity = profile_identity;
+        self
     }
 
     pub(crate) const fn with_refresh_services(
@@ -213,7 +244,7 @@ use super::dispatch_policy::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
 };
 use super::render;
-use support::{profile_root_for_global_db, project_registry_context, project_selector_present};
+use support::{project_registry_context, project_selector_present};
 
 pub(super) fn text_tool_result(text: &str) -> ToolResult {
     ToolResult::new(
@@ -256,9 +287,10 @@ fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool
 async fn selected_registered_project_reader(
     tool_name: &str,
     args: &Value,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
-) -> Result<Option<TraceDecay>> {
+    resolver: Option<&crate::mcp::server::RetainedProjectGraphResolver>,
+) -> Result<Option<Arc<TraceDecay>>> {
     if !tool_dispatches_registered_project_reader(tool_name) {
         return Ok(None);
     }
@@ -273,39 +305,17 @@ async fn selected_registered_project_reader(
         return Ok(None);
     };
 
-    let global_db_path = global_db
-        .map(|db| db.db_path().to_path_buf())
-        .or_else(crate::global_db::global_db_path);
-    let mut profile_roots = vec![profile_root_for_global_db(
-        global_db,
-        allow_default_registry_fallback,
-    )?];
-    if let Ok(default_profile_root) = crate::storage::default_profile_root()
-        && !profile_roots
-            .iter()
-            .any(|root| root == &default_profile_root)
-    {
-        profile_roots.push(default_profile_root);
-    }
-
-    let mut last_error = None;
-    for profile_root in profile_roots {
-        match TraceDecay::open_read_only_with_options(
-            Path::new(&context.project.canonical_root),
-            crate::tracedecay::TraceDecayOpenOptions {
-                profile_root: Some(profile_root),
-                global_db_path: global_db_path.clone(),
-            },
-        )
+    let Some(resolver) = resolver else {
+        return Err(TraceDecayError::Config {
+            message: "registered project graph is not mounted by the daemon".to_string(),
+        });
+    };
+    resolver(Path::new(&context.project.canonical_root).to_path_buf())
         .await
-        {
-            Ok(cg) => return Ok(Some(cg)),
-            Err(err) => last_error = Some(err),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| TraceDecayError::Config {
-        message: "registered project could not be opened".to_string(),
-    }))
+        .map(Some)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "registered project graph is not mounted by the daemon".to_string(),
+        })
 }
 
 fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
@@ -412,7 +422,7 @@ pub async fn handle_tool_call_with_registry(
     args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
-    global_db: Option<&GlobalDb>,
+    global_db: Option<&RegisteredGlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     Box::pin(handle_tool_call_with_registry_and_implicit_project(
@@ -432,7 +442,9 @@ pub async fn handle_tool_call_with_registry(
 
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
-    pub global_db: Option<&'a GlobalDb>,
+    pub global_db: Option<&'a RegisteredGlobalDb>,
+    pub accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub profile_root: Option<&'a Path>,
     pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
@@ -445,6 +457,10 @@ pub struct ToolCallRegistryOptions<'a> {
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
     pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
+    pub git_read_executor: Option<crate::mcp::server::GitReadExecutor>,
+    pub code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    pub retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     pub session_authorities: SessionAuthorities<'a>,
 }
 
@@ -452,6 +468,8 @@ impl Default for ToolCallRegistryOptions<'_> {
     fn default() -> Self {
         Self {
             global_db: None,
+            accounting_db: None,
+            registered_project_session_db: None,
             profile_root: None,
             allow_default_registry_fallback: true,
             implicit_project_path: None,
@@ -463,6 +481,10 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_request_id: None,
             application_deadline: None,
             application_cancellation: None,
+            code_index_search_executor: None,
+            git_read_executor: None,
+            code_index_search_authority: None,
+            retained_project_graph_resolver: None,
             session_authorities: SessionAuthorities::default(),
         }
     }
@@ -553,6 +575,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         &args,
         options.global_db,
         options.allow_default_registry_fallback,
+        options.retained_project_graph_resolver.as_ref(),
     )
     .await?;
     let selected_scope_prefix = if selected_cg.is_some() {
@@ -560,7 +583,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     } else {
         scope_prefix
     };
-    let cg = selected_cg.as_ref().unwrap_or(cg);
+    let cg = selected_cg.as_deref().unwrap_or(cg);
     let active_project_session_db = selected_cg
         .is_none()
         .then_some(options.session_authorities.project)
@@ -569,11 +592,23 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         cg,
         active_project_session_db,
         options.session_authorities.project_retrieval,
-    );
+    )
+    .with_direct_open(options.allow_default_registry_fallback);
     if let Some(result) = dispatch_application_surface_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) = dispatch_graph_tools(tool_name, cg, &args, selected_scope_prefix).await {
+    if let Some(result) = dispatch_graph_tools(
+        tool_name,
+        cg,
+        &args,
+        selected_scope_prefix,
+        options.code_index_search_executor.as_ref(),
+        options.code_index_search_authority.as_ref(),
+        options.application_deadline.clone(),
+        options.application_cancellation.clone(),
+    )
+    .await
+    {
         return result;
     }
     if let Some(result) = dispatch_info_tools(
@@ -598,7 +633,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     {
         return result;
     }
-    if let Some(result) = dispatch_git_tools(tool_name, cg, &args).await {
+    if let Some(result) = dispatch_git_tools(tool_name, cg, &args, &options).await {
         return result;
     }
     if let Some(result) = dispatch_edit_tools(tool_name, cg, &args).await {
@@ -643,9 +678,24 @@ async fn dispatch_graph_tools(
     cg: &TraceDecay,
     args: &Value,
     selected_scope_prefix: Option<&str>,
+    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
+    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
-        "tracedecay_search" => graph::handle_search(cg, args.clone(), selected_scope_prefix).await,
+        "tracedecay_search" => {
+            graph::handle_search(
+                cg,
+                args.clone(),
+                selected_scope_prefix,
+                search_executor,
+                search_authority,
+                deadline,
+                cancellation,
+            )
+            .await
+        }
         "tracedecay_grep" => grep::handle_grep(cg, args.clone(), selected_scope_prefix).await,
         "tracedecay_ast_grep_search" => {
             ast_grep_search::handle_ast_grep_search(cg, args.clone(), selected_scope_prefix).await
@@ -686,7 +736,7 @@ async fn dispatch_info_tools(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
     selected_scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<GlobalDb>>,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
@@ -768,6 +818,7 @@ async fn dispatch_admin_tools(
                 cg,
                 args.clone(),
                 options.global_db,
+                options.accounting_db,
                 options.session_authorities,
             )
             .await
@@ -777,6 +828,7 @@ async fn dispatch_admin_tools(
                 cg,
                 args.clone(),
                 options.global_db,
+                options.accounting_db,
                 options.profile_root,
                 options.session_authorities,
             )
@@ -860,6 +912,7 @@ async fn dispatch_analysis_tools(
                 args.clone(),
                 options.diagnostics_cache,
                 options.diagnostics_lsp,
+                options.registered_project_session_db.as_deref(),
             )
             .await
         }
@@ -880,8 +933,59 @@ async fn dispatch_git_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
+    options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
+        "tracedecay_git_status" => {
+            git::handle_git_status(
+                cg,
+                args,
+                options.git_read_executor.as_ref(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
+        "tracedecay_git_diff" => {
+            git::handle_git_diff(
+                cg,
+                args,
+                options.git_read_executor.as_ref(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
+        "tracedecay_git_history" => {
+            git::handle_git_history(
+                cg,
+                args,
+                options.git_read_executor.as_ref(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
+        "tracedecay_git_blame" => {
+            git::handle_git_blame(
+                cg,
+                args,
+                options.git_read_executor.as_ref(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
+        "tracedecay_git_hunks" => {
+            git::handle_git_hunks(
+                cg,
+                args,
+                options.git_read_executor.as_ref(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args.clone()).await,
         "tracedecay_affected" => git::handle_affected(cg, args.clone()).await,
         "tracedecay_diff_context" => git::handle_diff_context(cg, args.clone()).await,
@@ -923,7 +1027,7 @@ async fn dispatch_health_tools(
     cg: &TraceDecay,
     args: &Value,
     scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<GlobalDb>>,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
@@ -1002,12 +1106,17 @@ async fn dispatch_memory_tools(
                 cg,
                 args.clone(),
                 options.global_db,
+                options.accounting_db,
                 options.allow_default_registry_fallback,
             )
             .await
         }
-        "tracedecay_skill_list" => skills::handle_skill_list(cg, args.clone()).await,
-        "tracedecay_skill_view" => skills::handle_skill_view(cg, args.clone()).await,
+        "tracedecay_skill_list" => {
+            skills::handle_skill_list(cg, args.clone(), options.accounting_db).await
+        }
+        "tracedecay_skill_view" => {
+            skills::handle_skill_view(cg, args.clone(), options.accounting_db).await
+        }
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, args),
         _ => return None,
     };
@@ -1020,7 +1129,7 @@ async fn dispatch_session_workflow_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
-    active_project_session_db: Option<&Arc<GlobalDb>>,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
@@ -1054,8 +1163,22 @@ async fn dispatch_session_workflow_tools(
             ))
             .await
         }
-        "tracedecay_sessions_for" => session::handle_sessions_for(cg, args.clone()).await,
-        "tracedecay_workflows" => workflow_query::handle_workflows(cg, args.clone()).await,
+        "tracedecay_sessions_for" => {
+            session::handle_sessions_for(
+                cg,
+                active_project_session_db.map(Arc::as_ref),
+                args.clone(),
+            )
+            .await
+        }
+        "tracedecay_workflows" => {
+            workflow_query::handle_workflows(
+                cg,
+                args.clone(),
+                options.session_authorities.project_registered,
+            )
+            .await
+        }
         _ => return None,
     };
     Some(result)
@@ -1075,6 +1198,8 @@ mod tests {
     use std::fmt::Write as _;
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use serde_json::json;
     use tempfile::TempDir;
@@ -1082,6 +1207,42 @@ mod tests {
     use super::super::get_tool_definitions;
     use super::*;
     use crate::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
+    use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+
+    static SELECTOR_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+
+    struct SelectorRegistry {
+        database: Arc<RegisteredGlobalDb>,
+        _registry: DaemonSessionRuntimeRegistryV1,
+        _scope: crate::db::DaemonDatabaseScope,
+    }
+
+    impl SelectorRegistry {
+        async fn open() -> Self {
+            let profile_root = crate::config::user_data_dir().expect("selector profile root");
+            let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+                .expect("selector profile identity");
+            let nonce = SELECTOR_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
+            let scope = crate::db::enter_daemon_database_scope(
+                identity.profile_root(),
+                nonce,
+                "mcp-selector-test",
+            )
+            .expect("selector daemon database scope");
+            let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+                .await
+                .expect("selector session runtime registry");
+            let database = registry
+                .profile_database()
+                .await
+                .expect("selector registered profile database");
+            Self {
+                database,
+                _registry: registry,
+                _scope: scope,
+            }
+        }
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -1252,6 +1413,7 @@ mod tests {
         }
 
         for tool_name in [
+            "tracedecay_search",
             "tracedecay_str_replace",
             "tracedecay_run_affected_tests",
             "tracedecay_status",
@@ -1287,7 +1449,7 @@ mod tests {
             !target_still_stale,
             "target fixture source should be indexed for selected-project file listing"
         );
-        let registry = GlobalDb::open().await.unwrap();
+        let registry = SelectorRegistry::open().await;
         let target_project_id = target
             .store_layout()
             .identity
@@ -1305,7 +1467,7 @@ mod tests {
             }),
             None,
             Some("tests"),
-            Some(&registry),
+            Some(registry.database.as_ref()),
             false,
         )
         .await
@@ -1342,19 +1504,19 @@ mod tests {
         let active = TraceDecay::init(&active_project).await.unwrap();
         let target = TraceDecay::init(&target_project).await.unwrap();
         target.index_all().await.unwrap();
-        let registry = GlobalDb::open().await.unwrap();
+        let registry = SelectorRegistry::open().await;
 
         let result = handle_tool_call_with_registry(
             &active,
-            "tracedecay_search",
+            "tracedecay_grep",
             json!({
                 "project_selector": {"path": "target"},
-                "query": "target",
+                "pattern": "target",
                 "limit": 5,
             }),
             None,
             None,
-            Some(&registry),
+            Some(registry.database.as_ref()),
             false,
         )
         .await
@@ -1391,18 +1553,18 @@ mod tests {
         let active = TraceDecay::init(&active_project).await.unwrap();
         let first = TraceDecay::init(&first_target).await.unwrap();
         let second = TraceDecay::init(&second_target).await.unwrap();
-        let registry = GlobalDb::open().await.unwrap();
+        let registry = SelectorRegistry::open().await;
 
         let err = handle_tool_call_with_registry(
             &active,
-            "tracedecay_search",
+            "tracedecay_grep",
             json!({
                 "project_selector": {"path": "target"},
-                "query": "target",
+                "pattern": "target",
             }),
             None,
             None,
-            Some(&registry),
+            Some(registry.database.as_ref()),
             false,
         )
         .await
@@ -1453,8 +1615,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pr9_search_rejects_cross_project_selector() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().unwrap();
+        let _env = SelectorEnv::new(dir.path());
+        let project = dir.path().join("active");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
+        let cg = TraceDecay::init(&project).await.unwrap();
+
+        let err = handle_tool_call(
+            &cg,
+            "tracedecay_search",
+            json!({
+                "project_id": "cross-project-must-not-be-relabelled",
+                "query": "target",
+            }),
+            None,
+            None,
+        )
+        .await
+        .expect_err("PR9 single-root search must reject project selectors");
+
+        cg.close();
+        assert!(
+            format!("{err}").contains("does not accept project selectors"),
+            "unexpected selector rejection error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn selected_project_retrieve_finds_selected_project_response_handle() {
-        const LARGE_RESPONSE_MARKER_COUNT: usize = 260;
+        const LARGE_RESPONSE_MARKER_COUNT: usize = 200;
         const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
 
         let _env_lock = lock_user_data_dir_test_env();
@@ -1493,11 +1685,11 @@ mod tests {
 
         let result = handle_tool_call(
             &active,
-            "tracedecay_search",
+            "tracedecay_grep",
             json!({
-                "query": "selected_project_handle_marker",
+                "pattern": "selected_project_handle_marker",
                 "project_id": target_project_id,
-                "limit": LARGE_RESPONSE_MARKER_COUNT,
+                "max_results": LARGE_RESPONSE_MARKER_COUNT,
                 "format": "json"
             }),
             None,

@@ -14,6 +14,51 @@ use crate::storage::StoreLayout;
 #[cfg(test)]
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
+#[cfg(test)]
+pub(crate) struct DoctorTestRuntime {
+    database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    _scope: crate::db::DaemonDatabaseScope,
+}
+
+#[cfg(test)]
+impl DoctorTestRuntime {
+    pub(crate) async fn open(profile_root: &Path, label: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NONCE: AtomicU64 = AtomicU64::new(1);
+
+        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+            .expect("load Doctor test profile identity");
+        let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
+        let scope = crate::db::enter_daemon_database_scope(profile_root, nonce, label)
+            .expect("enter Doctor test database scope");
+        let registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("open Doctor test runtime registry");
+        let database = registry
+            .profile_database()
+            .await
+            .expect("mount Doctor test profile database");
+        Self {
+            database,
+            _registry: registry,
+            _scope: scope,
+        }
+    }
+
+    pub(crate) fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
+        self.database.as_ref()
+    }
+
+    pub(crate) fn database_arc(&self) -> std::sync::Arc<crate::global_db::RegisteredGlobalDb> {
+        std::sync::Arc::clone(&self.database)
+    }
+}
+
 pub mod heal;
 // Consumed by the unix-only daemon git-watch maintenance path; on other
 // targets only the module's tests reference it.
@@ -865,7 +910,7 @@ fn classify_project_storage(project_root: &Path) -> DoctorStorageStatus {
 #[cfg(test)]
 async fn classify_project_storage_with_registry(
     project_root: &Path,
-    global_db: &crate::global_db::GlobalDb,
+    global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: Option<&Path>,
 ) -> DoctorStorageStatus {
     let status = classify_project_storage(project_root);
@@ -994,7 +1039,7 @@ fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
 /// manifest scan issues. Shared between `doctor` and the post-update health
 /// pass.
 pub(crate) async fn orphan_store_manifest_report(
-    global_db: &crate::global_db::GlobalDb,
+    global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
 ) -> (usize, Vec<String>) {
     let report = crate::migrate::registry::scan_profile_store_manifests(

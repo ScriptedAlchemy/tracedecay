@@ -63,10 +63,15 @@ pub use doctor::{
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
-    MAX_SOURCE_OBSERVATIONS_PER_ADMISSION_V1, SourceCaptureAdmissionErrorV1,
-    SourceCaptureAdmissionV1,
+    MAX_SOURCE_OBSERVATIONS_PER_ADMISSION_V1, SourceAdmissionAuthorityV1, SourceAuthorityContextV1,
+    SourceCanonicalRefetchAuthorityV1, SourceCaptureAdmissionErrorV1, SourceCaptureAdmissionV1,
+    SourceCaptureApplicationV1, SourceEventAdmissionContextV1, SourceEventAdmissionV1,
+    SourceSanitizationAuthorityV1,
 };
-pub use feedback::{feedback_surface_catalog_contribution, feedback_surface_handler_descriptors};
+pub use feedback::{
+    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
+    feedback_surface_operation,
+};
 pub use framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, file_len, io_error, read_bounded,
     replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
@@ -128,7 +133,7 @@ pub use storage::{
     OrphanStoreRecordV1, QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1,
     RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
     StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
-    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
-    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
-    stale_branch_dbs_finding,
+    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1,
+    TableGrowthTelemetryReadV1, TableNameV1, incident_debris_finding, orphan_store_finding,
+    over_budget_finding, retention_backlog_finding, stale_branch_dbs_finding,
 };

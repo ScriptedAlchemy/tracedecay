@@ -5,7 +5,7 @@
 //! The server exposes code graph tools via the Model Context Protocol,
 //! allowing AI assistants to query the code graph interactively.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -18,7 +18,7 @@ use crate::application::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
@@ -104,6 +104,135 @@ pub(crate) type CodeIndexHookNotifyFuture =
 pub(crate) type CodeIndexHookSink =
     Arc<dyn Fn(PathBuf, Vec<String>) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
+/// Search policy crossing the MCP/daemon boundary. The daemon owns profile,
+/// generation, query-MAC, and semantic calibration authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeIndexSearchModeV1 {
+    FallbackAllowed,
+    StrictSemantic,
+}
+
+/// Existing route admission required before MCP may invoke PR9 retrieval.
+/// Neither value may be derived from paths, profile labels, or query bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeIndexSearchAuthorityV1 {
+    pub(crate) principal: tracedecay_domain::PrincipalId,
+    pub(crate) authorization_revision: tracedecay_domain::AuthorizationRevision,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CodeIndexSearchRequestV1 {
+    pub(crate) project_root: PathBuf,
+    pub(crate) query: String,
+    pub(crate) limit: usize,
+    pub(crate) mode: CodeIndexSearchModeV1,
+    pub(crate) authority: Option<CodeIndexSearchAuthorityV1>,
+    pub(crate) deadline: Option<tracedecay_application::Deadline>,
+    pub(crate) cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CodeIndexSemanticStatusV1 {
+    Complete,
+    Unavailable { reason: &'static str },
+}
+
+/// Internal scheduler probe used by the daemon search executor while semantic
+/// calibration remains unavailable. This is status data, not a second MCP
+/// callback surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeIndexSemanticAbstentionV1 {
+    pub(crate) code_generation: Option<String>,
+    pub(crate) reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeIndexSearchUnavailableReasonV1 {
+    CapabilityUnavailable,
+    AuthorityUnavailable,
+    Cancelled,
+    TimedOut,
+    GenerationUnavailable,
+    SemanticUnavailable,
+    InvalidRequest,
+    Internal,
+}
+
+impl CodeIndexSearchUnavailableReasonV1 {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CapabilityUnavailable => "code_index_unavailable",
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::GenerationUnavailable => "generation_unavailable",
+            Self::SemanticUnavailable => "semantic_unavailable",
+            Self::InvalidRequest => "invalid_request",
+            Self::Internal => "search_failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeIndexSearchCompletedV1 {
+    pub(crate) code_generation: String,
+    /// Visible result page: PR9 bytes when semantic abstains, separately
+    /// recomposed accepted-profile candidates when semantic augments.
+    pub(crate) ordered_candidates: Vec<tracedecay_domain::RankedCandidate>,
+    /// Exact canonical PR9 object produced under the mounted query authority.
+    /// Optional semantic work may report status but cannot mutate these bytes.
+    pub(crate) pr9_fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
+    pub(crate) semantic: CodeIndexSemanticStatusV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeIndexSearchUnavailableV1 {
+    pub(crate) code_generation: Option<String>,
+    pub(crate) reason: CodeIndexSearchUnavailableReasonV1,
+    pub(crate) semantic: CodeIndexSemanticStatusV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CodeIndexSearchOutcomeV1 {
+    Complete(CodeIndexSearchCompletedV1),
+    Unavailable(CodeIndexSearchUnavailableV1),
+}
+
+pub(crate) type CodeIndexSearchFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = CodeIndexSearchOutcomeV1> + Send + 'static>>;
+
+/// Type-erased production search bridge. Direct servers leave it absent and
+/// fail capability-closed instead of substituting the legacy graph search.
+pub(crate) type CodeIndexSearchExecutor =
+    Arc<dyn Fn(CodeIndexSearchRequestV1) -> CodeIndexSearchFuture + Send + Sync + 'static>;
+
+pub(crate) struct GitReadInvocationV1 {
+    pub(crate) project_root: PathBuf,
+    pub(crate) request: crate::application::git_reads::GitReadRequestV1,
+    pub(crate) bounds: crate::git_query::GitQueryBounds,
+    pub(crate) deadline: Option<tracedecay_application::Deadline>,
+    pub(crate) cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+pub(crate) type GitReadFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = crate::application::git_reads::GitReadOutcomeV1>
+            + Send
+            + 'static,
+    >,
+>;
+
+pub(crate) type GitReadExecutor =
+    Arc<dyn Fn(GitReadInvocationV1) -> GitReadFuture + Send + Sync + 'static>;
+
+pub(crate) type RetainedProjectGraphFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<Arc<TraceDecay>>> + Send + 'static>>;
+
+/// Type-erased read bridge to a graph already mounted by the daemon. Project
+/// selectors must not reconstruct graph ownership from registry paths.
+pub(crate) type RetainedProjectGraphResolver =
+    Arc<dyn Fn(PathBuf) -> RetainedProjectGraphFuture + Send + Sync + 'static>;
+
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
@@ -135,14 +264,18 @@ pub struct McpServer {
     /// User-level database tracking all projects (best-effort). Wrapped in
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
-    global_db: Option<Arc<GlobalDb>>,
+    global_db: Option<Arc<RegisteredGlobalDb>>,
     profile_root: Option<PathBuf>,
+    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
-    session_db: Option<Arc<GlobalDb>>,
+    session_db: Option<Arc<RegisteredGlobalDb>>,
     /// Daemon-owned user-scope session store. All project servers borrow this
     /// shared authority instead of reopening `user-sessions.db` per tool call.
-    user_session_db: Option<Arc<GlobalDb>>,
+    user_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
     host_admission_broker: Option<crate::application::host_admission::SharedHostAdmissionBroker>,
@@ -165,7 +298,7 @@ pub struct McpServer {
     /// Registry used for project-selector reads. This remains available even
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
-    registry_db: Option<Arc<GlobalDb>>,
+    registry_db: Option<Arc<RegisteredGlobalDb>>,
     allow_default_registry_fallback: bool,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
@@ -175,6 +308,17 @@ pub struct McpServer {
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
     code_index_hook_sink: Option<CodeIndexHookSink>,
+    /// Daemon-owned, authority-gated PR9/PR10 search bridge.
+    code_index_search_executor: Option<CodeIndexSearchExecutor>,
+    /// Daemon-owned, authority-gated PR9 typed Git-read bridge.
+    git_read_executor: Option<GitReadExecutor>,
+    /// Admission supplied by an authenticated daemon application route. It is
+    /// deliberately absent until such a route/grant is available.
+    code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
+    retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
+    #[cfg(any(test, feature = "test-transport"))]
+    _host_admission_test_runtime:
+        Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
     initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
@@ -315,19 +459,13 @@ impl McpServer {
     /// `packages/*/target`) drove unbounded event traffic and `FileId`
     /// cache growth.
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
-        let registry_db = GlobalDb::open().await.map(Arc::new);
-        let global_db: Option<Arc<GlobalDb>> = if crate::global_db::global_accounting_enabled() {
-            registry_db.clone()
-        } else {
-            None
-        };
-        Self::new_with_dbs(cg, scope_prefix, global_db, registry_db, true).await
+        Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
     pub async fn new_with_global_db(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        global_db: Option<Arc<GlobalDb>>,
+        global_db: Option<Arc<RegisteredGlobalDb>>,
     ) -> Arc<Self> {
         Self::new_with_dbs(cg, scope_prefix, global_db.clone(), global_db, true).await
     }
@@ -335,8 +473,8 @@ impl McpServer {
     pub async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Option<Arc<GlobalDb>>,
+        global_db: Option<Arc<RegisteredGlobalDb>>,
+        registry_db: Option<Arc<RegisteredGlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
         let profile_root = allow_default_registry_fallback
@@ -359,7 +497,7 @@ impl McpServer {
     pub async fn new_with_project_session_db_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        session_db: Arc<GlobalDb>,
+        session_db: Arc<RegisteredGlobalDb>,
     ) -> Arc<Self> {
         let context = McpServerConstructionContext::direct(cg, scope_prefix).with_direct_databases(
             None,
@@ -377,14 +515,35 @@ impl McpServer {
         self.project_session_retrieval_service.is_some()
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub fn host_admission_test_runtime_for_test(
+        &self,
+    ) -> Option<&crate::application::host_admission::HostAdmissionTestRuntimeV1> {
+        self._host_admission_test_runtime.as_deref()
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub async fn new_with_host_admission_test_runtime_for_test(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        runtime: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+    ) -> Arc<Self> {
+        let context = runtime
+            .into_mcp_server_context_for_test(cg, scope_prefix)
+            .expect("MCP test runtime must retain exact profile and session authorities");
+        Self::new_with_context(context).await
+    }
+
     /// Builds a direct test server with an isolated project admission spool.
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
     pub async fn new_with_dbs_and_host_admission_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Option<Arc<GlobalDb>>,
+        global_db: Option<Arc<RegisteredGlobalDb>>,
+        registry_db: Option<Arc<RegisteredGlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
         let profile_root = allow_default_registry_fallback
@@ -400,9 +559,7 @@ impl McpServer {
             allow_default_registry_fallback,
         )
         .await;
-        if context.session_db.is_none() {
-            context.session_db = GlobalDb::open_at(&session_db_path).await.map(Arc::new);
-        }
+        let _ = session_db_path;
         let Some(session_db) = context.session_db.as_ref() else {
             panic!("test server project sessions database should open");
         };
@@ -429,27 +586,12 @@ impl McpServer {
         cg: TraceDecay,
         scope_prefix: Option<String>,
         profile_root: Option<PathBuf>,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Option<Arc<GlobalDb>>,
+        global_db: Option<Arc<RegisteredGlobalDb>>,
+        registry_db: Option<Arc<RegisteredGlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> McpServerConstructionContext {
-        let user_session_db = if let Some(profile_root) = profile_root.as_ref() {
-            let path = crate::sessions::user_sessions_db_path(profile_root);
-            if path.is_file() {
-                GlobalDb::open_at(&path).await.map(Arc::new)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let session_db = if cg.store_layout().sessions_db_path.is_file() {
-            GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-                .await
-                .map(Arc::new)
-        } else {
-            None
-        };
+        let user_session_db = None;
+        let session_db = None;
         let mut context = McpServerConstructionContext::direct(cg, scope_prefix)
             .with_direct_databases(
                 global_db,
@@ -467,10 +609,14 @@ impl McpServer {
             cg,
             scope_prefix,
             profile_root,
+            profile_identity,
             global_db,
+            accounting_db,
             registry_db,
             session_db,
             user_session_db,
+            registered_session_db,
+            registered_user_session_db,
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
@@ -482,12 +628,18 @@ impl McpServer {
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
+            code_index_search_executor,
+            git_read_executor,
+            code_index_search_authority,
+            retained_project_graph_resolver,
+            #[cfg(any(test, feature = "test-transport"))]
+            host_admission_test_runtime,
         } = context;
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
         // Register this project in the global DB with its current tokens
-        if let Some(ref gdb) = global_db {
+        if let Some(ref gdb) = accounting_db {
             gdb.upsert(cg.project_root(), persisted).await;
         }
 
@@ -523,14 +675,24 @@ impl McpServer {
         let project_session_retrieval_root = match registry_db.as_deref() {
             Some(registry) => DaemonSessionRetrievalRoot::project(&cg, registry).await,
             None => None,
-        };
+        }
+        .and_then(|root| match profile_identity.as_ref() {
+            Some(identity) => root.with_project_runtime_shard(identity),
+            None => Some(root),
+        });
         #[cfg(feature = "test-transport")]
         let project_session_retrieval_root = project_session_retrieval_root.or_else(|| {
             session_db
                 .as_ref()
                 .map(|_| DaemonSessionRetrievalRoot::project_for_test(&cg))
         });
-        let profile_session_retrieval_root = DaemonSessionRetrievalRoot::profile();
+        let profile_session_retrieval_root =
+            DaemonSessionRetrievalRoot::profile().and_then(|root| {
+                match profile_identity.as_ref() {
+                    Some(identity) => root.with_profile_runtime_shard(identity),
+                    None => Some(root),
+                }
+            });
         let project_session_refresh_service = session_db
             .as_ref()
             .zip(project_session_refresh_wake.as_ref())
@@ -557,26 +719,42 @@ impl McpServer {
         let project_session_retrieval_service = session_db
             .as_ref()
             .zip(project_session_retrieval_root)
-            .and_then(|(database, root)| {
-                DaemonSessionRetrievalService::new(
+            .and_then(|(database, root)| match registered_session_db.as_ref() {
+                Some(registered) => DaemonSessionRetrievalService::new_registered(
+                    Arc::clone(database),
+                    Arc::clone(registered),
+                    root,
+                    Arc::clone(&project_session_retrieval_calls),
+                    project_session_refresh_wake.clone(),
+                ),
+                None => DaemonSessionRetrievalService::new(
                     Arc::clone(database),
                     root,
                     Arc::clone(&project_session_retrieval_calls),
                     project_session_refresh_wake.clone(),
-                )
+                ),
             })
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
         let user_session_retrieval_service = user_session_db
             .as_ref()
             .zip(profile_session_retrieval_root)
-            .and_then(|(database, root)| {
-                DaemonSessionRetrievalService::new(
-                    Arc::clone(database),
-                    root,
-                    Arc::clone(&user_session_retrieval_calls),
-                    None,
-                )
-            })
+            .and_then(
+                |(database, root)| match registered_user_session_db.as_ref() {
+                    Some(registered) => DaemonSessionRetrievalService::new_registered(
+                        Arc::clone(database),
+                        Arc::clone(registered),
+                        root,
+                        Arc::clone(&user_session_retrieval_calls),
+                        None,
+                    ),
+                    None => DaemonSessionRetrievalService::new(
+                        Arc::clone(database),
+                        root,
+                        Arc::clone(&user_session_retrieval_calls),
+                        None,
+                    ),
+                },
+            )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
         let server = Arc::new(Self {
@@ -593,10 +771,14 @@ impl McpServer {
             last_flushed_tokens: AtomicU64::new(persisted),
             last_flush_at: AtomicI64::new(0),
             global_db,
+            accounting_db,
             profile_root,
+            profile_identity,
             session_db,
             registry_db,
             user_session_db,
+            registered_session_db,
+            registered_user_session_db,
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
@@ -616,6 +798,12 @@ impl McpServer {
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
+            code_index_search_executor,
+            git_read_executor,
+            code_index_search_authority,
+            retained_project_graph_resolver,
+            #[cfg(any(test, feature = "test-transport"))]
+            _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
@@ -773,8 +961,14 @@ impl McpServer {
         Arc::clone(&self.diagnostics_lsp)
     }
 
-    pub fn project_session_db(&self) -> Option<Arc<GlobalDb>> {
+    pub fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
         self.session_db.clone()
+    }
+
+    pub(crate) fn registered_project_session_db(
+        &self,
+    ) -> Option<Arc<crate::global_db::RegisteredGlobalDb>> {
+        self.registered_session_db.clone()
     }
 
     /// Clones out the currently served `TraceDecay` instance. The lock is
@@ -835,7 +1029,7 @@ impl McpServer {
             "retained_state_proxy": {
                 "file_token_entries": file_token_entries,
                 "database_authorities": {
-                    "accounting": self.global_db.is_some(),
+                    "accounting": self.accounting_db.is_some() || self.global_db.is_some(),
                     "registry": self.registry_db.is_some(),
                     "project_sessions": self.session_db.is_some(),
                     "user_sessions": self.user_session_db.is_some(),
@@ -848,7 +1042,12 @@ impl McpServer {
             "approx_tokens_saved": self.tokens_saved.load(Ordering::Relaxed),
         });
 
-        if let Some(ref gdb) = self.global_db
+        if let Some(ref gdb) = self.accounting_db
+            && let Some(global_total) = gdb.global_tokens_saved().await
+        {
+            let local = self.tokens_saved.load(Ordering::Relaxed);
+            stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
+        } else if let Some(ref gdb) = self.global_db
             && let Some(global_total) = gdb.global_tokens_saved().await
         {
             let local = self.tokens_saved.load(Ordering::Relaxed);
@@ -882,12 +1081,35 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 }
 
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    let id = json_rpc_request_id_string(id)?;
-    let digest = Sha256::digest(id.as_bytes());
+    if !matches!(id, Value::String(_) | Value::Number(_)) {
+        return None;
+    }
+    let canonical_id = serde_json::to_vec(id).ok()?;
+    let digest = Sha256::digest(&canonical_id);
     Some(format!(
         "request.mcp.{connection_scope}.{}",
         hex::encode(&digest[..16])
     ))
+}
+
+#[cfg(test)]
+mod application_surface_request_id_tests {
+    use serde_json::json;
+
+    use super::application_surface_request_id;
+
+    #[test]
+    fn request_id_hash_preserves_json_rpc_id_type() {
+        let numeric = application_surface_request_id(&json!(1), "connection").unwrap();
+        let string = application_surface_request_id(&json!("1"), "connection").unwrap();
+
+        assert_ne!(numeric, string);
+        assert_eq!(
+            numeric,
+            application_surface_request_id(&json!(1), "connection").unwrap()
+        );
+        assert!(application_surface_request_id(&json!(null), "connection").is_none());
+    }
 }
 
 fn inject_trusted_memory_request_id(
