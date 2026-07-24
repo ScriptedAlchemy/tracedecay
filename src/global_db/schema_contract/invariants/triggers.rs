@@ -1468,7 +1468,7 @@ pub(in crate::global_db::schema_contract) const INVARIANTS: &[Invariant] = &[
     },
     Invariant {
         triggers: &[],
-        audit_query: Some("PRAGMA foreign_key_check"),
+        audit_query: Some("SELECT * FROM pragma_foreign_key_check"),
         violation: "global database contains a foreign-key violation",
     },
     Invariant {
