@@ -28,8 +28,35 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::global_db::GlobalDb;
+use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::db::engine::QueryExecutor as _;
+use crate::global_db::RegisteredGlobalDb;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+
+use super::SessionTemporalRefreshTestAuthority;
+
+async fn registered_test_database(
+    temp: &TempDir,
+    label: &str,
+    scope: HostAdmissionScope,
+) -> SessionTemporalRefreshTestAuthority {
+    let profile_root = temp.path().join(format!("{label}-profile"));
+    let runtime = match scope {
+        HostAdmissionScope::Profile => HostAdmissionTestRuntimeV1::profile(profile_root)
+            .await
+            .unwrap(),
+        HostAdmissionScope::Project => HostAdmissionTestRuntimeV1::project(
+            profile_root,
+            temp.path().join(format!("{label}-project")),
+            tracedecay_domain::ProjectId::new(format!("project.refresh-{label}")).unwrap(),
+        )
+        .await
+        .unwrap(),
+    };
+    runtime
+        .into_session_temporal_refresh_test_authority(scope)
+        .expect("registered temporal test database")
+}
 
 fn sanitization_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     SanitizationReceiptV1::new(
@@ -111,12 +138,12 @@ fn anchored_write(observation: DurableObservationV1) -> AnchoredObservationWrite
 }
 
 async fn admit_canonical_effect(
-    db: &Arc<GlobalDb>,
+    db: &RegisteredGlobalDb,
     session_id: &SessionId,
     ordinal: u64,
     text: &str,
 ) {
-    let store = crate::store::GlobalDbObservationStore::new(db.as_ref());
+    let store = db.observation_store();
     store
         .persist_observation(anchored_write(canonical_observation(
             session_id, ordinal, text,
@@ -127,7 +154,7 @@ async fn admit_canonical_effect(
     store.project_observation(&observation_id).await.unwrap();
 }
 
-async fn scalar(db: &GlobalDb, query: &str) -> i64 {
+async fn scalar(db: &RegisteredGlobalDb, query: &str) -> i64 {
     let mut rows = db.read_connection().query(query, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
@@ -207,7 +234,7 @@ impl EmptyProjector {
 impl SessionTemporalRefreshProjector for EmptyProjector {
     fn project<'a>(
         &'a self,
-        database: &'a Arc<GlobalDb>,
+        database: &'a Arc<RegisteredGlobalDb>,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.calls.fetch_add(1, Ordering::AcqRel);
@@ -262,48 +289,46 @@ fn retry_classes_use_distinct_bounded_backoff_curves() {
 #[tokio::test]
 async fn admitted_effect_refreshes_to_a_real_non_empty_active_projection() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("user-sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority =
+        registered_test_database(&temp, "admitted-effect", HostAdmissionScope::Profile).await;
+    let db = authority.database();
     let session_id = SessionId::new("session.refresh.real").unwrap();
-    admit_canonical_effect(&db, &session_id, 1, "durable refresh canary").await;
+    admit_canonical_effect(db, &session_id, 1, "durable refresh canary").await;
 
-    let first = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &CanonicalSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let first = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(
         first.projected_batches, 1,
         "first refresh pass failed: {first:?}"
     );
-    let second = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &CanonicalSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let second = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(second.completed, 1, "completion pass failed: {second:?}");
 
     let effect_count = scalar(
-        db.as_ref(),
+        db,
         "SELECT COUNT(*) FROM session_temporal_observation_effects
              WHERE session_id = 'session.refresh.real'",
     )
     .await;
     let operation_count = scalar(
-        db.as_ref(),
+        db,
         "SELECT COUNT(*) FROM session_refresh_operations
              WHERE session_id = 'session.refresh.real'",
     )
     .await;
     let occurrence_count = scalar(
-        db.as_ref(),
+        db,
         "SELECT COUNT(*) FROM session_occurrences
              WHERE session_id = 'session.refresh.real'",
     )
@@ -314,7 +339,7 @@ async fn admitted_effect_refreshes_to_a_real_non_empty_active_projection() {
     );
     assert_eq!(
         scalar(
-            db.as_ref(),
+            db,
             "SELECT COALESCE(SUM(occurrence_count), 0)
                  FROM session_temporal_projection_receipts
                  WHERE session_id = 'session.refresh.real'"
@@ -327,14 +352,16 @@ async fn admitted_effect_refreshes_to_a_real_non_empty_active_projection() {
 #[tokio::test]
 async fn restart_after_materialization_resumes_from_durable_receipts() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority = registered_test_database(
+        &temp,
+        "materialization-restart",
+        HostAdmissionScope::Profile,
+    )
+    .await;
+    let db = authority.database();
     let session_id = SessionId::new("session.refresh.materialized-crash").unwrap();
-    admit_canonical_effect(&db, &session_id, 2, "materialized crash canary").await;
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    admit_canonical_effect(db, &session_id, 2, "materialized crash canary").await;
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     let request = db
         .pending_session_temporal_refresh_requests_result(1)
         .await
@@ -348,8 +375,8 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
         .unwrap()
         .unwrap();
 
-    let materialized = CanonicalSessionTemporalProjector
-        .project(&db, recovery)
+    let materialized = authority
+        .project(&CanonicalSessionTemporalProjector, recovery)
         .await
         .unwrap();
     match materialized {
@@ -361,25 +388,25 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
     }
 
     let restarted_state = Arc::new(SessionTemporalRefreshWakeState::default());
-    let projected = run_session_temporal_refresh_pass(
-        &db,
-        &restarted_state,
-        &CanonicalSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let projected = authority
+        .run_pass(
+            &restarted_state,
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(projected.projected_batches, 1);
-    let completed = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &CanonicalSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let completed = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(completed.completed, 1);
     assert_eq!(
         scalar(
-            db.as_ref(),
+            db,
             "SELECT COUNT(*) FROM session_temporal_projection_receipts
                  WHERE session_id = 'session.refresh.materialized-crash'"
         )
@@ -388,7 +415,7 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
     );
     assert_eq!(
         scalar(
-            db.as_ref(),
+            db,
             "SELECT COUNT(*) FROM session_occurrences
                  WHERE session_id = 'session.refresh.materialized-crash'"
         )
@@ -400,25 +427,19 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
 #[tokio::test]
 async fn new_effect_wake_is_bounded_to_its_profile_database() {
     let temp = TempDir::new().unwrap();
-    let first_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("first-sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let second_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("second-sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let first_authority =
+        registered_test_database(&temp, "first-profile", HostAdmissionScope::Profile).await;
+    let second_authority =
+        registered_test_database(&temp, "second-profile", HostAdmissionScope::Profile).await;
+    let first_db = first_authority.database();
+    let second_db = second_authority.database();
     let first_session = SessionId::new("session.refresh.profile-first").unwrap();
     let second_session = SessionId::new("session.refresh.profile-second").unwrap();
-    admit_canonical_effect(&first_db, &first_session, 3, "first profile canary").await;
-    admit_canonical_effect(&second_db, &second_session, 3, "second profile canary").await;
+    admit_canonical_effect(first_db, &first_session, 3, "first profile canary").await;
+    admit_canonical_effect(second_db, &second_session, 3, "second profile canary").await;
 
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
-    let first_wake = registry
-        .ensure_profile(first_db.db_path().to_path_buf(), Arc::clone(&first_db))
-        .await;
+    let first_wake = first_authority.ensure_profile(&registry).await;
     assert!(
         registry
             .wait_profile_idle(first_db.db_path(), Duration::from_secs(2))
@@ -426,7 +447,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
     );
     assert_eq!(
         scalar(
-            first_db.as_ref(),
+            first_db,
             "SELECT COUNT(*)
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
@@ -438,15 +459,11 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
         1
     );
     assert_eq!(
-        scalar(
-            second_db.as_ref(),
-            "SELECT COUNT(*) FROM session_occurrences"
-        )
-        .await,
+        scalar(second_db, "SELECT COUNT(*) FROM session_occurrences").await,
         0
     );
 
-    admit_canonical_effect(&first_db, &first_session, 4, "second first-profile canary").await;
+    admit_canonical_effect(first_db, &first_session, 4, "second first-profile canary").await;
     first_wake.wake();
     assert!(
         registry
@@ -455,7 +472,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
     );
     assert_eq!(
         scalar(
-            first_db.as_ref(),
+            first_db,
             "SELECT COUNT(*)
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
@@ -467,11 +484,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
         2
     );
     assert_eq!(
-        scalar(
-            second_db.as_ref(),
-            "SELECT COUNT(*) FROM session_occurrences"
-        )
-        .await,
+        scalar(second_db, "SELECT COUNT(*) FROM session_occurrences").await,
         0
     );
     registry.shutdown().await;
@@ -480,12 +493,10 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
 #[tokio::test]
 async fn restart_finalizes_ready_progress_without_replaying_projection() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let authority =
+        registered_test_database(&temp, "ready-progress", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     let session_id = SessionId::new("session.restart.ready").unwrap();
     let started = store
         .begin_or_join_session_refresh(request(session_id.as_str(), 0))
@@ -529,17 +540,17 @@ async fn restart_finalizes_ready_progress_without_replaying_projection() {
     let _ = store;
 
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
-    let report = run_session_temporal_refresh_pass(
-        &db,
-        &state,
-        &DeferredSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let report = authority
+        .run_pass(
+            &state,
+            &DeferredSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(report.completed, 1);
     assert_eq!(report.projected_batches, 0);
 
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     let receipt = store
         .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
             started.operation_id().clone(),
@@ -569,11 +580,9 @@ async fn restart_finalizes_ready_progress_without_replaying_projection() {
 #[tokio::test]
 async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority =
+        registered_test_database(&temp, "committed-boundary", HostAdmissionScope::Profile).await;
+    let db = authority.database();
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
     let wake = state.handle();
     assert_eq!(
@@ -582,33 +591,29 @@ async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
     );
     let projector = EmptyProjector::new();
 
-    let first = run_session_temporal_refresh_pass(
-        &db,
-        &state,
-        &projector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let first = authority
+        .run_pass(&state, &projector, SessionTemporalRefreshPolicy::default())
+        .await;
     assert_eq!(first.begun, 1);
     assert_eq!(first.projected_batches, 1);
     assert_eq!(projector.calls.load(Ordering::Acquire), 1);
     assert_eq!(
         *projector.database.lock().unwrap(),
-        Some(Arc::as_ptr(&db) as usize)
+        Some(authority.database_identity())
     );
 
     let restarted_state = Arc::new(SessionTemporalRefreshWakeState::default());
-    let second = run_session_temporal_refresh_pass(
-        &db,
-        &restarted_state,
-        &DeferredSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let second = authority
+        .run_pass(
+            &restarted_state,
+            &DeferredSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(second.completed, 1);
     assert_eq!(second.projected_batches, 0);
     assert!(
-        crate::store::GlobalDbSessionTemporalStore::new(db.as_ref())
+        crate::store::GlobalDbSessionTemporalStore::new(db)
             .running_session_refreshes()
             .await
             .unwrap()
@@ -623,7 +628,7 @@ struct PrematureFailureProjector {
 impl SessionTemporalRefreshProjector for PrematureFailureProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.calls.fetch_add(1, Ordering::AcqRel);
@@ -649,12 +654,10 @@ impl SessionTemporalRefreshProjector for PrematureFailureProjector {
 #[tokio::test]
 async fn failed_terminal_operation_is_not_retried_in_one_owner_generation() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let authority =
+        registered_test_database(&temp, "terminal-operation", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     store
         .begin_or_join_session_refresh(request("session.terminal.once", 0))
         .await
@@ -664,20 +667,12 @@ async fn failed_terminal_operation_is_not_retried_in_one_owner_generation() {
         calls: std::sync::atomic::AtomicUsize::new(0),
     };
 
-    let first = run_session_temporal_refresh_pass(
-        &db,
-        &state,
-        &projector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
-    let second = run_session_temporal_refresh_pass(
-        &db,
-        &state,
-        &projector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let first = authority
+        .run_pass(&state, &projector, SessionTemporalRefreshPolicy::default())
+        .await;
+    let second = authority
+        .run_pass(&state, &projector, SessionTemporalRefreshPolicy::default())
+        .await;
 
     assert_eq!(first.failed, 1);
     assert_eq!(first.terminal_errors, 0);
@@ -694,7 +689,7 @@ struct TerminalProjector {
 impl SessionTemporalRefreshProjector for TerminalProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async move {
@@ -724,8 +719,8 @@ impl SessionTemporalRefreshProjector for TerminalProjector {
     }
 }
 
-async fn begin_with_incomplete_progress(db: &Arc<GlobalDb>, session_id: &SessionId) {
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+async fn begin_with_incomplete_progress(db: &RegisteredGlobalDb, session_id: &SessionId) {
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     store
         .begin_or_join_session_refresh(request(session_id.as_str(), 1))
         .await
@@ -764,34 +759,32 @@ async fn begin_with_incomplete_progress(db: &Arc<GlobalDb>, session_id: &Session
 #[tokio::test]
 async fn failure_and_cancel_effects_use_typed_terminal_store_operations() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority =
+        registered_test_database(&temp, "terminal-effects", HostAdmissionScope::Profile).await;
+    let db = authority.database();
     let failed_session = SessionId::new("session.effect.failed").unwrap();
-    begin_with_incomplete_progress(&db, &failed_session).await;
-    let failed = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &TerminalProjector { cancel: false },
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    begin_with_incomplete_progress(db, &failed_session).await;
+    let failed = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &TerminalProjector { cancel: false },
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(failed.failed, 1);
 
     let cancelled_session = SessionId::new("session.effect.cancelled").unwrap();
-    begin_with_incomplete_progress(&db, &cancelled_session).await;
-    let cancelled = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &TerminalProjector { cancel: true },
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    begin_with_incomplete_progress(db, &cancelled_session).await;
+    let cancelled = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &TerminalProjector { cancel: true },
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(cancelled.cancelled, 1);
 
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     assert!(
         store
             .session_refresh_recovery(&failed_session)
@@ -816,7 +809,7 @@ struct BlockingProjector {
 impl SessionTemporalRefreshProjector for BlockingProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         let started = Arc::clone(&self.started);
@@ -832,12 +825,9 @@ impl SessionTemporalRefreshProjector for BlockingProjector {
 #[tokio::test]
 async fn stale_owner_cannot_persist_after_cancellation() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let authority =
+        Arc::new(registered_test_database(&temp, "stale-owner", HostAdmissionScope::Profile).await);
+    let store = crate::store::GlobalDbSessionTemporalStore::new(authority.database());
     store
         .begin_or_join_session_refresh(request("session.stale.owner", 0))
         .await
@@ -850,16 +840,12 @@ async fn stale_owner_cannot_persist_after_cancellation() {
         release: Arc::clone(&release),
     };
     let pass = tokio::spawn({
-        let db = Arc::clone(&db);
+        let authority = Arc::clone(&authority);
         let state = Arc::clone(&state);
         async move {
-            run_session_temporal_refresh_pass(
-                &db,
-                &state,
-                &projector,
-                SessionTemporalRefreshPolicy::default(),
-            )
-            .await
+            authority
+                .run_pass(&state, &projector, SessionTemporalRefreshPolicy::default())
+                .await
         }
     });
     started.notified().await;
@@ -901,7 +887,7 @@ impl RecordingDeferredProjector {
 impl SessionTemporalRefreshProjector for RecordingDeferredProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.sessions
@@ -915,11 +901,9 @@ impl SessionTemporalRefreshProjector for RecordingDeferredProjector {
 #[tokio::test]
 async fn saturated_recovery_passes_visit_every_operation_before_idling() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority =
+        registered_test_database(&temp, "saturated-recovery", HostAdmissionScope::Profile).await;
+    let db = authority.database();
     let projector = Arc::new(RecordingDeferredProjector::new());
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
     registry.projector = projector.clone();
@@ -927,9 +911,7 @@ async fn saturated_recovery_passes_visit_every_operation_before_idling() {
         max_operations_per_pass: 2,
         ..SessionTemporalRefreshPolicy::default()
     };
-    let wake = registry
-        .ensure_profile(db.db_path().to_path_buf(), Arc::clone(&db))
-        .await;
+    let wake = authority.ensure_profile(&registry).await;
     for index in 0..3 {
         assert_eq!(
             wake.request(request(&format!("session.saturated.{index}"), 0)),
@@ -949,11 +931,8 @@ async fn saturated_recovery_passes_visit_every_operation_before_idling() {
 #[tokio::test]
 async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority =
+        registered_test_database(&temp, "project-retirement", HostAdmissionScope::Project).await;
     let owner = super::super::StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
         global_db_path: temp.path().join("global.db"),
@@ -967,9 +946,7 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
         started: Arc::clone(&started),
         release: Arc::new(tokio::sync::Notify::new()),
     });
-    let wake = registry
-        .ensure_project(owner.clone(), Arc::clone(&db))
-        .await;
+    let wake = authority.ensure_project(&registry, owner.clone()).await;
     assert_eq!(
         wake.request(request("session.retire.inflight", 0)),
         SessionTemporalRefreshWakeDisposition::Enqueued
@@ -996,7 +973,7 @@ struct PanicOnceProjector {
 impl SessionTemporalRefreshProjector for PanicOnceProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         let should_panic = !self.panicked.swap(true, Ordering::AcqRel);
@@ -1010,18 +987,14 @@ impl SessionTemporalRefreshProjector for PanicOnceProjector {
 #[tokio::test]
 async fn worker_recovery_exposes_blocker_and_drains_backlog() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority =
+        registered_test_database(&temp, "worker-recovery", HostAdmissionScope::Profile).await;
+    let db = authority.database();
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
     registry.projector = Arc::new(PanicOnceProjector {
         panicked: AtomicBool::new(false),
     });
-    let wake = registry
-        .ensure_profile(db.db_path().to_path_buf(), Arc::clone(&db))
-        .await;
+    let wake = authority.ensure_profile(&registry).await;
     assert_eq!(
         wake.request(request("session.worker.restart", 0)),
         SessionTemporalRefreshWakeDisposition::Enqueued
@@ -1053,7 +1026,7 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
             .wait_profile_idle(db.db_path(), Duration::from_secs(2))
             .await
     );
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     assert!(store.running_session_refreshes().await.unwrap().is_empty());
     let recovered = registry.profile_worker_status(db.db_path()).await;
     assert!(recovered.is_available());
@@ -1069,7 +1042,7 @@ struct PendingProjector;
 impl SessionTemporalRefreshProjector for PendingProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(std::future::pending())
@@ -1081,7 +1054,7 @@ struct TerminalErrorProjector;
 impl SessionTemporalRefreshProjector for TerminalErrorProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async {
@@ -1095,24 +1068,22 @@ impl SessionTemporalRefreshProjector for TerminalErrorProjector {
 #[tokio::test]
 async fn terminal_projector_error_persists_a_failure_receipt() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let authority =
+        registered_test_database(&temp, "terminal-error", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     let started = store
         .begin_or_join_session_refresh(request("session.terminal.error", 0))
         .await
         .unwrap();
 
-    let report = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &TerminalErrorProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let report = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &TerminalErrorProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
 
     assert_eq!(report.failed, 1);
     let receipt = store
@@ -1132,7 +1103,7 @@ struct NonCanonicalTerminalProjector;
 impl SessionTemporalRefreshProjector for NonCanonicalTerminalProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<GlobalDb>,
+        _database: &'a Arc<RegisteredGlobalDb>,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async {
@@ -1146,24 +1117,22 @@ impl SessionTemporalRefreshProjector for NonCanonicalTerminalProjector {
 #[tokio::test]
 async fn noncanonical_terminal_projector_errors_persist_projector_failed() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let authority =
+        registered_test_database(&temp, "noncanonical-terminal", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     let started = store
         .begin_or_join_session_refresh(request("session.terminal.noncanonical", 0))
         .await
         .unwrap();
 
-    let report = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &NonCanonicalTerminalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let report = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &NonCanonicalTerminalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
 
     assert_eq!(report.failed, 1);
     let receipt = store
@@ -1182,31 +1151,29 @@ async fn noncanonical_terminal_projector_errors_persist_projector_failed() {
 #[tokio::test]
 async fn canonical_noop_materialize_terminalizes_with_complete_receipt() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+    let authority =
+        registered_test_database(&temp, "canonical-noop", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     let started = store
         .begin_or_join_session_refresh(request("session.canonical.noop", 0))
         .await
         .unwrap();
 
-    let first = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &CanonicalSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
-    let second = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &CanonicalSessionTemporalProjector,
-        SessionTemporalRefreshPolicy::default(),
-    )
-    .await;
+    let first = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+    let second = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
 
     assert_eq!(first.projected_batches, 1);
     assert_eq!(first.deferred, 0);
@@ -1251,25 +1218,22 @@ fn recovery_selection_completes_by_identity_when_keys_are_skipped() {
 #[tokio::test]
 async fn operation_deadline_is_bounded_and_retryable_by_class() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
-            .await
-            .unwrap(),
-    );
-    crate::store::GlobalDbSessionTemporalStore::new(db.as_ref())
+    let authority =
+        registered_test_database(&temp, "operation-deadline", HostAdmissionScope::Profile).await;
+    crate::store::GlobalDbSessionTemporalStore::new(authority.database())
         .begin_or_join_session_refresh(request("session.deadline", 0))
         .await
         .unwrap();
-    let report = run_session_temporal_refresh_pass(
-        &db,
-        &Arc::new(SessionTemporalRefreshWakeState::default()),
-        &PendingProjector,
-        SessionTemporalRefreshPolicy {
-            operation_deadline: Duration::from_millis(10),
-            ..SessionTemporalRefreshPolicy::default()
-        },
-    )
-    .await;
+    let report = authority
+        .run_pass(
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &PendingProjector,
+            SessionTemporalRefreshPolicy {
+                operation_deadline: Duration::from_millis(10),
+                ..SessionTemporalRefreshPolicy::default()
+            },
+        )
+        .await;
 
     assert_eq!(report.deadline_errors, 1);
     assert_eq!(
@@ -1291,19 +1255,13 @@ async fn operation_deadline_is_bounded_and_retryable_by_class() {
 #[tokio::test]
 async fn profile_database_has_one_scheduler_and_equivalent_kicks_coalesce() {
     let temp = TempDir::new().unwrap();
-    let db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("user-sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let authority =
+        registered_test_database(&temp, "profile-coalescing", HostAdmissionScope::Profile).await;
+    let db = authority.database();
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
 
-    let first = registry
-        .ensure_profile(db.db_path().to_path_buf(), Arc::clone(&db))
-        .await;
-    let second = registry
-        .ensure_profile(db.db_path().to_path_buf(), Arc::clone(&db))
-        .await;
+    let first = authority.ensure_profile(&registry).await;
+    let second = authority.ensure_profile(&registry).await;
     for _ in 0..32 {
         second.wake();
     }
@@ -1323,16 +1281,10 @@ async fn profile_database_has_one_scheduler_and_equivalent_kicks_coalesce() {
 #[tokio::test]
 async fn project_rekey_retires_old_owner_before_rebinding_wake() {
     let temp = TempDir::new().unwrap();
-    let old_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("old-sessions.db"))
-            .await
-            .unwrap(),
-    );
-    let new_db = Arc::new(
-        crate::global_db::GlobalDb::open_at(&temp.path().join("new-sessions.db"))
-            .await
-            .unwrap(),
-    );
+    let old_authority =
+        registered_test_database(&temp, "old-project", HostAdmissionScope::Project).await;
+    let new_authority =
+        registered_test_database(&temp, "new-project", HostAdmissionScope::Project).await;
     let old_owner = super::super::StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
         global_db_path: temp.path().join("global.db"),
@@ -1346,13 +1298,13 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
         ..old_owner.clone()
     };
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
-    let wake = registry
-        .ensure_project(old_owner.clone(), Arc::clone(&old_db))
+    let wake = old_authority
+        .ensure_project(&registry, old_owner.clone())
         .await;
     let old_state = registry.project_state(&old_owner).await.unwrap();
 
-    registry
-        .rekey_project(&old_owner, new_owner.clone(), Arc::clone(&new_db))
+    new_authority
+        .rekey_project(&registry, &old_owner, new_owner.clone())
         .await;
     wake.wake();
 
@@ -1360,8 +1312,8 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
     assert!(registry.project_state(&old_owner).await.is_none());
     let new_state = registry.project_state(&new_owner).await.unwrap();
     assert!(!Arc::ptr_eq(&old_state, &new_state));
-    let stale = registry
-        .ensure_project(old_owner.clone(), Arc::clone(&old_db))
+    let stale = old_authority
+        .ensure_project(&registry, old_owner.clone())
         .await;
     assert_eq!(
         stale.request(request("session.rekey.stale-owner", 0)),
