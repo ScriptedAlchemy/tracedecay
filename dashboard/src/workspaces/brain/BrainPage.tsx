@@ -1,16 +1,22 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
+import { buildAdjacency, neighborsOf } from '../../viz/graph/adjacency.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import type { LiveActivityPulse, SseConnectionState } from '../../data/sse/connect.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
-import { StateChip, type DomainStateKind } from '../../ui/StateChip';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
-import { summarizeActivity, formatEventAge } from './activitySummary.ts';
+import {
+  ageTickIntervalMs,
+  formatDuration,
+  summarizeActivity,
+  RATE_WINDOW_MS,
+} from './activitySummary.ts';
 import {
   ProjectsPayloadSchema,
   type ProjectRegistryEntry,
@@ -107,10 +113,30 @@ function SynapseMap({
   // pulses already in the ring at mount are history, not activity to replay.
   const drawnRevision = useRef<number | null>(null);
 
+  // `groups` is rebuilt (sorted into a fresh array) on every render of this
+  // page, and the page re-renders on every live pulse. Memoising on its
+  // identity would therefore hand GraphCanvas a new node/edge array per event
+  // and force a full renderer teardown plus layout each time. Key the memo on
+  // what the topology actually IS instead, so the canvas is rebuilt only when
+  // the registry really changed.
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
+  const topologySignature = groups
+    .map(
+      (group) =>
+        `${group.git_common_dir ?? group.label}|${group.projects
+          .map(
+            (project) =>
+              `${project.project_id}:${project.kind}:${project.store_count}:${project.graph_scope_count}`,
+          )
+          .join(',')}`,
+    )
+    .join(';');
+
   const { nodes, edges } = useMemo(() => {
     const nodes = [] as Array<{ id: string; label: string; kind: string; degree: number }>;
     const edges = [] as Array<{ source: string; target: string; kind?: string }>;
-    for (const group of groups) {
+    for (const group of groupsRef.current) {
       const hubId = `repo:${group.git_common_dir ?? group.label}`;
       nodes.push({
         id: hubId,
@@ -129,7 +155,12 @@ function SynapseMap({
       }
     }
     return { nodes, edges };
-  }, [groups]);
+  }, [topologySignature]);
+
+  // Propagation reads the drawn edge list, so activation can only ever travel
+  // where the viewer can see a relation to travel along.
+  const adjacency = useMemo(() => buildAdjacency(edges), [edges]);
+  const drawnIds = useMemo(() => new Set(nodes.map((node) => node.id)), [nodes]);
 
   // The brain fires on real identities: each accepted event lights the neuron
   // named by its own exact scope, at an intensity that reflects what actually
@@ -147,21 +178,35 @@ function SynapseMap({
     const field = activationRef.current;
     for (const pulse of pulses.slice(pulses.length - unseen)) {
       const projectId = pulse.projectId ?? activeProjectId;
-      if (!projectId) continue;
-      field.strike([projectId], strikeIntensity(pulse.family));
-      const hub = groups.find((group) =>
-        group.projects.some((project) => project.project_id === projectId),
-      );
-      // The hub carries its checkout's signal at a third the intensity, so a
-      // repository glows when any of its worktrees is working.
-      if (hub) {
-        field.strike(
-          [`repo:${hub.git_common_dir ?? hub.label}`],
-          strikeIntensity(pulse.family) / 3,
-        );
-      }
+      // A scope naming something this graph does not draw fires nothing: heat
+      // on an id with no neuron is heat nobody can see, and it would keep the
+      // render loop awake resolving an invisible decay.
+      if (!projectId || !drawnIds.has(projectId)) continue;
+      const energy = strikeIntensity(pulse.family);
+      field.strike([projectId], energy);
+      // One synaptic hop along the graph's own edges. On this graph that hop
+      // reaches the checkout's repository hub and stops there — true, because
+      // work in a checkout IS work in that repository. It deliberately does
+      // not reach the hub's other checkouts, which did nothing. The hop lands
+      // at a third the energy, so the conducting edge lights from the end
+      // where the event actually happened.
+      const hop = neighborsOf(adjacency, projectId);
+      if (hop.length > 0) field.strike(hop, energy / 3);
     }
-  }, [pulses, revision, sseState, activeProjectId, groups]);
+  }, [pulses, revision, sseState, activeProjectId, adjacency, drawnIds]);
+
+  // Stable across renders so the canvas effect never re-runs for a new handler
+  // identity; the current registry is read through the ref at click time.
+  const handleSelect = useCallback(
+    (id: string | null) => {
+      if (id == null || id.startsWith('repo:')) return;
+      const project = groupsRef.current
+        .flatMap((group) => group.projects)
+        .find((candidate) => candidate.project_id === id);
+      if (project) selectProject(project.project_id, project.label);
+    },
+    [selectProject],
+  );
 
   return (
     <>
@@ -171,31 +216,53 @@ function SynapseMap({
         fill
         activation={activationRef.current}
         selectedId={scope.kind === 'project' ? scope.projectId : null}
-        onSelect={(id) => {
-          if (id == null || id.startsWith('repo:')) return;
-          const project = groups
-            .flatMap((group) => group.projects)
-            .find((candidate) => candidate.project_id === id);
-          if (project) selectProject(project.project_id, project.label);
-        }}
+        onSelect={handleSelect}
       />
       <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
     </>
   );
 }
 
-/** Live-signal HUD: connection honesty first, then a compact readout of what
- * the pulse ring actually carries. Every figure here is read off the ring or
- * the connection object at render time — never a timer of its own, so an
- * idle system between real events shows the age of its last real event
- * exactly as long as it stays true, and no longer.
+/** How the connection state maps onto the sixteen-state domain taxonomy. Kept
+ * beside the panel that renders it because the mapping is the whole honesty
+ * claim: `offline` is a genuinely dead EventSource and is NEVER inferred from
+ * "nothing lately", which is only a quiet system. */
+const CONNECTION_STATE: Record<
+  SseConnectionState,
+  { kind: DomainStateKind; detail: string; sentence: string }
+> = {
+  live: {
+    kind: 'ready',
+    detail: 'event stream open',
+    sentence: 'Connected. Figures below are current.',
+  },
+  connecting: {
+    kind: 'loading',
+    detail: 'opening event stream',
+    sentence: 'Reconnecting. Figures below are the last ones received.',
+  },
+  offline: {
+    kind: 'offline',
+    detail: 'event stream closed',
+    sentence: 'Disconnected — the readings below are frozen, not idle.',
+  },
+};
+
+/**
+ * The live-signal readout: connection honesty first, then what the pulse ring
+ * actually holds.
  *
- * Connection state is intentionally NOT derived from activity: `offline` is
- * a genuinely dead stream (the EventSource itself closed) and must never be
- * inferred from "no pulses lately", which is just a quiet system. The
- * daemon's own low-chroma `offline` token is deliberately neutral in this
- * taxonomy — StateChip's icon-plus-label is what actually makes a dead link
- * unmistakable, not a color. */
+ * Two states this panel exists to keep apart:
+ *
+ *   idle     the stream is open and nothing is happening. The chip reads
+ *            READY, and the age of the last event climbs steadily — which is
+ *            information, and true.
+ *   offline  the stream is dead. The chip carries a different icon, label and
+ *            token, the sentence says so in words, and the rate stops being
+ *            reported at all, because nothing is measuring it.
+ *
+ * The distinction never rests on colour, and never on the absence of activity.
+ */
 function SignalPanel({
   pulses,
   sseState,
@@ -205,50 +272,55 @@ function SignalPanel({
   sseState: SseConnectionState;
   lastEventAt: number | null;
 }) {
-  const summary = summarizeActivity(pulses);
-  const connectionKind: DomainStateKind =
-    sseState === 'live' ? 'ready' : sseState === 'connecting' ? 'loading' : 'offline';
-  const ageMs = lastEventAt == null ? null : Date.now() - lastEventAt;
-  const topFamily = summary.families[0];
+  const now = useClockWhileAging(lastEventAt);
+  const summary = summarizeActivity(pulses, now);
+  const connection = CONNECTION_STATE[sseState];
+  const ageMs = lastEventAt == null ? null : Math.max(0, now - lastEventAt);
+  const offline = sseState === 'offline';
   return (
-    // Offset well below InstrumentReadout's own band (`top-6`, one row tall
-    // regardless of width) rather than sharing it: at narrow widths that
-    // five-cell row runs wider than the viewport, and a second HUD sharing
-    // its exact top offset painted underneath it, invisible. Anchoring to
-    // the canvas's bottom instead collided with the figure's own caption —
-    // GraphCanvas renders it as a normal-flow sibling directly below the
-    // canvas, inside this same positioning root, so `bottom-*` here lands on
-    // top of that text instead of below it. A fixed clearance under the
-    // instrument row is the one gap guaranteed clear at every width.
     <div className="pointer-events-none absolute right-6 top-20 flex select-none items-stretch">
       <span aria-hidden className="w-2 shrink-0 border-y border-l border-accent/40" />
-      {/* Fixed width, not a `max-w-*` on the row: a flex row only shrinks a
-       * child below its content's natural size when something forces it to,
-       * and the offline sentence is long enough that without an explicit
-       * width here it overflowed straight past this HUD and into the
-       * registry rail instead of wrapping. */}
       <div className="flex w-56 flex-col gap-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
-        <div className="flex items-center gap-2">
-          <StateChip kind={connectionKind} />
-        </div>
-        <span className="td-legend block whitespace-normal break-words">
-          {sseState === 'offline'
-            ? 'stream unreachable — not idle'
-            : ageMs == null
-              ? 'no events observed yet'
-              : `last event ${formatEventAge(ageMs)}`}
-        </span>
-        {summary.families.length > 0 ? (
+        <StateChip kind={connection.kind} detail={connection.detail} />
+        <p className="max-w-52 whitespace-normal break-words text-3xs leading-snug text-text-secondary">
+          {connection.sentence}
+        </p>
+        <dl className="flex flex-wrap items-end gap-x-5 gap-y-2">
+          <div className="flex flex-col gap-1">
+            <dd className="td-value text-xs text-text-primary" data-cell="numeric">
+              {/* A rate is a claim that something is being measured right now.
+                * With the stream down nothing is, so the figure is withheld
+                * rather than decayed toward a comfortable zero that would look
+                * exactly like a healthy quiet system. */}
+              {offline ? '—' : summary.ratePerMinute.toFixed(0)}
+            </dd>
+            <dt className="td-legend">
+              {offline ? 'rate · not measured' : `per min · last ${RATE_WINDOW_MS / 1000}s`}
+            </dt>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dd className="td-value text-xs text-text-primary" data-cell="numeric">
+              {formatDuration(ageMs)}
+            </dd>
+            <dt className="td-legend">since last event</dt>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dd className="td-value text-xs text-text-primary" data-cell="numeric">
+              {summary.total}
+            </dd>
+            <dt className="td-legend">
+              in ring{summary.spanMs != null ? ` · ${formatDuration(summary.spanMs)}` : ''}
+            </dt>
+          </div>
+        </dl>
+        {summary.families.length > 0 && summary.peak != null ? (
           <dl className="flex flex-col gap-1">
             {summary.families.slice(0, 4).map((entry) => (
               <div key={entry.family} className="flex items-center gap-2">
                 <dt className="td-legend w-24 shrink-0 truncate">{entry.label}</dt>
-                <Meter
-                  fraction={topFamily ? entry.count / topFamily.count : null}
-                  className="min-w-8 flex-1"
-                />
+                <Meter fraction={entry.count / summary.peak!} className="min-w-8 flex-1" />
                 <dd
-                  className="td-value w-5 shrink-0 text-right text-2xs"
+                  className="td-value w-5 shrink-0 text-right text-2xs text-text-primary"
                   data-cell="numeric"
                 >
                   {entry.count}
@@ -256,14 +328,39 @@ function SignalPanel({
               </div>
             ))}
           </dl>
-        ) : null}
-        {summary.ratePerMinute != null ? (
-          <Readout label="rate" size="sm" value={summary.ratePerMinute.toFixed(1)} unit="/min" />
-        ) : null}
+        ) : (
+          <p className="td-legend">no events observed yet</p>
+        )}
       </div>
       <span aria-hidden className="w-2 shrink-0 border-y border-r border-accent/40" />
     </div>
   );
+}
+
+/**
+ * A clock that runs only while there is a real elapsed age to keep true.
+ *
+ * This is not motion and not a heartbeat: nothing here invents activity or
+ * draws a frame. It re-reads `Date.now()` so that the printed age of a real,
+ * already-received event does not sit frozen at the value it had when the last
+ * render happened — which is precisely what would happen during silence, since
+ * silence produces no renders. A stale "4s" pinned on screen ten minutes later
+ * would be a lie about exactly the condition the viewer most needs to see.
+ *
+ * With no event ever received there is no age to age, and no timer runs at
+ * all. The cadence backs off as the reading coarsens, so an idle dashboard is
+ * doing a few integer comparisons a minute and nothing more.
+ */
+function useClockWhileAging(lastEventAt: number | null): number {
+  const [, tick] = useReducer((count: number) => count + 1, 0);
+  const now = Date.now();
+  const interval = lastEventAt == null ? null : ageTickIntervalMs(now - lastEventAt);
+  useEffect(() => {
+    if (interval == null) return;
+    const id = setInterval(tick, interval);
+    return () => clearInterval(id);
+  }, [interval]);
+  return now;
 }
 
 /** Corner-bracketed instrument readout floating on the canvas: the counts that
