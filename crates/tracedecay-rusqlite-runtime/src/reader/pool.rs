@@ -249,6 +249,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.inner.locator.path()
     }
 
+    pub(crate) fn opened_file_identity(&self) -> Option<u64> {
+        self.inner.locator.expected_file_identity()
+    }
+
     pub(crate) fn downgrade(&self) -> WeakReaderPool<E> {
         WeakReaderPool {
             inner: Arc::downgrade(&self.inner),
@@ -438,7 +442,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 state.opening_general += 1;
                 drop(state);
                 let spawned =
-                    worker::spawn(self.inner.locator.clone(), self.inner.executor.clone());
+                    worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())
+                        .and_then(|spawned| self.validate_worker_identity(spawned));
                 let mut state = self
                     .inner
                     .state
@@ -542,7 +547,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     }
 
     fn add_idle_worker(&self, lane: ReaderLane) -> Result<(), ReaderStartError> {
-        let spawned = worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())?;
+        let spawned = worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())
+            .and_then(|spawned| self.validate_worker_identity(spawned))?;
         let now = Instant::now();
         let mut state = self
             .inner
@@ -566,6 +572,22 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             idle_since: now,
         });
         Ok(())
+    }
+
+    fn validate_worker_identity(
+        &self,
+        spawned: worker::SpawnedWorker,
+    ) -> Result<worker::SpawnedWorker, ReaderStartError> {
+        let Some(expected) = self.opened_file_identity() else {
+            return Ok(spawned);
+        };
+        if spawned.opened_file_identity == expected {
+            return Ok(spawned);
+        }
+        let actual = spawned.opened_file_identity;
+        spawned.client.shutdown();
+        let _ = spawned.join.join();
+        Err(ReaderStartError::OpenedDatabaseIdentityMismatch { expected, actual })
     }
 }
 
@@ -611,9 +633,14 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
             let inner = Arc::clone(&self.inner);
             let lane = self.lane;
             let worker = self.worker.clone();
-            let _ = thread::Builder::new()
-                .name("tracedecay-rusqlite-reader-return".to_owned())
-                .spawn(move || finish_deferred_return(inner, lane, worker, receive));
+            spawn_or_run_deferred_return(
+                Box::new(move || finish_deferred_return(inner, lane, worker, receive)),
+                |task| {
+                    thread::Builder::new()
+                        .name("tracedecay-rusqlite-reader-return".to_owned())
+                        .spawn(task)
+                },
+            );
         }
     }
 }
@@ -876,6 +903,59 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
         }
     }
     inner.capacity_changed.notify_all();
+}
+
+type DeferredReturnTask = Box<dyn FnOnce() + Send + 'static>;
+
+fn spawn_or_run_deferred_return(
+    task: DeferredReturnTask,
+    spawn: impl FnOnce(DeferredReturnTask) -> std::io::Result<JoinHandle<()>>,
+) {
+    // `Builder::spawn` does not return the closure on failure. Keep the real
+    // return task recoverable so worker capacity cannot disappear silently.
+    let pending = Arc::new(Mutex::new(Some(task)));
+    let threaded = Arc::clone(&pending);
+    let wrapper: DeferredReturnTask = Box::new(move || {
+        if let Some(task) = threaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task();
+        }
+    });
+    if spawn(wrapper).is_err() {
+        let task = pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            task();
+        }
+    }
+}
+
+#[cfg(test)]
+mod deferred_return_spawn_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn spawn_failure_runs_deferred_return_inline() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&ran);
+
+        spawn_or_run_deferred_return(
+            Box::new(move || observed.store(true, Ordering::Release)),
+            |task| {
+                drop(task);
+                Err(std::io::Error::other("injected spawn failure"))
+            },
+        );
+
+        assert!(ran.load(Ordering::Acquire));
+    }
 }
 
 fn map_worker_error(error: ReaderWorkerError) -> ReaderAcquireError {

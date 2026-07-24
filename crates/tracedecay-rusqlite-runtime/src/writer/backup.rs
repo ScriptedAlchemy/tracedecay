@@ -296,6 +296,10 @@ fn publish_staging(
                 ))),
             };
         }
+        completed
+            .pinned
+            .verify_current_path(destination)
+            .map_err(|_| WriterOnlineBackupError::DestinationReplaced)?;
         Ok(())
     })();
     completed.abandon();
@@ -665,6 +669,31 @@ mod tests {
         );
         assert_eq!(sync_attempts, 2);
         assert!(!destination.exists());
+        assert!(!staging_path.exists());
+    }
+
+    #[test]
+    fn destination_replacement_during_parent_sync_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("backup.sqlite3");
+        let displaced = root.path().join("displaced.sqlite3");
+        let mut filesystem = StagedBackupDestination::new(destination.clone());
+        let (staged, connection) = filesystem.create_new_private_destination().unwrap();
+        let completed = filesystem
+            .close_and_sync_destination(staged, connection)
+            .unwrap();
+        let staging_path = completed.path.clone();
+
+        let error = publish_staging(completed, &destination, |_| {
+            fs::rename(&destination, &displaced).unwrap();
+            fs::write(&destination, b"replacement").unwrap();
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(error, WriterOnlineBackupError::DestinationReplaced);
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+        assert!(displaced.exists());
         assert!(!staging_path.exists());
     }
 }
