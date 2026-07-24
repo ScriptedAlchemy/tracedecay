@@ -168,6 +168,27 @@ export function InspectorPanel({
   );
 }
 
+/** Filesystem paths and URLs carry no spaces, so the browser's only line-break
+ * fallback (`overflow-wrap: break-word`) had nowhere to break but mid-word —
+ * every character landed on its own line in a narrow column (worst at
+ * 320px). A `<wbr>` after each path separator gives it a real break point
+ * instead, so long paths wrap at segment boundaries like `.tracedecay/` \
+ * `config.toml` rather than one letter per line. Plain values are unaffected
+ * — this only ever inserts, never rewrites, the text. */
+function withPathBreaks(text: string): ReactNode {
+  if (!text.includes('/')) return text;
+  const segments = text.split('/');
+  const nodes: ReactNode[] = [];
+  segments.forEach((segment, i) => {
+    if (i > 0) {
+      nodes.push('/');
+      nodes.push(<wbr key={`wbr-${i}`} />);
+    }
+    nodes.push(segment);
+  });
+  return nodes;
+}
+
 /** Generic key/value renderer for legacy payload inspection: honest raw data
  * presentation until a typed view lands per family. */
 export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: number }) {
@@ -175,8 +196,11 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
     return <span className="text-text-muted">—</span>;
   }
   if (typeof value !== 'object') {
+    const text = String(value);
     return (
-      <span className="td-value break-words text-2xs text-text-secondary">{String(value)}</span>
+      <span className="td-value break-words text-2xs text-text-secondary">
+        {withPathBreaks(text)}
+      </span>
     );
   }
   const isArray = Array.isArray(value);
@@ -194,7 +218,7 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
             key={i}
             className="td-value break-words rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-text-secondary"
           >
-            {v === null || v === undefined ? '—' : String(v)}
+            {v === null || v === undefined ? '—' : withPathBreaks(String(v))}
           </span>
         ))}
         {value.length > 60 ? (
