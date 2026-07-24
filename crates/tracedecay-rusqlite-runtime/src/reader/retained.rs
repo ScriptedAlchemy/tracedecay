@@ -71,6 +71,7 @@ impl<E: ReaderQueryExecutor> SqliteRetainedSnapshotRegistry<E> {
         {
             return Err(RetainedSnapshotError::BindingMismatch);
         }
+        self.reclaim_expired();
         if self.entry(&lease.lease_id).is_some() {
             return Err(RetainedSnapshotError::LeaseConflict);
         }
@@ -83,25 +84,32 @@ impl<E: ReaderQueryExecutor> SqliteRetainedSnapshotRegistry<E> {
         reader
             .begin_pinned_snapshot(probe)
             .map_err(RetainedSnapshotError::Acquire)?;
-        let mut entries = self
-            .inner
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if entries
-            .iter()
-            .any(|entry| entry.lease.lease_id == lease.lease_id)
-        {
-            return Err(RetainedSnapshotError::LeaseConflict);
-        }
-        entries.push(Arc::new(RetainedEntry {
-            lease,
-            reader: Mutex::new(reader),
-        }));
+        let expired = {
+            let mut entries = self
+                .inner
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let expired = take_expired_entries(&mut entries);
+            if entries
+                .iter()
+                .any(|entry| entry.lease.lease_id == lease.lease_id)
+            {
+                drop(entries);
+                drop(expired);
+                return Err(RetainedSnapshotError::LeaseConflict);
+            }
+            entries.push(Arc::new(RetainedEntry {
+                lease,
+                reader: Mutex::new(reader),
+            }));
+            expired
+        };
+        drop(expired);
         Ok(())
     }
 
-    pub fn release(&self, lease_id: &SnapshotLeaseIdV1) -> bool {
+    pub fn release(&self, lease: &SnapshotLeaseV1) -> bool {
         let removed = {
             let mut entries = self
                 .inner
@@ -110,7 +118,7 @@ impl<E: ReaderQueryExecutor> SqliteRetainedSnapshotRegistry<E> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             entries
                 .iter()
-                .position(|entry| &entry.lease.lease_id == lease_id)
+                .position(|entry| &entry.lease == lease)
                 .map(|index| entries.remove(index))
         };
         removed.is_some()
@@ -128,6 +136,7 @@ impl<E: ReaderQueryExecutor> SqliteRetainedSnapshotRegistry<E> {
             ));
         };
         if is_expired(&entry.lease) {
+            self.remove_entry(&entry);
             return Ok(RetainedExecution::Unavailable(
                 UnavailableReasonV1::SnapshotExpired,
             ));
@@ -145,11 +154,18 @@ impl<E: ReaderQueryExecutor> SqliteRetainedSnapshotRegistry<E> {
                 UnavailableReasonV1::SnapshotNotRetained,
             ));
         }
-        let outcome = entry
+        let mut reader = entry
             .reader
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .execute_active_raw(request, probe)?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if is_expired(&entry.lease) {
+            drop(reader);
+            self.remove_entry(&entry);
+            return Ok(RetainedExecution::Unavailable(
+                UnavailableReasonV1::SnapshotExpired,
+            ));
+        }
+        let outcome = reader.execute_active_raw(request, probe)?;
         Ok(RetainedExecution::Outcome(Box::new(outcome)))
     }
 
@@ -162,6 +178,33 @@ impl<E: ReaderQueryExecutor> SqliteRetainedSnapshotRegistry<E> {
             .find(|entry| &entry.lease.lease_id == lease_id)
             .cloned()
     }
+
+    fn reclaim_expired(&self) {
+        let expired = {
+            let mut entries = self
+                .inner
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            take_expired_entries(&mut entries)
+        };
+        drop(expired);
+    }
+
+    fn remove_entry(&self, target: &Arc<RetainedEntry<E>>) -> bool {
+        let removed = {
+            let mut entries = self
+                .inner
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries
+                .iter()
+                .position(|entry| Arc::ptr_eq(entry, target))
+                .map(|index| entries.remove(index))
+        };
+        removed.is_some()
+    }
 }
 
 impl<E: ReaderQueryExecutor> RetainedSnapshotRegistry for SqliteRetainedSnapshotRegistry<E> {
@@ -170,6 +213,7 @@ impl<E: ReaderQueryExecutor> RetainedSnapshotRegistry for SqliteRetainedSnapshot
             return RetainedSnapshotState::NotRetained;
         };
         if is_expired(&entry.lease) {
+            self.remove_entry(&entry);
             RetainedSnapshotState::Expired
         } else {
             RetainedSnapshotState::Retained(Box::new(entry.lease.clone()))
@@ -217,6 +261,22 @@ impl Error for RetainedSnapshotError {
 
 fn is_expired(lease: &SnapshotLeaseV1) -> bool {
     utc_now_micros() >= lease.expires_at.0
+}
+
+fn take_expired_entries<E: ReaderQueryExecutor>(
+    entries: &mut Vec<Arc<RetainedEntry<E>>>,
+) -> Vec<Arc<RetainedEntry<E>>> {
+    let now = utc_now_micros();
+    let mut expired = Vec::new();
+    let mut index = 0;
+    while index < entries.len() {
+        if now >= entries[index].lease.expires_at.0 {
+            expired.push(entries.swap_remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    expired
 }
 
 fn utc_now_micros() -> i64 {

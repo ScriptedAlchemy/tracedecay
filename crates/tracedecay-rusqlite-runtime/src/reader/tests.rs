@@ -215,6 +215,35 @@ fn snapshot_lease(binding: &StoreRuntimeBindingV1) -> SnapshotLeaseV1 {
     .unwrap()
 }
 
+fn expiring_snapshot_lease(
+    binding: &StoreRuntimeBindingV1,
+    lease_id: &str,
+    snapshot_id: &str,
+    expires_at: i64,
+) -> SnapshotLeaseV1 {
+    serde_json::from_value(serde_json::json!({
+        "lease_id": lease_id,
+        "snapshot_id": snapshot_id,
+        "watermark": {
+            "shard_id": binding.shard_id,
+            "incarnation": binding.incarnation,
+            "authority_epoch": binding.authority_epoch,
+            "commit_sequence": 8
+        },
+        "acquired_at": expires_at - 1_000_000,
+        "expires_at": expires_at
+    }))
+    .unwrap()
+}
+
+fn utc_now_micros() -> i64 {
+    let micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    i64::try_from(micros).unwrap()
+}
+
 fn run<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -490,6 +519,67 @@ fn retained_snapshot_uses_a_pool_connection_and_facade_executes_that_exact_view(
         outcome.coverage(),
         RuntimeReadCoverageV1::Complete { .. }
     ));
+}
+
+#[test]
+fn retain_reclaims_expired_capacity_without_stale_release_of_reused_id() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let registry = SqliteRetainedSnapshotRegistry::new(pool.clone());
+    let expires_at = utc_now_micros() + 250_000;
+    let expired = expiring_snapshot_lease(
+        &store.binding,
+        "lease.reused",
+        "snapshot.expired",
+        expires_at,
+    );
+    let other_expired =
+        expiring_snapshot_lease(&store.binding, "lease.other", "snapshot.other", expires_at);
+    for lease in [&expired, &other_expired] {
+        let exact = exact_request(&store.binding, lease);
+        registry
+            .retain(
+                lease.clone(),
+                &exact,
+                &Probe::for_request(&exact),
+                Duration::ZERO,
+            )
+            .unwrap();
+    }
+    assert_eq!(pool.snapshot().leased_general, 2);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let replacement = expiring_snapshot_lease(
+        &store.binding,
+        "lease.reused",
+        "snapshot.replacement",
+        4_102_444_800_000_000,
+    );
+    let exact = exact_request(&store.binding, &replacement);
+    registry
+        .retain(
+            replacement.clone(),
+            &exact,
+            &Probe::for_request(&exact),
+            Duration::ZERO,
+        )
+        .unwrap();
+
+    assert_eq!(pool.snapshot().leased_general, 1);
+    assert!(!registry.release(&expired));
+    let stale_exact = exact_request(&store.binding, &expired);
+    let stale_probe = Probe::for_request(&stale_exact);
+    assert!(matches!(
+        registry.execute_exact(&expired.lease_id, stale_exact, &stale_probe),
+        Ok(RetainedExecution::Unavailable(
+            tracedecay_store::UnavailableReasonV1::SnapshotNotRetained
+        ))
+    ));
+    assert!(matches!(
+        registry.lookup(&replacement.lease_id),
+        RetainedSnapshotState::Retained(found) if *found == replacement
+    ));
+    assert!(registry.release(&replacement));
 }
 
 #[test]
