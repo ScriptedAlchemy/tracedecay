@@ -456,7 +456,7 @@ pub fn storage_family_read(findings: Vec<DoctorStorageFindingV1>) -> DoctorStora
 /// backstop sweep surfaces, read-only. Live stores are not a retention concern
 /// and produce no finding.
 pub async fn collect_orphan_store_findings(
-    global_db: &crate::global_db::GlobalDb,
+    global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
     retention_secs: i64,
     now: i64,
