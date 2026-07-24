@@ -4,6 +4,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
+use tracedecay::application::semantic_runtime::SemanticEvaluationProfileCandidateV1;
+use tracedecay::daemon::DaemonHandshake;
+use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::search_eval::{
     DirectEvaluationStatusV1, GenerateCandidateOutputsOptions, compare_direct,
     generate_candidate_outputs, validate_direct_workload, write_generate_outputs,
@@ -50,6 +53,14 @@ enum Command {
         output_root: PathBuf,
         #[arg(long, value_delimiter = ',')]
         profiles: Option<Vec<String>>,
+    },
+    /// Run the real direct evaluator in the owning daemon and publish only a
+    /// passing profile bound to the daemon's current scope and generations.
+    EvaluateAndPublish {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        candidate: PathBuf,
     },
 }
 
@@ -102,14 +113,55 @@ fn main() -> ExitCode {
             },
             Err(error) => invalid("generate_candidates", error),
         },
+        Command::EvaluateAndPublish {
+            project_root,
+            candidate,
+        } => evaluate_and_publish(project_root, candidate),
     }
+}
+
+fn evaluate_and_publish(project_root: PathBuf, candidate_path: PathBuf) -> ExitCode {
+    let candidate = match std::fs::read(&candidate_path)
+        .map_err(|error| format!("read {}: {error}", candidate_path.display()))
+        .and_then(|bytes| {
+            serde_json::from_slice::<SemanticEvaluationProfileCandidateV1>(&bytes)
+                .map_err(|error| format!("parse {}: {error}", candidate_path.display()))
+        }) {
+        Ok(candidate) => candidate,
+        Err(error) => return invalid("evaluate_and_publish", error),
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return invalid("evaluate_and_publish", error),
+    };
+    runtime.block_on(async move {
+        let handshake =
+            match DaemonHandshake::for_current_client(Some(project_root), None, false, false) {
+                Ok(handshake) => handshake,
+                Err(error) => return invalid("evaluate_and_publish", error),
+            };
+        let client = match DaemonInvocationClient::for_current(handshake) {
+            Ok(client) => client,
+            Err(error) => return invalid("evaluate_and_publish", error),
+        };
+        match client
+            .evaluate_and_publish_semantic_profile(candidate)
+            .await
+        {
+            Ok(result) => emit(&result, ExitCode::SUCCESS),
+            Err(error) => invalid("evaluate_and_publish", error),
+        }
+    })
 }
 
 fn invalid(command: &str, error: impl std::fmt::Display) -> ExitCode {
     emit(
         &json!({
             "command": command,
-            "status": "invalid",
+            "status": "fail",
             "rationale": error.to_string(),
         }),
         ExitCode::from(2),

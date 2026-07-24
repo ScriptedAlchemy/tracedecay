@@ -1,4 +1,26 @@
 {
+  "execution_contract": {
+    "cache_state": "cold_empty_in_memory_publication",
+    "concurrency": {
+      "projection_workers": 1,
+      "query_execution": "serial_exact_workload_order",
+      "query_workers": 1
+    },
+    "exact_corpus_bytes": 306536,
+    "exact_eligible_chunks_10x": 19600,
+    "exact_eligible_chunks_current": 1960,
+    "exact_file_count": 13,
+    "exact_query_count": 24,
+    "fusion_revision": "CompositionKernel::compose",
+    "model_revision": "JinaEmbeddingsV2BaseCode@516f4baf13dec4ddddda8631e019b5737c8bc250",
+    "projection_revision": "retriever.semantic-flat.evaluation.v1",
+    "runtime_revision": "semantic.fastembed.production.v1"
+  },
+  "incremental_fixture": {
+    "after_path": "tests/fixtures/search_quality/incremental/time-after.rs",
+    "after_sha256": "bf947193450322fb7d706c0cf46ca55fa68ddf4ffdb2bb4c5735fa43cd93e2dd",
+    "document_id": "time"
+  },
   "corpus": [
     {
       "document_id": "time",
@@ -582,7 +604,7 @@
     }
   },
   "schema_version": 1,
-  "source_repository_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
-  "source_repository_tree": "3d8de57a843244229c3b19995c9d0b9e00081769",
+  "source_repository_commit": "f1dfc76c0bc805fc29472d2bc53e727bbc6dad74",
+  "source_repository_tree": "587aed48f162f74765da3a35fc41850523ea377d",
   "workload_id": "pr9-pr10-production-candidate-workload-v1"
 }

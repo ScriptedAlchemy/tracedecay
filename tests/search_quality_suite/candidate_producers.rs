@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::fs;
+use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use tracedecay::code_index::chunks::{
     DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
 };
@@ -15,6 +18,9 @@ use tracedecay::query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1,
     LexicalFieldV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
     MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
+};
+use tracedecay::search_eval::{
+    compute_workload_digest, load_candidate_workload, validate_direct_workload,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
@@ -568,6 +574,10 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
             .expect("phrase retrieval succeeds"),
     );
     assert_eq!(phrase.candidates.len(), 1);
+    assert_eq!(
+        phrase.evidence_by_occurrence[&phrase.candidates[0].source_occurrence_id].matched_phrases,
+        vec!["reserve stock".to_owned()]
+    );
 
     let disabled = lexical_request("resreve_stock", &["resreve_stock"], &[], &[], 0, 8);
     assert!(
@@ -655,4 +665,111 @@ fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
         .retrieve_lexical(&request)
         .expect("staleness is a typed outcome");
     assert!(matches!(outcome, RetrieverOutcome::Stale(_)));
+}
+
+#[test]
+fn lexical_source_occurrence_identity_is_generation_exact() {
+    let first_generation = id::<CodeGenerationId>("generation.1");
+    let second_generation = id::<CodeGenerationId>("generation.2");
+    let first_projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&first_generation, FreshnessCompatibilityV1::Current),
+        vec![admitted_rust_chunk(
+            &first_generation,
+            1,
+            "pub fn target() {}\n",
+            CodeSearchChunkGrainV1::SymbolSignature,
+            "target",
+        )],
+    )
+    .expect("first projection builds");
+    let second_projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&second_generation, FreshnessCompatibilityV1::Current),
+        vec![admitted_rust_chunk(
+            &second_generation,
+            1,
+            "pub fn target() {}\n",
+            CodeSearchChunkGrainV1::SymbolSignature,
+            "target",
+        )],
+    )
+    .expect("second projection builds");
+    let first_request = lexical_request("target", &["target"], &[], &[], 0, 8);
+    let mut second_request = lexical_request("target", &["target"], &[], &[], 0, 8);
+    second_request.generation = second_generation;
+
+    let first = complete(
+        LexicalLane::new(first_projection)
+            .retrieve_lexical(&first_request)
+            .expect("first retrieval succeeds"),
+    );
+    let second = complete(
+        LexicalLane::new(second_projection)
+            .retrieve_lexical(&second_request)
+            .expect("second retrieval succeeds"),
+    );
+
+    assert_eq!(
+        first.candidates[0].anchor_id,
+        second.candidates[0].anchor_id
+    );
+    assert_ne!(
+        first.candidates[0].source_occurrence_id, second.candidates[0].source_occurrence_id,
+        "the logical chunk is stable but each generation has a distinct occurrence"
+    );
+}
+
+#[test]
+fn pr10_workload_and_incremental_fixture_are_byte_exact() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workload_path =
+        repo_root.join("tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json");
+    let workload = load_candidate_workload(&workload_path).expect("checked-in workload parses");
+    let summary =
+        validate_direct_workload(repo_root, None).expect("checked-in workload is authoritative");
+
+    assert_eq!(
+        compute_workload_digest(&workload).expect("workload digest"),
+        "sha256:de09c679414055db7e0998931e33d9d2280f7af4ae7e31a32ab22282a7c2b502"
+    );
+    assert_eq!(
+        summary.workload_digest,
+        compute_workload_digest(&workload).expect("summary workload digest")
+    );
+    assert_eq!(workload.execution_contract.exact_file_count, 13);
+    assert_eq!(workload.execution_contract.exact_corpus_bytes, 306_536);
+    assert_eq!(
+        workload.execution_contract.exact_eligible_chunks_current,
+        1_960
+    );
+    assert_eq!(
+        workload.execution_contract.exact_eligible_chunks_10x,
+        workload
+            .execution_contract
+            .exact_eligible_chunks_current
+            .checked_mul(10)
+            .expect("exact 10x chunk count")
+    );
+
+    let source = workload
+        .corpus
+        .iter()
+        .find(|document| document.document_id == workload.incremental_fixture.document_id)
+        .expect("incremental source belongs to the corpus");
+    let before = fs::read_to_string(repo_root.join(&source.path)).expect("read before fixture");
+    let after_path = repo_root.join(&workload.incremental_fixture.after_path);
+    let after = fs::read_to_string(&after_path).expect("read after fixture");
+    assert_eq!(
+        hex::encode(Sha256::digest(after.as_bytes())),
+        workload.incremental_fixture.after_sha256
+    );
+    assert_eq!(
+        before.matches("pub fn validate(&self)").count(),
+        1,
+        "incremental edit must have one authentic source target"
+    );
+    assert_eq!(
+        after,
+        before.replacen("pub fn validate(&self)", "pub fn validate_bounds(&self)", 1),
+        "incremental fixture must contain only the declared one-symbol edit"
+    );
 }

@@ -7,12 +7,186 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::CapabilityId;
+use crate::{CapabilityId, DomainError, canonical_json_bytes};
 
 pub const HOST_INTEGRATION_CATALOG_SCHEMA_VERSION_V1: u16 = 1;
 const OBSERVATION_CAPTURE_CAPABILITY_ID: &str = "capability.integration.observation.capture";
+
+/// Canonical stock host surfaces shared by catalog, packaging, delivery, and
+/// conformance consumers. A host surface is not itself evidence that the PR6
+/// observation-capture capability is fixture-backed.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKindV1 {
+    ClaudeCode,
+    CursorDesktop,
+    CursorCloud,
+    Codex,
+    Hermes,
+    Kiro,
+    ClineFamily,
+    Cline,
+    RooCode,
+    Kilo,
+    KimiCode,
+    OpenCode,
+}
+
+impl HostKindV1 {
+    pub const ALL: [Self; 12] = [
+        Self::ClaudeCode,
+        Self::CursorDesktop,
+        Self::CursorCloud,
+        Self::Codex,
+        Self::Hermes,
+        Self::Kiro,
+        Self::ClineFamily,
+        Self::Cline,
+        Self::RooCode,
+        Self::Kilo,
+        Self::KimiCode,
+        Self::OpenCode,
+    ];
+
+    /// Project a stock host surface into the bounded PR6 observation catalog
+    /// only when a checked-in native event fixture proves that integration.
+    pub const fn fixture_backed_observation_integration_id(self) -> Option<HostIntegrationIdV1> {
+        match self {
+            Self::ClaudeCode => Some(HostIntegrationIdV1::Claude),
+            Self::CursorDesktop => Some(HostIntegrationIdV1::Cursor),
+            Self::Codex => Some(HostIntegrationIdV1::Codex),
+            Self::Hermes => Some(HostIntegrationIdV1::Hermes),
+            Self::Kiro => Some(HostIntegrationIdV1::Kiro),
+            Self::CursorCloud
+            | Self::ClineFamily
+            | Self::Cline
+            | Self::RooCode
+            | Self::Kilo
+            | Self::KimiCode
+            | Self::OpenCode => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum HostCapabilityV1 {
+    Lsp,
+    NativeDiagnostics,
+    Hooks,
+    Mcp,
+    Cli,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostCapabilityUnavailableReasonV1 {
+    HostApiAbsent,
+    HostRegistrationUnsupported,
+    NativeFixtureLimited,
+    CheckedInEvidenceMissing,
+    CompetingExtensionClaim,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
+pub enum HostCapabilityStateV1 {
+    Supported,
+    Degraded(HostCapabilityUnavailableReasonV1),
+    Unavailable(HostCapabilityUnavailableReasonV1),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostCapabilityRecordV1 {
+    pub capability: HostCapabilityV1,
+    pub state: HostCapabilityStateV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StockHostCapabilityViewV1 {
+    host: HostKindV1,
+    capabilities: [HostCapabilityRecordV1; 5],
+}
+
+impl StockHostCapabilityViewV1 {
+    pub const fn host(&self) -> HostKindV1 {
+        self.host
+    }
+
+    pub const fn capabilities(&self) -> &[HostCapabilityRecordV1; 5] {
+        &self.capabilities
+    }
+}
+
+const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
+    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
+    use HostCapabilityUnavailableReasonV1::{
+        CheckedInEvidenceMissing, HostApiAbsent, HostRegistrationUnsupported, NativeFixtureLimited,
+    };
+    use HostCapabilityV1::{Cli, Hooks, Lsp, Mcp, NativeDiagnostics};
+
+    let (lsp, native_diagnostics, hooks) = match host {
+        HostKindV1::ClaudeCode => (Supported, Unavailable(HostApiAbsent), Supported),
+        HostKindV1::CursorDesktop => (
+            Unavailable(HostRegistrationUnsupported),
+            Supported,
+            Supported,
+        ),
+        HostKindV1::CursorCloud => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
+        ),
+        HostKindV1::Codex | HostKindV1::Hermes => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Supported,
+        ),
+        HostKindV1::Kiro => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Degraded(NativeFixtureLimited),
+        ),
+        HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(HostApiAbsent),
+        ),
+        HostKindV1::KimiCode => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Supported,
+        ),
+        HostKindV1::OpenCode => (Supported, Supported, Supported),
+    };
+    [
+        HostCapabilityRecordV1 {
+            capability: Lsp,
+            state: lsp,
+        },
+        HostCapabilityRecordV1 {
+            capability: NativeDiagnostics,
+            state: native_diagnostics,
+        },
+        HostCapabilityRecordV1 {
+            capability: Hooks,
+            state: hooks,
+        },
+        HostCapabilityRecordV1 {
+            capability: Mcp,
+            state: Supported,
+        },
+        HostCapabilityRecordV1 {
+            capability: Cli,
+            state: Supported,
+        },
+    ]
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -250,6 +424,56 @@ impl HostIntegrationCatalogV1 {
         &self.capabilities
     }
 
+    pub fn stock_host_capabilities(&self, host: HostKindV1) -> &[HostCapabilityRecordV1; 5] {
+        match host {
+            HostKindV1::ClaudeCode => &STOCK_HOST_CAPABILITIES[0],
+            HostKindV1::CursorDesktop => &STOCK_HOST_CAPABILITIES[1],
+            HostKindV1::CursorCloud => &STOCK_HOST_CAPABILITIES[2],
+            HostKindV1::Codex => &STOCK_HOST_CAPABILITIES[3],
+            HostKindV1::Hermes => &STOCK_HOST_CAPABILITIES[4],
+            HostKindV1::Kiro => &STOCK_HOST_CAPABILITIES[5],
+            HostKindV1::ClineFamily => &STOCK_HOST_CAPABILITIES[6],
+            HostKindV1::Cline => &STOCK_HOST_CAPABILITIES[7],
+            HostKindV1::RooCode => &STOCK_HOST_CAPABILITIES[8],
+            HostKindV1::Kilo => &STOCK_HOST_CAPABILITIES[9],
+            HostKindV1::KimiCode => &STOCK_HOST_CAPABILITIES[10],
+            HostKindV1::OpenCode => &STOCK_HOST_CAPABILITIES[11],
+        }
+    }
+
+    pub fn stock_host_capability_views(&self) -> Vec<StockHostCapabilityViewV1> {
+        HostKindV1::ALL
+            .into_iter()
+            .map(|host| StockHostCapabilityViewV1 {
+                host,
+                capabilities: *self.stock_host_capabilities(host),
+            })
+            .collect()
+    }
+
+    /// Canonical bytes for the complete catalog authority: the bounded PR6
+    /// observation fixture matrix plus every stock host surface capability.
+    pub fn canonical_authority_bytes(&self) -> Result<Vec<u8>, DomainError> {
+        canonical_json_bytes(&HostIntegrationCatalogAuthorityPayloadV1 {
+            observation_catalog: self,
+            stock_hosts: self.stock_host_capability_views(),
+        })
+    }
+
+    pub fn canonical_authority_digest(&self) -> Result<[u8; 32], DomainError> {
+        self.canonical_authority_bytes()
+            .map(|bytes| Sha256::digest(bytes).into())
+    }
+
+    /// Canonical per-host projection pinned into embedded bundle manifests.
+    pub fn host_capability_digest(&self, host: HostKindV1) -> Result<[u8; 32], DomainError> {
+        canonical_json_bytes(&StockHostCapabilityViewV1 {
+            host,
+            capabilities: *self.stock_host_capabilities(host),
+        })
+        .map(|bytes| Sha256::digest(bytes).into())
+    }
+
     pub fn validate(&self) -> Result<(), IntegrationCatalogError> {
         if self.schema_version != HOST_INTEGRATION_CATALOG_SCHEMA_VERSION_V1 {
             return Err(IntegrationCatalogError::UnsupportedSchemaVersion(
@@ -330,6 +554,31 @@ impl HostIntegrationCatalogV1 {
         }
         Ok(())
     }
+}
+
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 12] = [
+    canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
+    canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
+    canonical_stock_host_capabilities(HostKindV1::CursorCloud),
+    canonical_stock_host_capabilities(HostKindV1::Codex),
+    canonical_stock_host_capabilities(HostKindV1::Hermes),
+    canonical_stock_host_capabilities(HostKindV1::Kiro),
+    canonical_stock_host_capabilities(HostKindV1::ClineFamily),
+    canonical_stock_host_capabilities(HostKindV1::Cline),
+    canonical_stock_host_capabilities(HostKindV1::RooCode),
+    canonical_stock_host_capabilities(HostKindV1::Kilo),
+    canonical_stock_host_capabilities(HostKindV1::KimiCode),
+    canonical_stock_host_capabilities(HostKindV1::OpenCode),
+];
+
+#[derive(Serialize)]
+struct HostIntegrationCatalogAuthorityPayloadV1<'a> {
+    observation_catalog: &'a HostIntegrationCatalogV1,
+    stock_hosts: Vec<StockHostCapabilityViewV1>,
+}
+
+pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
+    *host_integration_catalog_v1().stock_host_capabilities(host)
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
