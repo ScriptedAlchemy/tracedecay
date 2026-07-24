@@ -59,6 +59,36 @@ fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     )
 }
 
+fn is_mcp_git_read(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_git_status"
+            | "tracedecay_git_diff"
+            | "tracedecay_git_history"
+            | "tracedecay_git_blame"
+            | "tracedecay_git_hunks"
+    )
+}
+
+pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
+    crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
+        || is_mcp_git_read(tool_name)
+        || tool_name == "tracedecay_search"
+}
+
+fn dispatch_deadline_horizon_micros(
+    application_surface: bool,
+    controlled_git_read: bool,
+) -> Option<i64> {
+    if controlled_git_read {
+        Some(30_000_000)
+    } else if application_surface {
+        Some(10_000_000)
+    } else {
+        None
+    }
+}
+
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
@@ -220,6 +250,7 @@ impl McpServer {
             request,
             self.timings_enabled(),
             &mut connection,
+            false,
         ))
         .await
     }
@@ -246,6 +277,7 @@ impl McpServer {
         request: &JsonRpcRequest,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
+        pre_cancelled: bool,
     ) -> Option<JsonRpcResponse> {
         debug_assert!(
             !request.method.is_empty(),
@@ -296,6 +328,7 @@ impl McpServer {
                     &connection.route_cache,
                     connection.implicit_project_path(),
                     connection.memory_request_scope(),
+                    pre_cancelled,
                 ))
                 .await,
             ),
@@ -369,7 +402,13 @@ impl McpServer {
         // connection: publish it as soon as the routing event is durably
         // appended, even when effect processing is deferred/retained. Do not
         // wait for Committed — delayed replay must not leave tools unrouted.
-        self.update_hook_workspace_route(&event, route_cache).await;
+        if let Err(error) = self.update_hook_workspace_route(&event, route_cache).await {
+            tracing::warn!(error = %error, "hook project registry route resolution failed");
+            let outcome =
+                HostAdmissionOutcome::retained_unavailable("project_registry_route_unavailable");
+            Self::report_host_admission_outcome(outcome);
+            return outcome;
+        }
         let outcome = Box::pin(self.replay_host_admission(Some(admitted.seq))).await;
         // Route analytics + span observations are side writes: only after the
         // durable spool record is authoritatively committed (Committed or
@@ -720,8 +759,7 @@ impl McpServer {
             memory_request_scope,
             &mut handler_arguments,
         );
-        if crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
-            .is_some()
+        if tool_supports_live_cancellation(tool_name)
             && let Some(map) = handler_arguments.as_object_mut()
         {
             map.remove("__mcp_request_id");
@@ -761,20 +799,33 @@ impl McpServer {
             self.scope_prefix(),
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_deref(),
+                accounting_db: self.accounting_db.as_deref(),
+                registered_project_session_db: self.registered_session_db.clone(),
+                registered_savings_db: self.accounting_db.clone(),
                 profile_root: self.profile_root.as_deref(),
                 allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
+                dashboard_doctor_owner: self.dashboard_doctor_owner.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(self.diagnostics_lsp.as_ref()),
                 application_invocation_client,
                 application_request_id,
                 application_deadline,
                 application_cancellation,
+                code_index_search_executor: self.code_index_search_executor.clone(),
+                git_read_executor: self.git_read_executor.clone(),
+                code_index_search_authority: self.code_index_search_authority.clone(),
+                retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),
                     self.user_session_db.as_ref(),
+                )
+                .with_profile_identity(self.profile_identity.as_ref())
+                .with_registered_databases(
+                    self.registered_session_db.as_deref(),
+                    self.registered_user_session_db.as_deref(),
                 )
                 .with_refresh_services(
                     self.project_session_refresh_service.as_deref(),
@@ -803,6 +854,28 @@ impl McpServer {
         }
     }
 
+    #[cfg(feature = "test-transport")]
+    #[doc(hidden)]
+    pub async fn call_tool_for_test(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<ToolResult> {
+        let cg = self.cg().await;
+        self.execute_tool_dispatch(
+            cg.as_ref(),
+            tool_name,
+            arguments,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_tool_call(
         &self,
@@ -813,6 +886,7 @@ impl McpServer {
         route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
         memory_request_scope: &str,
+        pre_cancelled: bool,
     ) -> DispatchedToolCall {
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
@@ -866,7 +940,13 @@ impl McpServer {
             invocation_client: application_invocation_client,
             _registration,
         } = self
-            .prepare_application_surface_dispatch(&cg, id, tool_name, memory_request_scope)
+            .prepare_application_surface_dispatch(
+                &cg,
+                id,
+                tool_name,
+                memory_request_scope,
+                pre_cancelled,
+            )
             .await;
         let outcome = self
             .execute_tool_dispatch(
@@ -897,37 +977,43 @@ impl McpServer {
         id: &Value,
         tool_name: &str,
         memory_request_scope: &str,
+        pre_cancelled: bool,
     ) -> ApplicationSurfaceDispatch<'a> {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let request_id = application_surface
-            .and_then(|_| application_surface_request_id(id, memory_request_scope))
+        let controlled_read = is_mcp_git_read(tool_name) || tool_name == "tracedecay_search";
+        let request_id = tool_supports_live_cancellation(tool_name)
+            .then(|| application_surface_request_id(id, memory_request_scope))
+            .flatten()
             .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
         let cancellation = request_id.as_ref().and_then(|request_id| {
-            tracedecay_application::CancellationSignal::active(format!(
+            let mut cancellations = self.application_surface_cancellations.lock().ok()?;
+            let cancellation = tracedecay_application::CancellationSignal::active(format!(
                 "cancellation.{}",
                 request_id.as_str()
             ))
-            .ok()
-        });
-        if let (Some(request_id), Some(cancellation)) = (&request_id, &cancellation)
-            && let Ok(mut cancellations) = self.application_surface_cancellations.lock()
-        {
+            .ok()?;
+            if pre_cancelled {
+                cancellation.cancel(mcp_now_micros());
+            }
             cancellations.insert(request_id.as_str().to_owned(), cancellation.clone());
-        }
+            Some(cancellation)
+        });
         let registration = ApplicationCancellationRegistration {
             registry: &self.application_surface_cancellations,
             request_id: request_id
                 .as_ref()
                 .map(|request_id| request_id.as_str().to_owned()),
         };
-        let deadline = application_surface.and_then(|_| {
-            let now = mcp_now_micros().0;
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                now.saturating_add(10_000_000),
-            ))
-            .ok()
-        });
+        let deadline =
+            dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read)
+                .and_then(|horizon| {
+                    let now = mcp_now_micros().0;
+                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                        now.saturating_add(horizon),
+                    ))
+                    .ok()
+                });
         let invocation_client = if application_surface.is_some() {
             self.application_surface_client
                 .get_or_try_init(|| async {
@@ -1045,13 +1131,15 @@ impl McpServer {
         // and notify make the write's completion observable to
         // [`Self::ledger_writes_settled`] without making it awaited
         // anywhere on the request path.
-        if let Some(gdb) = self.global_db.clone() {
+        let registered = self.accounting_db.clone();
+        let legacy = self.global_db.clone();
+        if registered.is_some() || legacy.is_some() {
             let ToolTokenAccounting {
                 raw_file_tokens,
                 response_tokens,
                 net_saved_tokens,
             } = accounting;
-            let project_path_str = GlobalDb::canonical_project_key(cg.project_root());
+            let project_path_str = RegisteredGlobalDb::canonical_project_key(cg.project_root());
             let tool_name_owned = tool_name.to_string();
             let ts = crate::tracedecay::current_timestamp();
             let client_name = self.client_name();
@@ -1076,6 +1164,23 @@ impl McpServer {
                 failure_reason: failure_reason.as_deref(),
             });
             self.spawn_observed_ledger_write(async move {
+                if let Some(gdb) = registered {
+                    gdb.record_savings(
+                        &project_path_str,
+                        &tool_name_owned,
+                        raw_file_tokens,
+                        response_tokens,
+                        ts,
+                    )
+                    .await;
+                    if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
+                        tracing::warn!(error = %e, "MCP analytics event insert failed");
+                    }
+                    return;
+                }
+                let Some(gdb) = legacy else {
+                    return;
+                };
                 gdb.record_savings(
                     &project_path_str,
                     &tool_name_owned,
@@ -1372,6 +1477,7 @@ impl McpServer {
         route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
         memory_request_scope: &str,
+        pre_cancelled: bool,
     ) -> JsonRpcResponse {
         let PreparedToolCall {
             tool_name,
@@ -1392,6 +1498,7 @@ impl McpServer {
                 route_cache,
                 implicit_project_path,
                 memory_request_scope,
+                pre_cancelled,
             )
             .await;
         self.complete_tool_call(
@@ -1402,5 +1509,51 @@ impl McpServer {
             dispatch,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod git_read_control_tests {
+    use super::*;
+
+    #[test]
+    fn controlled_reads_receive_live_control_registration_and_thirty_second_deadline() {
+        assert!(tool_supports_live_cancellation("tracedecay_search"));
+        assert!(!tool_supports_live_cancellation("tracedecay_outline"));
+        for tool_name in [
+            "tracedecay_git_status",
+            "tracedecay_git_diff",
+            "tracedecay_git_history",
+            "tracedecay_git_blame",
+            "tracedecay_git_hunks",
+        ] {
+            assert!(is_mcp_git_read(tool_name));
+            assert!(tool_supports_live_cancellation(tool_name));
+            assert!(
+                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
+                    .is_none(),
+                "Git reads must remain MCP-only rather than entering the shared transport surface"
+            );
+            assert_eq!(
+                dispatch_deadline_horizon_micros(false, is_mcp_git_read(tool_name)),
+                Some(30_000_000)
+            );
+        }
+
+        let request_id = "request.git-read-controls".to_owned();
+        let signal = tracedecay_application::CancellationSignal::active(
+            "cancellation.request.git-read-controls",
+        )
+        .expect("signal");
+        let registry = std::sync::Mutex::new(HashMap::from([(request_id.clone(), signal.clone())]));
+        {
+            let _registration = ApplicationCancellationRegistration {
+                registry: &registry,
+                request_id: Some(request_id.clone()),
+            };
+            signal.cancel(tracedecay_domain::UtcMicros(1));
+            assert!(registry.lock().expect("registry").contains_key(&request_id));
+        }
+        assert!(!registry.lock().expect("registry").contains_key(&request_id));
     }
 }

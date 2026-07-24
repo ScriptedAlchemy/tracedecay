@@ -3,6 +3,75 @@
 
 use super::*;
 
+const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
+
+fn queued_cancellable_request_key(
+    pending_lines: &VecDeque<String>,
+    request_id: &Value,
+    connection_scope: &str,
+) -> Option<String> {
+    let Some(expected) = application_surface_request_id(request_id, connection_scope) else {
+        return None;
+    };
+    pending_lines
+        .iter()
+        .any(|line| {
+            let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
+                return false;
+            };
+            request.method == "tools/call"
+                && request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("name"))
+                    .and_then(Value::as_str)
+                    .is_some_and(super::requests::tool_supports_live_cancellation)
+                && request
+                    .id
+                    .as_ref()
+                    .and_then(|id| application_surface_request_id(id, connection_scope))
+                    .as_ref()
+                    == Some(&expected)
+        })
+        .then_some(expected)
+}
+
+#[cfg(test)]
+mod cancellable_queue_tests {
+    use super::*;
+
+    #[test]
+    fn queued_request_cancellation_is_type_preserving() {
+        let pending = VecDeque::from([
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "1",
+                "method": "tools/call",
+                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "tracedecay_git_status", "arguments": {}},
+            })
+            .to_string(),
+        ]);
+
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")
+                .is_some()
+        );
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!(1), "connection").is_none()
+        );
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
+        );
+    }
+}
+
 impl McpServer {
     async fn handle_cancellable_application_request(
         &self,
@@ -10,21 +79,42 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         transport: &mut impl crate::mcp::transport::McpTransport,
-        pending_line: &mut Option<String>,
+        pending_lines: &mut VecDeque<String>,
+        pending_cancellations: &mut HashSet<String>,
+        mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
-        let handling =
-            Box::pin(self.handle_request_for_connection(request, timings_enabled, connection));
+        let pre_cancelled = request
+            .id
+            .as_ref()
+            .and_then(|id| application_surface_request_id(id, &connection_scope))
+            .is_some_and(|key| pending_cancellations.remove(&key));
+        let handling = Box::pin(self.handle_request_for_connection(
+            request,
+            timings_enabled,
+            connection,
+            pre_cancelled,
+        ));
         tokio::pin!(handling);
         loop {
             tokio::select! {
                 response = &mut handling => return Ok((response, false)),
+                () = &mut shutdown_requested => {
+                    if let Some(id) = request.id.as_ref() {
+                        let _ = self.cancel_application_surface_request(id, &connection_scope);
+                    }
+                    return Ok((None, true));
+                }
                 incoming = transport.read_line() => {
-                    let Some(line) = incoming? else {
-                        if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(id, &connection_scope);
+                    let line = match incoming {
+                        Ok(Some(line)) => line,
+                        Ok(None) => {
+                            if let Some(id) = request.id.as_ref() {
+                                let _ = self.cancel_application_surface_request(id, &connection_scope);
+                            }
+                            return Ok((None, true));
                         }
-                        return Ok((None, true));
+                        Err(error) => return Err(error.into()),
                     };
                     let parsed = serde_json::from_str::<JsonRpcRequest>(line.trim());
                     if let Ok(notification) = &parsed
@@ -38,13 +128,27 @@ impl McpServer {
                             .as_ref()
                             .and_then(|params| params.get("requestId"))
                         {
-                            let _ =
-                                self.cancel_application_surface_request(id, &connection_scope);
+                            if !self.cancel_application_surface_request(id, &connection_scope)
+                                && pending_cancellations.len()
+                                    < MAX_PENDING_CANCELLABLE_REQUEST_LINES
+                                && let Some(key) = queued_cancellable_request_key(
+                                    pending_lines,
+                                    id,
+                                    &connection_scope,
+                                )
+                            {
+                                pending_cancellations.insert(key);
+                            }
                         }
                         continue;
                     }
-                    *pending_line = Some(line);
-                    return Ok((handling.await, false));
+                    if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
+                        if let Some(id) = request.id.as_ref() {
+                            let _ = self.cancel_application_surface_request(id, &connection_scope);
+                        }
+                        return Ok((None, true));
+                    }
+                    pending_lines.push_back(line);
                 }
             }
         }
@@ -146,10 +250,11 @@ impl McpServer {
         });
 
         let mut connection_route = self.new_connection_route_state();
-        let mut pending_line = None;
+        let mut pending_lines = VecDeque::new();
+        let mut pending_cancellations = HashSet::new();
 
         loop {
-            let line: String = if let Some(line) = pending_line.take() {
+            let line: String = if let Some(line) = pending_lines.pop_front() {
                 line
             } else {
                 #[cfg(unix)]
@@ -279,24 +384,47 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        let application_surface_call = request.method == "tools/call"
+                        let cancellable_tool_call = request.method == "tools/call"
                             && request
                                 .params
                                 .as_ref()
                                 .and_then(|params| params.get("name"))
                                 .and_then(Value::as_str)
-                                .and_then(
-                                    crate::application_surface::ApplicationSurfaceOperation::from_tool_name,
-                                )
-                                .is_some();
-                        if application_surface_call {
+                                .is_some_and(super::requests::tool_supports_live_cancellation);
+                        if cancellable_tool_call {
+                            let shutdown_requested = async {
+                                if listen_for_process_signals {
+                                    #[cfg(unix)]
+                                    {
+                                        if let Some(sigterm) = sigterm.as_mut() {
+                                            tokio::select! {
+                                                _ = tokio::signal::ctrl_c() => {}
+                                                _ = sigterm.recv() => {}
+                                            }
+                                        } else {
+                                            let _ = tokio::signal::ctrl_c().await;
+                                        }
+                                    }
+                                    #[cfg(not(unix))]
+                                    {
+                                        let _ = tokio::signal::ctrl_c().await;
+                                    }
+                                } else if let Some(lifecycle) = request_lifecycle {
+                                    lifecycle.wait_for_draining().await;
+                                } else {
+                                    std::future::pending::<()>().await;
+                                }
+                            };
+                            tokio::pin!(shutdown_requested);
                             let (response, closed) = self
                                 .handle_cancellable_application_request(
                                     &request,
                                     timings_override.unwrap_or_else(|| self.timings_enabled()),
                                     &mut connection_route,
                                     transport,
-                                    &mut pending_line,
+                                    &mut pending_lines,
+                                    &mut pending_cancellations,
+                                    shutdown_requested.as_mut(),
                                 )
                                 .await?;
                             peer_closed = closed;
@@ -306,6 +434,7 @@ impl McpServer {
                                 &request,
                                 timings_override.unwrap_or_else(|| self.timings_enabled()),
                                 &mut connection_route,
+                                false,
                             ))
                             .await
                         }
@@ -404,14 +533,18 @@ impl McpServer {
         }
 
         // Update global DB with final count and checkpoint it
-        if let Some(ref gdb) = self.global_db {
+        if let Some(ref gdb) = self.accounting_db {
+            gdb.upsert(cg.project_root(), tokens_saved).await;
+            gdb.checkpoint().await;
+        } else if let Some(ref gdb) = self.global_db {
             gdb.upsert(cg.project_root(), tokens_saved).await;
             gdb.checkpoint().await;
         }
 
         // Flush remaining delta to worldwide counter (what periodic flushes missed)
         let last_flushed = self.last_flushed_tokens.load(Ordering::Relaxed);
-        if self.global_db.is_some() && tokens_saved > last_flushed {
+        if (self.accounting_db.is_some() || self.global_db.is_some()) && tokens_saved > last_flushed
+        {
             let delta = tokens_saved - last_flushed;
             let mut config = crate::user_config::UserConfig::load();
             config.pending_upload += delta;
