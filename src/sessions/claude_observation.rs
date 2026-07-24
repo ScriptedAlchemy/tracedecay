@@ -561,7 +561,7 @@ async fn apply_scanned_segment(
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
     segment: ScannedSegment,
     stats: &mut ClaudeObservationIngestStats,
-) -> Result<(), ClaudeObservationIngestError> {
+) -> Result<bool, ClaudeObservationIngestError> {
     let resume_fingerprint = segment.resume_fingerprint();
     match segment {
         ScannedSegment::Skipped(skipped) => {
@@ -569,8 +569,10 @@ async fn apply_scanned_segment(
             let reason = match skipped.reason {
                 ClaudeSkippedFrameReason::Whitespace => NonDurableFrameReason::BlankFrame,
                 ClaudeSkippedFrameReason::OutOfScope => NonDurableFrameReason::OutOfScope,
-                ClaudeSkippedFrameReason::Malformed => NonDurableFrameReason::MalformedFrame,
-                ClaudeSkippedFrameReason::Oversized => NonDurableFrameReason::OversizedFrame,
+                ClaudeSkippedFrameReason::Malformed | ClaudeSkippedFrameReason::Oversized => {
+                    stats.deferred_sources = 1;
+                    return Ok(false);
+                }
             };
             advance_non_durable_covered_range(
                 admission,
@@ -644,7 +646,7 @@ async fn apply_scanned_segment(
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn apply_prepared_source(
@@ -662,14 +664,17 @@ async fn apply_prepared_source(
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled.into());
         }
-        apply_scanned_segment(
+        if !apply_scanned_segment(
             admission,
             &capture_context,
             &mut observation_cursor,
             segment,
             &mut stats,
         )
-        .await?;
+        .await?
+        {
+            break;
+        }
     }
     Ok(stats)
 }
@@ -1095,11 +1100,7 @@ mod tests {
         );
     }
 
-    async fn assert_invalid_frame_preserves_observation_state(
-        session_id: &str,
-        frame: &[u8],
-        non_durable_covered: bool,
-    ) {
+    async fn assert_invalid_frame_preserves_observation_state(session_id: &str, frame: &[u8]) {
         let fixture = Fixture::new(session_id).await;
         fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
         let source_adapter = fixture.source(session_id);
@@ -1117,32 +1118,19 @@ mod tests {
 
         assert_eq!(stats.observations_committed, 0);
         assert_eq!(stats.observation_duplicates, 0);
-        assert_eq!(stats.cursor_advances, u64::from(non_durable_covered));
+        assert_eq!(stats.cursor_advances, 0);
         assert_eq!(stats.projections_completed, 0);
-        assert_eq!(stats.deferred_sources, u64::from(!non_durable_covered));
+        assert_eq!(stats.deferred_sources, 1);
         assert_eq!(stats.transcript, TranscriptIngestStats::default());
         let after = ingest_state_counts(&fixture).await;
-        if non_durable_covered {
-            assert_eq!(after[2], 1, "covered non-durable source cursor");
-            assert_eq!(after[3], 1, "covered non-durable cursor advance");
-            assert_eq!(after.iter().sum::<i64>(), 2);
-            assert!(
-                store
-                    .get_source_cursor(&source, &ObservationScopeV1::Profile)
-                    .await
-                    .unwrap()
-                    .is_some()
-            );
-        } else {
-            assert_eq!(after, before);
-            assert!(
-                store
-                    .get_source_cursor(&source, &ObservationScopeV1::Profile)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-        }
+        assert_eq!(after, before);
+        assert!(
+            store
+                .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             store
                 .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
@@ -1157,11 +1145,7 @@ mod tests {
         );
     }
 
-    async fn assert_invalid_suffix_preserves_valid_prefix(
-        session_id: &str,
-        suffix: &[u8],
-        non_durable_covered: bool,
-    ) {
+    async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: &[u8]) {
         let fixture = Fixture::new(session_id).await;
         let marker = format!("valid prefix before {session_id}");
         let record = json!({
@@ -1186,7 +1170,7 @@ mod tests {
         assert_eq!(first.observations_committed, 1);
         assert_eq!(first.transcript.messages_upserted, 1);
         assert_eq!(first.projections_completed, 1);
-        assert_eq!(first.deferred_sources, u64::from(!non_durable_covered));
+        assert_eq!(first.deferred_sources, 1);
 
         let store = fixture
             .runtime
@@ -1197,14 +1181,7 @@ mod tests {
             .await
             .unwrap()
             .expect("valid prefix source cursor");
-        assert_eq!(
-            source_cursor.byte_offset(),
-            if non_durable_covered {
-                suffix_start + u64::try_from(suffix.len()).unwrap()
-            } else {
-                suffix_start
-            }
-        );
+        assert_eq!(source_cursor.byte_offset(), suffix_start);
         let identity = identify_claude_source(&fixture.transcript).unwrap();
         let cursor_path = identity.cursor_key.store_path();
         let transcript_cursor = fixture
@@ -1232,7 +1209,7 @@ mod tests {
             .ingest(&source_adapter, None, ObservationCancellation::default())
             .await
             .expect("invalid suffix retry must remain deferred");
-        assert_eq!(retry.deferred_sources, u64::from(!non_durable_covered));
+        assert_eq!(retry.deferred_sources, 1);
         assert_eq!(retry.transcript, TranscriptIngestStats::default());
         assert_eq!(ingest_state_counts(&fixture).await, committed);
     }
@@ -1887,23 +1864,17 @@ mod tests {
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
             "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
-        for (session_id, frame, non_durable_covered) in [
+        for (session_id, frame) in [
             (
                 "invalid-malformed",
                 br#"{"type":"user",malformed}
 "#
                 .as_slice(),
-                true,
             ),
-            ("invalid-partial", br#"{"type":"user""#.as_slice(), false),
-            ("invalid-oversized", oversized.as_bytes(), true),
+            ("invalid-partial", br#"{"type":"user""#.as_slice()),
+            ("invalid-oversized", oversized.as_bytes()),
         ] {
-            assert_invalid_frame_preserves_observation_state(
-                session_id,
-                frame,
-                non_durable_covered,
-            )
-            .await;
+            assert_invalid_frame_preserves_observation_state(session_id, frame).await;
         }
     }
 
@@ -1913,19 +1884,17 @@ mod tests {
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
             "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
-        for (session_id, suffix, non_durable_covered) in [
+        for (session_id, suffix) in [
             (
                 "prefix-malformed",
                 br#"{"type":"user",malformed}
 "#
                 .as_slice(),
-                true,
             ),
-            ("prefix-partial", br#"{"type":"user""#.as_slice(), false),
-            ("prefix-oversized", oversized.as_bytes(), true),
+            ("prefix-partial", br#"{"type":"user""#.as_slice()),
+            ("prefix-oversized", oversized.as_bytes()),
         ] {
-            assert_invalid_suffix_preserves_valid_prefix(session_id, suffix, non_durable_covered)
-                .await;
+            assert_invalid_suffix_preserves_valid_prefix(session_id, suffix).await;
         }
     }
 }
