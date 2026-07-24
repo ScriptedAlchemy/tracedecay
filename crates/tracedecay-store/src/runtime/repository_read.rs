@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CanonicalObservationIdV1, CodeGenerationId, ConfigurationRevisionId, DurableObservationV1,
     FactLineageEventV1, FileOccurrenceId, GenerationDiagnosticV1, GitIndexIdempotencyKey,
-    GitIndexPreviewId, GitIndexPreviewV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ProjectionGenerationId, RepositoryId, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SessionId, SessionProjectionGenerationV1, SessionSummaryIdV1,
-    SessionSummaryRecordV1,
+    GitIndexPreviewId, GitIndexPreviewV1, NativeAliasV2, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId, RepositoryId,
+    RetrievalAnchorId, RetrievalAnchorRecordV2, SessionId, SessionProjectionGenerationV1,
+    SessionSummaryIdV1, SessionSummaryRecordV1,
 };
 
 use crate::{
@@ -118,16 +118,19 @@ fn observation_read_matches_shard(
     shard: &StoreShardIdV1,
 ) -> bool {
     match operation {
-        ObservationReadOperationV1::SourceCursor { scope, .. } => match (scope, &shard.scope) {
-            (ObservationScopeV1::Profile, StoreShardScopeV1::ProfileSessions) => true,
-            (
-                ObservationScopeV1::Project { project_id },
-                StoreShardScopeV1::ProjectSessions {
-                    project_id: shard_project,
-                },
-            ) => project_id == shard_project,
-            _ => false,
-        },
+        ObservationReadOperationV1::SourceCursor { scope, .. }
+        | ObservationReadOperationV1::RetrievalAnchorByAlias { scope, .. } => {
+            match (scope, &shard.scope) {
+                (ObservationScopeV1::Profile, StoreShardScopeV1::ProfileSessions) => true,
+                (
+                    ObservationScopeV1::Project { project_id },
+                    StoreShardScopeV1::ProjectSessions {
+                        project_id: shard_project,
+                    },
+                ) => project_id == shard_project,
+                _ => false,
+            }
+        }
         ObservationReadOperationV1::Observation { .. }
         | ObservationReadOperationV1::Replay { .. }
         | ObservationReadOperationV1::NextQueuedProjection
@@ -350,6 +353,10 @@ pub enum ObservationReadOperationV1 {
     Observation {
         observation_id: CanonicalObservationIdV1,
     },
+    RetrievalAnchorByAlias {
+        scope: ObservationScopeV1,
+        alias: NativeAliasV2,
+    },
     Replay {
         after_sequence: u64,
         limit: u16,
@@ -397,6 +404,7 @@ pub struct ProjectionRebuildProgressV1 {
 pub enum ObservationReadResultV1 {
     SourceCursor(Option<ObservationSourceCursorV1>),
     Observation(Box<Option<StoredObservationRowV1>>),
+    RetrievalAnchorByAlias(Option<RetrievalAnchorId>),
     Replay(Vec<StoredObservationRowV1>),
     NextQueuedProjection(Option<CanonicalObservationIdV1>),
     ProjectionCheckpoint(u64),

@@ -252,6 +252,24 @@ impl ObservationExecutor {
                 }
                 Ok(ObservationReadResultV1::Observation(Box::new(value)))
             }
+            ObservationReadOperationV1::RetrievalAnchorByAlias { scope, alias } => {
+                let anchor_id = snapshot
+                    .query_row(
+                        "SELECT anchor_id FROM retrieval_anchor_aliases
+                         WHERE owner_json = ?1 AND alias_kind = ?2 AND locator_digest = ?3",
+                        params![
+                            encode(scope)?,
+                            encode(&alias.kind())?,
+                            encode(alias.locator_digest())?,
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .map(tracedecay_domain::RetrievalAnchorId::new)
+                    .transpose()
+                    .map_err(invalid)?;
+                Ok(ObservationReadResultV1::RetrievalAnchorByAlias(anchor_id))
+            }
             ObservationReadOperationV1::Replay {
                 after_sequence,
                 limit,
@@ -1311,6 +1329,42 @@ mod tests {
             error
                 .to_string()
                 .contains("source cursor advance identity collision")
+        );
+    }
+
+    #[test]
+    fn retrieval_anchor_alias_reads_are_owner_bound() {
+        let mut connection = connection();
+        let write = anchored_observation_write("fixture", "receipt.fixture");
+        let alias = write.retrieval_anchor().aliases()[0].clone();
+        execute(&mut connection, &write).unwrap();
+
+        let resolved = read(
+            &mut connection,
+            &ObservationReadOperationV1::RetrievalAnchorByAlias {
+                scope: write.observation().scope().clone(),
+                alias: alias.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            ObservationReadResultV1::RetrievalAnchorByAlias(Some(
+                write.retrieval_anchor_id().clone()
+            ))
+        );
+
+        let foreign = read(
+            &mut connection,
+            &ObservationReadOperationV1::RetrievalAnchorByAlias {
+                scope: ObservationScopeV1::Profile,
+                alias,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            foreign,
+            ObservationReadResultV1::RetrievalAnchorByAlias(None)
         );
     }
 
