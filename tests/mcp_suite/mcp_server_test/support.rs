@@ -34,6 +34,10 @@ pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
         .unwrap();
     cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
+    server
+        .install_project_open_source_edit_authority_for_test()
+        .await
+        .unwrap();
     (server, dir)
 }
 
@@ -234,6 +238,10 @@ pub(crate) async fn setup_savings_project() -> (Arc<McpServer>, TempDir) {
         .unwrap();
     cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
+    server
+        .install_project_open_source_edit_authority_for_test()
+        .await
+        .unwrap();
     (server, dir)
 }
 

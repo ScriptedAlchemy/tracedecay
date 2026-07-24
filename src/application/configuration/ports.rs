@@ -62,6 +62,8 @@ pub trait ConfigurationClock: Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentConfigurationMutationAuthorizationV1 {
+    pub grant_revision: u64,
+    pub grant_digest: ManifestDigest,
     pub scope_digest: ManifestDigest,
     pub policy_epoch: u64,
     pub policy_digest: AccessPolicyDigest,

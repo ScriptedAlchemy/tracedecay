@@ -30,10 +30,12 @@ pub use ci_runtime::{
     GitHubCiCheckSuiteRefV1, GitHubCiOfficialResponseDecoderV1, GitHubCiProviderRecordV1,
     GitHubCiPullRequestRefV1, GitHubCiWorkflowRunV1, MAX_CI_RETAINED_ANNOTATIONS_V1,
     MAX_CI_RETAINED_CHECKS_V1, MAX_CI_RETAINED_FAILURES_V1, ProductionCiArchiveHandleV1,
-    ProductionCiExactEvidenceHandleV1, ProductionCiProviderAuthoritiesV1,
-    ProductionCiProviderConfigV1, ProductionCiProviderOpenErrorV1, ProjectCiCodeAnchorStoreV1,
+    ProductionCiExactEvidenceHandleV1, ProductionCiFailureDiscoveryOutcomeV1,
+    ProductionCiProviderAuthoritiesV1, ProductionCiProviderConfigV1,
+    ProductionCiProviderOpenErrorV1, ProjectCiCodeAnchorStoreV1,
     ProjectCiRetainedObservationStoreV1, concrete_ci_failure_localization_owner_v1,
-    open_production_ci_provider_authorities_v1, unavailable_production_ci_provider_authorities_v1,
+    discover_production_ci_failure_request_v1, open_production_ci_provider_authorities_v1,
+    unavailable_production_ci_provider_authorities_v1,
 };
 pub use fixtures::{
     PR13_CHECK_ANNOTATIONS_FIXTURE_V1, PR13_CHECK_RUN_FIXTURE_V1, PR13_FIXTURE_ROOT_V1,
@@ -53,19 +55,21 @@ pub use github_runtime::{
     GitHubHttpReadConfigV1, GitHubOfficialResponseDecoderV1, GitHubProviderLifecycleV1,
     GitHubReadCheckpointAuthorityV1, GitHubReadCheckpointLoadOutcomeV1,
     GitHubReadNetworkMetadataV1, GitHubReadNetworkOutcomeV1, GitHubReadNetworkResponseV1,
-    GitHubReadNetworkStatusV1, GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1,
-    GitHubReadOnlyNetworkAuthorityV1, GitHubReadOnlyRuntimeTransportV1, GitHubReadPermissionV1,
-    GitHubReadResponseDecoderV1, GitHubReadResumeV1, GitHubRepositoryTargetV1,
-    GitHubRestReadRequestV1, GitHubReviewAnchorSeedV1, GitHubReviewAtomicRefreshStoreV1,
-    GitHubReviewCompleteGenerationV1, GitHubReviewProviderIdentityV1,
-    GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshReceiptV1,
-    GitHubReviewRefreshStateV1, GitHubReviewRefreshStoreCommitOutcomeV1,
-    GitHubReviewRefreshStoreReadOutcomeV1, GitHubReviewRuntimeOwnerBuildErrorV1,
-    GitHubReviewRuntimeOwnerConfigV1, GitHubReviewRuntimeOwnerV1,
-    MAX_GITHUB_READ_RESPONSE_BYTES_V1, ProjectGitHubAnchorAuthorityV1,
+    GitHubReadNetworkStatusV1, GitHubReadOnlyClientV1, GitHubReadOnlyCredentialAuthorityOutcomeV1,
+    GitHubReadOnlyCredentialAuthorityV1, GitHubReadOnlyCredentialSecretV1,
+    GitHubReadOnlyCredentialV1, GitHubReadOnlyNetworkAuthorityV1, GitHubReadOnlyRuntimeTransportV1,
+    GitHubReadPermissionV1, GitHubReadResponseDecoderV1, GitHubReadResumeV1,
+    GitHubRepositoryTargetV1, GitHubRestReadRequestV1, GitHubReviewAnchorSeedV1,
+    GitHubReviewAtomicRefreshStoreV1, GitHubReviewCompleteGenerationV1,
+    GitHubReviewProviderIdentityV1, GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1,
+    GitHubReviewRefreshReceiptV1, GitHubReviewRefreshStateV1,
+    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
+    GitHubReviewRuntimeOwnerBuildErrorV1, GitHubReviewRuntimeOwnerConfigV1,
+    GitHubReviewRuntimeOwnerV1, MAX_GITHUB_READ_RESPONSE_BYTES_V1, ProjectGitHubAnchorAuthorityV1,
     ProjectGitHubRegistrarAuthoritiesV1, ProjectGitHubReviewStoreV1,
     build_github_review_runtime_owner_v1, github_anchor_authorities_arc_v1,
-    github_anchor_authorities_v1,
+    github_anchor_authorities_v1, register_github_read_only_credential_authority_v1,
+    unregister_github_read_only_credential_authority_v1,
 };
 pub use host_delivery::{
     Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryDaemonStartupErrorV1,
@@ -77,7 +81,8 @@ pub use host_delivery::{
     new_pr13_advisory_hook_delivery_port, register_pr13_advisory_daemon_startup,
 };
 pub(crate) use host_delivery::{
-    claim_pr13_advisory_hook_notice, register_pr13_advisory_hook_notice_queue,
+    acknowledge_pr13_advisory_hook_notice, peek_pr13_advisory_hook_notice,
+    register_pr13_advisory_hook_notice_queue,
 };
 pub use production::{
     Pr13AdvisoryProductionAuthoritiesV1, Pr13AdvisoryProductionHookDeliveryPortV1,

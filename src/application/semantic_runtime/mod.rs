@@ -21,8 +21,14 @@ pub(crate) use accepted_profile_authority::{
 pub use config_backend::ConfigurationLinkedSemanticRuntimeBackendV1;
 pub use config_store::ProductionSemanticRetrievalConfigurationStoreV1;
 pub(crate) use configuration_operation::{
-    ProductionSemanticConfigurationOperationV1, SemanticProtectedActivationOperationV1,
+    ProductionSemanticConfigurationOperationV1, SemanticEvaluatedProfilePublicationV1,
+    SemanticEvaluationAuthorityPublicationV1, SemanticEvaluationPublicationSnapshotPortV1,
+    SemanticEvaluationPublicationSnapshotV1, SemanticProtectedActivationOperationV1,
     SemanticProtectedRollbackOperationV1,
+};
+pub use configuration_operation::{
+    SemanticEvaluationDiversityCandidateV1, SemanticEvaluationFusionCandidateV1,
+    SemanticEvaluationProfileCandidateV1, SemanticEvaluationRerankCandidateV1,
 };
 pub(crate) use coordinator::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,
@@ -56,10 +62,11 @@ pub use production::{
 #[cfg(all(test, feature = "semantic-fastembed"))]
 pub(crate) use production::current_query_factory;
 pub(crate) use production::{
-    ProductionSemanticRuntimeV1, SavedCodeGenerationScheduleHookV1,
-    production_saved_generation_schedule_hook, project_semantic_application_status,
-    project_semantic_production_runtime, project_semantic_source_generation,
-    register_project_semantic_runtime, unregister_project_semantic_runtime,
+    PreparedSemanticEvaluationGenerationV1, ProductionSemanticRuntimeV1,
+    SavedCodeGenerationScheduleHookV1, production_saved_generation_schedule_hook,
+    project_semantic_application_status, project_semantic_production_runtime,
+    project_semantic_source_generation, register_project_semantic_runtime,
+    unregister_project_semantic_runtime,
 };
 
 #[cfg(test)]

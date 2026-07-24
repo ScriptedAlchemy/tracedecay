@@ -11,9 +11,9 @@ use std::time::Instant;
 
 use thiserror::Error;
 use tracedecay_application::feedback::{
-    CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
-    FeedbackCompletedPublicationV1, FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest,
-    GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
+    CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, FeedbackCompletedPublicationV1,
+    FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, GitHubReviewReadRequestV1,
+    ProximityEvaluationRequestV1,
 };
 use tracedecay_application::{
     AdvisoryFindingContributionBatchV1, AdvisoryFindingContributorV1,
@@ -43,8 +43,9 @@ use crate::db::Database;
 
 use super::ci_runtime::{
     CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1, ConcreteCiFailureLocalizationOwnerV1,
+    ProductionCiFailureDiscoveryOutcomeV1,
 };
-use super::github_runtime::ConfiguredGitHubSourceAccessAuthorityV1;
+use super::github_runtime::GitHubSourceAccessAuthorityV1;
 use super::proximity_runtime::{
     ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1,
 };
@@ -61,6 +62,7 @@ pub struct Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC> {
     pub ci_source: CS,
     pub ci_exact_evidence: CE,
     pub proximity_evidence: PE,
+    pub github_source_access: Option<Arc<dyn GitHubSourceAccessAuthorityV1>>,
     /// Canonical Plan 20 configuration authority. The proximity owner pins the
     /// effective threshold from this source and has no local default.
     pub configuration: PC,
@@ -217,7 +219,7 @@ impl Pr13AdvisoryContributionsV1 {
 pub struct Pr13AdvisoryCycleRequestV1 {
     pub feedback: FeedbackCycleExecutionRequest,
     pub github: Option<GitHubReviewReadRequestV1>,
-    pub ci: Option<CiFailureLocalizationRequestV1>,
+    pub ci: ProductionCiFailureDiscoveryOutcomeV1,
     pub proximity: Option<ProximityEvaluationRequestV1>,
     pub validity: AdvisoryFindingValidityWindowV1,
 }
@@ -232,10 +234,7 @@ impl Pr13AdvisoryCycleRequestV1 {
                 .github
                 .as_ref()
                 .is_some_and(|request| request.validate().is_err() || request.scope != *scope)
-            || self
-                .ci
-                .as_ref()
-                .is_some_and(|request| request.validate().is_err() || request.scope != *scope)
+            || !self.ci.validate_for(scope)
             || self
                 .proximity
                 .as_ref()
@@ -327,15 +326,11 @@ where
         }
         let github = match github {
             Some(mut github) => {
-                let github_source_access = Arc::new(
-                    ConfiguredGitHubSourceAccessAuthorityV1::new(
-                        providers.configuration.clone(),
-                        resolved_scope.clone(),
-                        &github.target.owner,
-                        &github.target.repository,
-                    )
-                    .ok_or(Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?,
-                );
+                let github_source_access = providers
+                    .github_source_access
+                    .as_ref()
+                    .map(Arc::clone)
+                    .ok_or(Pr13AdvisoryRuntimeOpenErrorV1::GitHubRuntimeUnavailable)?;
                 github.database = database;
                 github.resolved_scope = resolved_scope;
                 github.feedback_scope = feedback_scope.clone();
@@ -406,7 +401,7 @@ where
         mark_unrequested_remote_providers(
             &mut contributions,
             request.github.is_some(),
-            request.ci.is_some(),
+            request.ci.is_configured(),
         );
 
         if !context_matches_scope(context, &self.feedback_scope) {
@@ -504,70 +499,68 @@ where
             }
         }
 
-        if let Some(provider_request) = request.ci.as_ref() {
-            let outcome =
-                await_provider(&mut control, self.ci.localize(context, provider_request)).await;
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(interruption) => {
-                    return Ok(self.finish_interruption(
-                        &request.feedback.input,
-                        interruption,
-                        contributions,
-                    ));
+        match &request.ci {
+            ProductionCiFailureDiscoveryOutcomeV1::Found(provider_request) => {
+                let outcome =
+                    await_provider(&mut control, self.ci.localize(context, provider_request)).await;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(interruption) => {
+                        return Ok(self.finish_interruption(
+                            &request.feedback.input,
+                            interruption,
+                            contributions,
+                        ));
+                    }
+                };
+                match outcome {
+                    CiFailureLocalizationPortOutcomeV1::Localized(localization) => {
+                        self.observe_ci(&request.feedback.input, &localization);
+                        contributions.capture(
+                            Pr13AdvisoryProviderV1::Ci,
+                            localization.advisory_findings(request.validity),
+                        );
+                    }
+                    CiFailureLocalizationPortOutcomeV1::Denied => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            Plan26FeedbackOutcomeV1::Denied,
+                            Plan26CoverageV1::Known,
+                        );
+                        contributions.set_state(
+                            Pr13AdvisoryProviderV1::Ci,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                    CiFailureLocalizationPortOutcomeV1::Unavailable => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            Plan26FeedbackOutcomeV1::Unavailable,
+                            Plan26CoverageV1::Unknown,
+                        );
+                        contributions.set_state(
+                            Pr13AdvisoryProviderV1::Ci,
+                            ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
                 }
-            };
-            match outcome {
-                CiFailureLocalizationPortOutcomeV1::Localized(localization) => {
-                    self.observe_ci(&request.feedback.input, &localization);
-                    contributions.capture(
-                        Pr13AdvisoryProviderV1::Ci,
-                        localization.advisory_findings(request.validity),
-                    );
-                }
-                CiFailureLocalizationPortOutcomeV1::Denied => {
-                    self.observations.observe_source_event(
-                        &request.feedback.input,
-                        Plan26FeedbackSourceEventV1::CiLocalization {
-                            outcome: Plan26FeedbackOutcomeV1::Denied,
-                            provider: Plan26CiProviderV1::GitHubActions,
-                            exact_evidence: false,
-                            coverage: Plan26CoverageV1::Known,
-                            localized_count: 0,
-                            candidate_count: 0,
-                            duration_micros: None,
-                        },
-                    );
-                    contributions.set_state(
-                        Pr13AdvisoryProviderV1::Ci,
-                        ProviderEvaluationStateV1::Unavailable,
-                    );
-                }
-                CiFailureLocalizationPortOutcomeV1::Unavailable => {
-                    self.observations.observe_source_event(
-                        &request.feedback.input,
-                        Plan26FeedbackSourceEventV1::CiLocalization {
-                            outcome: Plan26FeedbackOutcomeV1::Unavailable,
-                            provider: Plan26CiProviderV1::GitHubActions,
-                            exact_evidence: false,
-                            coverage: Plan26CoverageV1::Unknown,
-                            localized_count: 0,
-                            candidate_count: 0,
-                            duration_micros: None,
-                        },
-                    );
-                    contributions.set_state(
-                        Pr13AdvisoryProviderV1::Ci,
-                        ProviderEvaluationStateV1::Unavailable,
-                    );
-                }
+            }
+            discovery => {
+                let (state, outcome, coverage) = ci_discovery_terminal_state(discovery)
+                    .expect("non-found discovery is terminal");
+                self.observe_ci_terminal(&request.feedback.input, outcome, coverage);
+                contributions.set_state(Pr13AdvisoryProviderV1::Ci, state);
             }
         }
 
         if let Some(provider_request) = request.proximity.as_ref() {
             let outcome = await_provider(
                 &mut control,
-                self.proximity.evaluate(context, provider_request),
+                self.proximity.evaluate_for_configuration_digest(
+                    context,
+                    provider_request,
+                    &request.feedback.input.request.configuration_digest,
+                ),
             )
             .await;
             let outcome = match outcome {
@@ -780,6 +773,26 @@ where
                 coverage,
                 localized_count,
                 candidate_count: localized_count,
+                duration_micros: None,
+            },
+        );
+    }
+
+    fn observe_ci_terminal(
+        &self,
+        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+        outcome: Plan26FeedbackOutcomeV1,
+        coverage: Plan26CoverageV1,
+    ) {
+        self.observations.observe_source_event(
+            input,
+            Plan26FeedbackSourceEventV1::CiLocalization {
+                outcome,
+                provider: Plan26CiProviderV1::GitHubActions,
+                exact_evidence: false,
+                coverage,
+                localized_count: 0,
+                candidate_count: 0,
                 duration_micros: None,
             },
         );
@@ -1019,6 +1032,39 @@ fn mark_unrequested_remote_providers(
     }
 }
 
+fn ci_discovery_terminal_state(
+    discovery: &ProductionCiFailureDiscoveryOutcomeV1,
+) -> Option<(
+    ProviderEvaluationStateV1,
+    Plan26FeedbackOutcomeV1,
+    Plan26CoverageV1,
+)> {
+    match discovery {
+        ProductionCiFailureDiscoveryOutcomeV1::Found(_) => None,
+        ProductionCiFailureDiscoveryOutcomeV1::NotFound => Some((
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            Plan26FeedbackOutcomeV1::Completed,
+            Plan26CoverageV1::Known,
+        )),
+        ProductionCiFailureDiscoveryOutcomeV1::Ambiguous => Some((
+            ProviderEvaluationStateV1::Failed,
+            Plan26FeedbackOutcomeV1::Failed,
+            Plan26CoverageV1::Unknown,
+        )),
+        ProductionCiFailureDiscoveryOutcomeV1::Denied => Some((
+            ProviderEvaluationStateV1::Unavailable,
+            Plan26FeedbackOutcomeV1::Denied,
+            Plan26CoverageV1::Unknown,
+        )),
+        ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
+        | ProductionCiFailureDiscoveryOutcomeV1::Unavailable => Some((
+            ProviderEvaluationStateV1::Unavailable,
+            Plan26FeedbackOutcomeV1::Unavailable,
+            Plan26CoverageV1::Unknown,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1107,5 +1153,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn ci_discovery_degradation_never_collapses_to_clean() {
+        assert_eq!(
+            ci_discovery_terminal_state(&ProductionCiFailureDiscoveryOutcomeV1::NotFound),
+            Some((
+                ProviderEvaluationStateV1::SupportedCompletedComplete,
+                Plan26FeedbackOutcomeV1::Completed,
+                Plan26CoverageV1::Known,
+            ))
+        );
+        for (discovery, expected) in [
+            (
+                ProductionCiFailureDiscoveryOutcomeV1::Ambiguous,
+                ProviderEvaluationStateV1::Failed,
+            ),
+            (
+                ProductionCiFailureDiscoveryOutcomeV1::Denied,
+                ProviderEvaluationStateV1::Unavailable,
+            ),
+            (
+                ProductionCiFailureDiscoveryOutcomeV1::Unavailable,
+                ProviderEvaluationStateV1::Unavailable,
+            ),
+            (
+                ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
+                ProviderEvaluationStateV1::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                ci_discovery_terminal_state(&discovery).map(|state| state.0),
+                Some(expected)
+            );
+        }
     }
 }

@@ -11,6 +11,7 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::tracedecay::TraceDecay;
 
+use super::github_runtime::GitHubSourceAccessAuthorityV1;
 use super::proximity_runtime::production_proximity_evidence_authority_v1;
 use super::{
     CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
@@ -71,6 +72,7 @@ pub struct Pr13AdvisoryProductionOpenV1 {
     pub project_root: PathBuf,
     pub feedback_scope: FeedbackScopeV1,
     pub ci_config: Option<ProductionCiProviderConfigV1>,
+    pub github_source_access: Option<Arc<dyn GitHubSourceAccessAuthorityV1>>,
     pub ci_retained: Arc<dyn CiRetainedProviderObservationAuthorityV1>,
     pub ci_code_anchors: Arc<dyn CiCodeAnchorStoreV1>,
     pub hook_v2: Arc<Pr13AdvisoryHookNoticeSinkV1>,
@@ -99,6 +101,7 @@ pub fn open_pr13_advisory_production_authorities(
         project_root,
         feedback_scope,
         ci_config,
+        github_source_access,
         ci_retained,
         ci_code_anchors,
         hook_v2,
@@ -117,6 +120,13 @@ pub fn open_pr13_advisory_production_authorities(
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         project_runtime_db,
     );
+    if ci_config.as_ref().is_some_and(|config| {
+        github_source_access
+            .as_ref()
+            .is_none_or(|source_access| !Arc::ptr_eq(source_access, &config.source_access))
+    }) {
+        return Err(Pr13AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable);
+    }
     let ci = match ci_config {
         Some(config) => {
             open_production_ci_provider_authorities_v1(config, ci_retained, ci_code_anchors)
@@ -135,6 +145,7 @@ pub fn open_pr13_advisory_production_authorities(
             ci_source,
             ci_exact_evidence,
             proximity_evidence,
+            github_source_access,
             configuration,
         },
         hook_delivery_port,

@@ -127,6 +127,8 @@ where
                 return Err(ConfigurationError::MutationAuthorityRejected);
             }
             Ok(CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: current.grant_revision,
+                grant_digest: current.grant_digest,
                 scope_digest: current.scope_digest,
                 policy_epoch: current.policy_epoch,
                 policy_digest: current.policy_digest,
@@ -187,10 +189,11 @@ mod tests {
         let sink = ConfigurationMutationSinkV1::ConfigurationStore;
         let effect = ConfigurationMutationEffectV1::CommitConfigurationRevision;
         let revision = id::<ConfigurationRevisionId>("configuration.revision.fixture");
-        let snapshot = ConfigurationMutationGrantSnapshotV1 {
+        let mut snapshot = ConfigurationMutationGrantSnapshotV1 {
             grant_id: id("configuration.grant.fixture"),
             grant_revision: 1,
             grant_digest: digest('a'),
+            authorized_receipt_digest: digest('d'),
             actor_id: id::<ActorId>("actor.fixture"),
             scope_digest: digest('b'),
             expected_configuration_revision: revision.clone(),
@@ -220,6 +223,7 @@ mod tests {
             snapshot.expires_at,
         )
         .unwrap();
+        snapshot.authorized_receipt_digest = receipt.receipt_digest.clone();
         (snapshot, receipt)
     }
 
@@ -240,6 +244,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(current.scope_digest, snapshot.scope_digest);
+        assert_eq!(current.grant_revision, snapshot.grant_revision);
+        assert_eq!(current.grant_digest, snapshot.grant_digest);
         assert_eq!(current.policy_epoch, snapshot.policy_epoch);
         assert_eq!(current.policy_digest, snapshot.policy_digest);
     }

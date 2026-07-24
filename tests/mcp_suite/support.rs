@@ -10,6 +10,7 @@ use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
@@ -45,6 +46,17 @@ use tracedecay_store::{
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
+static NEXT_SOURCE_EDIT_TEST_KEY: AtomicU64 = AtomicU64::new(1);
+
+const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
+    "tracedecay_str_replace",
+    "tracedecay_multi_str_replace",
+    "tracedecay_insert_at",
+    "tracedecay_ast_grep_rewrite",
+    "tracedecay_replace_symbol",
+    "tracedecay_insert_at_symbol",
+    "tracedecay_move_symbol",
+];
 
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
@@ -187,6 +199,10 @@ pub(crate) async fn handle_tool_call(
         obj.entry("format".to_string())
             .or_insert_with(|| serde_json::json!("json"));
     }
+    #[cfg(feature = "test-transport")]
+    if SOURCE_EDIT_TOOL_NAMES.contains(&tool_name) {
+        return handle_project_open_source_edit_tool_call(cg, tool_name, args).await;
+    }
     // The project-session server path needs the test-transport feature (the
     // in-process MCP harness and the for-test server constructor live behind
     // it); without the feature these tools take the generic path below.
@@ -247,6 +263,90 @@ pub(crate) async fn handle_tool_call(
         return Ok(ToolResult::new(response["result"].clone(), Vec::new()));
     }
     tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
+}
+
+#[cfg(feature = "test-transport")]
+async fn handle_project_open_source_edit_tool_call(
+    cg: &TraceDecay,
+    tool_name: &str,
+    mut args: Value,
+) -> tracedecay::errors::Result<ToolResult> {
+    let graph = TraceDecay::open(cg.project_root()).await?;
+    let server = McpServer::new(graph, None).await;
+    server
+        .install_project_open_source_edit_authority_for_test()
+        .await?;
+
+    let dry_run = args.get("dry_run").and_then(Value::as_bool);
+    let apply = if tool_name == "tracedecay_move_symbol" {
+        dry_run == Some(false)
+    } else {
+        dry_run != Some(true)
+    };
+    if apply && (args.get("idempotency_key").is_none() || args.get("expected_state").is_none()) {
+        let mut preview_args = args.clone();
+        preview_args
+            .as_object_mut()
+            .expect("source edit arguments are an object")
+            .insert("dry_run".to_owned(), Value::Bool(true));
+        let preview =
+            call_project_open_source_edit_server(&server, tool_name, preview_args).await?;
+        let preview_value: Value =
+            serde_json::from_str(extract_text(&preview.value)).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("source edit preview returned invalid JSON: {error}"),
+                }
+            })?;
+        let expected_state = preview_value["expected_state"]
+            .as_str()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "source edit preview returned no expected state".to_owned(),
+            })?
+            .to_owned();
+        let args = args
+            .as_object_mut()
+            .expect("source edit arguments are an object");
+        args.entry("expected_state".to_owned())
+            .or_insert(Value::String(expected_state));
+        args.entry("idempotency_key".to_owned()).or_insert_with(|| {
+            Value::String(format!(
+                "mcp-test.source-edit.{}",
+                NEXT_SOURCE_EDIT_TEST_KEY.fetch_add(1, Ordering::Relaxed)
+            ))
+        });
+    }
+    call_project_open_source_edit_server(&server, tool_name, args).await
+}
+
+#[cfg(feature = "test-transport")]
+async fn call_project_open_source_edit_server(
+    server: &McpServer,
+    tool_name: &str,
+    arguments: Value,
+) -> tracedecay::errors::Result<ToolResult> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+        }
+    });
+    let mut transport = CaptureTransport::default();
+    server
+        .handle_and_write(&request.to_string(), &mut transport)
+        .await?;
+    let response: Value =
+        serde_json::from_str(transport.output.trim()).map_err(|error| TraceDecayError::Config {
+            message: format!("source edit MCP response was invalid JSON: {error}"),
+        })?;
+    if !response["error"].is_null() {
+        return Err(TraceDecayError::Config {
+            message: format!("source edit MCP call failed: {}", response["error"]),
+        });
+    }
+    Ok(ToolResult::new(response["result"].clone(), Vec::new()))
 }
 
 pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay) {

@@ -10,9 +10,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationReplayRequest, ObservationStore, ObservationStoreError,
-    ObservationStoreResult, ProjectionPersistOutcome, StoreShardScopeV1, StoredObservation,
-    build_scope_resolution_authorization_v1,
+    ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
+    ObservationStore, ObservationStoreError, ObservationStoreResult, ProjectionPersistOutcome,
+    StoreShardScopeV1, StoredObservation, build_scope_resolution_authorization_v1,
 };
 
 use crate::application::anchor_resolution::{
