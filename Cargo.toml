@@ -264,7 +264,7 @@ tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", versi
 # Disable the runtime's bundled amalgamation at the root edge so rusqlite and
 # transitional libsql do not both statically define sqlite3_* symbols.
 tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0", default-features = false }
-rusqlite = { version = "0.40.1", default-features = false }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }

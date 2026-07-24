@@ -18,7 +18,7 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::db::{Database, DatabaseAuthority};
+use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
@@ -28,19 +28,19 @@ static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
 pub async fn initialize_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
     let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
-    Database::initialize(path, &authority).await
+    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize).await
 }
 
 pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
-    Database::open(path, &authority).await
+    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await
 }
 
 pub async fn open_test_database_read_only(
     path: &Path,
 ) -> tracedecay::errors::Result<(Database, bool)> {
     let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
-    Database::open_read_only(path, &authority).await
+    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::ReadOnly).await
 }
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the

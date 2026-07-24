@@ -25,9 +25,46 @@ impl ProfileAuthorityPin {
 pub(crate) struct StoreRuntimeOpenRequest {
     pub(super) key: StoreRuntimeKey,
     pub(super) profile_authority: Option<ProfileAuthorityPin>,
+    pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
+    pub(super) mode: StoreRuntimeOpenMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StoreRuntimeOpenMode {
+    Existing,
+    Initialize,
 }
 
 impl StoreRuntimeOpenRequest {
+    pub(crate) fn new_authorized(
+        shard_id: StoreShardIdV1,
+        incarnation: StoreIncarnationV1,
+        profile_authority: Option<ProfileAuthorityPin>,
+        database_authority: crate::db::DatabaseAuthority,
+    ) -> Self {
+        Self {
+            key: StoreRuntimeKey::new(shard_id, incarnation),
+            profile_authority,
+            database_authority: Some(database_authority),
+            mode: StoreRuntimeOpenMode::Existing,
+        }
+    }
+
+    pub(crate) fn new_initialize_authorized(
+        shard_id: StoreShardIdV1,
+        incarnation: StoreIncarnationV1,
+        profile_authority: Option<ProfileAuthorityPin>,
+        database_authority: crate::db::DatabaseAuthority,
+    ) -> Self {
+        Self {
+            key: StoreRuntimeKey::new(shard_id, incarnation),
+            profile_authority,
+            database_authority: Some(database_authority),
+            mode: StoreRuntimeOpenMode::Initialize,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn new(
         shard_id: StoreShardIdV1,
         incarnation: StoreIncarnationV1,
@@ -36,6 +73,8 @@ impl StoreRuntimeOpenRequest {
         Self {
             key: StoreRuntimeKey::new(shard_id, incarnation),
             profile_authority,
+            database_authority: None,
+            mode: StoreRuntimeOpenMode::Existing,
         }
     }
 

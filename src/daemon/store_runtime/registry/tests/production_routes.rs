@@ -54,6 +54,8 @@ impl StoreRuntimeResolver for FileResolver {
     fn resolve<'a>(
         &'a self,
         key: &'a StoreRuntimeKey,
+        _mode: StoreRuntimeOpenMode,
+        _database_authority: Option<&'a crate::db::DatabaseAuthority>,
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
     {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);

@@ -102,6 +102,10 @@ impl PhysicalRuntimeAttachment for RusqliteGraphAttachment {
         }
     }
 
+    fn opened_file_identity(&self) -> Result<u64, String> {
+        Ok(self.inner.opened_file_identity())
+    }
+
     fn drain(&self) -> Result<(), String> {
         self.inner.drain()
     }
@@ -109,24 +113,36 @@ impl PhysicalRuntimeAttachment for RusqliteGraphAttachment {
     fn close_and_join(&self) -> Result<(), String> {
         self.inner.close_and_join()
     }
+
+    fn migration_sql_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
+        self.inner
+            .migration_sql_handle()
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt::Debug, path::PathBuf, sync::Arc};
+    use std::{fmt::Debug, fs, path::PathBuf, sync::Arc, time::Duration};
 
     use tracedecay_domain::{
-        BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, WorktreeId,
+        BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
     };
     use tracedecay_rusqlite_runtime::graph::fixtures::create_graph_fixture_database_v1;
     use tracedecay_store::{
-        CodeShardScopeV1, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
+        CodeShardScopeV1, ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1,
+        RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+        RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeRequestControlV1,
+        RuntimeRequestProbeV1, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
     };
 
     use super::*;
     use crate::daemon::store_runtime::registry::{
-        ProfileAuthorityPinResult, ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenRequest,
-        StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver,
+        ProfileAuthorityPinResult, ResolvedStoreLocator, StoreRuntimeHandle, StoreRuntimeKey,
+        StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+        StoreRuntimeRegistry, StoreRuntimeResolver,
     };
 
     fn id<T>(value: &str) -> T
@@ -160,10 +176,31 @@ mod tests {
         path: PathBuf,
     }
 
+    struct Probe {
+        cancellation: RuntimeCancellationIdentityV1,
+        deadline: RuntimeDeadlineV1,
+    }
+
+    impl RuntimeRequestProbeV1 for Probe {
+        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+            &self.cancellation
+        }
+
+        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+            &self.deadline
+        }
+
+        fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
+            None
+        }
+    }
+
     impl StoreRuntimeResolver for FixtureResolver {
         fn resolve<'a>(
             &'a self,
             key: &'a StoreRuntimeKey,
+            _mode: StoreRuntimeOpenMode,
+            _database_authority: Option<&'a crate::db::DatabaseAuthority>,
         ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
         {
             let verified = VerifiedStoreLocatorV1::new(
@@ -174,6 +211,94 @@ mod tests {
             let path = self.path.clone();
             Box::pin(async move { Ok(ResolvedStoreLocator::new(verified, path)) })
         }
+    }
+
+    async fn open_graph_runtime(path: PathBuf) -> (StoreRuntimeHandle, StoreRuntimeHandle) {
+        let authority =
+            crate::db::DatabaseAuthority::for_runtime(&path, "mount graph runtime fixture")
+                .unwrap();
+        let registry = StoreRuntimeRegistry::new(
+            Arc::new(FixtureResolver { path }),
+            Arc::new(
+                ExplicitPrecutoverRusqliteGraphPublisher::for_test_integration(
+                    AdmissionConfigV1::default(),
+                ),
+            ),
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let profile = match registry
+            .open(StoreRuntimeOpenRequest::new(
+                profile_shard(),
+                incarnation,
+                None,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            other @ StoreRuntimeOpenResult::Failed(_) => {
+                panic!("profile publication failed: {other:?}")
+            }
+        };
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let code = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            other @ StoreRuntimeOpenResult::Failed(_) => {
+                panic!("code publication failed: {other:?}")
+            }
+        };
+        (profile, code)
+    }
+
+    fn graph_quick_check_request(
+        binding: &tracedecay_store::StoreRuntimeBindingV1,
+    ) -> (RuntimeReadRequestV1, Probe) {
+        let cancellation = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new("cancel.graph-replacement").unwrap(),
+            generation: 1,
+        };
+        let deadline = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new("deadline.graph-replacement").unwrap(),
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: UtcMicros(1),
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        };
+        (
+            RuntimeReadRequestV1::new(
+                binding.clone(),
+                ConsistencyModeV1::LatestAvailable,
+                RuntimeReadOperationV1::GraphQuickCheck,
+                OperationPriorityV1::Health,
+                1,
+                control,
+            )
+            .unwrap(),
+            Probe {
+                cancellation,
+                deadline,
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    fn replace_graph_database(path: &std::path::Path) {
+        let replacement = path.with_extension("replacement.db");
+        let retired = path.with_extension("retired.db");
+        create_graph_fixture_database_v1(&replacement).unwrap();
+        fs::rename(path, &retired).unwrap();
+        fs::rename(replacement, path).unwrap();
     }
 
     #[tokio::test]
@@ -227,6 +352,216 @@ mod tests {
         assert!(ready.healthy);
         assert!(ready.writer_present);
         assert_eq!(ready.reader_handles, 3);
+        code.inner.attachment.drain().unwrap();
+        assert!(code.physical_snapshot().is_drained());
+        code.inner.attachment.close_and_join().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn verified_graph_runtime_round_trips_metadata_through_engine() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("graph.db");
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (profile, code) = open_graph_runtime(path).await;
+
+        let metadata = code
+            .graph_metadata()
+            .expect("verified graph attachment must expose metadata");
+        assert_eq!(metadata.get("stage_d1").await.unwrap(), None);
+        metadata.set("stage_d1", "cutover").await.unwrap();
+        assert_eq!(
+            metadata.get("stage_d1").await.unwrap().as_deref(),
+            Some("cutover")
+        );
+        drop(metadata);
+
+        code.inner.attachment.drain().unwrap();
+        code.inner.attachment.close_and_join().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn issued_graph_metadata_writer_rejects_daemon_scope_loss() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let path = profile_root.join("projects/project/graph.db");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let scope =
+            crate::db::enter_daemon_database_scope(&profile_root, 1, "graph-metadata-issued")
+                .unwrap();
+        let (profile, code) = open_graph_runtime(path).await;
+        let metadata = code
+            .graph_metadata()
+            .expect("verified graph attachment must expose metadata");
+        metadata.set("authority", "active").await.unwrap();
+
+        drop(scope);
+
+        let error = metadata
+            .set("authority", "revoked")
+            .await
+            .expect_err("issued graph metadata writer must reject revoked daemon scope");
+        assert!(format!("{error:?}").contains("active daemon"));
+        assert_eq!(
+            metadata.get("authority").await.unwrap().as_deref(),
+            Some("active")
+        );
+        drop(metadata);
+        code.inner.attachment.drain().unwrap();
+        code.inner.attachment.close_and_join().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_graph_metadata_write_rechecks_authority_on_actor_dequeue() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let path = profile_root.join("projects/project/graph.db");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let scope =
+            crate::db::enter_daemon_database_scope(&profile_root, 1, "graph-metadata-queued")
+                .unwrap();
+        let (profile, code) = open_graph_runtime(path).await;
+        let metadata = code
+            .graph_metadata()
+            .expect("verified graph attachment must expose metadata");
+        let holder_authority = code
+            .database_authority("hold graph metadata writer")
+            .unwrap();
+        let holder = code
+            .authorized_migration_sql_handle(holder_authority)
+            .unwrap()
+            .begin_immediate()
+            .unwrap();
+        let error = {
+            let queued_write = metadata.set("queued-authority", "must-not-persist");
+            tokio::pin!(queued_write);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut queued_write)
+                    .await
+                    .is_err(),
+                "metadata write unexpectedly bypassed the occupied writer actor"
+            );
+
+            drop(scope);
+            holder.rollback().unwrap();
+
+            queued_write
+                .await
+                .expect_err("queued graph metadata write must recheck revoked authority")
+        };
+        assert!(format!("{error:?}").contains("active daemon"));
+        assert_eq!(metadata.get("queued-authority").await.unwrap(), None);
+        drop(metadata);
+        code.inner.attachment.drain().unwrap();
+        code.inner.attachment.close_and_join().unwrap();
+        drop(profile);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_path_graph_replacement_denies_existing_read_and_write_capabilities() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("graph.db");
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (profile, code) = open_graph_runtime(path.clone()).await;
+        let metadata = code
+            .graph_metadata()
+            .expect("verified graph attachment must expose metadata");
+        metadata.set("before-replacement", "visible").await.unwrap();
+
+        replace_graph_database(&path);
+
+        let telemetry_error = match code.telemetry_read_handle() {
+            Ok(_) => panic!("telemetry must reject a replaced graph path"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{telemetry_error:?}").contains("identity changed"),
+            "unexpected telemetry error: {telemetry_error:?}"
+        );
+        let (request, probe) = graph_quick_check_request(code.binding());
+        let dispatch_error = code
+            .dispatch_read(request, &probe)
+            .expect_err("dispatch reads must reject a replaced graph path");
+        assert!(
+            format!("{dispatch_error:?}").contains("identity changed"),
+            "unexpected dispatch error: {dispatch_error:?}"
+        );
+        let metadata_read_error = metadata
+            .get("before-replacement")
+            .await
+            .expect_err("issued metadata readers must reject a replaced graph path");
+        assert!(
+            format!("{metadata_read_error:?}").contains("identity changed"),
+            "unexpected metadata read error: {metadata_read_error:?}"
+        );
+        let metadata_write_error = metadata
+            .set("after-replacement", "must-not-persist")
+            .await
+            .expect_err("issued metadata writers must reject a replaced graph path");
+        assert!(
+            format!("{metadata_write_error:?}").contains("identity changed"),
+            "unexpected metadata write error: {metadata_write_error:?}"
+        );
+        assert!(
+            code.graph_metadata().is_err(),
+            "replacement must prevent issuing another graph capability"
+        );
+
+        drop(metadata);
+        code.inner.attachment.drain().unwrap();
+        assert!(code.physical_snapshot().is_drained());
+        code.inner.attachment.close_and_join().unwrap();
+        drop(profile);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_graph_metadata_write_rechecks_same_path_replacement_on_actor_dequeue() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("graph.db");
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (profile, code) = open_graph_runtime(path.clone()).await;
+        let metadata = code
+            .graph_metadata()
+            .expect("verified graph attachment must expose metadata");
+        let holder = code
+            .authorized_migration_sql_handle(
+                code.database_authority("hold graph writer before replacement")
+                    .unwrap(),
+            )
+            .unwrap()
+            .begin_immediate()
+            .unwrap();
+        let queued_write = metadata.set("queued-replacement", "must-not-persist");
+        tokio::pin!(queued_write);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut queued_write)
+                .await
+                .is_err(),
+            "metadata write unexpectedly bypassed the occupied writer actor"
+        );
+
+        replace_graph_database(&path);
+        holder.rollback().unwrap();
+
+        let error = queued_write
+            .await
+            .expect_err("queued graph write must recheck the opened file identity");
+        assert!(
+            format!("{error:?}").contains("identity changed"),
+            "unexpected queued replacement error: {error:?}"
+        );
+        drop(metadata);
         code.inner.attachment.drain().unwrap();
         assert!(code.physical_snapshot().is_drained());
         code.inner.attachment.close_and_join().unwrap();

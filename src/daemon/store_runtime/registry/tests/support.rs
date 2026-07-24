@@ -32,6 +32,13 @@ pub(super) fn profile_shard() -> StoreShardIdV1 {
     )
 }
 
+pub(super) fn profile_sessions_shard() -> StoreShardIdV1 {
+    StoreShardIdV1::profile_sessions(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+    )
+}
+
 fn project_shard(project: &str) -> StoreShardIdV1 {
     StoreShardIdV1::project(
         id::<BrainId>("brain.registry"),
@@ -49,6 +56,8 @@ impl StoreRuntimeResolver for TestResolver {
     fn resolve<'a>(
         &'a self,
         key: &'a StoreRuntimeKey,
+        _mode: StoreRuntimeOpenMode,
+        _database_authority: Option<&'a crate::db::DatabaseAuthority>,
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
     {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -159,6 +168,10 @@ pub(super) async fn profile_pin(registry: &StoreRuntimeRegistry) -> ProfileAutho
 
 pub(super) fn project_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
     StoreRuntimeOpenRequest::new(project_shard(project), incarnation(), Some(pin.clone()))
+}
+
+pub(super) fn profile_sessions_request(pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(profile_sessions_shard(), incarnation(), Some(pin.clone()))
 }
 
 pub(super) async fn wait_for_calls(calls: &AtomicUsize, expected: usize) {

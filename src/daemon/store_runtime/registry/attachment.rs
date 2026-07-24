@@ -2,8 +2,10 @@
 
 use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracedecay_store::{
     RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
@@ -38,6 +40,13 @@ impl PhysicalRuntimeSnapshot {
 pub(crate) trait PhysicalRuntimeAttachment: Send + Sync {
     fn snapshot(&self) -> PhysicalRuntimeSnapshot;
 
+    /// Physical identity captured from a descriptor held across SQLite worker
+    /// startup. Implementations must not derive this from a later pathname
+    /// stat.
+    fn opened_file_identity(&self) -> Result<u64, String> {
+        Err("physical runtime has no opened SQLite file identity".to_owned())
+    }
+
     /// Stops admission and drains writer/read work. Returning success promises
     /// that a following snapshot has no writer, readers, or queued work.
     fn drain(&self) -> Result<(), String>;
@@ -46,10 +55,95 @@ pub(crate) trait PhysicalRuntimeAttachment: Send + Sync {
     /// by the registry after a successful drain has been verified.
     fn close_and_join(&self) -> Result<(), String>;
 
+    /// Transitional S11 SQL facade bound to this already-verified attachment.
+    ///
+    /// Implementations must return a handle over their owned writer/readers;
+    /// they must never reopen the locator path.
+    fn migration_sql_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
+        Err("physical runtime has no migration SQL channel".to_owned())
+    }
+
+    /// Reads the retained attachment's bounded reserved-health telemetry.
+    ///
+    /// Implementations must use their already-open reader pool. Reopening the
+    /// locator path or accepting caller-provided SQL is forbidden.
+    fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
+        let _ = reader_wait;
+        Err("physical runtime has no store-size telemetry port".to_owned())
+    }
+
+    /// Runs one typed, page-bounded incremental compaction on the retained
+    /// writer. The authority is sampled by the writer at admission, dequeue,
+    /// and before commit; no SQL or path crosses this port.
+    fn run_bounded_incremental_compaction<'a>(
+        &'a self,
+        max_pages: u32,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StoreRuntimeRegistryFailure>> + Send + 'a>> {
+        let _ = (max_pages, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "run bounded incremental compaction",
+                message: "physical runtime has no typed compaction port".to_owned(),
+            })
+        })
+    }
+
+    fn run_checkpoint<'a>(
+        &'a self,
+        request: tracedecay_rusqlite_runtime::CheckpointRequest,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_rusqlite_runtime::CheckpointOutcome,
+                        StoreRuntimeRegistryFailure,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = (request, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "run checkpoint",
+                message: "physical runtime has no typed checkpoint port".to_owned(),
+            })
+        })
+    }
+
+    fn snapshot_to<'a>(
+        &'a self,
+        destination: PathBuf,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_rusqlite_runtime::OnlineBackupReceipt,
+                        StoreRuntimeRegistryFailure,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = (destination, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "snapshot database",
+                message: "physical runtime has no typed online-backup port".to_owned(),
+            })
+        })
+    }
+
     fn dispatch_submit<'a>(
         &'a self,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
@@ -57,7 +151,7 @@ pub(crate) trait PhysicalRuntimeAttachment: Send + Sync {
                 + 'a,
         >,
     > {
-        let _ = (request, probe);
+        let _ = (request, probe, authority);
         Box::pin(async {
             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "dispatch submit",
@@ -92,6 +186,10 @@ impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
         }
     }
 
+    fn opened_file_identity(&self) -> Result<u64, String> {
+        Ok(1)
+    }
+
     fn drain(&self) -> Result<(), String> {
         Ok(())
     }
@@ -105,6 +203,7 @@ impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
 pub(crate) struct PublishedShardRuntime {
     runtime: Arc<crate::daemon::store_runtime::shard::ShardRuntime>,
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
+    schema_migrated: bool,
 }
 
 impl PublishedShardRuntime {
@@ -115,11 +214,32 @@ impl PublishedShardRuntime {
         Self {
             runtime,
             attachment,
+            schema_migrated: false,
+        }
+    }
+
+    pub(crate) fn new_with_schema_migration(
+        runtime: Arc<crate::daemon::store_runtime::shard::ShardRuntime>,
+        attachment: Arc<dyn PhysicalRuntimeAttachment>,
+        schema_migrated: bool,
+    ) -> Self {
+        Self {
+            runtime,
+            attachment,
+            schema_migrated,
         }
     }
 
     pub(crate) fn logical(&self) -> &Arc<crate::daemon::store_runtime::shard::ShardRuntime> {
         &self.runtime
+    }
+
+    pub(crate) fn opened_file_identity(&self) -> Result<u64, String> {
+        self.attachment.opened_file_identity()
+    }
+
+    pub(crate) const fn schema_migrated(&self) -> bool {
+        self.schema_migrated
     }
 
     pub(super) fn into_parts(

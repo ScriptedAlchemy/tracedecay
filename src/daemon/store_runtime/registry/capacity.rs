@@ -86,7 +86,11 @@ impl StoreRuntimeRegistry {
         &self,
         state: &mut RegistryState,
     ) -> Result<CapacityReservation, StoreRuntimeRegistryFailure> {
-        let occupied = state.entries.keys().filter(|key| !key.is_profile()).count();
+        let occupied = state
+            .entries
+            .keys()
+            .filter(|key| !key.is_project_code_capacity_exempt())
+            .count();
         if occupied < self.inner.config.project_budget() {
             return Ok(CapacityReservation::Available);
         }
@@ -94,7 +98,7 @@ impl StoreRuntimeRegistry {
             let RegistryEntry::Ready(ready) = entry else {
                 return None;
             };
-            (!key.is_profile()
+            (!key.is_project_code_capacity_exempt()
                 && ready.handle.is_exclusively_held_by_registry()
                 && Arc::strong_count(ready.handle.runtime()) == 1
                 && ready

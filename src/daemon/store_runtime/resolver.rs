@@ -19,6 +19,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use sha2::{Digest, Sha256};
 use tracedecay_store::{
@@ -27,8 +28,8 @@ use tracedecay_store::{
 };
 
 use super::registry::{
-    ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
-    StoreRuntimeResolver,
+    ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
+    StoreRuntimeRegistryFuture, StoreRuntimeResolver,
 };
 use crate::storage;
 
@@ -54,6 +55,16 @@ impl LocalProfileStoreAuthorityV1 {
             profile_id,
             profile_root,
         }
+    }
+
+    pub(crate) fn from_profile_identity(
+        identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    ) -> Self {
+        Self::new(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            identity.profile_root().to_path_buf(),
+        )
     }
 
     pub(crate) fn brain_id(&self) -> &BrainId {
@@ -99,6 +110,36 @@ impl LocalProjectEnrollmentAuthorityV1 {
     }
 }
 
+/// Exact daemon authority for one already-created code-shard database.
+///
+/// The typed shard selects this record. `database_path` is locator evidence
+/// only and can never select or manufacture a project, repository, worktree,
+/// or snapshot identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalCodeStoreAuthorityV1 {
+    shard_id: StoreShardIdV1,
+    database_path: PathBuf,
+}
+
+impl LocalCodeStoreAuthorityV1 {
+    pub(crate) fn new(
+        shard_id: StoreShardIdV1,
+        database_path: PathBuf,
+    ) -> Result<Self, LocalStoreRuntimeResolverConfigurationErrorV1> {
+        if !matches!(&shard_id.scope, StoreShardScopeV1::Code { .. }) {
+            return Err(
+                LocalStoreRuntimeResolverConfigurationErrorV1::CodeAuthorityIsNotCodeShard {
+                    shard_id,
+                },
+            );
+        }
+        Ok(Self {
+            shard_id,
+            database_path,
+        })
+    }
+}
+
 /// In-memory configuration failures for a local resolver.
 ///
 /// This is deliberately separate from resolution unavailability: a duplicate
@@ -107,6 +148,8 @@ impl LocalProjectEnrollmentAuthorityV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LocalStoreRuntimeResolverConfigurationErrorV1 {
     DuplicateProjectAuthority { project_id: ProjectId },
+    DuplicateCodeAuthority { shard_id: StoreShardIdV1 },
+    CodeAuthorityIsNotCodeShard { shard_id: StoreShardIdV1 },
 }
 
 /// Infrastructure-only resolver for the local profile-sharded layout.
@@ -119,14 +162,16 @@ pub(crate) enum LocalStoreRuntimeResolverConfigurationErrorV1 {
 #[derive(Clone, Debug)]
 pub(crate) struct LocalStoreRuntimeResolverV1 {
     profile_authority: LocalProfileStoreAuthorityV1,
-    project_authorities: BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>,
+    project_authorities: Arc<RwLock<BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>>>,
+    code_authorities: Arc<RwLock<BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>>>,
 }
 
 impl LocalStoreRuntimeResolverV1 {
     pub(crate) fn new(profile_authority: LocalProfileStoreAuthorityV1) -> Self {
         Self {
             profile_authority,
-            project_authorities: BTreeMap::new(),
+            project_authorities: Arc::new(RwLock::new(BTreeMap::new())),
+            code_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -136,22 +181,87 @@ impl LocalStoreRuntimeResolverV1 {
     /// [`LocalProjectEnrollmentAuthorityV1`], but two separately configured
     /// authorities for the same typed project are refused rather than merged.
     pub(crate) fn with_project_authority(
-        mut self,
+        self,
         authority: LocalProjectEnrollmentAuthorityV1,
     ) -> Result<Self, LocalStoreRuntimeResolverConfigurationErrorV1> {
+        self.register_project_authority(authority)?;
+        Ok(self)
+    }
+
+    pub(crate) fn register_project_authority(
+        &self,
+        authority: LocalProjectEnrollmentAuthorityV1,
+    ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
         let project_id = authority.project_id.clone();
-        if self
-            .project_authorities
-            .insert(project_id.clone(), authority)
-            .is_some()
+        let mut project_authorities = self.project_authorities_write();
+        if project_authorities
+            .get(&project_id)
+            .is_some_and(|existing| existing == &authority)
         {
+            return Ok(());
+        }
+        if project_authorities.contains_key(&project_id) {
             return Err(
                 LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateProjectAuthority {
                     project_id,
                 },
             );
         }
-        Ok(self)
+        project_authorities.insert(project_id, authority);
+        Ok(())
+    }
+
+    pub(crate) fn register_code_authority(
+        &self,
+        authority: LocalCodeStoreAuthorityV1,
+    ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
+        let shard_id = authority.shard_id.clone();
+        let mut code_authorities = self.code_authorities_write();
+        if code_authorities
+            .get(&shard_id)
+            .is_some_and(|existing| existing == &authority)
+        {
+            return Ok(());
+        }
+        if code_authorities.contains_key(&shard_id) {
+            return Err(
+                LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateCodeAuthority { shard_id },
+            );
+        }
+        code_authorities.insert(shard_id, authority);
+        Ok(())
+    }
+
+    fn project_authorities_read(
+        &self,
+    ) -> RwLockReadGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
+        self.project_authorities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn project_authorities_write(
+        &self,
+    ) -> RwLockWriteGuard<'_, BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>> {
+        self.project_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn code_authorities_read(
+        &self,
+    ) -> RwLockReadGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
+        self.code_authorities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn code_authorities_write(
+        &self,
+    ) -> RwLockWriteGuard<'_, BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>> {
+        self.code_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Resolves a canonical key without opening or reading its database.
@@ -213,6 +323,34 @@ impl LocalStoreRuntimeResolverV1 {
                     filesystem_safety,
                 )
             }
+            StoreShardScopeV1::ProfileMemory => {
+                let locator_path = canonical_or_prospective_regular_file(
+                    &canonical_profile_root.join(crate::memory::user::USER_MEMORY_DB_FILENAME),
+                    &canonical_profile_root,
+                )?;
+                verified_locator(
+                    key,
+                    LocalStoreLocatorKindV1::ProfileMemory,
+                    canonical_profile_root.clone(),
+                    canonical_profile_root,
+                    locator_path,
+                    filesystem_safety,
+                )
+            }
+            StoreShardScopeV1::ProfileSessions => {
+                let locator_path = canonical_or_prospective_regular_file(
+                    &canonical_profile_root.join(crate::sessions::USER_SESSIONS_DB_FILENAME),
+                    &canonical_profile_root,
+                )?;
+                verified_locator(
+                    key,
+                    LocalStoreLocatorKindV1::ProfileSessions,
+                    canonical_profile_root.clone(),
+                    canonical_profile_root,
+                    locator_path,
+                    filesystem_safety,
+                )
+            }
             StoreShardScopeV1::Project { project_id } => self.resolve_project_locator(
                 key,
                 project_id,
@@ -228,9 +366,43 @@ impl LocalStoreRuntimeResolverV1 {
                 filesystem_safety,
             ),
             StoreShardScopeV1::Code { .. } => {
-                Err(LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope)
+                self.resolve_code_locator(key, &canonical_profile_root, filesystem_safety)
             }
         }
+    }
+
+    fn resolve_code_locator(
+        &self,
+        key: &StoreRuntimeKey,
+        canonical_profile_root: &Path,
+        filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+    ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
+        let authority = self
+            .code_authorities_read()
+            .get(key.shard_id())
+            .cloned()
+            .ok_or(LocalStoreLocatorUnavailableReasonV1::MissingCodeStoreAuthority)?;
+        let canonical_path = canonical_or_prospective_regular_file(
+            &authority.database_path,
+            canonical_profile_root,
+        )?;
+        let metadata = fs::symlink_metadata(&canonical_path)
+            .map_err(|_| LocalStoreLocatorUnavailableReasonV1::CodeDatabaseUnavailable)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+        }
+        let canonical_store_root = canonical_path
+            .parent()
+            .ok_or(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)?
+            .to_path_buf();
+        verified_locator(
+            key,
+            LocalStoreLocatorKindV1::Code,
+            canonical_profile_root.to_path_buf(),
+            canonical_store_root,
+            canonical_path,
+            filesystem_safety,
+        )
     }
 
     fn resolve_project_locator(
@@ -242,8 +414,9 @@ impl LocalStoreRuntimeResolverV1 {
         filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
     ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
         let authority = self
-            .project_authorities
+            .project_authorities_read()
             .get(project_id)
+            .cloned()
             .ok_or(LocalStoreLocatorUnavailableReasonV1::MissingProjectEnrollmentAuthority)?;
         if authority.enrollment_roots().is_empty() {
             return Err(LocalStoreLocatorUnavailableReasonV1::MissingProjectEnrollmentAuthority);
@@ -311,7 +484,10 @@ impl LocalStoreRuntimeResolverV1 {
         let locator_path = match kind {
             LocalStoreLocatorKindV1::Project => layout.graph_db_path,
             LocalStoreLocatorKindV1::ProjectSessions => layout.sessions_db_path,
-            LocalStoreLocatorKindV1::ProfileAuthority => {
+            LocalStoreLocatorKindV1::ProfileAuthority
+            | LocalStoreLocatorKindV1::ProfileMemory
+            | LocalStoreLocatorKindV1::ProfileSessions
+            | LocalStoreLocatorKindV1::Code => {
                 return Err(LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope);
             }
         };
@@ -332,16 +508,73 @@ impl StoreRuntimeResolver for LocalStoreRuntimeResolverV1 {
     fn resolve<'a>(
         &'a self,
         key: &'a StoreRuntimeKey,
+        mode: StoreRuntimeOpenMode,
+        database_authority: Option<&'a crate::db::DatabaseAuthority>,
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
     {
         Box::pin(async move {
-            match self.resolve_key(key) {
-                LocalStoreLocatorResolutionV1::Resolved(locator) => {
-                    Ok(locator.into_registry_locator())
-                }
+            let locator = match self.resolve_key(key) {
+                LocalStoreLocatorResolutionV1::Resolved(locator) => locator.into_registry_locator(),
                 LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-                    Err(unavailable.into_registry_failure())
+                    return Err(unavailable.into_registry_failure());
                 }
+            };
+            if let Some(authority) = database_authority {
+                authority
+                    .require_active_write_scope("resolve registered SQLite runtime")
+                    .map_err(|error| StoreRuntimeRegistryFailure::ResolverFailed {
+                        message: error.to_string(),
+                    })?;
+                if authority.canonical_database_path() != locator.path() {
+                    return Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                        message: format!(
+                            "resolved locator {} does not match originating database authority {}",
+                            locator.path().display(),
+                            authority.canonical_database_path().display()
+                        ),
+                    });
+                }
+            } else if mode == StoreRuntimeOpenMode::Initialize {
+                return Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "initialization requires originating database authority".to_owned(),
+                });
+            }
+            match fs::symlink_metadata(locator.path()) {
+                Ok(metadata)
+                    if !metadata.file_type().is_symlink()
+                        && metadata.file_type().is_file()
+                        && fs::canonicalize(locator.path()).ok().as_deref()
+                            == Some(locator.path()) =>
+                {
+                    if mode == StoreRuntimeOpenMode::Initialize {
+                        Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                            message: "initialization requires a prospective database locator"
+                                .to_owned(),
+                        })
+                    } else {
+                        Ok(locator)
+                    }
+                }
+                Ok(_) => Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "resolved database locator is not a canonical regular file".to_owned(),
+                }),
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        && mode == StoreRuntimeOpenMode::Initialize =>
+                {
+                    Ok(ResolvedStoreLocator::prospective(
+                        locator.verified().clone(),
+                        locator.path().to_path_buf(),
+                    ))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                        message: "resolved database does not exist".to_owned(),
+                    })
+                }
+                Err(error) => Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: format!("inspect resolved database locator: {error}"),
+                }),
             }
         })
     }
@@ -351,8 +584,11 @@ impl StoreRuntimeResolver for LocalStoreRuntimeResolverV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LocalStoreLocatorKindV1 {
     ProfileAuthority,
+    ProfileMemory,
+    ProfileSessions,
     Project,
     ProjectSessions,
+    Code,
 }
 
 /// Locality facts captured while resolving a physical locator.
@@ -428,6 +664,8 @@ pub(crate) enum LocalStoreLocatorUnavailableReasonV1 {
     ProfileAuthorityMismatch,
     UnsupportedShardScope,
     MissingProjectEnrollmentAuthority,
+    MissingCodeStoreAuthority,
+    CodeDatabaseUnavailable,
     ProjectEnrollmentRootUnavailable,
     MissingEnrollment,
     InvalidEnrollment,
@@ -456,6 +694,12 @@ impl fmt::Display for LocalStoreLocatorUnavailableReasonV1 {
             Self::UnsupportedShardScope => formatter.write_str("unsupported shard scope"),
             Self::MissingProjectEnrollmentAuthority => {
                 formatter.write_str("missing project enrollment authority")
+            }
+            Self::MissingCodeStoreAuthority => {
+                formatter.write_str("missing exact code-store authority")
+            }
+            Self::CodeDatabaseUnavailable => {
+                formatter.write_str("authorized code database is unavailable")
             }
             Self::ProjectEnrollmentRootUnavailable => {
                 formatter.write_str("project enrollment root is unavailable")
@@ -956,6 +1200,31 @@ mod tests {
     }
 
     #[test]
+    fn shared_resolver_accepts_a_typed_project_authority_after_construction() {
+        let fixture = Fixture::new();
+        let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());
+        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+
+        assert!(matches!(
+            resolve_as_local(&resolver, &key),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::MissingProjectEnrollmentAuthority,
+                ..
+            })
+        ));
+
+        resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                fixture.project_id.clone(),
+                [fixture.first_alias.clone()],
+            ))
+            .expect("register typed project authority");
+        let locator = resolved(resolve_as_local(&resolver, &key));
+
+        assert_eq!(locator.locator().verified().shard_id, fixture.shard());
+    }
+
+    #[test]
     fn exact_profile_and_session_layout_mappings_remain_pre_open() {
         let fixture = Fixture::new();
         let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
@@ -974,6 +1243,44 @@ mod tests {
         assert_eq!(
             profile.metadata().kind,
             LocalStoreLocatorKindV1::ProfileAuthority
+        );
+
+        let profile_memory_key = StoreRuntimeKey::new(
+            StoreShardIdV1::profile_memory(
+                id::<BrainId>("brain.local-resolver"),
+                id::<UserProfileId>("profile.local-resolver"),
+            ),
+            incarnation(),
+        );
+        let profile_memory = resolved(resolve_as_local(&resolver, &profile_memory_key));
+        assert_eq!(
+            profile_memory.locator().path(),
+            fixture
+                .profile_root
+                .join(crate::memory::user::USER_MEMORY_DB_FILENAME)
+        );
+        assert_eq!(
+            profile_memory.metadata().kind,
+            LocalStoreLocatorKindV1::ProfileMemory
+        );
+
+        let profile_sessions_key = StoreRuntimeKey::new(
+            StoreShardIdV1::profile_sessions(
+                id::<BrainId>("brain.local-resolver"),
+                id::<UserProfileId>("profile.local-resolver"),
+            ),
+            incarnation(),
+        );
+        let profile_sessions = resolved(resolve_as_local(&resolver, &profile_sessions_key));
+        assert_eq!(
+            profile_sessions.locator().path(),
+            fixture
+                .profile_root
+                .join(crate::sessions::USER_SESSIONS_DB_FILENAME)
+        );
+        assert_eq!(
+            profile_sessions.metadata().kind,
+            LocalStoreLocatorKindV1::ProfileSessions
         );
 
         let sessions_key = StoreRuntimeKey::new(
@@ -998,7 +1305,10 @@ mod tests {
             LocalStoreLocatorKindV1::ProjectSessions
         );
         assert!(
-            !profile.locator().path().exists() && !sessions.locator().path().exists(),
+            !profile.locator().path().exists()
+                && !profile_memory.locator().path().exists()
+                && !profile_sessions.locator().path().exists()
+                && !sessions.locator().path().exists(),
             "resolution must not create or read live database files"
         );
     }
@@ -1181,9 +1491,208 @@ mod tests {
         assert!(matches!(
             resolve_as_local(&resolver, &StoreRuntimeKey::new(code_shard, incarnation())),
             LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
-                reason: LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope,
+                reason: LocalStoreLocatorUnavailableReasonV1::MissingCodeStoreAuthority,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn exact_code_authority_resolves_only_its_typed_code_shard() {
+        let fixture = Fixture::new();
+        let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());
+        let graph_root = fixture.profile_root.join("code-fixture");
+        fs::create_dir_all(&graph_root).expect("graph root");
+        let graph_path = graph_root.join("graph.db");
+        fs::write(&graph_path, b"fixture").expect("graph fixture");
+        let code_shard = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            fixture.project_id.clone(),
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Worktree {
+                worktree_id: id("worktree.local-resolver"),
+            },
+        );
+        resolver
+            .register_code_authority(
+                LocalCodeStoreAuthorityV1::new(code_shard.clone(), graph_path.clone())
+                    .expect("typed code authority"),
+            )
+            .expect("register exact code authority");
+
+        let locator = resolved(resolve_as_local(
+            &resolver,
+            &StoreRuntimeKey::new(code_shard.clone(), incarnation()),
+        ));
+        assert_eq!(locator.locator().verified().shard_id, code_shard);
+        assert_eq!(
+            locator.locator().path(),
+            graph_path.canonicalize().expect("canonical graph path")
+        );
+        assert_eq!(locator.metadata().kind, LocalStoreLocatorKindV1::Code);
+
+        let other_worktree = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            fixture.project_id.clone(),
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Worktree {
+                worktree_id: id("worktree.other"),
+            },
+        );
+        assert!(matches!(
+            resolve_as_local(
+                &resolver,
+                &StoreRuntimeKey::new(other_worktree, incarnation())
+            ),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::MissingCodeStoreAuthority,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn branch_code_authority_keeps_its_typed_ref_path_distinct_from_worktree() {
+        let fixture = Fixture::new();
+        let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());
+        let worktree_id = id("worktree-component");
+        let project_id = fixture.project_id.clone();
+        let branch_shard = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            project_id.clone(),
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Branch {
+                worktree_id: worktree_id.clone(),
+                ref_id: id("ref-component"),
+            },
+        );
+        let worktree_shard = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            project_id,
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Worktree { worktree_id },
+        );
+        let worktree_root = fixture
+            .profile_root
+            .join("code-fixture")
+            .join("worktrees")
+            .join("worktree-component");
+        let worktree_path = worktree_root.join("graph.db");
+        let branch_path = worktree_root
+            .join("refs")
+            .join("ref-component")
+            .join("graph.db");
+        fs::create_dir_all(worktree_path.parent().expect("worktree graph parent"))
+            .expect("worktree graph root");
+        fs::create_dir_all(branch_path.parent().expect("branch graph parent"))
+            .expect("branch graph root");
+        fs::write(&worktree_path, b"worktree fixture").expect("worktree graph fixture");
+        fs::write(&branch_path, b"branch fixture").expect("branch graph fixture");
+
+        for (shard, path) in [
+            (worktree_shard.clone(), worktree_path.clone()),
+            (branch_shard.clone(), branch_path.clone()),
+        ] {
+            resolver
+                .register_code_authority(
+                    LocalCodeStoreAuthorityV1::new(shard, path).expect("typed code authority"),
+                )
+                .expect("register exact code authority");
+        }
+
+        let branch = resolved(resolve_as_local(
+            &resolver,
+            &StoreRuntimeKey::new(branch_shard.clone(), incarnation()),
+        ));
+        let worktree = resolved(resolve_as_local(
+            &resolver,
+            &StoreRuntimeKey::new(worktree_shard.clone(), incarnation()),
+        ));
+
+        assert_eq!(branch.locator().verified().shard_id, branch_shard);
+        assert_eq!(worktree.locator().verified().shard_id, worktree_shard);
+        assert_eq!(
+            branch.locator().path(),
+            branch_path.canonicalize().expect("canonical branch path")
+        );
+        assert_eq!(
+            worktree.locator().path(),
+            worktree_path
+                .canonicalize()
+                .expect("canonical worktree path")
+        );
+        assert_ne!(branch.locator().path(), worktree.locator().path());
+    }
+
+    #[test]
+    fn code_authority_rejects_scope_conflicts_and_paths_outside_profile() {
+        let fixture = Fixture::new();
+        assert!(matches!(
+            LocalCodeStoreAuthorityV1::new(fixture.shard(), fixture.profile_root.join("graph.db")),
+            Err(LocalStoreRuntimeResolverConfigurationErrorV1::CodeAuthorityIsNotCodeShard { .. })
+        ));
+
+        let code_shard = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            fixture.project_id.clone(),
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Worktree {
+                worktree_id: id("worktree.local-resolver"),
+            },
+        );
+        let outside_path = fixture.root.join("outside.db");
+        fs::write(&outside_path, b"fixture").expect("outside graph fixture");
+        let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());
+        resolver
+            .register_code_authority(
+                LocalCodeStoreAuthorityV1::new(code_shard.clone(), outside_path)
+                    .expect("typed code authority"),
+            )
+            .expect("register code authority");
+        assert!(matches!(
+            resolve_as_local(&resolver, &StoreRuntimeKey::new(code_shard, incarnation())),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn code_authority_registration_is_idempotent_but_rejects_rebinding() {
+        let fixture = Fixture::new();
+        let code_shard = StoreShardIdV1::code(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            fixture.project_id.clone(),
+            id("repository.local-resolver"),
+            tracedecay_store::CodeShardScopeV1::Worktree {
+                worktree_id: id("worktree.local-resolver"),
+            },
+        );
+        let first_path = fixture.profile_root.join("first.db");
+        let second_path = fixture.profile_root.join("second.db");
+        let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());
+        let first = LocalCodeStoreAuthorityV1::new(code_shard.clone(), first_path)
+            .expect("first authority");
+
+        resolver
+            .register_code_authority(first.clone())
+            .expect("first registration");
+        resolver
+            .register_code_authority(first)
+            .expect("identical registration is idempotent");
+        assert!(matches!(
+            resolver.register_code_authority(
+                LocalCodeStoreAuthorityV1::new(code_shard, second_path)
+                    .expect("conflicting authority")
+            ),
+            Err(LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateCodeAuthority { .. })
         ));
     }
 

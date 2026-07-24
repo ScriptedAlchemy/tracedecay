@@ -1,9 +1,3 @@
-use libsql::Connection;
-
-use crate::errors::{Result, TraceDecayError};
-
-const GRAPH_STORE_MMAP_SIZE: u64 = 0;
-
 /// Env var that, when set to `1`, switches every `TraceDecay` `SQLite`
 /// connection to `journal_mode=MEMORY` + `synchronous=OFF` on all platforms.
 ///
@@ -54,7 +48,7 @@ fn sqlite_unsafe_fast_enabled() -> bool {
 
 /// Returns the `journal_mode` safe for the current platform.
 ///
-/// Windows libsql/`SQLite` local databases can intermittently fault while closing
+/// Windows `SQLite` local databases can intermittently fault while closing
 /// WAL-mode databases under nextest's per-test process isolation. Disabling
 /// mmap removed one unsafe teardown path, but master CI still aborts in
 /// unrelated tests as different short-lived databases close. Use rollback
@@ -91,69 +85,4 @@ pub(crate) fn platform_safe_synchronous_mode() -> &'static str {
     } else {
         "NORMAL"
     }
-}
-
-/// Applies performance-oriented `SQLite` pragmas.
-///
-/// `cache_size` and `mmap_size` are scaled to the on-disk DB size so
-/// small projects don't pay the 320 MB baseline of a large project.
-pub(super) async fn apply(conn: &Connection, db_file_size: u64) -> Result<()> {
-    let (cache_kb, _) = adaptive_cache_sizes(db_file_size);
-    // Keep graph stores on ordinary file I/O so SQLite remains the sole
-    // authority for page-cache and WAL coherence.
-    let mmap = GRAPH_STORE_MMAP_SIZE;
-    let synchronous = platform_safe_synchronous_mode();
-    // recursive_triggers must be ON: node writes use INSERT OR REPLACE, and
-    // without it REPLACE's implicit conflict-delete skips the nodes_fts
-    // delete trigger, leaving orphaned FTS5 index entries that accumulate
-    // into "malformed inverted index" corruption.
-    conn.execute_batch(&format!(
-        "PRAGMA mmap_size = {mmap};
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 120000;
-         PRAGMA synchronous = {synchronous};
-         PRAGMA cache_size = -{cache_kb};
-         PRAGMA temp_store = MEMORY;
-         PRAGMA recursive_triggers = ON;",
-    ))
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("failed to apply pragmas: {e}"),
-        operation: "apply_pragmas".to_string(),
-    })?;
-    Ok(())
-}
-
-pub(super) async fn apply_fresh_storage(conn: &Connection) -> Result<()> {
-    let journal_mode = platform_safe_journal_mode();
-    conn.execute_batch(&format!(
-        "PRAGMA page_size = 8192;
-         PRAGMA journal_mode = {journal_mode};"
-    ))
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("failed to configure fresh database storage: {e}"),
-        operation: "apply_fresh_storage_pragmas".to_string(),
-    })?;
-    Ok(())
-}
-
-pub(super) async fn apply_read_only(conn: &Connection, db_file_size: u64) -> Result<()> {
-    let (cache_kb, _) = adaptive_cache_sizes(db_file_size);
-    // Maintenance read handles use the same non-mmap invariant.
-    let mmap = GRAPH_STORE_MMAP_SIZE;
-    conn.execute_batch(&format!(
-        "PRAGMA mmap_size = {mmap};
-         PRAGMA foreign_keys = ON;
-         PRAGMA query_only = ON;
-         PRAGMA busy_timeout = 120000;
-         PRAGMA cache_size = -{cache_kb};
-         PRAGMA temp_store = MEMORY;",
-    ))
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("failed to apply read-only pragmas: {e}"),
-        operation: "apply_read_only_pragmas".to_string(),
-    })?;
-    Ok(())
 }

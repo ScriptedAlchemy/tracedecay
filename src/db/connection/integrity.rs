@@ -1,34 +1,39 @@
 use std::path::Path;
 
-use libsql::{Builder, Connection, OpenFlags};
-
+use crate::db::engine::QueryExecutor;
 use crate::errors::{Result, TraceDecayError};
 
-use super::pragmas;
-
 pub(super) async fn validate_read_only(db_path: &Path) -> Result<()> {
-    let db = Builder::new_local(db_path)
-        .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
+    let scratch_root = crate::storage::default_profile_root()
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to resolve the integrity-validation snapshot root: {error}"),
+            operation: "validate_integrity".to_string(),
+        })?
+        .join("scratch")
+        .join("sqlite-read");
+    let snapshot = crate::sqlite_read_snapshot::open_in(db_path, &scratch_root)
         .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to open database for integrity validation: {e}"),
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to open database for integrity validation: {error}"),
             operation: "validate_integrity".to_string(),
         })?;
-    let conn = db.connect().map_err(|e| TraceDecayError::Database {
-        message: format!("failed to connect for integrity validation: {e}"),
-        operation: "validate_integrity".to_string(),
-    })?;
-    let file_size = std::fs::metadata(db_path).map_or(0, |metadata| metadata.len());
-    pragmas::apply_read_only(&conn, file_size).await?;
-    validate(&conn, "validate_integrity").await
+    validate(snapshot.connection(), "validate_integrity").await?;
+    snapshot
+        .validate_source()
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("database family changed during integrity validation: {error}"),
+            operation: "validate_integrity".to_string(),
+        })
 }
 
-pub(super) async fn quick_check_result(
-    conn: &Connection,
+pub(super) async fn quick_check_result<C>(
+    conn: &C,
     operation: &str,
     query_error: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<String>>
+where
+    C: QueryExecutor + ?Sized,
+{
     let mut rows =
         conn.query("PRAGMA quick_check", ())
             .await
@@ -45,7 +50,10 @@ pub(super) async fn quick_check_result(
         .map(|row| row.map(|row| row.get::<String>(0).unwrap_or_default()))
 }
 
-pub(super) async fn validate(conn: &Connection, operation: &str) -> Result<()> {
+pub(super) async fn validate<C>(conn: &C, operation: &str) -> Result<()>
+where
+    C: QueryExecutor + ?Sized,
+{
     let result = quick_check_result(conn, operation, "failed to run read-only quick_check")
         .await?
         .ok_or_else(|| TraceDecayError::Database {

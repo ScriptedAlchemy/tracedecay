@@ -204,6 +204,35 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
 }
 
 #[tokio::test]
+async fn profile_sessions_require_the_profile_pin_without_consuming_project_capacity() {
+    let config = StoreRuntimeRegistryConfig::new(1).unwrap();
+    let (registry, _, _) = registry(config);
+    let pin = profile_pin(&registry).await;
+    assert!(matches!(
+        registry.begin_or_join_open(&StoreRuntimeOpenRequest::new(
+            profile_sessions_shard(),
+            incarnation(),
+            None,
+        )),
+        StoreRuntimeOpenBegin::Rejected(
+            StoreRuntimeRegistryFailure::ProfileAuthorityRequired { .. }
+        )
+    ));
+
+    let profile_sessions = open_published(&registry, profile_sessions_request(&pin)).await;
+    let project = open_published(&registry, project_request("project.full-budget", &pin)).await;
+
+    assert!(matches!(
+        registry.lookup(profile_sessions.binding()),
+        StoreRuntimeLookup::Ready(_)
+    ));
+    assert!(matches!(
+        registry.lookup(project.binding()),
+        StoreRuntimeLookup::Ready(_)
+    ));
+}
+
+#[tokio::test]
 async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
     let resolver: Arc<dyn StoreRuntimeResolver> = Arc::new(TestResolver::default());
     let publisher: Arc<dyn ShardRuntimePublisher> = Arc::new(TestPublisher::default());
@@ -229,4 +258,31 @@ async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
     assert!(first.binding().authority_epoch > floor);
     assert!(second.binding().authority_epoch > first.binding().authority_epoch);
     assert!(!Arc::ptr_eq(first.runtime(), second.runtime()));
+}
+
+#[test]
+fn migration_sql_authority_rechecks_opened_file_identity() {
+    use tracedecay_rusqlite_runtime::migration_sql::{
+        MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("identity.db");
+    std::fs::write(&database_path, []).unwrap();
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&database_path, "migration SQL identity test")
+            .unwrap();
+    let current_identity =
+        crate::sessions::source::sqlite_generation_identity(&database_path).unwrap();
+    let authority = RuntimeDatabaseWriteAuthority {
+        authority,
+        canonical_path: database_path.canonicalize().unwrap(),
+        opened_file_identity: current_identity.wrapping_add(1),
+    };
+
+    assert!(matches!(
+        MigrationSqlWriteAuthority::verify(&authority, MigrationSqlWriteIntent::Execute),
+        Err(MigrationSqlError::AuthorityDenied(message))
+            if message == "database file identity changed after registry attachment"
+    ));
 }

@@ -13,8 +13,8 @@ use super::leases::validate_profile_authority;
 use super::{
     PublishedShardRuntime, ReadyRuntime, RegistryEntry, RegistryState, RuntimeLocatorRecord,
     ShardRuntimeBuildRequest, StoreRuntimeHandle, StoreRuntimeHandleInner, StoreRuntimeKey,
-    StoreRuntimeOpenRequest, StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
-    StoreRuntimeRegistryFuture, utc_now,
+    StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeRegistry,
+    StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture, utc_now,
 };
 
 static PROCESS_AUTHORITY_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -98,6 +98,8 @@ pub(super) enum OpenState {
 pub(super) struct OpeningRuntime {
     pub(super) attempt: u64,
     pub(super) updates: watch::Sender<OpenState>,
+    pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
+    pub(super) mode: StoreRuntimeOpenMode,
 }
 
 impl StoreRuntimeRegistry {
@@ -113,14 +115,34 @@ impl StoreRuntimeRegistry {
             }
             if let Some(entry) = state.entries.get(&key) {
                 return match entry {
-                    RegistryEntry::Ready(ready) => {
+                    RegistryEntry::Ready(ready)
+                        if matching_database_authority(
+                            request.database_authority.as_ref(),
+                            ready.handle.inner.database_authority.as_ref(),
+                        ) =>
+                    {
                         StoreRuntimeOpenBegin::Ready(ready.handle.clone())
                     }
-                    RegistryEntry::Opening(opening) => {
+                    RegistryEntry::Opening(opening)
+                        if matching_database_authority(
+                            request.database_authority.as_ref(),
+                            opening.database_authority.as_ref(),
+                        ) && request.mode == opening.mode =>
+                    {
                         StoreRuntimeOpenBegin::Joined(StoreRuntimeOpenJoin {
                             key: Box::new(key),
                             updates: opening.updates.subscribe(),
                         })
+                    }
+                    RegistryEntry::Ready(_) | RegistryEntry::Opening(_) => {
+                        StoreRuntimeOpenBegin::Rejected(
+                            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                operation: "join registered runtime open",
+                                message:
+                                    "runtime open authority does not match the originating capability"
+                                        .to_owned(),
+                            },
+                        )
                     }
                     RegistryEntry::Evicting(_) => StoreRuntimeOpenBegin::Rejected(
                         StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
@@ -142,7 +164,7 @@ impl StoreRuntimeRegistry {
             let binding =
                 StoreRuntimeBindingV1::new(key.shard_id.clone(), key.incarnation, authority_epoch);
             let (updates, receiver) = watch::channel(OpenState::Opening);
-            let eviction = if key.is_profile() {
+            let eviction = if key.is_project_code_capacity_exempt() {
                 None
             } else {
                 match self.reserve_project_code_capacity(&mut state) {
@@ -163,6 +185,8 @@ impl StoreRuntimeRegistry {
                 RegistryEntry::Opening(OpeningRuntime {
                     attempt,
                     updates: updates.clone(),
+                    database_authority: request.database_authority.clone(),
+                    mode: request.mode,
                 }),
             );
             let join = StoreRuntimeOpenJoin {
@@ -180,9 +204,13 @@ impl StoreRuntimeRegistry {
         }
 
         let registry = self.clone();
+        let database_authority = request.database_authority.clone();
+        let mode = request.mode;
         tokio::spawn(async move {
             let guard = OpenAttemptGuard::new(registry.clone(), key.clone(), attempt, updates);
-            let outcome = registry.build_runtime(&key, binding).await;
+            let outcome = registry
+                .build_runtime(&key, binding, database_authority, mode)
+                .await;
             guard.complete(outcome);
         });
         StoreRuntimeOpenBegin::Started(join)
@@ -214,17 +242,48 @@ impl StoreRuntimeRegistry {
         &'a self,
         key: &'a StoreRuntimeKey,
         binding: StoreRuntimeBindingV1,
+        database_authority: Option<crate::db::DatabaseAuthority>,
+        mode: StoreRuntimeOpenMode,
     ) -> StoreRuntimeRegistryFuture<
         'a,
-        Result<(PublishedShardRuntime, RuntimeLocatorRecord), StoreRuntimeRegistryFailure>,
+        Result<
+            (
+                PublishedShardRuntime,
+                RuntimeLocatorRecord,
+                Option<crate::db::DatabaseAuthority>,
+            ),
+            StoreRuntimeRegistryFailure,
+        >,
     > {
         Box::pin(async move {
-            let resolved = self.inner.resolver.resolve(key).await?;
+            let resolved = self
+                .inner
+                .resolver
+                .resolve(key, mode, database_authority.as_ref())
+                .await?;
             if !resolved.matches(key) {
                 return Err(StoreRuntimeRegistryFailure::LocatorIdentityMismatch {
                     key: Box::new(key.clone()),
                     locator: Box::new(resolved.verified().clone()),
                 });
+            }
+            if let Some(authority) = database_authority.as_ref() {
+                authority
+                    .require_active_write_scope("publish registered SQLite runtime")
+                    .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "publish registered SQLite runtime",
+                        message: error.to_string(),
+                    })?;
+                if authority.canonical_database_path() != resolved.path() {
+                    return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "publish registered SQLite runtime",
+                        message: format!(
+                            "resolved locator {} does not match originating database authority {}",
+                            resolved.path().display(),
+                            authority.canonical_database_path().display()
+                        ),
+                    });
+                }
             }
             let locator = RuntimeLocatorRecord::new(key.clone(), resolved);
             let published = self
@@ -233,6 +292,8 @@ impl StoreRuntimeRegistry {
                 .publish(ShardRuntimeBuildRequest::new(
                     binding.clone(),
                     locator.clone(),
+                    mode,
+                    database_authority.clone(),
                 ))
                 .await?;
             if published.logical().binding() != &binding {
@@ -241,7 +302,7 @@ impl StoreRuntimeRegistry {
                     actual: Box::new(published.logical().binding().clone()),
                 });
             }
-            Ok((published, locator))
+            Ok((published, locator, database_authority))
         })
     }
 }
@@ -272,7 +333,14 @@ impl OpenAttemptGuard {
 
     fn complete(
         mut self,
-        outcome: Result<(PublishedShardRuntime, RuntimeLocatorRecord), StoreRuntimeRegistryFailure>,
+        outcome: Result<
+            (
+                PublishedShardRuntime,
+                RuntimeLocatorRecord,
+                Option<crate::db::DatabaseAuthority>,
+            ),
+            StoreRuntimeRegistryFailure,
+        >,
     ) {
         let mut state = self.registry.lock_state();
         let still_opening = matches!(
@@ -285,7 +353,22 @@ impl OpenAttemptGuard {
         }
 
         match outcome {
-            Ok((published, locator)) => {
+            Ok((published, locator, database_authority)) => {
+                let schema_migrated = published.schema_migrated();
+                let opened_file_identity = match published.opened_file_identity() {
+                    Ok(identity) => identity,
+                    Err(message) => {
+                        self.fail(
+                            &mut state,
+                            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                operation: "capture opened SQLite file identity",
+                                message,
+                            },
+                        );
+                        self.armed = false;
+                        return;
+                    }
+                };
                 match allocate_publication(&mut state, published.logical().binding().clone()) {
                     Ok(publication) => {
                         let (runtime, attachment) = published.into_parts();
@@ -295,6 +378,9 @@ impl OpenAttemptGuard {
                                 runtime,
                                 attachment,
                                 locator,
+                                opened_file_identity,
+                                schema_migrated,
+                                database_authority,
                             }),
                         };
                         if self.key.is_profile() {
@@ -321,6 +407,24 @@ impl OpenAttemptGuard {
     fn fail(&self, state: &mut RegistryState, failure: StoreRuntimeRegistryFailure) {
         state.entries.remove(&self.key);
         self.updates.send_replace(OpenState::Failed(failure));
+    }
+}
+
+fn matching_database_authority(
+    requested: Option<&crate::db::DatabaseAuthority>,
+    retained: Option<&crate::db::DatabaseAuthority>,
+) -> bool {
+    match (requested, retained) {
+        (Some(requested), Some(retained)) => {
+            requested
+                .require_active_write_scope("join registered runtime open")
+                .is_ok()
+                && requested.token() == retained.token()
+                && requested.canonical_database_path() == retained.canonical_database_path()
+        }
+        #[cfg(test)]
+        (None, None) => true,
+        _ => false,
     }
 }
 

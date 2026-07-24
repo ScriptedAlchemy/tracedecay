@@ -1,16 +1,30 @@
 // Rust guideline compliant 2025-10-17
-use std::ops::Deref;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use libsql::{Builder, Connection, OpenFlags, Transaction, TransactionBehavior};
-use tracedecay_domain::{FactOwnerV1, SourceStoreId};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    BrainId, FactOwnerV1, RepositoryId, SourceStoreId, UserProfileId, WorktreeId,
+};
+use tracedecay_rusqlite_runtime::{CheckpointBlockers, CheckpointOutcome, CheckpointRequest};
+use tracedecay_store::{
+    CodeShardScopeV1, LocatorDigest, ProjectId, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeRequestProbeV1, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
+};
 
+use crate::daemon::store_runtime::registry::{
+    LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
+    StoreRuntimeHandle, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+    StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
+    StoreRuntimeRegistryFuture, StoreRuntimeResolver,
+};
+use crate::db::engine::{Connection, ReadSnapshot, Transaction, TransactionBehavior};
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
     CapturedMemoryV2Frontiers, DatabaseAuthority, MemoryV2BackfillBatchOutcome, memory_v2,
-    migrations,
 };
 
 mod integrity;
@@ -24,13 +38,127 @@ pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 pub(crate) use pragmas::{platform_safe_journal_mode, platform_safe_synchronous_mode};
 use registry::{DatabaseInner, database_slot};
 
-/// `SQLite` database backing the code graph, powered by libsql.
+/// `SQLite` database backed by one daemon-owned native runtime attachment.
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<DatabaseInner>,
 }
 
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestDatabaseRuntimeMode {
+    Initialize,
+    Existing,
+    ReadOnly,
+}
+
+struct ExactTestRuntimeResolver {
+    locators: BTreeMap<StoreRuntimeKey, ExactTestRuntimeLocator>,
+}
+
+struct ExactTestRuntimeLocator {
+    verified: VerifiedStoreLocatorV1,
+    path: PathBuf,
+}
+
+impl StoreRuntimeResolver for ExactTestRuntimeResolver {
+    fn resolve<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+        mode: StoreRuntimeOpenMode,
+        database_authority: Option<&'a DatabaseAuthority>,
+    ) -> StoreRuntimeRegistryFuture<
+        'a,
+        std::result::Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>,
+    > {
+        Box::pin(async move {
+            let locator = self.locators.get(key).ok_or_else(|| {
+                StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "test runtime resolver received the wrong typed shard".to_owned(),
+                }
+            })?;
+            let authority =
+                database_authority.ok_or_else(|| StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "test runtime publication requires exact database authority"
+                        .to_owned(),
+                })?;
+            authority
+                .require_active_write_scope("resolve canonical test runtime")
+                .map_err(|error| StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: error.to_string(),
+                })?;
+            if authority.canonical_database_path() != locator.path {
+                return Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "test runtime authority does not match its exact locator".to_owned(),
+                });
+            }
+            match (mode, locator.path.try_exists()) {
+                (StoreRuntimeOpenMode::Initialize, Ok(false)) => Ok(
+                    ResolvedStoreLocator::prospective(
+                        locator.verified.clone(),
+                        locator.path.clone(),
+                    ),
+                ),
+                (StoreRuntimeOpenMode::Existing, Ok(true)) => Ok(ResolvedStoreLocator::new(
+                    locator.verified.clone(),
+                    locator.path.clone(),
+                )),
+                (StoreRuntimeOpenMode::Initialize, Ok(true)) => {
+                    Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                        message: "test runtime initialization requires a missing database"
+                            .to_owned(),
+                    })
+                }
+                (StoreRuntimeOpenMode::Existing, Ok(false)) => {
+                    Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                        message: "test runtime database does not exist".to_owned(),
+                    })
+                }
+                (_, Err(error)) => Err(StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: error.to_string(),
+                }),
+            }
+        })
+    }
+}
+
+/// Logical access granted by a canonical runtime mount.
+///
+/// This is deliberately independent of the physical runtime's writer
+/// presence: one writable runtime can issue both read-only and read-write
+/// database facades without opening the SQLite path again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DatabaseAccessMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl DatabaseAccessMode {
+    const fn is_writable(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+}
+
 const NODES_FTS_CORRUPTION: &str = "malformed inverted index for FTS5 table main.nodes_fts";
+
+struct DatabaseCheckpointProbe {
+    cancellation: RuntimeCancellationIdentityV1,
+    deadline: RuntimeDeadlineV1,
+}
+
+impl RuntimeRequestProbeV1 for DatabaseCheckpointProbe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        &self.cancellation
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        &self.deadline
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        None
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum DatabaseHealth {
@@ -40,11 +168,41 @@ enum DatabaseHealth {
 }
 
 /// A writer connection that cannot outlive the canonical database's writer
-/// lane. The connection is isolated from the retained query-only handle, so
-/// cancellation cannot leave readers inside an unfinished transaction.
+/// lane. It is another capability over the same physical attachment, never a
+/// second path-derived SQLite open.
 pub(crate) struct DatabaseWriterConnection<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     conn: Connection,
+}
+
+/// Driver-neutral graph query facade.
+///
+/// The retained graph connection remains private to this adapter while the
+/// daemon runtime cutover replaces its physical owner.
+#[derive(Clone)]
+pub(crate) struct DatabaseEngineConnection {
+    conn: Connection,
+}
+
+pub(crate) struct DatabaseEngineStatement<'a> {
+    target: DatabaseEngineStatementTarget<'a>,
+    sql: String,
+}
+
+pub(crate) struct DatabaseEngineReadSnapshot {
+    snapshot: ReadSnapshot,
+}
+
+enum DatabaseEngineStatementTarget<'a> {
+    Connection(Connection),
+    Transaction(&'a Transaction),
+}
+
+/// Driver-neutral transaction used by the canonical memory store during the
+/// physical database cutover.
+pub(crate) enum DatabaseMemoryTransaction<'a> {
+    Read(DatabaseEngineReadSnapshot),
+    Write(DatabaseWriteTransaction<'a>),
 }
 
 /// Opaque, serialized access to memory mutations for integration fixtures.
@@ -63,38 +221,256 @@ pub(crate) struct DatabaseWriteTransaction<'a> {
     guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
-impl Deref for DatabaseWriteTransaction<'_> {
-    type Target = Transaction;
-
-    fn deref(&self) -> &Self::Target {
-        &self.transaction
-    }
-}
-
 impl DatabaseWriterConnection<'_> {
     #[cfg(test)]
-    pub(crate) async fn execute_batch(&self, sql: &str) -> libsql::Result<()> {
-        self.conn.execute_batch(sql).await.map(|_| ())
+    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.conn.execute_batch(sql).await
     }
 
-    pub(crate) async fn execute(
-        &self,
-        sql: &str,
-        params: impl libsql::params::IntoParams,
-    ) -> libsql::Result<u64> {
+    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
         self.conn.execute(sql, params).await
     }
 
-    pub(crate) async fn query(
+    pub(crate) async fn query<P>(
         &self,
         sql: &str,
-        params: impl libsql::params::IntoParams,
-    ) -> libsql::Result<libsql::Rows> {
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
         self.conn.query(sql, params).await
     }
 
     pub(crate) fn memory_store(&self) -> crate::memory::store::MemoryStore<'_> {
-        crate::memory::store::MemoryStore::new(&self.conn)
+        crate::memory::store::MemoryStore::new_runtime(&self.conn)
+    }
+
+    pub(crate) async fn execute_engine<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.conn.execute(sql, params).await
+    }
+
+    pub(crate) async fn query_engine<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.conn.query(sql, params).await
+    }
+
+    pub(crate) async fn prepare_engine(
+        &self,
+        sql: &str,
+    ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
+        self.conn.prepare(sql).await?;
+        Ok(DatabaseEngineStatement {
+            target: DatabaseEngineStatementTarget::Connection(self.conn.clone()),
+            sql: sql.to_owned(),
+        })
+    }
+}
+
+impl DatabaseEngineConnection {
+    pub(crate) async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.conn.query(sql, params).await
+    }
+}
+
+impl crate::db::engine::QueryExecutor for DatabaseEngineConnection {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        DatabaseEngineConnection::query(self, sql, params).await
+    }
+}
+
+impl DatabaseEngineStatement<'_> {
+    pub(crate) async fn execute<P>(&self, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        match &self.target {
+            DatabaseEngineStatementTarget::Connection(connection) => {
+                connection.execute(&self.sql, params).await
+            }
+            DatabaseEngineStatementTarget::Transaction(transaction) => {
+                transaction.execute(&self.sql, params).await
+            }
+        }
+    }
+
+    pub(crate) fn reset(&self) {}
+}
+
+impl DatabaseEngineReadSnapshot {
+    pub(crate) async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.snapshot.query(sql, params).await
+    }
+
+    pub(crate) async fn commit(self) -> crate::db::engine::Result<()> {
+        drop(self);
+        Ok(())
+    }
+
+    pub(crate) async fn rollback(self) -> crate::db::engine::Result<()> {
+        drop(self);
+        Ok(())
+    }
+}
+
+impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        DatabaseEngineReadSnapshot::query(self, sql, params).await
+    }
+}
+
+impl<'a> DatabaseMemoryTransaction<'a> {
+    pub(crate) fn read(snapshot: DatabaseEngineReadSnapshot) -> Self {
+        Self::Read(snapshot)
+    }
+
+    pub(crate) fn write(transaction: DatabaseWriteTransaction<'a>) -> Self {
+        Self::Write(transaction)
+    }
+
+    pub(crate) async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        match self {
+            Self::Read(snapshot) => snapshot.query(sql, params).await,
+            Self::Write(transaction) => transaction.query_engine(sql, params).await,
+        }
+    }
+
+    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        match self {
+            Self::Read(_) => Err(crate::db::engine::Error::Runtime(
+                "cannot execute a write in a memory read snapshot".to_owned(),
+            )),
+            Self::Write(transaction) => transaction.execute_engine(sql, params).await,
+        }
+    }
+
+    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        match self {
+            Self::Read(_) => Err(crate::db::engine::Error::Runtime(
+                "cannot execute a write in a memory read snapshot".to_owned(),
+            )),
+            Self::Write(transaction) => transaction.execute_batch_engine(sql).await,
+        }
+    }
+
+    pub(crate) async fn commit(self) -> Result<()> {
+        match self {
+            Self::Read(snapshot) => {
+                snapshot
+                    .commit()
+                    .await
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to commit memory read snapshot: {error}"),
+                        operation: "commit memory read snapshot".to_owned(),
+                    })
+            }
+            Self::Write(transaction) => transaction.commit().await,
+        }
+    }
+
+    pub(crate) async fn rollback(self) -> Result<()> {
+        match self {
+            Self::Read(snapshot) => {
+                snapshot
+                    .rollback()
+                    .await
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to roll back memory read snapshot: {error}"),
+                        operation: "rollback memory read snapshot".to_owned(),
+                    })
+            }
+            Self::Write(transaction) => transaction.rollback().await,
+        }
+    }
+
+    pub(super) fn legacy_write_transaction(&self, operation: &str) -> Result<&Transaction> {
+        match self {
+            Self::Write(transaction) => Ok(&transaction.transaction),
+            Self::Read(_) => Err(TraceDecayError::Database {
+                message: "memory write authority requires a writable transaction".to_owned(),
+                operation: operation.to_owned(),
+            }),
+        }
+    }
+}
+
+impl crate::db::engine::QueryExecutor for DatabaseMemoryTransaction<'_> {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        DatabaseMemoryTransaction::query(self, sql, params).await
+    }
+}
+
+impl crate::db::engine::Executor for DatabaseMemoryTransaction<'_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        DatabaseMemoryTransaction::execute(self, sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        DatabaseMemoryTransaction::execute_batch(self, sql).await
     }
 }
 
@@ -104,9 +480,84 @@ impl DatabaseMemoryWriter<'_> {
     pub fn store(&self) -> crate::memory::store::MemoryStore<'_> {
         self.writer.memory_store()
     }
+
+    /// Returns a retriever bound to the same serialized memory authority.
+    pub fn retriever(&self) -> crate::memory::retrieval::FactRetriever<'_> {
+        crate::memory::retrieval::FactRetriever::new_runtime(&self.writer.conn)
+    }
 }
 
 impl DatabaseWriteTransaction<'_> {
+    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.transaction.execute(sql, params).await
+    }
+
+    pub(crate) async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.transaction.query(sql, params).await
+    }
+
+    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.transaction.execute_batch(sql).await
+    }
+
+    pub(crate) async fn prepare(
+        &self,
+        sql: &str,
+    ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
+        self.prepare_engine(sql).await
+    }
+
+    pub(crate) fn last_insert_rowid(&self) -> i64 {
+        self.transaction.last_insert_rowid()
+    }
+
+    pub(crate) async fn execute_batch_engine(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.transaction.execute_batch(sql).await
+    }
+
+    pub(crate) async fn execute_engine<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.transaction.execute(sql, params).await
+    }
+
+    pub(crate) async fn query_engine<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.transaction.query(sql, params).await
+    }
+
+    pub(crate) async fn prepare_engine(
+        &self,
+        sql: &str,
+    ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
+        self.transaction.prepare(sql).await?;
+        Ok(DatabaseEngineStatement {
+            target: DatabaseEngineStatementTarget::Transaction(&self.transaction),
+            sql: sql.to_owned(),
+        })
+    }
+
     pub(crate) async fn commit(self) -> Result<()> {
         let Self { transaction, guard } = self;
         let transaction = transaction.commit().await;
@@ -129,224 +580,429 @@ impl DatabaseWriteTransaction<'_> {
     }
 }
 
+impl crate::db::engine::QueryExecutor for DatabaseWriteTransaction<'_> {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.query_engine(sql, params).await
+    }
+}
+
+impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.execute_engine(sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.execute_batch_engine(sql).await
+    }
+}
+
 impl Database {
-    /// Creates a new database at `db_path`, creating parent directories if needed.
+    pub(super) fn retained_runtime(&self) -> &StoreRuntimeHandle {
+        &self.inner._runtime
+    }
+
+    /// Canonical path held by this database's verified runtime locator.
+    pub(crate) fn canonical_database_path(&self) -> &Path {
+        &self.inner.canonical_path
+    }
+
+    /// Returns the canonical path bound to this already-open database.
     ///
-    /// An explicit [`DatabaseAuthority`] is required; opening writable storage
-    /// without process authority is intentionally unsupported.
+    /// Primarily exposed for read-only inspection and integration fixtures;
+    /// callers must not treat the path as a substitute for write authority.
+    #[doc(hidden)]
+    pub fn database_path(&self) -> &Path {
+        self.canonical_database_path()
+    }
+
+    /// Physical SQLite identity captured when this retained handle was opened.
+    pub(crate) fn opened_file_identity(&self) -> u64 {
+        self.inner.opened_file_identity
+    }
+
+    /// Clones the originating revocable write capability for actor-time checks.
+    pub(crate) fn write_authority(&self) -> Result<DatabaseAuthority> {
+        if !self.inner.writable {
+            return Err(integrity::read_only_upgrade_error(
+                self.canonical_database_path(),
+                "acquire database write authority",
+            ));
+        }
+        self.inner
+            ._authority
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "writable database facade has no originating authority".to_owned(),
+                operation: "acquire database write authority".to_owned(),
+            })
+    }
+
+    /// Publishes one verified registry runtime as the only physical owner of
+    /// this database path.
     ///
-    /// Opens a libsql connection, applies performance pragmas, and runs all
-    /// schema migrations up to the latest version.
-    /// Returns `(Self, migrated)` where `migrated` is `true` if schema
-    /// migrations were applied during initialization.
+    /// The runtime already carries its typed binding, verified locator, and
+    /// opened file identity. A read-write facade additionally retains the
+    /// originating authority; a read-only facade never requests it. Neither
+    /// mode derives identity from a path or extracts the physical attachment.
+    pub(crate) async fn publish_runtime(
+        runtime: StoreRuntimeHandle,
+        access: DatabaseAccessMode,
+    ) -> Result<Self> {
+        let writable = access.is_writable();
+        let authority = if writable {
+            if !runtime.physical_snapshot().writer_present {
+                return Err(TraceDecayError::Database {
+                    message: "registered runtime has no physical writer".to_owned(),
+                    operation: "publish database runtime".to_owned(),
+                });
+            }
+            let authority = runtime
+                .database_authority("publish database runtime")
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("{error:?}"),
+                    operation: "publish database runtime".to_owned(),
+                })?;
+            authority.require_active_write_scope("publish database runtime")?;
+            Some(authority)
+        } else {
+            None
+        };
+        let slot = authority
+            .as_ref()
+            .map(|authority| database_slot(authority.database_identity_key()));
+        if let Some(slot) = &slot {
+            let mut open = slot.lock().await;
+            if let Some(inner) = open.upgrade() {
+                return Ok(Self { inner });
+            }
+            let inner = Arc::new(DatabaseInner::publish(
+                runtime,
+                true,
+                authority,
+                Some(Arc::clone(slot)),
+            )?);
+            *open = Arc::downgrade(&inner);
+            return Ok(Self { inner });
+        }
+        DatabaseInner::publish(runtime, false, None, None)
+            .map(Arc::new)
+            .map(|inner| Self { inner })
+    }
+
+    #[doc(hidden)]
+    pub async fn publish_test_runtime(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+    ) -> Result<(Self, bool)> {
+        if authority.role() != super::DatabaseAuthorityRole::Test {
+            return Err(TraceDecayError::Database {
+                message: "canonical test runtime requires explicit test authority".to_owned(),
+                operation: "publish test database runtime".to_owned(),
+            });
+        }
+        let authority = authority.hold_for(db_path, "publish test database runtime")?;
+        authority.require_active_write_scope("publish test database runtime")?;
+        let path = authority.canonical_database_path().to_path_buf();
+        let existing_slot = database_slot(authority.database_identity_key());
+        if let Some(inner) = existing_slot.lock().await.upgrade() {
+            if mode == TestDatabaseRuntimeMode::ReadOnly {
+                let database =
+                    Self::publish_runtime(inner._runtime.clone(), DatabaseAccessMode::ReadOnly)
+                        .await?;
+                return Ok((database, false));
+            }
+            return Ok((Self { inner }, false));
+        }
+        let brain_id = BrainId::try_from("brain.test-runtime".to_owned()).map_err(|error| {
+            test_runtime_error("construct test brain identity", error.to_string())
+        })?;
+        let profile_id =
+            UserProfileId::try_from("profile.test-runtime".to_owned()).map_err(|error| {
+                test_runtime_error("construct test profile identity", error.to_string())
+            })?;
+        let profile_shard = StoreShardIdV1::profile(brain_id.clone(), profile_id.clone());
+        let code_shard = StoreShardIdV1::code(
+            brain_id,
+            profile_id,
+            ProjectId::try_from("project.test-runtime".to_owned()).map_err(|error| {
+                test_runtime_error("construct test project identity", error.to_string())
+            })?,
+            RepositoryId::try_from("repository.test-runtime".to_owned()).map_err(|error| {
+                test_runtime_error("construct test repository identity", error.to_string())
+            })?,
+            CodeShardScopeV1::Worktree {
+                worktree_id: WorktreeId::try_from("worktree.test-runtime".to_owned()).map_err(
+                    |error| {
+                        test_runtime_error("construct test worktree identity", error.to_string())
+                    },
+                )?,
+            },
+        );
+        let incarnation = StoreIncarnationV1::new(1)
+            .map_err(|error| test_runtime_error("construct test incarnation", error.to_string()))?;
+        let mut digest = Sha256::new();
+        digest.update(b"tracedecay.test-runtime.profile.v1\0");
+        digest.update(path.as_os_str().as_encoded_bytes());
+        let profile_name = format!(
+            ".tracedecay-test-profile-{}.db",
+            &hex::encode(digest.finalize())[..16]
+        );
+        let profile_path = path.with_file_name(profile_name);
+        let (profile_key, profile_locator) = exact_test_runtime_locator(
+            profile_shard.clone(),
+            incarnation,
+            profile_path.clone(),
+        )?;
+        let (code_key, code_locator) =
+            exact_test_runtime_locator(code_shard.clone(), incarnation, path)?;
+        let mut locators = BTreeMap::new();
+        locators.insert(profile_key, profile_locator);
+        locators.insert(code_key, code_locator);
+        let resolver = Arc::new(ExactTestRuntimeResolver {
+            locators,
+        });
+        let registry =
+            StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+        let profile_authority =
+            DatabaseAuthority::acquire_test(&profile_path, "publish test profile runtime")?;
+        let profile_exists = profile_path.try_exists().map_err(|error| {
+            test_runtime_error("inspect test profile runtime", error.to_string())
+        })?;
+        let profile_request = if profile_exists {
+            StoreRuntimeOpenRequest::new_authorized(
+                profile_shard.clone(),
+                incarnation,
+                None,
+                profile_authority,
+            )
+        } else {
+            StoreRuntimeOpenRequest::new_initialize_authorized(
+                profile_shard.clone(),
+                incarnation,
+                None,
+                profile_authority,
+            )
+        };
+        let _profile_runtime = match registry.open(profile_request).await {
+            StoreRuntimeOpenResult::Published(runtime) => runtime,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                return Err(test_runtime_error(
+                    "publish test profile runtime",
+                    format!("{failure:?}"),
+                ));
+            }
+        };
+        let profile_pin = match registry.profile_authority_pin(&profile_shard) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            outcome => {
+                return Err(test_runtime_error(
+                    "pin test profile runtime",
+                    format!("{outcome:?}"),
+                ));
+            }
+        };
+        let open_mode = match mode {
+            TestDatabaseRuntimeMode::Initialize => StoreRuntimeOpenMode::Initialize,
+            TestDatabaseRuntimeMode::Existing | TestDatabaseRuntimeMode::ReadOnly => {
+                StoreRuntimeOpenMode::Existing
+            }
+        };
+        let request = match open_mode {
+            StoreRuntimeOpenMode::Initialize => StoreRuntimeOpenRequest::new_initialize_authorized(
+                code_shard,
+                incarnation,
+                Some(profile_pin),
+                authority.clone(),
+            ),
+            StoreRuntimeOpenMode::Existing => StoreRuntimeOpenRequest::new_authorized(
+                code_shard,
+                incarnation,
+                Some(profile_pin),
+                authority.clone(),
+            ),
+        };
+        let runtime = match registry.open(request).await {
+            StoreRuntimeOpenResult::Published(runtime) => runtime,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                return Err(test_runtime_error(
+                    "publish test database runtime",
+                    format!("{failure:?}"),
+                ));
+            }
+        };
+        let _schema_initialized = runtime.schema_migrated();
+        let access = if mode == TestDatabaseRuntimeMode::ReadOnly {
+            DatabaseAccessMode::ReadOnly
+        } else {
+            DatabaseAccessMode::ReadWrite
+        };
+        let database = Self::publish_runtime(runtime, access).await?;
+        let migrated = match mode {
+            TestDatabaseRuntimeMode::Initialize => false,
+            TestDatabaseRuntimeMode::Existing => crate::db::migrations::migrate(&database).await?,
+            TestDatabaseRuntimeMode::ReadOnly => false,
+        };
+        Ok((database, migrated))
+    }
+
+    /// Legacy compatibility lookup.
+    ///
+    /// Physical creation and schema bootstrap are owned by the registered
+    /// runtime. This method can reuse an attachment already published for the
+    /// exact authority, but it never opens a path or invents store identity.
     pub async fn initialize(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "initialize")?;
         authority.require_active_write_scope("initialize")?;
-        let exclusive_maintenance = authority.role() == super::DatabaseAuthorityRole::Maintenance;
         let slot = database_slot(authority.database_identity_key());
-        let mut open = slot.lock().await;
+        let open = slot.lock().await;
         if let Some(inner) = open.upgrade() {
             if !inner.writable {
                 return Err(integrity::read_only_upgrade_error(db_path, "initialize"));
             }
             return Ok((Self { inner }, false));
         }
-        let is_fresh = std::fs::metadata(db_path).map_or(true, |metadata| metadata.len() == 0);
-        if !is_fresh {
-            integrity::validate_sqlite_header(db_path, "initialize", false)?;
-            integrity::validate_read_only(db_path).await?;
-        }
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to create database directory: {e}"),
-                operation: "initialize".to_string(),
-            })?;
-        }
-
-        let db =
-            Builder::new_local(db_path)
-                .build()
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to open database: {e}"),
-                    operation: "initialize".to_string(),
-                })?;
-
-        let conn = db.connect().map_err(|e| TraceDecayError::Database {
-            message: format!("failed to connect to database: {e}"),
-            operation: "initialize".to_string(),
-        })?;
-
-        if is_fresh {
-            pragmas::apply_fresh_storage(&conn).await?;
-            migrations::configure_fresh_auto_vacuum(&conn, "initialize").await?;
-        }
-        let file_size = std::fs::metadata(db_path).map_or(0, |metadata| metadata.len());
-        pragmas::apply(&conn, file_size).await?;
-        let migrated = if is_fresh {
-            migrations::create_schema(&conn).await?;
-            false
-        } else if exclusive_maintenance {
-            migrations::migrate_with_exclusive_maintenance(&conn).await?
-        } else {
-            migrations::migrate(&conn).await?
-        };
-        conn.execute_batch("PRAGMA query_only = ON;")
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to seal retained database reader: {error}"),
-                operation: "initialize".to_string(),
-            })?;
-
-        let inner = Arc::new(DatabaseInner {
-            conn,
-            db,
-            writable: true,
-            writer: tokio::sync::Mutex::new(()),
-            _authority: authority,
-            _slot: Some(slot.clone()),
-        });
-        *open = Arc::downgrade(&inner);
-        Ok((Self { inner }, migrated))
+        Err(registered_attachment_required("initialize", db_path))
     }
 
-    /// Opens an existing database at `db_path`, applies performance pragmas,
-    /// and runs any pending schema migrations.
-    ///
-    /// An explicit [`DatabaseAuthority`] is required; opening writable storage
-    /// without process authority is intentionally unsupported.
-    ///
-    /// Returns `(Self, migrated)` where `migrated` is `true` if schema
-    /// migrations were applied during open.
+    /// Reuses an already-published writable attachment for `db_path`.
     pub async fn open(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "open")?;
         authority.require_active_write_scope("open")?;
-        let exclusive_maintenance = authority.role() == super::DatabaseAuthorityRole::Maintenance;
         let slot = database_slot(authority.database_identity_key());
-        let mut open = slot.lock().await;
+        let open = slot.lock().await;
         if let Some(inner) = open.upgrade() {
             if !inner.writable {
                 return Err(integrity::read_only_upgrade_error(db_path, "open"));
             }
             return Ok((Self { inner }, false));
         }
-        let is_fresh = std::fs::metadata(db_path).map_or(true, |metadata| metadata.len() == 0);
-        integrity::validate_sqlite_header(db_path, "open", true)?;
-        if !is_fresh {
-            integrity::validate_read_only(db_path).await?;
-        }
-        let db =
-            Builder::new_local(db_path)
-                .build()
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to open database: {e}"),
-                    operation: "open".to_string(),
-                })?;
-
-        let conn = db.connect().map_err(|e| TraceDecayError::Database {
-            message: format!("failed to connect to database: {e}"),
-            operation: "open".to_string(),
-        })?;
-
-        let file_size = std::fs::metadata(db_path).map_or(0, |m| m.len());
-        if is_fresh {
-            pragmas::apply_fresh_storage(&conn).await?;
-        }
-        pragmas::apply(&conn, file_size).await?;
-        let migrated = if exclusive_maintenance {
-            migrations::migrate_with_exclusive_maintenance(&conn).await?
-        } else {
-            migrations::migrate(&conn).await?
-        };
-        conn.execute_batch("PRAGMA query_only = ON;")
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to seal retained database reader: {error}"),
-                operation: "open".to_string(),
-            })?;
-
-        let inner = Arc::new(DatabaseInner {
-            conn,
-            db,
-            writable: true,
-            writer: tokio::sync::Mutex::new(()),
-            _authority: authority,
-            _slot: Some(slot.clone()),
-        });
-        *open = Arc::downgrade(&inner);
-        Ok((Self { inner }, migrated))
+        Err(registered_attachment_required("open", db_path))
     }
 
-    /// Opens an existing database in read-only mode.
-    ///
-    /// This intentionally skips write-oriented PRAGMAs and migrations so
-    /// status/verification paths can inspect read-only `SQLite` files without
-    /// creating WAL files or attempting schema updates.
-    /// An explicit [`DatabaseAuthority`] is still required so every local
-    /// database handle participates in the same process-ownership contract.
+    /// Reuses an already-published attachment for a read-only caller.
     pub async fn open_read_only(
         db_path: &Path,
         authority: &DatabaseAuthority,
     ) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "open_read_only")?;
-        integrity::validate_sqlite_header(db_path, "open_read_only", false)?;
-        let db = Builder::new_local(db_path)
-            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to open database read-only: {e}"),
-                operation: "open_read_only".to_string(),
-            })?;
-
-        let conn = db.connect().map_err(|e| TraceDecayError::Database {
-            message: format!("failed to connect to database read-only: {e}"),
-            operation: "open_read_only".to_string(),
-        })?;
-
-        let file_size = std::fs::metadata(db_path).map_or(0, |m| m.len());
-        pragmas::apply_read_only(&conn, file_size).await?;
-        integrity::validate(&conn, "open_read_only").await?;
-
-        let inner = Arc::new(DatabaseInner {
-            conn,
-            db,
-            writable: false,
-            writer: tokio::sync::Mutex::new(()),
-            _authority: authority,
-            _slot: None,
-        });
-        Ok((Self { inner }, false))
+        let slot = database_slot(authority.database_identity_key());
+        if let Some(inner) = slot.lock().await.upgrade() {
+            let read_only = DatabaseInner::publish(inner._runtime.clone(), false, None, None)?;
+            return Ok((
+                Self {
+                    inner: Arc::new(read_only),
+                },
+                false,
+            ));
+        }
+        Err(registered_attachment_required("open_read_only", db_path))
     }
 
-    /// Returns the retained query-only libsql connection.
+    /// Returns the canonical runtime facade.
     ///
     /// Mutations must use [`Self::writer_connection`] or an isolated
     /// transaction while holding [`Self::writer`].
-    pub fn conn(&self) -> &Connection {
+    pub(crate) fn conn(&self) -> &Connection {
         &self.inner.conn
+    }
+
+    /// Runs a bounded scalar integer inspection on the retained runtime.
+    #[doc(hidden)]
+    pub async fn query_scalar_i64(&self, operation: &str, sql: &str) -> Result<i64> {
+        let mut rows = self
+            .inner
+            .conn
+            .query(sql, ())
+            .await
+            .map_err(|error| database_query_error(operation, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| database_query_error(operation, error))?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "scalar query returned no rows".to_owned(),
+                operation: operation.to_owned(),
+            })?;
+        row.get(0)
+            .map_err(|error| database_query_error(operation, error))
+    }
+
+    /// Runs a bounded scalar blob inspection on the retained runtime.
+    #[doc(hidden)]
+    pub async fn query_scalar_blob(&self, operation: &str, sql: &str) -> Result<Vec<u8>> {
+        let mut rows = self
+            .inner
+            .conn
+            .query(sql, ())
+            .await
+            .map_err(|error| database_query_error(operation, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| database_query_error(operation, error))?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "scalar query returned no rows".to_owned(),
+                operation: operation.to_owned(),
+            })?;
+        row.get(0)
+            .map_err(|error| database_query_error(operation, error))
+    }
+
+    pub(crate) fn engine_conn(&self) -> DatabaseEngineConnection {
+        DatabaseEngineConnection {
+            conn: self.inner.conn.clone(),
+        }
     }
 
     /// Executes one autocommit-style mutation through the canonical writer
     /// broker. Primarily useful for fixtures and maintenance adapters that do
     /// not need to retain a raw writable connection.
     #[doc(hidden)]
-    pub async fn execute_write(
+    pub async fn execute_write<P>(&self, operation: &str, sql: &str, params: P) -> Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        let transaction = self.begin_write_transaction(operation).await?;
+        let changed = transaction
+            .execute_engine(sql, params)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to execute brokered write: {error}"),
+                operation: operation.to_string(),
+            })?;
+        transaction.commit().await?;
+        Ok(changed)
+    }
+
+    pub(crate) async fn execute_write_engine<P>(
         &self,
         operation: &str,
         sql: &str,
-        params: impl libsql::params::IntoParams,
-    ) -> Result<u64> {
+        params: P,
+    ) -> Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
         let transaction = self.begin_write_transaction(operation).await?;
-        let changed =
-            transaction
-                .execute(sql, params)
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to execute brokered write: {error}"),
-                    operation: operation.to_string(),
-                })?;
+        let changed = transaction
+            .execute_engine(sql, params)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to execute brokered write: {error}"),
+                operation: operation.to_owned(),
+            })?;
         transaction.commit().await?;
         Ok(changed)
     }
@@ -374,7 +1030,19 @@ impl Database {
     }
 
     fn require_active_write_scope(&self, operation: &str) -> Result<()> {
-        self.inner._authority.require_active_write_scope(operation)
+        if !self.inner.writable {
+            return Err(integrity::read_only_upgrade_error(
+                self.canonical_database_path(),
+                operation,
+            ));
+        }
+        self.inner
+            ._authority
+            .as_ref()
+            .ok_or_else(|| {
+                integrity::read_only_upgrade_error(self.canonical_database_path(), operation)
+            })?
+            .require_active_write_scope(operation)
     }
 
     pub(super) async fn open_writer_connection_unguarded(
@@ -382,16 +1050,7 @@ impl Database {
         operation: &str,
     ) -> Result<Connection> {
         self.require_active_write_scope(operation)?;
-        let conn = self
-            .inner
-            .db
-            .connect()
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to open isolated writer connection: {error}"),
-                operation: operation.to_string(),
-            })?;
-        pragmas::apply(&conn, 0).await?;
-        Ok(conn)
+        Ok(self.inner.conn.clone())
     }
 
     /// Opens an isolated writer while holding the process-local writer lane.
@@ -455,27 +1114,33 @@ impl Database {
     pub(crate) async fn begin_isolated_read_snapshot(
         &self,
         operation: &str,
-    ) -> Result<Transaction> {
-        let conn = self
-            .inner
-            .db
-            .connect()
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to open isolated read connection: {error}"),
-                operation: operation.to_string(),
-            })?;
-        conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;")
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to configure isolated read connection: {error}"),
-                operation: operation.to_string(),
-            })?;
-        conn.transaction()
+    ) -> Result<ReadSnapshot> {
+        self.inner
+            .conn
+            .read_snapshot()
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to begin isolated read snapshot: {error}"),
                 operation: operation.to_string(),
             })
+    }
+
+    pub(crate) async fn begin_engine_read_snapshot(
+        &self,
+        operation: &str,
+    ) -> Result<DatabaseEngineReadSnapshot> {
+        self.begin_isolated_read_snapshot(operation)
+            .await
+            .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
+    }
+
+    pub(crate) async fn begin_memory_read_transaction(
+        &self,
+        operation: &str,
+    ) -> Result<DatabaseMemoryTransaction<'_>> {
+        self.begin_engine_read_snapshot(operation)
+            .await
+            .map(DatabaseMemoryTransaction::read)
     }
 
     /// Starts an immediate transaction that owns the canonical writer lane.
@@ -496,6 +1161,15 @@ impl Database {
         Ok(DatabaseWriteTransaction { transaction, guard })
     }
 
+    pub(crate) async fn begin_memory_write_transaction(
+        &self,
+        operation: &str,
+    ) -> Result<DatabaseMemoryTransaction<'_>> {
+        self.begin_write_transaction(operation)
+            .await
+            .map(DatabaseMemoryTransaction::write)
+    }
+
     /// Releases this database handle.
     ///
     /// The underlying connection remains open until all cloned handles are
@@ -504,10 +1178,7 @@ impl Database {
         drop(self);
     }
 
-    /// Checkpoints the WAL back into the main database file.
-    ///
-    /// This ensures all committed transactions are merged into the main DB
-    /// before the process exits, preventing a stale WAL file on next startup.
+    /// Applies the canonical runtime's bounded WAL checkpoint policy.
     pub async fn checkpoint(&self) -> Result<()> {
         self.require_active_write_scope("checkpoint")?;
         let _writer = self.writer().await;
@@ -515,53 +1186,37 @@ impl Database {
     }
 
     pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
-        let conn = self.open_writer_connection_unguarded("checkpoint").await?;
-        let mut rows = conn
-            .query("PRAGMA wal_checkpoint(TRUNCATE);", ())
+        let authority = self.write_authority()?;
+        let request = CheckpointRequest::new(
+            CheckpointBlockers::default(),
+            Arc::new(database_checkpoint_probe()?),
+        );
+        let outcome = self
+            .inner
+            ._runtime
+            .run_checkpoint(request, authority)
             .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to checkpoint WAL: {e}"),
-                operation: "checkpoint".to_string(),
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("registered checkpoint failed: {error:?}"),
+                operation: "checkpoint".to_owned(),
             })?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read WAL checkpoint status: {e}"),
-                operation: "checkpoint".to_string(),
-            })?
-            .ok_or_else(|| TraceDecayError::Database {
-                message: "WAL checkpoint returned no status row".to_string(),
-                operation: "checkpoint".to_string(),
-            })?;
-        let busy: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read WAL checkpoint busy status: {e}"),
-            operation: "checkpoint".to_string(),
-        })?;
-        let log_frames: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read WAL checkpoint frame count: {e}"),
-            operation: "checkpoint".to_string(),
-        })?;
-        let checkpointed_frames: i64 = row.get(2).map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read WAL checkpoint completion count: {e}"),
-            operation: "checkpoint".to_string(),
-        })?;
-        if busy != 0 || checkpointed_frames < log_frames {
-            return Err(TraceDecayError::Database {
-                message: format!(
-                    "WAL checkpoint incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
-                ),
-                operation: "checkpoint".to_string(),
-            });
+        match outcome {
+            CheckpointOutcome::BelowSoft { .. } | CheckpointOutcome::Complete { .. } => Ok(()),
+            CheckpointOutcome::Pending { .. } => Err(TraceDecayError::Database {
+                message: "registered checkpoint remains pending".to_owned(),
+                operation: "checkpoint".to_owned(),
+            }),
+            CheckpointOutcome::Interrupted { reason, .. } => Err(TraceDecayError::Database {
+                message: format!("registered checkpoint was interrupted: {reason:?}"),
+                operation: "checkpoint".to_owned(),
+            }),
         }
-        Ok(())
     }
 
     /// Writes a transactionally consistent copy of this database.
     ///
-    /// `VACUUM INTO` reads from one `SQLite` snapshot, so concurrent WAL
-    /// checkpoints cannot leave the destination with a partially copied
-    /// B-tree. The destination must not already exist.
+    /// The writer-owned online-backup command copies one consistent SQLite
+    /// snapshot in bounded steps. The destination must not already exist.
     pub async fn snapshot_to(&self, destination: &Path) -> Result<()> {
         self.require_active_write_scope("snapshot_to")?;
         let _writer = self.writer().await;
@@ -569,38 +1224,25 @@ impl Database {
     }
 
     pub(crate) async fn snapshot_to_unguarded(&self, destination: &Path) -> Result<()> {
-        let destination = destination
-            .to_str()
-            .ok_or_else(|| TraceDecayError::Database {
+        if destination.to_str().is_none() {
+            return Err(TraceDecayError::Database {
                 message: format!(
                     "snapshot destination is not valid UTF-8: '{}'",
                     destination.display()
                 ),
                 operation: "snapshot".to_string(),
-            })?;
-        let connection = self
-            .inner
-            .db
-            .connect()
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to open database snapshot connection: {e}"),
-                operation: "snapshot".to_string(),
-            })?;
-        connection
-            .execute_batch("PRAGMA busy_timeout = 120000;")
+            });
+        }
+        let authority = self.write_authority()?;
+        self.inner
+            ._runtime
+            .snapshot_to(destination.to_path_buf(), authority)
             .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to configure database snapshot connection: {e}"),
-                operation: "snapshot".to_string(),
-            })?;
-        connection
-            .execute("VACUUM INTO ?1", libsql::params![destination])
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to create consistent database snapshot: {e}"),
-                operation: "snapshot".to_string(),
-            })?;
-        Ok(())
+            .map(|_| ())
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("registered online backup failed: {error:?}"),
+                operation: "snapshot".to_owned(),
+            })
     }
 
     /// Runs VACUUM and ANALYZE to reclaim space and update query planner statistics.
@@ -702,16 +1344,16 @@ impl Database {
     }
 
     async fn health_on_fresh_reader(&self, operation: &str) -> Result<DatabaseHealth> {
-        let conn = self
-            .inner
-            .db
-            .connect()
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to connect for database health check: {e}"),
-                operation: operation.to_string(),
-            })?;
-        pragmas::apply_read_only(&conn, 0).await?;
-        database_health(&conn, operation).await
+        let snapshot =
+            self.inner
+                .conn
+                .read_snapshot()
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to begin database health snapshot: {e}"),
+                    operation: operation.to_string(),
+                })?;
+        database_health(&snapshot, operation).await
     }
 
     /// Maintenance-only: rebuilds the FTS5 index of a store whose open-time
@@ -729,78 +1371,10 @@ impl Database {
             Self { inner }.repair_fts_after_open().await?;
             return Ok(());
         }
-
-        let read_db = Builder::new_local(db_path)
-            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to open database for FTS health check: {e}"),
-                operation: "repair_fts_offline".to_string(),
-            })?;
-        let read_conn = read_db.connect().map_err(|e| TraceDecayError::Database {
-            message: format!("failed to connect for FTS health check: {e}"),
-            operation: "repair_fts_offline".to_string(),
-        })?;
-        let file_size = std::fs::metadata(db_path).map_or(0, |metadata| metadata.len());
-        pragmas::apply_read_only(&read_conn, file_size).await?;
-        match database_health(&read_conn, "repair_fts_offline").await? {
-            DatabaseHealth::Healthy => return Ok(()),
-            DatabaseHealth::FtsOnlyCorruption(_) => {}
-            DatabaseHealth::Corrupt(problem) => {
-                return Err(TraceDecayError::Database {
-                    message: format!("database quick_check failed: {problem}"),
-                    operation: "repair_fts_offline".to_string(),
-                });
-            }
-        }
-        drop(read_conn);
-        drop(read_db);
-
-        let db =
-            Builder::new_local(db_path)
-                .build()
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to open database for FTS repair: {e}"),
-                    operation: "repair_fts_offline".to_string(),
-                })?;
-        let conn = db.connect().map_err(|e| TraceDecayError::Database {
-            message: format!("failed to connect for FTS repair: {e}"),
-            operation: "repair_fts_offline".to_string(),
-        })?;
-        pragmas::apply(&conn, file_size).await?;
-        let transaction = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to begin FTS repair transaction: {e}"),
-                operation: "repair_fts_offline".to_string(),
-            })?;
-        transaction
-            .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to rebuild FTS index: {e}"),
-                operation: "repair_fts_offline".to_string(),
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to commit FTS repair: {e}"),
-                operation: "repair_fts_offline".to_string(),
-            })?;
-        match database_health(&conn, "repair_fts_offline").await? {
-            DatabaseHealth::Healthy => {}
-            DatabaseHealth::FtsOnlyCorruption(problem) | DatabaseHealth::Corrupt(problem) => {
-                return Err(TraceDecayError::Database {
-                    message: format!("FTS repair did not restore database health: {problem}"),
-                    operation: "repair_fts_offline".to_string(),
-                });
-            }
-        }
-        Ok(())
+        Err(registered_attachment_required(
+            "repair_fts_offline",
+            db_path,
+        ))
     }
 
     pub(crate) async fn rebuild_fts_unguarded(
@@ -916,7 +1490,77 @@ impl Database {
     }
 }
 
-async fn database_health(conn: &Connection, operation: &str) -> Result<DatabaseHealth> {
+fn exact_test_runtime_locator(
+    shard_id: StoreShardIdV1,
+    incarnation: StoreIncarnationV1,
+    path: PathBuf,
+) -> Result<(StoreRuntimeKey, ExactTestRuntimeLocator)> {
+    let mut digest = Sha256::new();
+    digest.update(b"tracedecay.test-runtime.locator.v1\0");
+    digest.update(path.as_os_str().as_encoded_bytes());
+    let verified = VerifiedStoreLocatorV1::new(
+        shard_id.clone(),
+        incarnation,
+        LocatorDigest::new(format!("sha256:{}", hex::encode(digest.finalize()))).map_err(
+            |error| test_runtime_error("construct test locator digest", error.to_string()),
+        )?,
+    );
+    Ok((
+        StoreRuntimeKey::new(shard_id, incarnation),
+        ExactTestRuntimeLocator { verified, path },
+    ))
+}
+
+fn test_runtime_error(operation: &'static str, message: String) -> TraceDecayError {
+    TraceDecayError::Database {
+        message,
+        operation: operation.to_owned(),
+    }
+}
+
+fn registered_attachment_required(operation: &str, db_path: &Path) -> TraceDecayError {
+    TraceDecayError::Database {
+        operation: operation.to_owned(),
+        message: format!(
+            "database '{}' is not mounted in the canonical runtime registry",
+            db_path.display()
+        ),
+    }
+}
+
+fn database_checkpoint_probe() -> Result<DatabaseCheckpointProbe> {
+    let cancellation_id = RuntimeCancellationIdV1::new("cancellation.database-checkpoint")
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to build checkpoint cancellation identity: {error}"),
+            operation: "checkpoint".to_owned(),
+        })?;
+    let deadline_id =
+        RuntimeDeadlineIdV1::new("deadline.database-checkpoint").map_err(|error| {
+            TraceDecayError::Database {
+                message: format!("failed to build checkpoint deadline identity: {error}"),
+                operation: "checkpoint".to_owned(),
+            }
+        })?;
+    Ok(DatabaseCheckpointProbe {
+        cancellation: RuntimeCancellationIdentityV1 {
+            cancellation_id,
+            generation: 1,
+        },
+        deadline: RuntimeDeadlineV1 { deadline_id },
+    })
+}
+
+fn database_query_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: error.to_string(),
+        operation: operation.to_owned(),
+    }
+}
+
+async fn database_health<Q>(conn: &Q, operation: &str) -> Result<DatabaseHealth>
+where
+    Q: crate::db::engine::QueryExecutor,
+{
     let mut rows =
         conn.query("PRAGMA quick_check", ())
             .await
@@ -1091,6 +1735,36 @@ mod tests {
         assert!(second.inner.writer.try_lock().is_err());
         drop(first_writer);
         assert!(second.inner.writer.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn read_only_preflight_and_writable_mount_share_one_registered_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "preflight reuse").unwrap();
+        let (writer, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let reader = Database::publish_runtime(
+            writer.retained_runtime().clone(),
+            DatabaseAccessMode::ReadOnly,
+        )
+        .await
+        .unwrap();
+        let remounted_writer = Database::publish_runtime(
+            reader.retained_runtime().clone(),
+            DatabaseAccessMode::ReadWrite,
+        )
+        .await
+        .unwrap();
+
+        assert!(Arc::ptr_eq(
+            writer.retained_runtime().runtime(),
+            reader.retained_runtime().runtime()
+        ));
+        assert_eq!(writer.opened_file_identity(), reader.opened_file_identity());
+        assert!(Arc::ptr_eq(&writer.inner, &remounted_writer.inner));
     }
 
     #[tokio::test]

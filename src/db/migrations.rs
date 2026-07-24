@@ -2,24 +2,22 @@
 //! Sequential schema migrations for the tracedecay database.
 //!
 //! Each migration is a function that takes a connection and applies DDL
-//! statements. Migrations run inside an EXCLUSIVE transaction so that
-//! concurrent processes (e.g. a post-commit hook and an MCP server)
-//! cannot corrupt the schema.
+//! statements. Migrations run inside the runtime's immediate transaction on
+//! its single writer lane so concurrent clients cannot interleave schema work.
 //!
 //! The current schema version is stored in `PRAGMA user_version`, which
 //! is an atomic integer built into `SQLite`. No extra table is needed.
 
-use libsql::Connection;
-
+use crate::db::engine::{Connection, Executor, QueryExecutor, Transaction, params};
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 24;
+pub(crate) const LATEST_VERSION: u32 = 24;
 
 /// Reads the current schema version from `PRAGMA user_version`.
-async fn get_version(conn: &Connection) -> Result<u32> {
+async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
     let mut rows =
         conn.query("PRAGMA user_version", ())
             .await
@@ -47,7 +45,7 @@ async fn get_version(conn: &Connection) -> Result<u32> {
 ///
 /// PRAGMA statements cannot be parameterised, so we format the value
 /// directly. This is safe because `version` is a u32.
-async fn set_version(conn: &Connection, version: u32) -> Result<()> {
+async fn set_version(conn: &impl Executor, version: u32) -> Result<()> {
     conn.execute(&format!("PRAGMA user_version = {version}"), ())
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -57,7 +55,7 @@ async fn set_version(conn: &Connection, version: u32) -> Result<()> {
     Ok(())
 }
 
-async fn auto_vacuum_mode(conn: &Connection, operation: &str) -> Result<i64> {
+async fn auto_vacuum_mode(conn: &impl QueryExecutor, operation: &str) -> Result<i64> {
     let mut rows =
         conn.query("PRAGMA auto_vacuum", ())
             .await
@@ -127,7 +125,11 @@ pub(crate) async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &s
 
 /// Creates the complete latest schema from scratch for a brand-new database.
 /// This avoids running v0→v1→…→v6 migrations sequentially.
-pub async fn create_schema(conn: &Connection) -> Result<()> {
+pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
+    create_schema_connection(database.conn()).await
+}
+
+pub(crate) async fn create_schema_connection(conn: &Connection) -> Result<()> {
     // Fresh databases only need the pragma before tables are created.
     configure_fresh_auto_vacuum(conn, "create_schema").await?;
     conn.execute_batch(
@@ -301,11 +303,18 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
 
 /// Runs all pending migrations up to `LATEST_VERSION`.
 ///
-/// Acquires an EXCLUSIVE transaction to prevent concurrent writers from
-/// interleaving schema changes. Each migration is applied and the version
-/// is bumped inside the same transaction.
+/// Acquires the runtime's immediate transaction on its single writer lane.
+/// Each migration is applied and the version is bumped inside that same
+/// transaction.
 /// Returns `true` if any migrations were applied, `false` if already up-to-date.
-pub async fn migrate(conn: &Connection) -> Result<bool> {
+pub async fn migrate(database: &crate::db::Database) -> Result<bool> {
+    migrate_connection(database.conn()).await
+}
+
+/// Internal registered-runtime entry point. Public callers migrate the
+/// authority-bound [`crate::db::Database`] facade instead of naming the
+/// private engine connection.
+pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
     migrate_inner(conn, false).await
 }
 
@@ -334,25 +343,50 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
 
     eprintln!("[tracedecay] migrating database schema v{current} → v{LATEST_VERSION}…");
 
-    // BEGIN EXCLUSIVE blocks other writers (including other MCP servers or
-    // post-commit hooks) until we COMMIT. Readers using WAL mode are not
-    // blocked.
-    conn.execute("BEGIN EXCLUSIVE", ())
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to acquire exclusive lock: {e}"),
-            operation: "migrate".to_string(),
-        })?;
+    // The runtime owns one writer lane. Beginning an immediate transaction
+    // reserves that lane before the version is re-read and keeps every schema
+    // change plus its version bump atomic without raw transaction-control SQL.
+    let transaction =
+        conn.schema_migration_transaction()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to acquire migration writer lock: {e}"),
+                operation: "migrate".to_string(),
+            })?;
 
     // Re-read inside the lock in case another process migrated between our
     // check and the lock acquisition.
-    let current = get_version(conn).await?;
+    let current = get_version(&transaction).await?;
+    if current > LATEST_VERSION {
+        let rollback = transaction.rollback().await;
+        let rollback_context = rollback
+            .err()
+            .map_or(String::new(), |error| format!("; rollback failed: {error}"));
+        return Err(TraceDecayError::Database {
+            message: format!(
+                "database schema v{current} is newer than supported v{LATEST_VERSION}{rollback_context}"
+            ),
+            operation: "migrate".to_string(),
+        });
+    }
+    if current == LATEST_VERSION {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to release migration writer lock: {error}"),
+                operation: "migrate".to_string(),
+            })?;
+        repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
+        return Ok(false);
+    }
 
-    let result = run_migrations(conn, current).await;
+    let result = run_migrations(&transaction, current).await;
 
     match result {
         Ok(()) => {
-            conn.execute("COMMIT", ())
+            transaction
+                .commit()
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to commit migrations: {e}"),
@@ -362,14 +396,14 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
             Ok(true)
         }
         Err(e) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            let _ = transaction.rollback().await;
             Err(e)
         }
     }
 }
 
 /// Applies migrations sequentially from `current` up to `LATEST_VERSION`.
-async fn run_migrations(conn: &Connection, current: u32) -> Result<()> {
+async fn run_migrations(conn: &Transaction, current: u32) -> Result<()> {
     debug_assert!(
         current < LATEST_VERSION,
         "run_migrations called when already at latest version"
@@ -382,7 +416,7 @@ async fn run_migrations(conn: &Connection, current: u32) -> Result<()> {
 }
 
 /// Dispatches a single migration by version number.
-async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
+async fn run_migration(conn: &Transaction, version: u32) -> Result<()> {
     match version {
         1 => migrate_v1(conn).await,
         2 => migrate_v2(conn).await,
@@ -417,7 +451,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
 
 /// v19: additive typed fact identity, immutable assertion/evidence/lineage,
 /// purgeable payloads, and resumable legacy projection backfill state.
-async fn migrate_v19(conn: &Connection) -> Result<()> {
+async fn migrate_v19(conn: &Transaction) -> Result<()> {
     super::memory_v2::create_schema(conn, "migrate_v19").await
 }
 
@@ -425,34 +459,34 @@ async fn migrate_v19(conn: &Connection) -> Result<()> {
 /// already received the additive v19 tables. It atomically rebuilds the
 /// proposal transition projection for the relaxed applied-transition contract;
 /// legacy projection backfill and cutover stay daemon-authorized runtime actions.
-async fn migrate_v20(conn: &Connection) -> Result<()> {
+async fn migrate_v20(conn: &Transaction) -> Result<()> {
     super::memory_v2::upgrade_v20_schema(conn, "migrate_v20").await
 }
 
 /// v21: adds durable compatibility telemetry and projection/vector lifecycle
 /// fields to current facts. Aggregate status and per-call repair receipts stay
 /// derived by the daemon-authorized compatibility authority.
-async fn migrate_v21(conn: &Connection) -> Result<()> {
+async fn migrate_v21(conn: &Transaction) -> Result<()> {
     super::memory_v2::upgrade_v21_schema(conn, "migrate_v21").await
 }
 
 /// v22: adds retry receipts, feedback-history/numeric-event parity, constrained
 /// baseline fact relations, and the final proposal-state projection. All V22
 /// data is owner-bound and does not retain a compatibility payload snapshot.
-async fn migrate_v22(conn: &Connection) -> Result<()> {
+async fn migrate_v22(conn: &Transaction) -> Result<()> {
     super::memory_v2::upgrade_v22_schema(conn, "migrate_v22").await
 }
 
 /// v23: upgrades durable V22 relation provenance/parity and adds owner-keyed
 /// compatibility-bank projections without reopening V20/V21 schema scope.
-async fn migrate_v23(conn: &Connection) -> Result<()> {
+async fn migrate_v23(conn: &Transaction) -> Result<()> {
     super::memory_v2::upgrade_v23_schema(conn, "migrate_v23").await
 }
 
 /// v24: adds the payload-free Plan 13 evidence assembly ledger. The tables
 /// retain immutable source membership, producer order, publication receipts,
 /// and replay keys in the existing project database.
-async fn migrate_v24(conn: &Connection) -> Result<()> {
+async fn migrate_v24(conn: &Transaction) -> Result<()> {
     super::evidence_assembly::install_evidence_assembly_schema(conn, "migrate_v24").await
 }
 
@@ -462,7 +496,7 @@ async fn migrate_v24(conn: &Connection) -> Result<()> {
 /// databases may already carry `user_version = 12`. Keep the version monotonic
 /// so later schema work can safely use v13 instead of reusing an exposed number.
 #[allow(clippy::unused_async)] // keeps the migration dispatch uniform
-async fn migrate_v12(_conn: &Connection) -> Result<()> {
+async fn migrate_v12(_conn: &Transaction) -> Result<()> {
     Ok(())
 }
 
@@ -473,7 +507,7 @@ async fn migrate_v12(_conn: &Connection) -> Result<()> {
 /// `memory_facts`. Curation now hard-deletes losing facts instead, so this
 /// migration drops those columns from any local development database that
 /// ran the earlier revision, and is a no-op everywhere else.
-async fn migrate_v13(conn: &Connection) -> Result<()> {
+async fn migrate_v13(conn: &Transaction) -> Result<()> {
     // table_xinfo, not table_info: the earlier revision could have left
     // `superseded_by` as a GENERATED column, which plain table_info hides —
     // and a skipped drop then breaks dropping the column it references.
@@ -540,7 +574,7 @@ async fn migrate_v13(conn: &Connection) -> Result<()> {
 /// of memory mutations. Idempotent: columns are probed before ALTER and the
 /// table/index use IF NOT EXISTS, so databases created from the fresh schema
 /// (which already includes both) pass through unchanged.
-async fn migrate_v14(conn: &Connection) -> Result<()> {
+async fn migrate_v14(conn: &Transaction) -> Result<()> {
     let existing: std::collections::HashSet<String> = {
         let mut rows = conn
             .query("PRAGMA table_info(memory_facts)", ())
@@ -597,7 +631,7 @@ async fn migrate_v14(conn: &Connection) -> Result<()> {
 /// Adds `hrr_precision` so f64 legacy blobs can be identified and re-encoded
 /// once as f32 blobs. The default remains f32 for fresh writes; existing
 /// non-compact blobs are marked f64 before the shared vector repair path runs.
-async fn migrate_v15(conn: &Connection) -> Result<()> {
+async fn migrate_v15(conn: &Transaction) -> Result<()> {
     let mut has_precision = false;
     let mut rows = conn
         .query("PRAGMA table_info(memory_facts)", ())
@@ -634,7 +668,7 @@ async fn migrate_v15(conn: &Connection) -> Result<()> {
          SET hrr_precision = 'f64'
          WHERE hrr_vector IS NOT NULL
            AND length(hrr_vector) != ?1",
-        libsql::params![crate::memory::encoding::HolographicEncoder::SERIALIZED_F32_BYTES as i64],
+        params![crate::memory::encoding::HolographicEncoder::SERIALIZED_F32_BYTES as i64],
     )
     .await
     .map_err(|e| TraceDecayError::Database {
@@ -658,7 +692,7 @@ async fn migrate_v15(conn: &Connection) -> Result<()> {
 /// stored hash no longer matches the current cached fingerprint. `ON DELETE
 /// CASCADE` reclaims rows when either node is deleted, so orphan cleanup is
 /// automatic and no explicit sweep is needed. Idempotent via `IF NOT EXISTS`.
-async fn migrate_v16(conn: &Connection) -> Result<()> {
+async fn migrate_v16(conn: &Transaction) -> Result<()> {
     conn.execute_batch(REDUNDANCY_PAIRS_SCHEMA)
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -699,7 +733,7 @@ async fn migrate_v16(conn: &Connection) -> Result<()> {
 ///   writers supply an explicit value, so the DEFAULT can never manufacture a
 ///   false 0, and NULL is only ever *read*, never written, on such databases.
 #[allow(clippy::unused_async)] // keeps the migration dispatch uniform
-async fn migrate_v17(_conn: &Connection) -> Result<()> {
+async fn migrate_v17(_conn: &Transaction) -> Result<()> {
     Ok(())
 }
 
@@ -707,7 +741,7 @@ async fn migrate_v17(_conn: &Connection) -> Result<()> {
 ///
 /// Relations deliberately use a closed vocabulary. Entity timestamps support
 /// optimistic grooming without creating a global entity identity system.
-async fn migrate_v18(conn: &Connection) -> Result<()> {
+async fn migrate_v18(conn: &Transaction) -> Result<()> {
     let mut has_updated_at = false;
     let mut rows = conn
         .query("PRAGMA table_info(memory_entities)", ())
@@ -749,7 +783,7 @@ async fn migrate_v18(conn: &Connection) -> Result<()> {
     create_memory_fact_relations_schema(conn, "migrate_v18").await
 }
 
-async fn create_memory_fact_relations_schema(conn: &Connection, operation: &str) -> Result<()> {
+async fn create_memory_fact_relations_schema(conn: &impl Executor, operation: &str) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_fact_relations (
             source_fact_id INTEGER NOT NULL,
@@ -822,7 +856,7 @@ const MEMORY_OPLOG_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_oplog (
 // ---------------------------------------------------------------------------
 
 /// Creates all core tables, FTS index, triggers, and indexes.
-async fn migrate_v1(conn: &Connection) -> Result<()> {
+async fn migrate_v1(conn: &Transaction) -> Result<()> {
     // Tables
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS nodes (
@@ -952,7 +986,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Adds the key-value metadata table for persistent counters.
-async fn migrate_v2(conn: &Connection) -> Result<()> {
+async fn migrate_v2(conn: &Transaction) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS metadata (
             key TEXT PRIMARY KEY,
@@ -982,7 +1016,7 @@ async fn migrate_v2(conn: &Connection) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Adds branches, loops, returns, and `max_nesting` columns to the nodes table.
-async fn migrate_v3(conn: &Connection) -> Result<()> {
+async fn migrate_v3(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
         "ALTER TABLE nodes ADD COLUMN branches INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE nodes ADD COLUMN loops INTEGER NOT NULL DEFAULT 0;
@@ -1003,7 +1037,7 @@ async fn migrate_v3(conn: &Connection) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Adds `unsafe_blocks`, `unchecked_calls`, and assertions columns to the nodes table.
-async fn migrate_v4(conn: &Connection) -> Result<()> {
+async fn migrate_v4(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
         "ALTER TABLE nodes ADD COLUMN unsafe_blocks INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE nodes ADD COLUMN unchecked_calls INTEGER NOT NULL DEFAULT 0;
@@ -1025,11 +1059,11 @@ async fn migrate_v4(conn: &Connection) -> Result<()> {
 /// Removes duplicate edges accumulated by repeated reference resolution
 /// during incremental syncs, then adds a UNIQUE index to prevent future
 /// duplicates. See: <https://github.com/…/issues/5>
-async fn migrate_v5(conn: &Connection) -> Result<()> {
+async fn migrate_v5(conn: &Transaction) -> Result<()> {
     // Rebuild the edges table keeping only distinct rows. We use a temp
     // table + swap because DELETE with a self-join subquery can be very
     // slow on large tables (the reporter had 13.9 M edges).
-    conn.execute_batch(
+    conn.execute_schema_batch_step(
         "CREATE TABLE edges_dedup (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT NOT NULL,
@@ -1069,7 +1103,7 @@ async fn migrate_v5(conn: &Connection) -> Result<()> {
 
 /// Adds an expression index on `lower(name)` so that case-insensitive queries
 /// and LIKE fallbacks avoid full table scans on large codebases.
-async fn migrate_v6(conn: &Connection) -> Result<()> {
+async fn migrate_v6(conn: &Transaction) -> Result<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_nodes_lower_name ON nodes(lower(name))",
         (),
@@ -1108,7 +1142,7 @@ async fn migrate_v6(conn: &Connection) -> Result<()> {
 /// true `attrs_start_line` is written back. The DDL below is intentionally left
 /// as-is (not rewritten) to keep migration history stable for databases that
 /// have already applied it.
-async fn migrate_v7(conn: &Connection) -> Result<()> {
+async fn migrate_v7(conn: &Transaction) -> Result<()> {
     conn.execute(
         "ALTER TABLE nodes ADD COLUMN attrs_start_line INTEGER NOT NULL DEFAULT 0",
         (),
@@ -1142,7 +1176,7 @@ async fn migrate_v7(conn: &Connection) -> Result<()> {
 /// over `memory_decisions.text` and `memory_decisions.reason` supported the
 /// legacy decision-recall implementation before v11 backfilled and dropped
 /// these tables.
-async fn migrate_v8(conn: &Connection) -> Result<()> {
+async fn migrate_v8(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_decisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1212,7 +1246,7 @@ async fn migrate_v8(conn: &Connection) -> Result<()> {
 ///    The column is backfilled from existing `Contains` rows, then those
 ///    rows are deleted. After v9, the truth for "who contains node X" is
 ///    `nodes.parent_id`, not the edges table — readers should prefer it.
-async fn migrate_v9(conn: &Connection) -> Result<()> {
+async fn migrate_v9(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS read_cache (
             project_id   TEXT NOT NULL,
@@ -1343,7 +1377,7 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
 /// detect AST-isomorphic, control-flow-equivalent, and token-similar
 /// function/method duplicates. Populated lazily on first redundancy query
 /// and invalidated by `source_hash` mismatch.
-async fn migrate_v10(conn: &Connection) -> Result<()> {
+async fn migrate_v10(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS node_fingerprints (
             node_id TEXT PRIMARY KEY,
@@ -1374,7 +1408,7 @@ async fn migrate_v10(conn: &Connection) -> Result<()> {
 
 /// Creates the active holographic-memory tables alongside the legacy memory
 /// tables. Legacy data is preserved and copied into `memory_facts`.
-async fn migrate_v11(conn: &Connection) -> Result<()> {
+async fn migrate_v11(conn: &Transaction) -> Result<()> {
     create_holographic_memory_schema(conn, "migrate_v11").await?;
     if legacy_memory_tables_exist(conn).await? {
         backfill_legacy_memory_as_facts(conn).await?;
@@ -1383,8 +1417,8 @@ async fn migrate_v11(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn backfill_holographic_memory_vectors_and_banks(conn: &Connection) -> Result<()> {
-    let store = MemoryStore::new(conn);
+async fn backfill_holographic_memory_vectors_and_banks(conn: &Transaction) -> Result<()> {
+    let store = MemoryStore::new_engine_transaction(conn);
     loop {
         let updated = store.compute_missing_vectors(500).await?;
         if updated == 0 {
@@ -1395,7 +1429,7 @@ async fn backfill_holographic_memory_vectors_and_banks(conn: &Connection) -> Res
     Ok(())
 }
 
-async fn legacy_memory_tables_exist(conn: &Connection) -> Result<bool> {
+async fn legacy_memory_tables_exist(conn: &Transaction) -> Result<bool> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM sqlite_master
@@ -1426,7 +1460,7 @@ async fn legacy_memory_tables_exist(conn: &Connection) -> Result<bool> {
     Ok(count > 0)
 }
 
-async fn create_holographic_memory_schema(conn: &Connection, operation: &str) -> Result<()> {
+async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_facts (
             fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1559,7 +1593,7 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
     Ok(())
 }
 
-async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
+async fn backfill_legacy_memory_as_facts(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
         "WITH normalized_decisions AS (
             SELECT
@@ -1773,25 +1807,4 @@ async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn exclusive_maintenance_completes_deferred_auto_vacuum_repair() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("graph.db");
-        let db = libsql::Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        create_schema(&conn).await.unwrap();
-        conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
-            .await
-            .unwrap();
-        assert_eq!(auto_vacuum_mode(&conn, "test").await.unwrap(), 0);
-
-        assert!(!migrate(&conn).await.unwrap());
-        assert_eq!(auto_vacuum_mode(&conn, "test").await.unwrap(), 0);
-
-        assert!(!migrate_with_exclusive_maintenance(&conn).await.unwrap());
-        assert_eq!(auto_vacuum_mode(&conn, "test").await.unwrap(), 2);
-    }
-}
+mod tests;

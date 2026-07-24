@@ -1,0 +1,232 @@
+use std::sync::{Arc, Mutex};
+
+use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlTransaction as RuntimeTransaction;
+
+use super::{
+    IntoParams, Result, Rows, Statement, Value,
+    connection::{Runtime, statement},
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransactionBehavior {
+    Deferred,
+    Immediate,
+}
+
+pub(crate) struct Transaction {
+    runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
+    connection_runtime: Arc<dyn Runtime>,
+}
+
+impl Transaction {
+    pub(super) fn from_runtime(
+        runtime: RuntimeTransaction,
+        connection_runtime: Arc<dyn Runtime>,
+    ) -> Self {
+        Self {
+            runtime: Arc::new(Mutex::new(Some(runtime))),
+            connection_runtime,
+        }
+    }
+
+    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    where
+        P: IntoParams,
+    {
+        let runtime = Arc::clone(&self.runtime);
+        let statement = statement(sql, params)?;
+        tokio::task::spawn_blocking(move || {
+            runtime
+                .lock()
+                .expect("migration SQL transaction lock")
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .execute(statement)
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)?
+        .map(|result| result.changed_rows as u64)
+    }
+
+    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let runtime = Arc::clone(&self.runtime);
+        let statement = statement(sql, params)?;
+        let rows = tokio::task::spawn_blocking(move || {
+            runtime
+                .lock()
+                .expect("migration SQL transaction lock")
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .query(statement)
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)??;
+        Ok(Rows::from_parts(
+            rows.columns,
+            rows.rows
+                .into_iter()
+                .map(|row| {
+                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
+                })
+                .collect(),
+        ))
+    }
+
+    pub(crate) async fn execute_batch(&self, sql: &str) -> Result<()> {
+        let runtime = Arc::clone(&self.runtime);
+        let sql = sql.to_owned();
+        tokio::task::spawn_blocking(move || {
+            runtime
+                .lock()
+                .expect("migration SQL transaction lock")
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .execute_batch(sql)
+                .map(|_| ())
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    /// Executes one separately authorized schema statement without the
+    /// ordinary statement deadline.
+    pub(crate) async fn execute_schema_step<P>(&self, sql: &str, params: P) -> Result<u64>
+    where
+        P: IntoParams,
+    {
+        let runtime = Arc::clone(&self.runtime);
+        let statement = statement(sql, params)?;
+        tokio::task::spawn_blocking(move || {
+            runtime
+                .lock()
+                .expect("migration SQL transaction lock")
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .execute_schema_step(statement)
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)?
+        .map(|result| result.changed_rows as u64)
+    }
+
+    /// Executes one separately authorized schema batch without the ordinary
+    /// statement deadline.
+    pub(crate) async fn execute_schema_batch_step(&self, sql: &str) -> Result<()> {
+        let runtime = Arc::clone(&self.runtime);
+        let sql = sql.to_owned();
+        tokio::task::spawn_blocking(move || {
+            runtime
+                .lock()
+                .expect("migration SQL transaction lock")
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .execute_schema_batch_step(sql)
+                .map(|_| ())
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    pub(crate) async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
+        let runtime = Arc::clone(&self.runtime);
+        let statement = statement(sql, ())?;
+        tokio::task::spawn_blocking(move || {
+            runtime
+                .lock()
+                .expect("migration SQL transaction lock")
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .validate(statement)
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)??;
+        Statement::for_transaction(self, sql)
+    }
+
+    pub(crate) fn last_insert_rowid(&self) -> i64 {
+        self.connection_runtime.last_insert_rowid()
+    }
+
+    pub(crate) async fn commit(self) -> Result<()> {
+        let runtime = self.take_runtime()?;
+        tokio::task::spawn_blocking(move || {
+            runtime.commit().map(|_| ()).map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    pub(crate) async fn rollback(self) -> Result<()> {
+        let runtime = self.take_runtime()?;
+        tokio::task::spawn_blocking(move || {
+            runtime.rollback().map(|_| ()).map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    fn take_runtime(&self) -> Result<RuntimeTransaction> {
+        self.runtime
+            .lock()
+            .expect("migration SQL transaction lock")
+            .take()
+            .ok_or(super::Error::TransactionClosed)
+    }
+}
+
+fn join_error(error: tokio::task::JoinError) -> super::Error {
+    super::Error::Runtime(format!("migration SQL transaction task failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tracedecay_rusqlite_runtime::migration_sql::{
+        MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+    };
+
+    use super::super::{Error, TestConnection};
+
+    struct AllowWrites;
+
+    impl MigrationSqlWriteAuthority for AllowWrites {
+        fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn only_schema_transaction_exposes_long_schema_steps() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let connection = TestConnection::open_with_write_authority(
+            &directory.path().join("engine.sqlite3"),
+            Arc::new(AllowWrites),
+        );
+        let ordinary = connection.transaction().await.unwrap();
+
+        let error = ordinary
+            .execute_schema_batch_step("CREATE TABLE forbidden (id INTEGER)")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidOperation(_)));
+        ordinary.rollback().await.unwrap();
+
+        let migration = connection.schema_migration_transaction().await.unwrap();
+        migration
+            .execute_schema_batch_step("CREATE TABLE allowed (id INTEGER)")
+            .await
+            .unwrap();
+        migration.commit().await.unwrap();
+    }
+}

@@ -2,19 +2,96 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
-use libsql::{Connection, Database as LibsqlDatabase};
-
-use crate::db::DatabaseAuthority;
+use crate::{
+    daemon::store_runtime::registry::StoreRuntimeHandle,
+    db::{DatabaseAuthority, engine::Connection},
+    errors::TraceDecayError,
+};
 
 pub(super) struct DatabaseInner {
     pub(super) conn: Connection,
-    /// Kept alive so the underlying database is not dropped.
-    pub(super) db: LibsqlDatabase,
+    /// Retains the registry-owned physical runtime. The registry remains the
+    /// sole lifecycle owner; this facade never extracts or reopens its
+    /// attachment.
+    pub(super) _runtime: StoreRuntimeHandle,
     pub(super) writable: bool,
+    /// Descriptor-derived identity reported by the physical attachment.
+    pub(super) opened_file_identity: u64,
     /// Serializes logical writers sharing this canonical database slot.
     pub(super) writer: tokio::sync::Mutex<()>,
-    pub(super) _authority: DatabaseAuthority,
+    /// Canonical path from the runtime's verified locator.
+    pub(super) canonical_path: PathBuf,
+    /// The exact capability retained when this physical attachment was
+    /// published writable. Read-only facades never retain write authority.
+    pub(super) _authority: Option<DatabaseAuthority>,
     pub(super) _slot: Option<DatabaseSlot>,
+}
+
+impl DatabaseInner {
+    /// Publishes an already-open canonical registry runtime without reopening
+    /// the SQLite path.
+    pub(super) fn publish(
+        runtime: StoreRuntimeHandle,
+        writable: bool,
+        authority: Option<DatabaseAuthority>,
+        slot: Option<DatabaseSlot>,
+    ) -> crate::errors::Result<Self> {
+        let opened_file_identity = runtime.opened_file_identity().ok_or_else(|| {
+            database_registry_error(
+                "publish canonical database runtime",
+                "registered runtime did not report its opened SQLite file identity",
+            )
+        })?;
+        if let Some(authority) = authority.as_ref() {
+            if runtime.locator().path() != authority.canonical_database_path() {
+                return Err(database_registry_error(
+                    "publish canonical database runtime",
+                    format!(
+                        "registered locator {} does not match retained database authority {}",
+                        runtime.locator().path().display(),
+                        authority.canonical_database_path().display()
+                    ),
+                ));
+            }
+        }
+        runtime
+            .validate_registered_read("publish canonical database runtime")
+            .map_err(|error| {
+                database_registry_error("publish canonical database runtime", format!("{error:?}"))
+            })?;
+
+        let handle = if writable {
+            let authority = authority.clone().ok_or_else(|| {
+                database_registry_error(
+                    "authorize canonical database engine",
+                    "writable database publication requires originating authority",
+                )
+            })?;
+            runtime
+                .authorized_migration_sql_handle(authority)
+                .map_err(|error| {
+                    database_registry_error(
+                        "authorize canonical database engine",
+                        format!("{error:?}"),
+                    )
+                })?
+        } else {
+            runtime.telemetry_read_handle().map_err(|error| {
+                database_registry_error("attach canonical database reader", format!("{error:?}"))
+            })?
+        };
+
+        Ok(Self {
+            conn: Connection::attach(handle),
+            canonical_path: runtime.locator().path().to_path_buf(),
+            _runtime: runtime,
+            writable,
+            opened_file_identity,
+            writer: tokio::sync::Mutex::new(()),
+            _authority: authority,
+            _slot: slot,
+        })
+    }
 }
 
 type DatabaseWeak = Weak<DatabaseInner>;
@@ -36,4 +113,11 @@ pub(super) fn database_slot(identity_key: &Path) -> DatabaseSlot {
     let slot = Arc::new(tokio::sync::Mutex::new(Weak::new()));
     databases.insert(identity_key.to_path_buf(), Arc::downgrade(&slot));
     slot
+}
+
+fn database_registry_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
+        operation: operation.to_owned(),
+        message: error.to_string(),
+    }
 }

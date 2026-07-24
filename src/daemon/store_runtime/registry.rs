@@ -22,8 +22,9 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::UtcMicros;
 use tracedecay_store::{
@@ -45,7 +46,7 @@ pub(crate) use capacity::{
 };
 pub(crate) use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeLeaseAcquireResult,
-    StoreRuntimeOpenRequest,
+    StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
 };
 pub(crate) use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin, StoreRuntimeOpenResult};
 pub(crate) use ports::{
@@ -85,6 +86,15 @@ impl StoreRuntimeKey {
     fn is_profile(&self) -> bool {
         matches!(self.shard_id.scope, StoreShardScopeV1::Profile)
     }
+
+    fn is_project_code_capacity_exempt(&self) -> bool {
+        matches!(
+            self.shard_id.scope,
+            StoreShardScopeV1::Profile
+                | StoreShardScopeV1::ProfileMemory
+                | StoreShardScopeV1::ProfileSessions
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -97,6 +107,83 @@ struct StoreRuntimeHandleInner {
     runtime: Arc<ShardRuntime>,
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
     locator: RuntimeLocatorRecord,
+    opened_file_identity: u64,
+    schema_migrated: bool,
+    database_authority: Option<crate::db::DatabaseAuthority>,
+}
+
+struct RuntimeDatabaseWriteAuthority {
+    authority: crate::db::DatabaseAuthority,
+    canonical_path: PathBuf,
+    opened_file_identity: u64,
+}
+
+impl RuntimeDatabaseWriteAuthority {
+    fn verify_database(&self, intent: &str) -> Result<(), String> {
+        self.authority
+            .require_active_write_scope(intent)
+            .map_err(|error| error.to_string())?;
+        let current_file_identity =
+            crate::sessions::source::sqlite_generation_identity(&self.canonical_path)
+                .map_err(|_| "could not verify the registered SQLite file identity".to_owned())?;
+        if current_file_identity != self.opened_file_identity {
+            return Err("database file identity changed after registry attachment".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl tracedecay_rusqlite_runtime::RuntimeWriteAuthority for RuntimeDatabaseWriteAuthority {
+    fn verify(
+        &self,
+        stage: tracedecay_rusqlite_runtime::RuntimeWriteAuthorityStage,
+    ) -> Result<(), tracedecay_rusqlite_runtime::RuntimeWriteAuthorityError> {
+        let intent = match stage {
+            tracedecay_rusqlite_runtime::RuntimeWriteAuthorityStage::BeforeAdmission => {
+                "admit registered runtime write"
+            }
+            tracedecay_rusqlite_runtime::RuntimeWriteAuthorityStage::Dequeued => {
+                "dequeue registered runtime write"
+            }
+            tracedecay_rusqlite_runtime::RuntimeWriteAuthorityStage::BeforeCommit => {
+                "commit registered runtime write"
+            }
+        };
+        self.verify_database(intent)
+            .map_err(tracedecay_rusqlite_runtime::RuntimeWriteAuthorityError::denied)
+    }
+}
+
+impl tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority
+    for RuntimeDatabaseWriteAuthority
+{
+    fn verify(
+        &self,
+        intent: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent,
+    ) -> Result<(), tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError> {
+        let intent = match intent {
+            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Validate => {
+                "validate registered migration SQL statement"
+            }
+            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Execute => {
+                "execute registered migration SQL statement"
+            }
+            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Query => {
+                "query registered migration SQL writer"
+            }
+            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::ExecuteBatch => {
+                "execute registered migration SQL statement batch"
+            }
+            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::BeginTransaction => {
+                "begin registered migration SQL transaction"
+            }
+            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Commit => {
+                "commit registered migration SQL transaction"
+            }
+        };
+        self.verify_database(intent)
+            .map_err(tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied)
+    }
 }
 
 impl StoreRuntimeHandle {
@@ -116,14 +203,239 @@ impl StoreRuntimeHandle {
         &self.inner.locator
     }
 
+    pub(crate) fn opened_file_identity(&self) -> Option<u64> {
+        Some(self.inner.opened_file_identity)
+    }
+
+    pub(crate) fn schema_migrated(&self) -> bool {
+        self.inner.schema_migrated
+    }
+
+    pub(crate) fn database_authority(
+        &self,
+        operation: &'static str,
+    ) -> Result<crate::db::DatabaseAuthority, StoreRuntimeRegistryFailure> {
+        let authority = self.inner.database_authority.clone().ok_or_else(|| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: "registered runtime has no originating database authority".to_owned(),
+            }
+        })?;
+        self.validate_database_write_authority(&authority, operation)?;
+        Ok(authority)
+    }
+
+    pub(crate) fn validate_registered_read(
+        &self,
+        operation: &'static str,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        self.validate_opened_file_identity(operation).map(|_| ())
+    }
+
     pub(crate) fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
         self.inner.attachment.snapshot()
     }
 
-    pub(crate) async fn dispatch_submit(
+    pub(crate) fn storage_page_counts(
+        &self,
+        reader_wait: Duration,
+    ) -> Result<(u64, u64, u64), StoreRuntimeRegistryFailure> {
+        self.validate_opened_file_identity("authorize registered store-size telemetry")?;
+        let counts = self
+            .inner
+            .attachment
+            .storage_page_counts(reader_wait)
+            .map_err(
+                |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "read registered store-size telemetry",
+                    message,
+                },
+            )?;
+        self.validate_opened_file_identity("complete registered store-size telemetry")?;
+        Ok(counts)
+    }
+
+    pub(crate) async fn run_bounded_incremental_compaction(
+        &self,
+        max_pages: u64,
+        authority: crate::db::DatabaseAuthority,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        let max_pages = u32::try_from(max_pages).map_err(|_| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "run bounded incremental compaction",
+                message: "incremental compaction page limit exceeds u32".to_owned(),
+            }
+        })?;
+        if max_pages == 0 {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "run bounded incremental compaction",
+                message: "incremental compaction page limit must be positive".to_owned(),
+            });
+        }
+        let opened_file_identity = self.validate_database_write_authority(
+            &authority,
+            "authorize registered incremental compaction",
+        )?;
+        let authority = Arc::new(RuntimeDatabaseWriteAuthority {
+            canonical_path: authority.canonical_database_path().to_path_buf(),
+            authority,
+            opened_file_identity,
+        });
+        self.inner
+            .attachment
+            .run_bounded_incremental_compaction(max_pages, authority)
+            .await?;
+        self.validate_opened_file_identity("complete registered incremental compaction")?;
+        Ok(())
+    }
+
+    pub(crate) async fn run_checkpoint(
+        &self,
+        request: tracedecay_rusqlite_runtime::CheckpointRequest,
+        authority: crate::db::DatabaseAuthority,
+    ) -> Result<tracedecay_rusqlite_runtime::CheckpointOutcome, StoreRuntimeRegistryFailure> {
+        let opened_file_identity =
+            self.validate_database_write_authority(&authority, "authorize registered checkpoint")?;
+        let authority = Arc::new(RuntimeDatabaseWriteAuthority {
+            canonical_path: authority.canonical_database_path().to_path_buf(),
+            authority,
+            opened_file_identity,
+        });
+        let outcome = self
+            .inner
+            .attachment
+            .run_checkpoint(request, authority)
+            .await?;
+        self.validate_opened_file_identity("complete registered checkpoint")?;
+        Ok(outcome)
+    }
+
+    pub(crate) async fn snapshot_to(
+        &self,
+        destination: PathBuf,
+        authority: crate::db::DatabaseAuthority,
+    ) -> Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure> {
+        let opened_file_identity = self
+            .validate_database_write_authority(&authority, "authorize registered online backup")?;
+        let authority = Arc::new(RuntimeDatabaseWriteAuthority {
+            canonical_path: authority.canonical_database_path().to_path_buf(),
+            authority,
+            opened_file_identity,
+        });
+        let receipt = self
+            .inner
+            .attachment
+            .snapshot_to(destination, authority)
+            .await?;
+        self.validate_opened_file_identity("complete registered online backup")?;
+        Ok(receipt)
+    }
+
+    fn migration_sql_handle_unchecked(
+        &self,
+    ) -> Result<
+        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+        StoreRuntimeRegistryFailure,
+    > {
+        self.inner
+            .attachment
+            .migration_sql_handle()
+            .map_err(
+                |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "attach migration SQL channel",
+                    message,
+                },
+            )
+    }
+
+    /// Returns a writerless channel for bounded health and telemetry reads.
+    ///
+    /// This capability does not accept `DatabaseAuthority` and cannot recover
+    /// the attachment's writer sender through `with_write_authority`.
+    pub(crate) fn telemetry_read_handle(
+        &self,
+    ) -> Result<
+        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+        StoreRuntimeRegistryFailure,
+    > {
+        self.validate_opened_file_identity("authorize registered telemetry read")?;
+        let handle = self.migration_sql_handle_unchecked()?;
+        if handle.binding() != self.binding() {
+            return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
+                expected: Box::new(self.binding().clone()),
+                actual: Box::new(handle.binding().clone()),
+            });
+        }
+        if handle.verified_locator() != self.locator().verified() {
+            return Err(StoreRuntimeRegistryFailure::LocatorIdentityMismatch {
+                key: Box::new(self.locator().key().clone()),
+                locator: Box::new(handle.verified_locator().clone()),
+            });
+        }
+        Ok(handle.read_only_clone())
+    }
+
+    pub(crate) fn authorized_migration_sql_handle(
+        &self,
+        authority: crate::db::DatabaseAuthority,
+    ) -> Result<
+        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+        StoreRuntimeRegistryFailure,
+    > {
+        use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority;
+
+        authority
+            .require_active_write_scope("authorize registered SQLite runtime")
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "authorize migration SQL channel",
+                message: error.to_string(),
+            })?;
+        if authority.canonical_database_path() != self.locator().path() {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "authorize migration SQL channel",
+                message: format!(
+                    "registered locator {} does not match database authority {}",
+                    self.locator().path().display(),
+                    authority.canonical_database_path().display()
+                ),
+            });
+        }
+
+        let handle = self.migration_sql_handle_unchecked()?;
+        if handle.binding() != self.binding() {
+            return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
+                expected: Box::new(self.binding().clone()),
+                actual: Box::new(handle.binding().clone()),
+            });
+        }
+        if handle.verified_locator() != self.locator().verified() {
+            return Err(StoreRuntimeRegistryFailure::LocatorIdentityMismatch {
+                key: Box::new(self.locator().key().clone()),
+                locator: Box::new(handle.verified_locator().clone()),
+            });
+        }
+
+        let opened_file_identity =
+            self.validate_opened_file_identity("authorize migration SQL channel")?;
+
+        let authority = RuntimeDatabaseWriteAuthority {
+            canonical_path: authority.canonical_database_path().to_path_buf(),
+            authority,
+            opened_file_identity,
+        };
+        handle
+            .with_write_authority(Arc::new(authority) as Arc<dyn MigrationSqlWriteAuthority>)
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "authorize migration SQL channel",
+                message: error.to_string(),
+            })
+    }
+
+    pub(crate) async fn dispatch_submit_authorized(
         &self,
         request: tracedecay_store::RuntimeSubmitRequestV1,
         probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
+        authority: crate::db::DatabaseAuthority,
     ) -> Result<tracedecay_store::RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure> {
         if request.binding() != self.binding() {
             return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
@@ -131,7 +443,70 @@ impl StoreRuntimeHandle {
                 actual: Box::new(request.binding().clone()),
             });
         }
-        self.inner.attachment.dispatch_submit(request, probe).await
+        let opened_file_identity = self
+            .validate_database_write_authority(&authority, "authorize registered runtime write")?;
+        let authority = Arc::new(RuntimeDatabaseWriteAuthority {
+            canonical_path: authority.canonical_database_path().to_path_buf(),
+            authority,
+            opened_file_identity,
+        });
+        self.inner
+            .attachment
+            .dispatch_submit(request, probe, authority)
+            .await
+    }
+
+    fn validate_database_write_authority(
+        &self,
+        authority: &crate::db::DatabaseAuthority,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        authority
+            .require_active_write_scope(operation)
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: error.to_string(),
+            })?;
+        if authority.canonical_database_path() != self.locator().path() {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: format!(
+                    "registered locator {} does not match database authority {}",
+                    self.locator().path().display(),
+                    authority.canonical_database_path().display()
+                ),
+            });
+        }
+        self.validate_opened_file_identity(operation)
+    }
+
+    fn validate_opened_file_identity(
+        &self,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        if let Some(authority) = self.inner.database_authority.as_ref() {
+            authority
+                .require_active_write_scope(operation)
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation,
+                    message: error.to_string(),
+                })?;
+        }
+        let current_file_identity = crate::sessions::source::sqlite_generation_identity(
+            self.locator().path(),
+        )
+        .map_err(|_| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation,
+            message: "could not verify the registered SQLite file identity".to_owned(),
+        })?;
+        let opened_file_identity = self.inner.opened_file_identity;
+        if current_file_identity != opened_file_identity {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: "database file identity changed after registry attachment".to_owned(),
+            });
+        }
+        Ok(opened_file_identity)
     }
 
     pub(crate) fn dispatch_read(
@@ -145,6 +520,7 @@ impl StoreRuntimeHandle {
                 actual: Box::new(request.binding().clone()),
             });
         }
+        self.validate_opened_file_identity("authorize registered runtime read")?;
         self.inner.attachment.dispatch_read(request, probe)
     }
 
