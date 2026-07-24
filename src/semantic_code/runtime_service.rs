@@ -706,6 +706,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The injected panic means the commit closure never reads its captured
+    // pointer; liveness resolves this lint at the binding, not at `Ok(next)`.
+    #[allow(unused_assignments)]
     async fn panicked_publication_worker_fails_closed_and_retains_prior_generation() {
         let handle = SemanticRuntimeSchedulingHandleV1::new();
         let prior_pointer = pointer('a');
@@ -735,7 +738,7 @@ mod tests {
             move |_cancellation| async move {
                 Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
                     panic!("injected publication worker failure");
-                    #[allow(unreachable_code, unused_assignments)]
+                    #[allow(unreachable_code)]
                     Ok(next)
                 }))
             },
