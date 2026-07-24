@@ -21,8 +21,15 @@ export interface GraphCanvasEdge {
  * consume CSS variables directly, so we re-sample on every theme flip. */
 function palette(element: HTMLElement) {
   const style = getComputedStyle(element);
-  const token = (name: string, fallback: string) =>
-    style.getPropertyValue(name).trim() || fallback;
+  const token = (name: string, fallback: string) => {
+    // Sigma's WebGL programs parse colors themselves and accept only
+    // hex / rgb() / named forms. Our oklch tokens resolve to `lab(...)`,
+    // which they cannot parse — every node and edge silently became black.
+    // Normalize through the canvas parser (which does understand lab/oklch)
+    // so the renderer always receives a form it can read.
+    const [r, g, b] = cssColorToRgb(style.getPropertyValue(name).trim() || fallback);
+    return `rgb(${r}, ${g}, ${b})`;
+  };
   return {
     node: token('--raw-text-muted', '#8a90a0'),
     nodeSelected: token('--raw-accent', '#7aa2f7'),
