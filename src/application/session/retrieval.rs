@@ -21,8 +21,8 @@ use crate::query::temporal::context::{ContextBudget, ContextError, VersionedToke
 use crate::query::temporal::cursor::CursorError;
 use crate::query::temporal::hydration::HydrationError;
 use crate::query::temporal::ports::{
-    ExecutionControl, ExecutionLimits, TemporalAuthorizedRoot, TemporalPortError,
-    TemporalRetrievalScope,
+    ExecutionControl, ExecutionLimits, TemporalAuthorizedRoot, TemporalCandidateFilterV1,
+    TemporalPortError, TemporalRetrievalScope,
 };
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::query::temporal::resolution::SummaryLineageRejection;
@@ -68,6 +68,7 @@ pub struct SessionTemporalQuery {
     query: String,
     direct_anchor: Option<RetrievalAnchorId>,
     compatibility_filter_digest: Option<String>,
+    semantic_filter: TemporalCandidateFilterV1,
     cursor: Option<String>,
     temporal_mode: TemporalModeV1,
     grain: RetrievalGrainV1,
@@ -119,6 +120,7 @@ impl SessionTemporalQuery {
             query: query.into(),
             direct_anchor: None,
             compatibility_filter_digest: None,
+            semantic_filter: TemporalCandidateFilterV1::default(),
             cursor,
             temporal_mode,
             grain,
@@ -158,6 +160,15 @@ impl SessionTemporalQuery {
     }
 
     #[must_use]
+    pub(crate) fn with_semantic_filter(
+        mut self,
+        semantic_filter: TemporalCandidateFilterV1,
+    ) -> Self {
+        self.semantic_filter = semantic_filter;
+        self
+    }
+
+    #[must_use]
     pub(crate) fn with_direct_anchor(mut self, anchor_id: RetrievalAnchorId) -> Self {
         self.direct_anchor = Some(anchor_id);
         self
@@ -182,6 +193,10 @@ impl SessionTemporalQuery {
     #[allow(dead_code)] // retained for session retrieval compatibility filters
     pub(crate) fn compatibility_filter_digest(&self) -> Option<&str> {
         self.compatibility_filter_digest.as_deref()
+    }
+
+    pub(crate) fn semantic_filter(&self) -> &TemporalCandidateFilterV1 {
+        &self.semantic_filter
     }
 
     pub fn cursor(&self) -> Option<&str> {
@@ -376,6 +391,7 @@ where
             query.grain,
         )
         .and_then(|request| request.with_filter_digest(filter_digest.clone()))
+        .and_then(|request| request.with_semantic_filter(query.semantic_filter.clone()))
         .and_then(|request| {
             temporal_authorized_root(grant.scope().authorized_root().identity())
                 .and_then(|root| request.with_authorized_root(root))
@@ -799,6 +815,7 @@ fn digest_request(
         query: &'a str,
         direct_anchor: Option<String>,
         compatibility_filter_digest: Option<&'a str>,
+        semantic_filter: &'a TemporalCandidateFilterV1,
         temporal_mode: &'static str,
         cutoff_micros: Option<i64>,
         grain: &'static str,
@@ -817,7 +834,7 @@ fn digest_request(
 
     let limits = query.execution_limits;
     sha256_json(&RequestBinding {
-        format_version: 4,
+        format_version: 5,
         actor_id: context.actor_id().as_str(),
         grant_id: grant.id().as_str(),
         grant_revision: grant.revision(),
@@ -831,6 +848,7 @@ fn digest_request(
         query: &query.query,
         direct_anchor: query.direct_anchor.as_ref().map(ToString::to_string),
         compatibility_filter_digest: query.compatibility_filter_digest.as_deref(),
+        semantic_filter: &query.semantic_filter,
         temporal_mode: query.temporal_mode.as_str(),
         cutoff_micros: match query.temporal_mode {
             TemporalModeV1::AsOf { cutoff } => Some(cutoff.0),
@@ -897,10 +915,11 @@ fn digest_filters(query: &SessionTemporalQuery) -> String {
         grain: &'static str,
         direct_anchor: Option<String>,
         compatibility_filter_digest: Option<&'a str>,
+        semantic_filter: &'a TemporalCandidateFilterV1,
     }
 
     sha256_json(&FilterBinding {
-        format_version: 2,
+        format_version: 3,
         query: &query.query,
         scope_kind: query.retrieval_scope.kind(),
         session_id: query.retrieval_scope.session_id().map(SessionId::as_str),
@@ -913,6 +932,7 @@ fn digest_filters(query: &SessionTemporalQuery) -> String {
         grain: query.grain.as_str(),
         direct_anchor: query.direct_anchor.as_ref().map(ToString::to_string),
         compatibility_filter_digest: query.compatibility_filter_digest.as_deref(),
+        semantic_filter: &query.semantic_filter,
     })
 }
 

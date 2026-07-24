@@ -1,11 +1,11 @@
-use libsql::params;
+use crate::db::engine::params;
 use tracedecay_domain::SessionId;
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
     SessionStoreResult, SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
 
-use super::super::GlobalDb;
+use super::super::RegisteredGlobalDb;
 use super::query::{PERSIST_OPERATION, storage};
 use super::refresh::SessionRefreshRecoveryV1;
 
@@ -29,7 +29,7 @@ pub(super) use receipts::validate_final_projection_receipt;
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
 
-impl GlobalDb {
+impl RegisteredGlobalDb {
     pub(crate) async fn pending_session_temporal_refresh_requests_result(
         &self,
         limit: usize,

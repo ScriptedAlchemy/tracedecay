@@ -560,6 +560,74 @@ fn token_budget_marks_an_aggregate_omission_and_preserves_all_continuations() {
 }
 
 #[test]
+fn budget_omission_keeps_ranked_hydration_omissions_measured_and_rendered_in_order() {
+    let batch = HydrationBatch {
+        available: vec![
+            HydratedPayload {
+                anchor_id: anchor("available-first"),
+                bytes: b"one".to_vec(),
+            },
+            HydratedPayload {
+                anchor_id: anchor("available-second"),
+                bytes: b"two".to_vec(),
+            },
+        ],
+        unavailable: vec![
+            UnavailableHydration {
+                anchor_id: anchor("z-denied"),
+                state: HydrationStateV1::Redacted,
+            },
+            UnavailableHydration {
+                anchor_id: anchor("a-denied"),
+                state: HydrationStateV1::Locked,
+            },
+        ],
+    };
+
+    let context = assemble_context(
+        &batch,
+        RetrievalGrainV1::Occurrence,
+        ContextBudget {
+            max_bytes: 100_000,
+            max_tokens: 1,
+            estimator_version: "payload-count-v1".to_string(),
+        },
+        &PayloadCountEstimator,
+    )
+    .expect("one admitted payload with positional omissions");
+
+    assert_eq!(
+        context.bundle.omissions,
+        vec![
+            CompactContextOmissionV1 {
+                anchor_id: Some(anchor("z-denied")),
+                reason: ContextOmissionReasonV1::Redacted,
+            },
+            CompactContextOmissionV1 {
+                anchor_id: Some(anchor("a-denied")),
+                reason: ContextOmissionReasonV1::Locked,
+            },
+            CompactContextOmissionV1 {
+                anchor_id: None,
+                reason: ContextOmissionReasonV1::TokenBudget,
+            },
+        ]
+    );
+    let rendered: serde_json::Value =
+        serde_json::from_str(&context.rendered).expect("rendered context");
+    assert_eq!(
+        rendered["bundle"]["omissions"]
+            .as_array()
+            .expect("omission array")
+            .iter()
+            .map(|omission| omission["anchor_id"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("z-denied"), Some("a-denied"), None]
+    );
+    assert_eq!(context.accounted_bytes, context.rendered.len() as u64);
+}
+
+#[test]
 fn byte_budget_marks_an_aggregate_omission_without_losing_continuation_order() {
     let batch = HydrationBatch {
         available: vec![

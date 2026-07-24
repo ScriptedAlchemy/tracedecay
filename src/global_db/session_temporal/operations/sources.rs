@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     AnchorDurabilityClass, AnchorSourceGenerationV2, DurableObservationV1, EntityId, EntityKind,
@@ -28,7 +28,7 @@ const SOURCE_UNAVAILABLE_STATES: &[&str] = &[
 ];
 
 pub(super) async fn prepare_sources(
-    conn: &Connection,
+    conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
 ) -> Result<Vec<PreparedSource>, LcmError> {
     let mut sources = Vec::with_capacity(publication.draft.source_refs.len());
@@ -47,7 +47,7 @@ pub(super) async fn prepare_sources(
 }
 
 async fn prepare_raw_source(
-    conn: &Connection,
+    conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
     store_id: i64,
     now: i64,
@@ -124,7 +124,7 @@ async fn prepare_raw_source(
 }
 
 async fn prepare_summary_source(
-    conn: &Connection,
+    conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
     node_id: &str,
 ) -> Result<PreparedSource, LcmError> {
@@ -184,7 +184,7 @@ async fn prepare_summary_source(
 }
 
 async fn resolve_message_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     session_id: &str,
     message_id: &str,
@@ -272,7 +272,7 @@ async fn resolve_message_anchor(
 }
 
 async fn publishing_scope(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     session_id: &str,
 ) -> Result<ObservationScopeV1, LcmError> {
@@ -331,7 +331,7 @@ fn validate_source_eligibility(
 }
 
 async fn load_payload_manifest(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     session_id: &str,
     payload_ref: &str,
@@ -385,7 +385,7 @@ async fn load_payload_manifest(
 }
 
 pub(super) async fn session_owner_json(
-    conn: &Connection,
+    conn: &impl Executor,
     provider: &str,
     session_id: &str,
 ) -> Result<String, LcmError> {
@@ -435,7 +435,7 @@ pub(super) fn source_horizon_json(sources: &[PreparedSource]) -> String {
 }
 
 pub(super) async fn insert_compatibility_source_anchors(
-    conn: &Connection,
+    conn: &impl Executor,
     sources: &[PreparedSource],
     owner_json: &str,
 ) -> Result<(), LcmError> {
@@ -478,7 +478,7 @@ pub(super) async fn insert_compatibility_source_anchors(
 }
 
 pub(super) async fn build_summary_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     sources: &[PreparedSource],
     created_at: i64,
@@ -533,7 +533,7 @@ pub(super) async fn build_summary_anchor(
 }
 
 pub(super) async fn insert_summary_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     anchor_id: &str,
     summary_id: &str,
     owner_json: &str,
@@ -585,7 +585,7 @@ pub(super) async fn insert_summary_anchor(
 }
 
 async fn verify_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     anchor_id: &str,
     anchor_json: &str,
     owner_json: &str,
@@ -613,7 +613,7 @@ async fn verify_anchor(
 }
 
 pub(super) async fn insert_payload_manifests(
-    conn: &Connection,
+    conn: &impl Executor,
     _summary_id: &str,
     manifest: &CanonicalPublicationManifest,
     _created_at: i64,
@@ -641,7 +641,7 @@ pub(super) async fn insert_payload_manifests(
 }
 
 pub(super) async fn verify_payload_manifests(
-    conn: &Connection,
+    conn: &impl Executor,
     _summary_id: &str,
     manifest: &CanonicalPublicationManifest,
     _created_at: i64,
@@ -655,7 +655,7 @@ pub(super) async fn verify_payload_manifests(
 }
 
 async fn payload_authority_created_at(
-    conn: &Connection,
+    conn: &impl Executor,
     payload_ref: &str,
     session_id: &str,
 ) -> Result<i64, LcmError> {
@@ -674,7 +674,7 @@ async fn payload_authority_created_at(
 }
 
 async fn verify_payload_binding(
-    conn: &Connection,
+    conn: &impl Executor,
     payload: &PreparedPayload,
     session_id: &str,
     created_at: i64,
@@ -704,7 +704,7 @@ async fn verify_payload_binding(
 }
 
 async fn receipt_binds_payload(
-    conn: &Connection,
+    conn: &impl Executor,
     payload: &PreparedPayload,
     session_id: &str,
     receipt_id: &str,
@@ -735,7 +735,7 @@ async fn receipt_binds_payload(
 }
 
 async fn ensure_source_summary_available(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     summary_id: &str,
 ) -> Result<(), LcmError> {

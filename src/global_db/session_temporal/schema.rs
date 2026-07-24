@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 
 use crate::global_db::{global_db_operation_error, global_db_operation_message};
 
@@ -1039,7 +1039,9 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     ("session_summary_nodes_fts", &["summary_text", "index_text"]),
 ];
 
-pub(crate) async fn ensure_session_temporal_schema(conn: &Connection) -> crate::errors::Result<()> {
+pub(crate) async fn ensure_session_temporal_schema(
+    conn: &impl Executor,
+) -> crate::errors::Result<()> {
     let version = schema_version(conn).await?;
     if let Some(version) = version
         && version > SESSION_TEMPORAL_SCHEMA_VERSION
@@ -1077,7 +1079,9 @@ pub(crate) async fn ensure_session_temporal_schema(conn: &Connection) -> crate::
     Ok(())
 }
 
-pub(crate) async fn repair_session_temporal_state(conn: &Connection) -> crate::errors::Result<()> {
+pub(crate) async fn repair_session_temporal_state(
+    conn: &impl Executor,
+) -> crate::errors::Result<()> {
     let Some(version) = schema_version(conn).await? else {
         return Ok(());
     };
@@ -1093,7 +1097,7 @@ pub(crate) async fn repair_session_temporal_state(conn: &Connection) -> crate::e
     repair_legacy_cursor_key_bindings(conn).await
 }
 
-async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::Result<()> {
+async fn repair_interrupted_refresh_state(conn: &impl Executor) -> crate::errors::Result<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS session_refresh_operations_delete_guard_v1;
          DROP TRIGGER IF EXISTS session_refresh_operations_state_guard_v1;
@@ -1392,7 +1396,7 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
     Ok(())
 }
 
-async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::Result<()> {
+async fn repair_legacy_cursor_key_bindings(conn: &impl Executor) -> crate::errors::Result<()> {
     // Projection receipts are immutable evidence whose digest includes the
     // generation's frozen watermarks. If an earlier repair rebound the active
     // generation directly, restore that evidence-authoritative snapshot rather
@@ -1580,7 +1584,7 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
 /// Upgrade pre-v3 copy edges to carry bitemporal columns while preserving
 /// legacy unknown validity and the prior `created_at` knowledge watermark.
 async fn migrate_logical_copy_bitemporality(
-    conn: &Connection,
+    conn: &impl Executor,
     version: Option<i64>,
 ) -> crate::errors::Result<()> {
     let mut rows = conn
@@ -1698,12 +1702,12 @@ async fn migrate_logical_copy_bitemporality(
     Ok(())
 }
 
-async fn temporal_fts_is_missing(conn: &Connection) -> crate::errors::Result<bool> {
+async fn temporal_fts_is_missing(conn: &impl Executor) -> crate::errors::Result<bool> {
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         let mut rows = conn
             .query(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                params![table],
+                params![*table],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -1719,12 +1723,12 @@ async fn temporal_fts_is_missing(conn: &Connection) -> crate::errors::Result<boo
     Ok(false)
 }
 
-async fn validate_temporal_fts_contracts(conn: &Connection) -> crate::errors::Result<()> {
+async fn validate_temporal_fts_contracts(conn: &impl Executor) -> crate::errors::Result<()> {
     for (table, expected_sql) in TEMPORAL_FTS_CONTRACTS {
         let mut rows = conn
             .query(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                params![table],
+                params![*table],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -1759,7 +1763,7 @@ fn normalize_fts_sql(sql: &str) -> String {
         .replace("ifnotexists", "")
 }
 
-async fn rebuild_temporal_fts(conn: &Connection) -> crate::errors::Result<()> {
+async fn rebuild_temporal_fts(conn: &impl Executor) -> crate::errors::Result<()> {
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         conn.execute(
             &format!("INSERT INTO {table}({table}) VALUES ('rebuild')"),
@@ -1771,7 +1775,7 @@ async fn rebuild_temporal_fts(conn: &Connection) -> crate::errors::Result<()> {
     Ok(())
 }
 
-async fn validate_temporal_fts_match(conn: &Connection) -> crate::errors::Result<()> {
+async fn validate_temporal_fts_match(conn: &impl Executor) -> crate::errors::Result<()> {
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         conn.query(
             &format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1 LIMIT 1"),
@@ -1783,7 +1787,7 @@ async fn validate_temporal_fts_match(conn: &Connection) -> crate::errors::Result
     Ok(())
 }
 
-async fn validate_temporal_table_shapes(conn: &Connection) -> crate::errors::Result<()> {
+async fn validate_temporal_table_shapes(conn: &impl Executor) -> crate::errors::Result<()> {
     for &(table, expected_columns) in TEMPORAL_TABLE_COLUMNS {
         let mut rows = conn
             .query(
@@ -1817,7 +1821,7 @@ async fn validate_temporal_table_shapes(conn: &Connection) -> crate::errors::Res
     Ok(())
 }
 
-async fn schema_version(conn: &Connection) -> crate::errors::Result<Option<i64>> {
+async fn schema_version(conn: &impl Executor) -> crate::errors::Result<Option<i64>> {
     let mut tables = conn
         .query(
             "SELECT 1 FROM sqlite_master
@@ -1854,21 +1858,18 @@ async fn schema_version(conn: &Connection) -> crate::errors::Result<Option<i64>>
 
 #[cfg(test)]
 mod tests {
-    use libsql::Builder;
     use tempfile::TempDir;
+
+    use crate::db::engine::TestConnection;
 
     use super::repair_session_temporal_state;
 
     #[tokio::test]
     async fn repair_uninitialized_store_is_non_mutating() {
         let temp = TempDir::new().expect("temp dir");
-        let db = Builder::new_local(temp.path().join("sessions.db"))
-            .build()
-            .await
-            .expect("local database");
-        let conn = db.connect().expect("database connection");
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
 
-        repair_session_temporal_state(&conn)
+        repair_session_temporal_state(&*conn)
             .await
             .expect("uninitialized store needs no state repair");
 
@@ -1886,3 +1887,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/session_suite/lcm_schema/mod.rs"]
+mod stage_e_schema_tests;

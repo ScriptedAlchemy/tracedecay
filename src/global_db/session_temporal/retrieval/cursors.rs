@@ -1,11 +1,11 @@
 use std::cmp;
 
-use libsql::Row;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracedecay_domain::SignedCursorKeyRefV1;
 
 use crate::query::temporal::ports::{PageKey, PageRequest, TemporalPortError};
 
+use super::super::sql::TemporalSqlRow;
 use super::rows::*;
 use super::{CANDIDATE_OPERATION, MIN_CURSOR_CAPACITY, RECORD_OPERATION};
 
@@ -99,7 +99,7 @@ impl RecordCursor {
         encode_cursor(self, cap, RECORD_OPERATION)
     }
 
-    pub(super) fn from_row(row: &Row) -> Result<Self, TemporalPortError> {
+    pub(super) fn from_row(row: &TemporalSqlRow) -> Result<Self, TemporalPortError> {
         let candidate: i64 = row
             .get(0)
             .map_err(|error| read_error(RECORD_OPERATION, error))?;

@@ -1,4 +1,4 @@
-use libsql::{Connection, Row, params};
+use crate::db::engine::{Executor, QueryExecutor, Row, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -18,7 +18,7 @@ use tracedecay_store::{
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
 
-use super::super::GlobalDb;
+use super::super::RegisteredGlobalDb;
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
     persist_session_temporal_projection_batch_in_transaction,
@@ -148,7 +148,7 @@ impl SessionRefreshRecoveryV1 {
     }
 }
 
-impl GlobalDb {
+impl RegisteredGlobalDb {
     pub(crate) async fn begin_or_join_session_refresh_result(
         &self,
         request: SessionRefreshBeginOrJoinRequestV1,
@@ -439,12 +439,11 @@ impl GlobalDb {
         &self,
         request: SessionRefreshProgressRequestV1,
     ) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
-        read_progress(
-            self.read_connection(),
-            request.session_id(),
-            request.operation_id(),
-        )
-        .await
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(READ_REFRESH, error))?;
+        read_progress(&snapshot, request.session_id(), request.operation_id()).await
     }
 
     pub(crate) async fn complete_session_refresh_result(
@@ -719,27 +718,33 @@ impl GlobalDb {
         &self,
         request: SessionRefreshReceiptRequestV1,
     ) -> SessionStoreResult<Option<SessionRefreshReceiptV1>> {
-        read_receipt(
-            self.read_connection(),
-            request.session_id(),
-            request.operation_id(),
-        )
-        .await
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(READ_REFRESH, error))?;
+        read_receipt(&snapshot, request.session_id(), request.operation_id()).await
     }
 
     pub(crate) async fn session_refresh_recovery_result(
         &self,
         session_id: &SessionId,
     ) -> SessionStoreResult<Option<SessionRefreshRecoveryV1>> {
-        let mut recoveries =
-            read_running_recoveries(self.read_connection(), Some(session_id)).await?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(READ_REFRESH, error))?;
+        let mut recoveries = read_running_recoveries(&snapshot, Some(session_id)).await?;
         Ok(recoveries.pop())
     }
 
     pub(crate) async fn running_session_refreshes_result(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {
-        read_running_recoveries(self.read_connection(), None).await
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(READ_REFRESH, error))?;
+        read_running_recoveries(&snapshot, None).await
     }
 }
 
@@ -937,7 +942,7 @@ fn decode_coverage(
 }
 
 async fn read_joinable_operation_by_digest(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     digest: &str,
 ) -> SessionStoreResult<Option<OperationRow>> {
@@ -971,7 +976,7 @@ async fn read_joinable_operation_by_digest(
 }
 
 async fn next_operation_attempt(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     digest: &str,
 ) -> SessionStoreResult<u64> {
@@ -995,7 +1000,7 @@ async fn next_operation_attempt(
 }
 
 async fn read_running_operation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
 ) -> SessionStoreResult<Option<String>> {
     let mut rows = conn
@@ -1014,7 +1019,7 @@ async fn read_running_operation(
 }
 
 async fn ensure_active_generation(
-    conn: &Connection,
+    conn: &impl Executor,
     request: &SessionRefreshBeginOrJoinRequestV1,
 ) -> SessionStoreResult<(SessionProjectionGenerationV1, SessionFrozenWatermarksV1)> {
     let mut rows = conn
@@ -1077,7 +1082,7 @@ async fn ensure_active_generation(
 }
 
 async fn next_generation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
 ) -> SessionStoreResult<SessionProjectionGenerationV1> {
     let mut rows = conn
@@ -1106,7 +1111,7 @@ fn decode_generation_i64(
     SessionProjectionGenerationV1::new(value).map_err(SessionStoreError::from)
 }
 
-fn map_begin_conflict(error: libsql::Error) -> SessionStoreError {
+fn map_begin_conflict(error: crate::db::engine::Error) -> SessionStoreError {
     let message = error.to_string();
     if message.contains("idx_session_refresh_operations_one_running")
         || message.contains("UNIQUE constraint failed: session_refresh_operations.session_id")
@@ -1181,7 +1186,7 @@ fn validate_progress_batch_identity(
 }
 
 async fn require_running_binding(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
     operation: &'static str,
@@ -1281,7 +1286,7 @@ fn validate_progress_binding(
 }
 
 async fn validate_next_progress(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     progress: &SessionRefreshProgressV1,
     generation: SessionProjectionGenerationV1,
     batch_ordinal: u64,
@@ -1321,7 +1326,7 @@ async fn validate_next_progress(
 }
 
 async fn insert_progress_and_binding(
-    conn: &Connection,
+    conn: &impl Executor,
     progress: &SessionRefreshProgressV1,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
@@ -1337,7 +1342,7 @@ async fn insert_progress_and_binding(
 }
 
 async fn insert_progress(
-    conn: &Connection,
+    conn: &impl Executor,
     progress: &SessionRefreshProgressV1,
     progress_ordinal: u64,
 ) -> SessionStoreResult<()> {
@@ -1363,7 +1368,7 @@ async fn insert_progress(
 }
 
 async fn insert_batch_binding(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
     progress_ordinal: u64,
@@ -1386,7 +1391,7 @@ async fn insert_batch_binding(
 }
 
 async fn require_batch_binding(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
     batch_ordinal: u64,
@@ -1420,7 +1425,7 @@ async fn require_batch_binding(
 }
 
 async fn projection_receipt_item_count(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,
     batch_ordinal: u64,
@@ -1454,7 +1459,7 @@ async fn projection_receipt_item_count(
 }
 
 async fn read_progress(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
 ) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
@@ -1506,7 +1511,7 @@ fn decode_progress(
 }
 
 async fn require_exact_terminal_progress(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
     frontier: SessionRefreshFrontierV1,
@@ -1527,7 +1532,7 @@ async fn require_exact_terminal_progress(
 
 #[allow(clippy::too_many_arguments)]
 async fn require_or_seed_terminal_progress(
-    conn: &Connection,
+    conn: &impl Executor,
     binding: &RefreshBinding,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
@@ -1584,7 +1589,7 @@ async fn require_or_seed_terminal_progress(
 }
 
 async fn touch_running_operation(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
     updated_at: UtcMicros,
@@ -1604,7 +1609,7 @@ async fn touch_running_operation(
 }
 
 async fn activate_bound_generation(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     binding: &RefreshBinding,
     terminal_at: UtcMicros,
@@ -1655,7 +1660,7 @@ async fn activate_bound_generation(
 }
 
 async fn terminate_candidate(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,
     state: &str,
@@ -1685,7 +1690,7 @@ async fn terminate_candidate(
 }
 
 async fn finish_operation(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
     state: &str,
@@ -1717,7 +1722,7 @@ async fn finish_operation(
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_terminal_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
     state: &str,
@@ -1748,7 +1753,7 @@ async fn insert_terminal_receipt(
 }
 
 async fn read_receipt(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     operation_id: &SessionRefreshOperationIdV1,
 ) -> SessionStoreResult<Option<SessionRefreshReceiptV1>> {
@@ -1905,7 +1910,7 @@ fn require_exact_terminal(
 }
 
 async fn read_running_recoveries(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_filter: Option<&SessionId>,
 ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {
     let mut rows = conn
@@ -2048,7 +2053,7 @@ async fn read_running_recoveries(
 }
 
 async fn projection_receipt_exists(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,
     batch_ordinal: u64,

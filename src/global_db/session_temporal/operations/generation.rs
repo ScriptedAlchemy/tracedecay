@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use serde_json::json;
 
 use crate::sessions::lcm::types::{LcmError, LcmImmutableSummaryPublication};
@@ -17,7 +17,7 @@ enum Traversal {
 }
 
 pub(super) async fn validate_lineage_graph(
-    conn: &Connection,
+    conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
 ) -> Result<(), LcmError> {
     let summary_id = publication.summary_id.as_str();
@@ -40,7 +40,7 @@ pub(super) async fn validate_lineage_graph(
 }
 
 pub(super) async fn validate_current_predecessor(
-    conn: &Connection,
+    conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
     logical_identity_digest: &str,
 ) -> Result<(), LcmError> {
@@ -108,7 +108,7 @@ pub(super) async fn validate_current_predecessor(
 }
 
 pub(super) async fn publish_candidate_generation(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     summary_id: &str,
     predecessor: Option<&str>,
@@ -258,7 +258,7 @@ pub(super) async fn publish_candidate_generation(
 }
 
 async fn stale_generation(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     expected: i64,
 ) -> Result<LcmError, LcmError> {
@@ -271,7 +271,7 @@ async fn stale_generation(
 }
 
 async fn stale_closure(
-    conn: &Connection,
+    conn: &impl Executor,
     predecessor: &str,
     conflict_id: &str,
 ) -> Result<Vec<String>, LcmError> {
@@ -283,7 +283,7 @@ async fn stale_closure(
 }
 
 async fn bounded_graph(
-    conn: &Connection,
+    conn: &impl Executor,
     start: &str,
     traversal: Traversal,
     conflict_id: &str,
@@ -370,7 +370,7 @@ fn cycle(summary_id: &str) -> LcmError {
 }
 
 async fn copy_active_projection(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     active: i64,
     candidate: i64,
@@ -482,7 +482,7 @@ async fn copy_active_projection(
 }
 
 pub(super) async fn active_generation(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
 ) -> Result<Option<i64>, LcmError> {
     let mut rows = conn
@@ -504,7 +504,7 @@ pub(super) async fn active_generation(
 }
 
 pub(super) async fn generation_watermarks(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     generation: i64,
 ) -> Result<String, LcmError> {

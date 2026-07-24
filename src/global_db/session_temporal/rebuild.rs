@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use libsql::params;
+use crate::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_domain::{DurableObservationV1, MessageOccurrenceIdV1, ProjectionOutputOrdinalV1};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionGenerationActivationReceiptV1,
@@ -9,7 +9,7 @@ use tracedecay_store::{
     SessionStoreResult,
 };
 
-use super::super::GlobalDb;
+use super::super::RegisteredGlobalDb;
 use super::super::observation_projection::derive_projection;
 use super::projection::{canonical_parent_message_resolver, validate_final_projection_receipt};
 use super::query::{
@@ -17,7 +17,7 @@ use super::query::{
     now_micros, read_generation, require_active_generation, storage, storage_message,
 };
 
-impl GlobalDb {
+impl RegisteredGlobalDb {
     pub(crate) async fn begin_session_generation_rebuild_result(
         &self,
         request: SessionGenerationRebuildRequestV1,
@@ -206,7 +206,7 @@ impl GlobalDb {
 }
 
 async fn bootstrap_first_active_generation(
-    conn: &libsql::Connection,
+    conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     watermarks: &SessionFrozenWatermarksV1,
 ) -> SessionStoreResult<()> {
@@ -264,7 +264,7 @@ async fn bootstrap_first_active_generation(
 }
 
 pub(super) async fn validate_candidate_frontier(
-    conn: &libsql::Connection,
+    conn: &impl QueryExecutor,
     session_id: &str,
     generation: i64,
     source_frontier: u64,

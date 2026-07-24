@@ -1,9 +1,10 @@
-use libsql::params;
+use crate::db::engine::params;
 use tracedecay_domain::{RetrievalAnchorId, SessionId};
 
 use crate::application::session::SessionTemporalExecutionError;
-use crate::global_db::GlobalDbReadSnapshot;
 use crate::sessions::lcm::{LcmDescribeTarget, LcmExpandTarget};
+
+use super::sql::TemporalSqlRead;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedDirectAnchor {
@@ -12,7 +13,7 @@ pub(crate) struct ResolvedDirectAnchor {
 }
 
 pub(crate) async fn resolve_describe_target(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &SessionId,
     target: &LcmDescribeTarget,
@@ -33,7 +34,7 @@ pub(crate) async fn resolve_describe_target(
 }
 
 pub(crate) async fn resolve_expand_target(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &SessionId,
     target: &LcmExpandTarget,
@@ -52,7 +53,7 @@ pub(crate) async fn resolve_expand_target(
 }
 
 async fn resolve_occurrence_anchor(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     provider: &str,
     store_id: i64,
 ) -> Result<ResolvedDirectAnchor, SessionTemporalExecutionError> {
@@ -111,7 +112,7 @@ async fn resolve_occurrence_anchor(
 }
 
 async fn resolve_summary_anchor(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &SessionId,
     summary_id: &str,
@@ -153,7 +154,7 @@ async fn resolve_summary_anchor(
 }
 
 async fn resolve_external_anchor(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &SessionId,
     payload_ref: &str,

@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 
 use crate::sessions::lcm::types::{LcmError, LcmSourceRef};
 
@@ -10,7 +10,7 @@ use super::CanonicalPublicationManifest;
 /// conflict at the database boundary; they are never consulted for identity,
 /// replay, authorization, or publication decisions.
 pub(super) async fn project_canonical_summary(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
     created_at: i64,

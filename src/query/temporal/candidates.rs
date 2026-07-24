@@ -2,6 +2,9 @@ use std::collections::BTreeSet;
 
 use tracedecay_domain::RetrievalAnchorId;
 
+#[cfg(test)]
+use tracedecay_domain::ByteRangeV1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CandidateChannel {
     Scope,
@@ -395,5 +398,13 @@ mod tests {
             CandidateChannel::ExactMessage,
             r#""unterminated phrase value"#
         ));
+    }
+
+    #[test]
+    fn exact_match_byte_ranges_are_non_empty_and_half_open() {
+        let range = ByteRangeV1::new(7, 11).expect("valid range");
+        assert_eq!((range.start(), range.end()), (7, 11));
+        assert!(ByteRangeV1::new(7, 7).is_err());
+        assert!(ByteRangeV1::new(8, 7).is_err());
     }
 }

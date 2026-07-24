@@ -1,39 +1,12 @@
-//! Legacy LCM field shaping after canonical temporal selection and hydration.
+//! LCM content shaping after canonical temporal selection and hydration.
 
-use crate::global_db::GlobalDb;
-use crate::sessions::lcm::{
-    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmError, LcmExpandRequest,
-    LcmExpandResponse,
-};
+use crate::sessions::lcm::{LcmContentSlice, LcmExpandResponse};
 
-pub(crate) async fn describe(
-    db: &GlobalDb,
-    request: LcmDescribeRequest,
-) -> Result<LcmDescribeResponse, LcmError> {
-    let mut description = db.lcm_describe(request).await?;
-    for raw in &mut description.raw_messages {
-        raw.content_preview.clear();
-        raw.content_range.returned_chars = 0;
-    }
-    for summary in &mut description.summary_nodes {
-        summary.summary_preview.clear();
-    }
-    if let Some(external) = description.external_payload.as_mut() {
-        external.content_preview.clear();
-    }
-    Ok(description)
-}
-
-pub(crate) async fn expand(
-    db: &GlobalDb,
-    request: LcmExpandRequest,
+pub(super) fn apply_canonical_content(
+    mut expansion: LcmExpandResponse,
+    slice: LcmContentSlice,
     canonical_content: &str,
-) -> Result<LcmExpandResponse, LcmError> {
-    let slice = request.content_slice.unwrap_or(LcmContentSlice {
-        offset: 0,
-        limit: usize::MAX,
-    });
-    let mut expansion = db.lcm_expand(request).await?;
+) -> LcmExpandResponse {
     let total_chars = canonical_content.chars().count();
     let offset = slice.offset.min(total_chars);
     let content = canonical_content
@@ -56,5 +29,5 @@ pub(crate) async fn expand(
     if let Some(summary) = expansion.summary_node.as_mut() {
         summary.summary_text = content;
     }
-    Ok(expansion)
+    expansion
 }

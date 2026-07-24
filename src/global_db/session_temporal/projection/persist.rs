@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, QueryExecutor, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1,
@@ -22,7 +22,7 @@ use super::materialize::*;
 use super::receipts::*;
 
 pub(crate) async fn session_temporal_projection_record_count(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
 ) -> SessionStoreResult<u64> {
@@ -58,7 +58,7 @@ pub(crate) async fn session_temporal_projection_record_count(
 }
 
 pub(crate) async fn persist_session_temporal_projection_batch_in_transaction(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
     let generation = read_generation(
@@ -126,7 +126,7 @@ pub(crate) async fn persist_session_temporal_projection_batch_in_transaction(
 }
 
 pub(crate) async fn seed_active_projection_in_transaction(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
     const COPIES: &[&str] = &[
@@ -243,7 +243,7 @@ pub(crate) async fn seed_active_projection_in_transaction(
 }
 
 pub(super) async fn persist_occurrence(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     occurrence: &MessageOccurrenceRecordV1,
 ) -> SessionStoreResult<bool> {
@@ -458,7 +458,7 @@ pub(super) async fn persist_occurrence(
 }
 
 pub(super) async fn canonical_occurrence(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &tracedecay_domain::DurableObservationV1,
     output_ordinal: u32,
 ) -> SessionStoreResult<MessageOccurrenceRecordV1> {
@@ -547,7 +547,7 @@ pub(super) async fn canonical_occurrence(
 }
 
 pub(super) async fn ensure_thread(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     generation: i64,
     thread_id: &str,
@@ -572,7 +572,7 @@ pub(super) async fn ensure_thread(
 }
 
 pub(super) async fn ensure_turn(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     generation: i64,
     turn_id: &str,
@@ -601,7 +601,7 @@ pub(super) async fn ensure_turn(
 }
 
 pub(super) async fn ensure_agent(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &str,
     generation: i64,
     agent_id: &str,
@@ -630,7 +630,7 @@ pub(super) async fn ensure_agent(
 }
 
 pub(super) async fn require_exact_occurrence(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     occurrence: &MessageOccurrenceRecordV1,
     text: &str,
@@ -711,7 +711,7 @@ pub(super) async fn require_exact_occurrence(
 }
 
 pub(super) async fn persist_copy(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     copy: &LogicalCopyRecordV1,
 ) -> SessionStoreResult<bool> {
@@ -834,7 +834,7 @@ pub(super) async fn persist_copy(
 }
 
 pub(super) async fn occurrence_observation_and_anchor(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     batch: &SessionTemporalProjectionBatchV1,
     occurrence_id: &tracedecay_domain::MessageOccurrenceIdV1,
 ) -> SessionStoreResult<(
@@ -880,7 +880,7 @@ pub(super) async fn occurrence_observation_and_anchor(
 }
 
 pub(super) async fn validate_copy_proof(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     copy: &LogicalCopyRecordV1,
 ) -> SessionStoreResult<()> {
@@ -949,7 +949,7 @@ pub(super) async fn validate_copy_proof(
 }
 
 pub(super) async fn persist_assertion(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     assertion: &TemporalAssertionRecordV1,
 ) -> SessionStoreResult<bool> {
@@ -1038,7 +1038,7 @@ pub(super) async fn persist_assertion(
 }
 
 pub(super) async fn validate_assertion(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     assertion: &TemporalAssertionRecordV1,
 ) -> SessionStoreResult<()> {
@@ -1230,7 +1230,7 @@ pub(super) const fn assertion_kind_for_relation(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn require_edge_json(
-    conn: &Connection,
+    conn: &impl Executor,
     sql: &str,
     batch: &SessionTemporalProjectionBatchV1,
     left: &str,
@@ -1275,7 +1275,7 @@ pub(super) async fn require_edge_json(
 }
 
 pub(super) async fn rebuild_current_occurrences(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
@@ -1319,7 +1319,7 @@ pub(super) async fn rebuild_current_occurrences(
 }
 
 pub(super) async fn rebuild_assertion_derivatives(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;

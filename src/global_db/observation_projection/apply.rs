@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use libsql::{Connection, params};
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationFactV1, CanonicalObservationIdV1, CanonicalReasoningVisibilityV1,
@@ -13,6 +12,7 @@ use tracedecay_store::{
     SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
 };
 
+use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::sessions::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
@@ -785,6 +785,35 @@ fn canonical_message_fields(
         }));
     }
 
+    if let Some(CanonicalObservationFactV1::WorkflowLifecycle {
+        semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
+        content: Some(content),
+        ..
+    }) = facts.iter().find(|fact| {
+        matches!(
+            fact,
+            CanonicalObservationFactV1::WorkflowLifecycle {
+                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
+                content: Some(_),
+                ..
+            }
+        )
+    }) {
+        let text = content
+            .get("objective")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or(canonical_fact_text(content)?);
+        return Ok(Some(CanonicalMessageFields {
+            role: "system".to_owned(),
+            text,
+            kind: "goal".to_owned(),
+            model: None,
+            timestamp: envelope.evidence().native_timestamp(),
+            tool_names,
+        }));
+    }
+
     for fact in facts {
         if matches!(
             fact,
@@ -1035,7 +1064,7 @@ struct ProjectionOutputAlias {
 }
 
 async fn read_projection_alias(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
     rebuild_generation: Option<&str>,
 ) -> ProjectionStoreResult<Option<ProjectionOutputAlias>> {
@@ -1044,11 +1073,11 @@ async fn read_projection_alias(
             "SELECT output_provider, output_message_id
              FROM observation_projection_rebuild_aliases
              WHERE projector_version = ?1 AND generation = ?2 AND observation_id = ?3",
-            params![
+            (
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 generation,
-                observation_id.as_str()
-            ],
+                observation_id.as_str(),
+            ),
         )
         .await
     } else {
@@ -1056,7 +1085,7 @@ async fn read_projection_alias(
             "SELECT output_provider, output_message_id
              FROM observation_projection_aliases
              WHERE projector_version = ?1 AND observation_id = ?2",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id.as_str()],
+            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id.as_str()),
         )
         .await
     }
@@ -1079,14 +1108,14 @@ async fn read_projection_alias(
 }
 
 pub(in super::super) async fn derive_projection_with_alias(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
     derive_projection_with_alias_from_generation(conn, observation, None).await
 }
 
 pub(super) async fn derive_projection_for_rebuild(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     generation: &str,
 ) -> ProjectionStoreResult<ObservationProjection> {
@@ -1094,7 +1123,7 @@ pub(super) async fn derive_projection_for_rebuild(
 }
 
 async fn derive_projection_with_alias_from_generation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     rebuild_generation: Option<&str>,
 ) -> ProjectionStoreResult<ObservationProjection> {
@@ -1172,7 +1201,7 @@ fn goal_dedupe_key(fact: &WorkflowFactRecord) -> (String, Option<String>) {
 }
 
 async fn read_latest_goal_dedupe_key(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
     provider_reference: Option<&str>,
@@ -1196,14 +1225,14 @@ async fn read_latest_goal_dedupe_key(
                )
              ORDER BY observation_sequence DESC, fact_ordinal DESC
              LIMIT 1",
-            params![
+            (
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 generation,
                 provider,
                 session_id,
-                super::opt_text(provider_reference),
+                provider_reference,
                 before_observation_id,
-            ],
+            ),
         )
         .await
     } else {
@@ -1223,13 +1252,13 @@ async fn read_latest_goal_dedupe_key(
                )
              ORDER BY observation_sequence DESC, fact_ordinal DESC
              LIMIT 1",
-            params![
+            (
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 provider,
                 session_id,
-                super::opt_text(provider_reference),
+                provider_reference,
                 before_observation_id,
-            ],
+            ),
         )
         .await
     }
@@ -1265,7 +1294,7 @@ async fn read_latest_goal_dedupe_key(
 /// Drop Codex Goal rows that only advance tokens/time while retaining the raw
 /// observation. Meaningful objective or status transitions still project.
 async fn collapse_consecutive_goal_ticks(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     projection: ObservationProjection,
     rebuild_generation: Option<&str>,
@@ -1327,6 +1356,16 @@ async fn collapse_consecutive_goal_ticks(
         retained.push(fact_projection);
     }
 
+    let message = if message.as_ref().is_some_and(|projection| {
+        projection.message().kind.as_deref() == Some("goal")
+            && !retained
+                .iter()
+                .any(|fact| fact.fact().semantic_kind == CanonicalWorkflowSemanticKindV1::Goal)
+    }) {
+        None
+    } else {
+        message
+    };
     if retained.is_empty() {
         return match message {
             Some(message) => Ok(ObservationProjection::Message(message)),
@@ -1344,7 +1383,7 @@ async fn collapse_consecutive_goal_ticks(
 }
 
 pub(super) async fn apply_session(
-    conn: &Connection,
+    conn: &impl Executor,
     session: &SessionRecord,
 ) -> ProjectionStoreResult<()> {
     // Resolve symlinked project-path family roots to their canonical on-disk
@@ -1375,15 +1414,15 @@ pub(super) async fn apply_session(
                     merged.session_id.as_str(),
                     merged.project_key.as_str(),
                     merged.project_path.as_str(),
-                    super::opt_text(merged.title.as_deref()),
-                    super::opt_i64(merged.started_at),
-                    super::opt_i64(merged.ended_at),
-                    super::opt_text(merged.transcript_path.as_deref()),
-                    super::opt_text(merged.metadata_json.as_deref()),
-                    super::opt_text(merged.parent_session_id.as_deref()),
+                    merged.title.as_deref(),
+                    merged.started_at,
+                    merged.ended_at,
+                    merged.transcript_path.as_deref(),
+                    merged.metadata_json.as_deref(),
+                    merged.parent_session_id.as_deref(),
                     i64::from(merged.is_subagent),
-                    super::opt_text(merged.agent_id.as_deref()),
-                    super::opt_text(merged.parent_tool_use_id.as_deref()),
+                    merged.agent_id.as_deref(),
+                    merged.parent_tool_use_id.as_deref(),
                 ],
             )
             .await
@@ -1402,15 +1441,15 @@ pub(super) async fn apply_session(
                     session.session_id.as_str(),
                     session.project_key.as_str(),
                     session.project_path.as_str(),
-                    super::opt_text(session.title.as_deref()),
-                    super::opt_i64(session.started_at),
-                    super::opt_i64(session.ended_at),
-                    super::opt_text(session.transcript_path.as_deref()),
-                    super::opt_text(session.metadata_json.as_deref()),
-                    super::opt_text(session.parent_session_id.as_deref()),
+                    session.title.as_deref(),
+                    session.started_at,
+                    session.ended_at,
+                    session.transcript_path.as_deref(),
+                    session.metadata_json.as_deref(),
+                    session.parent_session_id.as_deref(),
                     i64::from(session.is_subagent),
-                    super::opt_text(session.agent_id.as_deref()),
-                    super::opt_text(session.parent_tool_use_id.as_deref()),
+                    session.agent_id.as_deref(),
+                    session.parent_tool_use_id.as_deref(),
                 ],
             )
             .await
@@ -1420,7 +1459,7 @@ pub(super) async fn apply_session(
 }
 
 async fn apply_rows(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
@@ -1464,15 +1503,15 @@ async fn apply_rows(
                     message.message_id.as_str(),
                     message.session_id.as_str(),
                     message.role.as_str(),
-                    super::opt_i64(message.timestamp),
+                    message.timestamp,
                     message.ordinal,
                     message.text.as_str(),
-                    super::opt_text(message.kind.as_deref()),
-                    super::opt_text(message.model.as_deref()),
-                    super::opt_text(message.tool_names.as_deref()),
-                    super::opt_text(message.source_path.as_deref()),
-                    super::opt_i64(message.source_offset),
-                    super::opt_text(message.metadata_json.as_deref()),
+                    message.kind.as_deref(),
+                    message.model.as_deref(),
+                    message.tool_names.as_deref(),
+                    message.source_path.as_deref(),
+                    message.source_offset,
+                    message.metadata_json.as_deref(),
                 ],
             )
             .await
@@ -1490,15 +1529,15 @@ async fn apply_rows(
                     message.message_id.as_str(),
                     message.session_id.as_str(),
                     message.role.as_str(),
-                    super::opt_i64(message.timestamp),
+                    message.timestamp,
                     message.ordinal,
                     message.text.as_str(),
-                    super::opt_text(message.kind.as_deref()),
-                    super::opt_text(message.model.as_deref()),
-                    super::opt_text(message.tool_names.as_deref()),
-                    super::opt_text(message.source_path.as_deref()),
-                    super::opt_i64(message.source_offset),
-                    super::opt_text(message.metadata_json.as_deref()),
+                    message.kind.as_deref(),
+                    message.model.as_deref(),
+                    message.tool_names.as_deref(),
+                    message.source_path.as_deref(),
+                    message.source_offset,
+                    message.metadata_json.as_deref(),
                 ],
             )
             .await
@@ -1562,7 +1601,7 @@ struct StoredWorkflowFact {
 }
 
 async fn verify_workflow_fact(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     projection: &WorkflowFactProjection,
 ) -> ProjectionStoreResult<()> {
     let fact = projection.fact();
@@ -1571,7 +1610,7 @@ async fn verify_workflow_fact(
     let mut sequence_rows = conn
         .query(
             "SELECT sequence FROM observations WHERE observation_id = ?1",
-            params![provenance.observation_id().as_str()],
+            (provenance.observation_id().as_str(),),
         )
         .await
         .map_err(|error| storage("read workflow observation sequence", error))?;
@@ -1592,11 +1631,11 @@ async fn verify_workflow_fact(
                     native_timestamp, ordering_domain, content_json, content_text, output_digest
              FROM observation_workflow_facts
              WHERE projector_version = ?1 AND observation_id = ?2 AND fact_ordinal = ?3",
-            params![
+            (
                 provenance.projector_version(),
                 provenance.observation_id().as_str(),
                 i64::from(fact.fact_ordinal),
-            ],
+            ),
         )
         .await
         .map_err(|error| storage("verify projected workflow fact", error))?;
@@ -1679,7 +1718,7 @@ async fn verify_workflow_fact(
 }
 
 async fn apply_workflow_fact(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
     projection: &WorkflowFactProjection,
 ) -> ProjectionStoreResult<()> {
@@ -1698,7 +1737,7 @@ async fn apply_workflow_fact(
 }
 
 pub(super) async fn verify_provenance(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let provenance = projection.provenance();
@@ -1752,7 +1791,7 @@ pub(super) async fn verify_provenance(
 }
 
 async fn apply_provenance(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
     projection: &SessionMessageProjection,
     message_created: bool,
@@ -1832,14 +1871,14 @@ async fn apply_provenance(
 /// disposition: it must project as a skip everywhere (drain, audit, replay)
 /// because its output identity is owned by a different observation.
 pub(in crate::global_db) async fn output_collision_disposed(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &str,
 ) -> ProjectionStoreResult<bool> {
     let mut rows = conn
         .query(
             "SELECT reason FROM observation_projection_dispositions
              WHERE projector_version = ?1 AND observation_id = ?2",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id),
         )
         .await
         .map_err(|error| storage("read projection disposition", error))?;
@@ -1854,7 +1893,7 @@ pub(in crate::global_db) async fn output_collision_disposed(
 }
 
 async fn verify_skip_disposition(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     reason: ProjectionSkipReason,
 ) -> ProjectionStoreResult<()> {
@@ -1891,7 +1930,7 @@ async fn verify_skip_disposition(
 }
 
 async fn apply_skip_disposition(
-    conn: &Connection,
+    conn: &impl Executor,
     observation: &DurableObservationV1,
     reason: ProjectionSkipReason,
 ) -> ProjectionStoreResult<()> {
@@ -1913,7 +1952,7 @@ async fn apply_skip_disposition(
 }
 
 async fn verify_message_effect(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     verify_provenance(conn, projection).await?;
@@ -1924,7 +1963,7 @@ async fn verify_message_effect(
 }
 
 async fn apply_message_effect(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
@@ -1934,7 +1973,7 @@ async fn apply_message_effect(
 }
 
 pub(crate) async fn verify_effect(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
@@ -1961,7 +2000,7 @@ pub(crate) async fn verify_effect(
 }
 
 pub(crate) async fn verify_workflow_effects(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     workflow_facts: &[WorkflowFactProjection],
 ) -> ProjectionStoreResult<()> {
     for projection in workflow_facts {
@@ -1971,7 +2010,7 @@ pub(crate) async fn verify_workflow_effects(
 }
 
 pub(super) async fn apply_effect(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
@@ -2003,7 +2042,7 @@ pub(super) async fn apply_effect(
 }
 
 pub(super) async fn seed_predecessor_message_lineage(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
     observation: &DurableObservationV1,
     predecessor_version: &str,
@@ -2070,7 +2109,7 @@ pub(super) async fn seed_predecessor_message_lineage(
 }
 
 async fn upgrade_v1_claude_source_path(
-    conn: &Connection,
+    conn: &impl Executor,
     observation: &DurableObservationV1,
     predecessor_version: &str,
     actual: &SessionMessageRecord,
@@ -2173,6 +2212,54 @@ mod tests {
         assert_eq!(fields.model.as_deref(), Some("model.fixture"));
         assert_eq!(fields.timestamp, Some(42));
         assert_eq!(fields.tool_names.as_deref(), Some("Read"));
+    }
+
+    #[test]
+    fn canonical_projection_emits_checked_in_codex_goal_as_one_message() {
+        let envelope: CanonicalObservationEnvelopeV1 = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
+        ))
+        .unwrap();
+
+        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
+        assert_eq!(fields.role, "system");
+        assert_eq!(
+            fields.text,
+            "phlogiston pipeline overhaul and reconciliation"
+        );
+        assert_eq!(fields.kind, "goal");
+        assert_eq!(fields.timestamp, Some(1_783_500_569));
+        assert!(fields.model.is_none());
+        assert!(fields.tool_names.is_none());
+    }
+
+    #[test]
+    fn canonical_projection_does_not_duplicate_goal_colocated_with_message() {
+        let envelope = envelope(vec![
+            CanonicalObservationFactV1::WorkflowLifecycle {
+                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
+                provider_reference: Some("session.fixture".to_owned()),
+                item_id: None,
+                parent_reference: None,
+                list_reference: None,
+                state: None,
+                status: Some("active".to_owned()),
+                item_order: None,
+                revision: None,
+                event_sequence: None,
+                content: Some(json!({"objective": "supporting goal"})),
+            },
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "authored response"}),
+                model: None,
+                timestamp: Some(43),
+            },
+        ]);
+
+        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
+        assert_eq!(fields.kind, "message");
+        assert_eq!(fields.text, "authored response");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::error::Error;
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{Connection, Row, params};
+use crate::db::engine::{QueryExecutor, Row, params};
 use serde_json::json;
 use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, SessionId, SessionProjectionGenerationV1,
@@ -77,7 +77,7 @@ pub(super) fn encode_watermarks(
 }
 
 pub(super) async fn read_generation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,
     operation: &'static str,
@@ -106,7 +106,7 @@ fn decode_generation(row: &Row, operation: &'static str) -> SessionStoreResult<G
 }
 
 pub(super) async fn read_active_generation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     operation: &'static str,
 ) -> SessionStoreResult<Option<SessionProjectionGenerationV1>> {
@@ -134,7 +134,7 @@ pub(super) async fn read_active_generation(
 }
 
 pub(super) async fn require_active_generation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     expected: SessionProjectionGenerationV1,
     operation: &'static str,
@@ -150,7 +150,7 @@ pub(super) async fn require_active_generation(
 }
 
 pub(super) async fn read_observation(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
 ) -> SessionStoreResult<(u64, DurableObservationV1)> {
     let mut rows = conn

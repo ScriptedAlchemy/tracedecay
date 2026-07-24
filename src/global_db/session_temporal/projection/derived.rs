@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use tracedecay_domain::{
     DerivedEvidenceKindV1, DerivedEvidenceOccurrenceRefV1, MessageId, MessageOccurrenceIdV1,
     RetrievalAnchorId, SESSION_DERIVED_SPAN_MAX_MEMBERS_V1, SessionDerivedEvidencePolicyV1,
@@ -10,7 +10,7 @@ use tracedecay_store::{SessionStoreResult, SessionTemporalProjectionBatchV1};
 use super::super::query::{PERSIST_OPERATION, generation_i64, storage, storage_message};
 
 pub(super) async fn rebuild_derived_evidence(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
@@ -46,7 +46,7 @@ pub(super) async fn rebuild_derived_evidence(
 }
 
 async fn load_occurrence_refs(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     generation: i64,
 ) -> SessionStoreResult<Vec<DerivedEvidenceOccurrenceRefV1>> {
@@ -126,7 +126,7 @@ async fn load_occurrence_refs(
 }
 
 async fn persist_derived_record(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &SessionId,
     generation: i64,
     record: &SessionDerivedEvidenceRecordV1,
@@ -183,7 +183,7 @@ async fn persist_derived_record(
 }
 
 async fn ensure_derived_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     record: &SessionDerivedEvidenceRecordV1,
 ) -> SessionStoreResult<()> {
     let mut owner_rows = conn

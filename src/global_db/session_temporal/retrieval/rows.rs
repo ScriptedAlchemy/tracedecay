@@ -1,4 +1,3 @@
-use libsql::Row;
 use serde::de::DeserializeOwned;
 use tracedecay_domain::{
     LogicalCopyRecordV1, RetrievalAnchorId, SessionEvidenceMetadataV1, SessionId,
@@ -12,9 +11,12 @@ use crate::query::temporal::resolution::{
     ValidatedAuthorization,
 };
 
+use super::super::sql::TemporalSqlRow;
 use super::RECORD_OPERATION;
 
-pub(super) fn temporal_record_from_row(row: &Row) -> Result<TemporalRecord, TemporalPortError> {
+pub(super) fn temporal_record_from_row(
+    row: &TemporalSqlRow,
+) -> Result<TemporalRecord, TemporalPortError> {
     let kind: String = row
         .get(3)
         .map_err(|error| read_error(RECORD_OPERATION, error))?;
@@ -71,7 +73,9 @@ pub(super) fn temporal_record_from_row(row: &Row) -> Result<TemporalRecord, Temp
     }
 }
 
-pub(super) fn summary_from_row(row: &Row) -> Result<SessionSummaryRecordV1, TemporalPortError> {
+pub(super) fn summary_from_row(
+    row: &TemporalSqlRow,
+) -> Result<SessionSummaryRecordV1, TemporalPortError> {
     let summary_id: SessionSummaryIdV1 = parse_text(required_string(row, 4)?, RECORD_OPERATION)?;
     let summary_anchor: RetrievalAnchorId = parse_text(required_string(row, 5)?, RECORD_OPERATION)?;
     let source_values: Vec<String> = parse_json(&required_string(row, 11)?, RECORD_OPERATION)?;
@@ -133,7 +137,9 @@ pub(super) fn summary_from_row(row: &Row) -> Result<SessionSummaryRecordV1, Temp
     Ok(summary)
 }
 
-pub(super) fn summary_source_from_row(row: &Row) -> Result<SummarySourceRecord, TemporalPortError> {
+pub(super) fn summary_source_from_row(
+    row: &TemporalSqlRow,
+) -> Result<SummarySourceRecord, TemporalPortError> {
     let anchor_id = parse_text(required_string(row, 4)?, RECORD_OPERATION)?;
     let state = match required_string(row, 14)?.as_str() {
         "covered" => SummarySourceState::Covered {
@@ -158,17 +164,23 @@ pub(super) fn authorized_evidence(evidence: SessionEvidenceMetadataV1) -> Resolu
         .with_supporting_anchor(evidence.source_anchor_id)
 }
 
-pub(super) fn required_string(row: &Row, column: i32) -> Result<String, TemporalPortError> {
+pub(super) fn required_string(
+    row: &TemporalSqlRow,
+    column: i32,
+) -> Result<String, TemporalPortError> {
     row.get(column)
         .map_err(|error| read_error(RECORD_OPERATION, error))
 }
 
-pub(super) fn optional_string(row: &Row, column: i32) -> Result<Option<String>, TemporalPortError> {
+pub(super) fn optional_string(
+    row: &TemporalSqlRow,
+    column: i32,
+) -> Result<Option<String>, TemporalPortError> {
     row.get(column)
         .map_err(|error| read_error(RECORD_OPERATION, error))
 }
 
-pub(super) fn required_i64(row: &Row, column: i32) -> Result<i64, TemporalPortError> {
+pub(super) fn required_i64(row: &TemporalSqlRow, column: i32) -> Result<i64, TemporalPortError> {
     row.get(column)
         .map_err(|error| read_error(RECORD_OPERATION, error))
 }

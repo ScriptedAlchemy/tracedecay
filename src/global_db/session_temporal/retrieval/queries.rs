@@ -3,27 +3,27 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
            o.message_id, o.turn_id, o.session_id, o.role,
            COALESCE(json_extract(
                provider_observation.observation_json, '$.identity.source.provider'
-           ), 'claude')
-    FROM session_occurrences_fts
-    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+           ), 'claude'),
+           o.snippet_text, ?4
+    FROM session_occurrences AS o
     JOIN observations AS provider_observation
       ON provider_observation.observation_id = o.source_observation_id
     WHERE o.session_id = ?1 AND o.generation = ?2
       AND (?3 IS NULL OR COALESCE(json_extract(
           provider_observation.observation_json, '$.identity.source.provider'
       ), 'claude') = ?3)
-      AND session_occurrences_fts MATCH ?4
-      AND o.snippet_text = ?5
-      AND (o.knowledge_at < ?6 OR (o.knowledge_at = ?6 AND o.occurrence_id > ?7))
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?8
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?10
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
-      AND length(CAST(o.session_id AS BLOB)) <= ?10
-      AND length(CAST(o.role AS BLOB)) <= ?10
+      AND instr(o.snippet_text, ?4) > 0
+      AND (o.knowledge_at < ?5 OR (o.knowledge_at = ?5 AND o.occurrence_id > ?6))
+      AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
+      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?8
+      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?9
+      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
+      AND length(CAST(o.session_id AS BLOB)) <= ?9
+      AND length(CAST(o.role AS BLOB)) <= ?9
       AND length(CAST(COALESCE(json_extract(
           provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') AS BLOB)) <= ?10
+      ), 'claude') AS BLOB)) <= ?9
+      AND length(CAST(o.snippet_text AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
@@ -32,9 +32,11 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
           + length(CAST(o.role AS BLOB))
           + length(CAST(COALESCE(json_extract(
               provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') AS BLOB)) <= ?11
+          ), 'claude') AS BLOB))
+          + length(CAST(o.snippet_text AS BLOB))
+          + length(CAST(?4 AS BLOB)) <= ?10
     ORDER BY o.knowledge_at DESC, o.occurrence_id
-    LIMIT ?12";
+    LIMIT ?11";
 
 pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
@@ -277,9 +279,8 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = "
 pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           authority_session.provider
-    FROM session_occurrences_fts
-    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+           authority_session.provider, o.snippet_text, ?3
+    FROM session_occurrences AS o
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
      AND frozen.generation = o.generation
@@ -306,36 +307,38 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = "
       AND (?2 IS NULL OR COALESCE(json_extract(
           provider_observation.observation_json, '$.identity.source.provider'
       ), 'claude') = ?2)
-      AND session_occurrences_fts MATCH ?3
-      AND o.snippet_text = ?4
+      AND instr(o.snippet_text, ?3) > 0
       AND (
-          o.knowledge_at < ?5
+          o.knowledge_at < ?4
           OR (
-              o.knowledge_at = ?5
+              o.knowledge_at = ?4
               AND (
-                  o.session_id > ?6
-                  OR (o.session_id = ?6 AND o.occurrence_id > ?7)
+                  o.session_id > ?5
+                  OR (o.session_id = ?5 AND o.occurrence_id > ?6)
               )
           )
       )
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?8
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?9
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?10
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
-      AND length(CAST(o.session_id AS BLOB)) <= ?10
-      AND length(CAST(o.role AS BLOB)) <= ?10
-      AND length(CAST(authority_session.provider AS BLOB)) <= ?10
+      AND length(CAST(o.occurrence_id AS BLOB)) <= ?7
+      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?8
+      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?9
+      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
+      AND length(CAST(o.session_id AS BLOB)) <= ?9
+      AND length(CAST(o.role AS BLOB)) <= ?9
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?9
+      AND length(CAST(o.snippet_text AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
           + length(CAST(o.role AS BLOB))
-          + length(CAST(authority_session.provider AS BLOB)) <= ?11
+          + length(CAST(authority_session.provider AS BLOB))
+          + length(CAST(o.snippet_text AS BLOB))
+          + length(CAST(?3 AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.session_id AS BLOB)) + 9 <= ?12
+          + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?13";
+    LIMIT ?12";
 
 pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,

@@ -19,6 +19,9 @@ use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
 use crate::query::temporal::context::ContextBudget;
+use crate::query::temporal::ports::{
+    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
+};
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
@@ -172,8 +175,9 @@ impl SessionRetrievalCommand {
         goals: bool,
         store_scope: SessionRetrievalStoreScope,
     ) -> Self {
-        let query =
-            query.with_compatibility_filter_digest(compatibility_filter_digest(&filters, goals));
+        let query = query
+            .with_compatibility_filter_digest(compatibility_filter_digest(&filters, goals))
+            .with_semantic_filter(temporal_candidate_filter(&filters, goals));
         Self {
             query,
             filters,
@@ -201,6 +205,44 @@ impl SessionRetrievalCommand {
 
     pub(crate) fn project_selector(&self) -> Option<&SessionRetrievalProjectSelector> {
         self.project_selector.as_ref()
+    }
+}
+
+fn temporal_candidate_filter(
+    filters: &SessionRetrievalFilters,
+    goals: bool,
+) -> TemporalCandidateFilterV1 {
+    let mut roles = filters.roles.clone();
+    roles.sort();
+    roles.dedup();
+    TemporalCandidateFilterV1 {
+        project_key: filters.project_key.clone(),
+        parent_session_id: filters.parent_session_id.clone(),
+        session_scope: match filters.scope {
+            SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
+            SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
+            SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
+        },
+        message_type: match filters.message_type {
+            SessionMessageType::All => TemporalMessageTypeFilterV1::All,
+            SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
+            SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
+        },
+        roles,
+        start_time: filters.time_range.start_time,
+        end_time: filters.time_range.end_time,
+        git_branch: filters.git_filter.branch.clone(),
+        git_worktree: filters.git_filter.worktree.clone(),
+        git_commit: filters.git_filter.commit.clone(),
+        workflow_run: filters
+            .workflow_scope
+            .as_ref()
+            .map(|scope| scope.run_id.clone()),
+        workflow_agent: filters
+            .workflow_scope
+            .as_ref()
+            .and_then(|scope| scope.agent_label.clone()),
+        goals,
     }
 }
 
@@ -1114,6 +1156,9 @@ mod cutover_tests {
     use crate::application::session::{
         SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
     };
+    use crate::query::temporal::ports::{
+        TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
+    };
 
     #[derive(Default)]
     struct RecordingService {
@@ -1262,6 +1307,30 @@ mod cutover_tests {
                 .map(|scope| scope.run_id.as_str()),
             Some("wf_123")
         );
+        let semantic = command.query().semantic_filter();
+        assert_eq!(semantic.project_key.as_deref(), Some("project-key"));
+        assert_eq!(
+            semantic.parent_session_id.as_deref(),
+            Some("parent-session")
+        );
+        assert_eq!(
+            semantic.session_scope,
+            TemporalSessionScopeFilterV1::ParentsOnly
+        );
+        assert_eq!(
+            semantic.message_type,
+            TemporalMessageTypeFilterV1::DirectUser
+        );
+        assert_eq!(
+            semantic.git_branch.as_deref(),
+            Some("feature/message-search")
+        );
+        assert_eq!(semantic.workflow_run.as_deref(), Some("wf_123"));
+        assert_eq!(semantic.workflow_agent.as_deref(), Some("researcher"));
+        assert_eq!(
+            (semantic.start_time, semantic.end_time),
+            (Some(10), Some(20))
+        );
         assert!(!command.goals());
     }
 
@@ -1326,8 +1395,10 @@ mod cutover_tests {
         )
         .await
         .unwrap();
-        assert_eq!(service.command().query().query(), "");
-        assert!(service.command().goals());
+        let command = service.command();
+        assert_eq!(command.query().query(), "");
+        assert!(command.goals());
+        assert!(command.query().semantic_filter().goals);
 
         let missing = RecordingService::default();
         let error = handle_message_search_with_service(

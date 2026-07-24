@@ -1,4 +1,4 @@
-use libsql::Value as SqlValue;
+use crate::db::engine::Value as SqlValue;
 use tracedecay_domain::TemporalModeV1;
 
 use crate::query::temporal::ports::{

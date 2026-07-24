@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use thiserror::Error;
-use tracedecay_domain::RetrievalAnchorId;
+use tracedecay_domain::{ByteRangeV1, RetrievalAnchorId};
 
 use super::candidates::CandidateChannel;
 
@@ -18,6 +18,7 @@ pub struct RankingCandidate {
     pub session: Option<String>,
     pub source: Option<String>,
     pub evidence_role: Option<String>,
+    pub exact_ranges: Vec<ByteRangeV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +76,7 @@ pub struct RetrieverContribution {
     pub retriever_ordinal: u64,
     pub raw_score: i64,
     pub calibrated_score_micros: u64,
+    pub exact_ranges: Vec<ByteRangeV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -168,6 +170,7 @@ fn rank_validated_candidates(
                 retriever_ordinal: u64::try_from(index).unwrap_or(u64::MAX),
                 raw_score: candidate.raw_score,
                 calibrated_score_micros: contribution,
+                exact_ranges: candidate.exact_ranges.clone(),
             };
             match best_by_id.get_mut(&candidate.stable_id) {
                 Some(existing) => {
@@ -246,28 +249,37 @@ fn prepare_candidates(
 
     // An idempotent max-evidence collapse prevents duplicate row count from
     // changing any channel partition's ordinal denominator.
-    let mut unique_by_id_and_channel =
-        BTreeMap::<(String, CandidateChannel), RankingCandidate>::new();
+    let mut unique_by_id_channel_and_record =
+        BTreeMap::<(String, CandidateChannel, String), RankingCandidate>::new();
     for candidate in candidates {
-        let key = (candidate.stable_id.clone(), candidate.channel);
-        match unique_by_id_and_channel.get_mut(&key) {
+        let key = (
+            candidate.stable_id.clone(),
+            candidate.channel,
+            candidate.retriever_record_id.clone(),
+        );
+        match unique_by_id_channel_and_record.get_mut(&key) {
             Some(existing) => {
                 if existing.source != candidate.source {
                     return Err(RankingError::ConflictingDuplicateMetadata {
                         stable_id: candidate.stable_id.clone(),
                     });
                 }
+                let mut exact_ranges = existing.exact_ranges.clone();
+                exact_ranges.extend(candidate.exact_ranges.iter().copied());
                 if candidate.raw_score > existing.raw_score {
                     *existing = candidate.clone();
                 }
+                exact_ranges.sort_by_key(|range| (range.start(), range.end()));
+                exact_ranges.dedup();
+                existing.exact_ranges = exact_ranges;
             }
             None => {
-                unique_by_id_and_channel.insert(key, candidate.clone());
+                unique_by_id_channel_and_record.insert(key, candidate.clone());
             }
         }
     }
 
-    for candidate in unique_by_id_and_channel.values_mut() {
+    for candidate in unique_by_id_channel_and_record.values_mut() {
         let Some(metadata) = metadata_by_id.get(&candidate.stable_id) else {
             return Err(RankingError::ConflictingDuplicateMetadata {
                 stable_id: candidate.stable_id.clone(),
@@ -276,7 +288,7 @@ fn prepare_candidates(
         copy_metadata(candidate, metadata);
     }
 
-    Ok(unique_by_id_and_channel.into_values().collect())
+    Ok(unique_by_id_channel_and_record.into_values().collect())
 }
 
 fn copy_metadata(candidate: &mut RankingCandidate, metadata: &RankingCandidate) {
@@ -451,6 +463,7 @@ mod tests {
             session: Some("session-1".to_string()),
             source: Some("store-a".to_string()),
             evidence_role: Some("message".to_string()),
+            exact_ranges: Vec::new(),
         }
     }
 
@@ -779,15 +792,53 @@ mod tests {
         );
         exact.evidence_role = Some("producer".to_string());
         exact.source = Some("cursor".to_string());
+        exact.exact_ranges = vec![ByteRangeV1::new(7, 19).expect("exact byte range")];
+        let approximate = candidate(
+            "approximate-neighbor",
+            CandidateChannel::Lexical,
+            i64::MAX,
+            None,
+        );
 
-        let ranked = rank(&[exact], DiversityLimits::unbounded());
+        let ranked = rank(&[approximate, exact], DiversityLimits::unbounded());
 
-        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].stable_id, "exact-producer");
         assert_eq!(ranked[0].logical_message.as_deref(), Some("exact message"));
         assert_eq!(ranked[0].evidence_role.as_deref(), Some("producer"));
         assert_eq!(ranked[0].source.as_deref(), Some("cursor"));
+        assert_eq!(
+            ranked[0].contributions[0].exact_ranges,
+            [ByteRangeV1::new(7, 19).expect("exact byte range")]
+        );
         assert!(ranked[0].normalized_score_micros >= encode_score(RankTier::ExactMessage, 0));
+    }
+
+    #[test]
+    fn repeated_exact_occurrence_ranges_fuse_deterministically() {
+        let mut first = candidate("same", CandidateChannel::ExactMessage, 1, None);
+        first.retriever_record_id = "occurrence-1".to_string();
+        first.exact_ranges = vec![
+            ByteRangeV1::new(8, 12).expect("second range"),
+            ByteRangeV1::new(1, 5).expect("first range"),
+        ];
+        let mut duplicate = first.clone();
+        duplicate.exact_ranges = vec![ByteRangeV1::new(1, 5).expect("duplicate range")];
+
+        let forward = rank(
+            &[first.clone(), duplicate.clone()],
+            DiversityLimits::unbounded(),
+        );
+        let reversed = rank(&[duplicate, first], DiversityLimits::unbounded());
+
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward[0].contributions[0].exact_ranges,
+            [
+                ByteRangeV1::new(1, 5).expect("first range"),
+                ByteRangeV1::new(8, 12).expect("second range"),
+            ]
+        );
     }
 
     #[test]

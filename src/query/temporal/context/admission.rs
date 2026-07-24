@@ -8,7 +8,7 @@ use tracedecay_domain::{
 
 use super::super::ports::ExecutionControl;
 use super::super::resolution::summary::SummaryOmission;
-use super::assembly::{compare_omissions, try_reserve, validate_bundle};
+use super::assembly::{try_reserve, validate_bundle};
 use super::wire::{
     CanonicalContextWire, CanonicalPayload, CanonicalPayloads, StreamingWriter, WireMeasure,
 };
@@ -197,7 +197,6 @@ fn measure_omissions(
             anchor_id: None,
             reason: limit.omission_reason(),
         });
-        values.sort_by(compare_omissions);
     }
     measure_serializable(&values, policy, control)
 }
@@ -355,7 +354,6 @@ pub fn materialize_admission<P: ContextPayload>(
             anchor_id: None,
             reason: limit.omission_reason(),
         });
-        bundle.omissions.sort_by(compare_omissions);
     }
     Ok(())
 }

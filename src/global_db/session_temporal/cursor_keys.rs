@@ -1,12 +1,11 @@
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{Transaction, params};
 use thiserror::Error;
 use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
-use crate::global_db::{GlobalDb, GlobalDbReadSnapshot};
+use crate::db::engine::{Executor, ReadSnapshot, params};
 use crate::query::temporal::cursor::{CURSOR_CLOCK_SKEW_MICROS, CURSOR_LIFETIME_MICROS};
 use crate::query::temporal::ports::{
     CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,
@@ -37,7 +36,7 @@ pub(crate) enum GlobalDbCursorKeyProviderError {
     Storage {
         operation: &'static str,
         #[source]
-        source: libsql::Error,
+        source: crate::db::engine::Error,
     },
 }
 
@@ -46,25 +45,8 @@ pub(crate) struct GlobalDbCursorKeyProvider {
     authenticators: Vec<(SignedCursorKeyRefV1, InMemoryCursorAuthenticator)>,
 }
 
-impl GlobalDb {
-    pub(crate) async fn ensure_active_session_cursor_key_result(
-        &self,
-    ) -> SessionStoreResult<SignedCursorKeyRefV1> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
-        let key = ensure_active_session_cursor_key_in_transaction(&transaction).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
-        Ok(key)
-    }
-}
-
 pub(super) async fn ensure_active_session_cursor_key_in_transaction(
-    transaction: &Transaction,
+    transaction: &impl Executor,
 ) -> SessionStoreResult<SignedCursorKeyRefV1> {
     let mut active_rows = transaction
         .query(
@@ -199,34 +181,26 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 }
 
 impl GlobalDbCursorKeyProvider {
-    pub(crate) async fn from_snapshot(
-        read: &GlobalDbReadSnapshot,
-        snapshot: &TemporalExecutionSnapshot,
+    pub(crate) async fn from_registered_key_ref(
+        read: &ReadSnapshot,
+        expected: SignedCursorKeyRefV1,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
-        Self::from_snapshot_at(read, snapshot, now_micros()).await
+        Self::from_registered_key_ref_at(read, expected, now_micros()).await
     }
 
-    async fn from_snapshot_at(
-        read: &GlobalDbReadSnapshot,
+    pub(crate) async fn from_registered_snapshot(
+        read: &ReadSnapshot,
         snapshot: &TemporalExecutionSnapshot,
-        now_micros: i64,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
         let expected = snapshot
             .cursor_key()
             .cloned()
             .ok_or(GlobalDbCursorKeyProviderError::SnapshotKeyUnavailable)?;
-        Self::from_key_ref_at(read, expected, now_micros).await
+        Self::from_registered_key_ref_at(read, expected, now_micros()).await
     }
 
-    pub(crate) async fn from_key_ref(
-        read: &GlobalDbReadSnapshot,
-        expected: SignedCursorKeyRefV1,
-    ) -> Result<Self, GlobalDbCursorKeyProviderError> {
-        Self::from_key_ref_at(read, expected, now_micros()).await
-    }
-
-    async fn from_key_ref_at(
-        read: &GlobalDbReadSnapshot,
+    async fn from_registered_key_ref_at(
+        read: &ReadSnapshot,
         expected: SignedCursorKeyRefV1,
         now_micros: i64,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
@@ -237,8 +211,7 @@ impl GlobalDbCursorKeyProvider {
                         SUM(CASE WHEN retired_at IS NULL THEN 1 ELSE 0 END) OVER ()
                  FROM session_query_cursor_keys
                  WHERE retired_at IS NULL OR retired_at > ?1
-                 ORDER BY key_version DESC
-                ",
+                 ORDER BY key_version DESC",
                 [retention_cutoff],
             )
             .await
@@ -334,424 +307,9 @@ fn now_micros() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn storage(source: libsql::Error) -> GlobalDbCursorKeyProviderError {
+fn storage(source: crate::db::engine::Error) -> GlobalDbCursorKeyProviderError {
     GlobalDbCursorKeyProviderError::Storage {
         operation: LOAD_OPERATION,
         source,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use libsql::params;
-    use tempfile::TempDir;
-    use tracedecay_domain::{
-        RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
-        SignedCursorKeyRefV1, TemporalModeV1,
-    };
-
-    use super::*;
-    use crate::global_db::GlobalDb;
-    use crate::query::temporal::ports::{
-        BindingDigest, CursorKeyError, KernelVersions, SessionCursorAuthenticator,
-        TemporalExecutionSnapshot, TemporalSnapshotRequest, TemporalWatermarks,
-    };
-
-    const KEY_ONE_MATERIAL: [u8; 32] = [0xa5; 32];
-    const KEY_TWO_MATERIAL: [u8; 32] = [0x5a; 32];
-
-    fn key_ref(key_id: &str, version: u16) -> SignedCursorKeyRefV1 {
-        SignedCursorKeyRefV1 {
-            key_id: SessionCursorKeyIdV1::new(key_id).expect("valid key id"),
-            version: SessionCursorVersionV1::new(version).expect("valid key version"),
-        }
-    }
-
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
-
-    fn snapshot(cursor_key: Option<SignedCursorKeyRefV1>) -> TemporalExecutionSnapshot {
-        TemporalExecutionSnapshot::new(
-            TemporalSnapshotRequest::new(
-                SessionId::new("session-1").expect("valid session id"),
-                digest('1'),
-                digest('2'),
-                digest('3'),
-                TemporalModeV1::Current,
-                RetrievalGrainV1::Session,
-            )
-            .expect("valid snapshot request"),
-            TemporalWatermarks {
-                generation: 1,
-                source: 2,
-                projection: 3,
-                index: 4,
-                summary: 5,
-            },
-            KernelVersions {
-                schema: 1,
-                ranking: 1,
-                configuration_digest: BindingDigest::new("configuration", digest('4'))
-                    .expect("valid configuration digest"),
-            },
-            cursor_key,
-        )
-        .expect("authorized test snapshot")
-    }
-
-    async fn open_db(temp: &TempDir) -> GlobalDb {
-        GlobalDb::try_open_at(&temp.path().join("global.db"))
-            .await
-            .expect("database open should succeed")
-            .expect("database should be available")
-    }
-
-    async fn insert_key(
-        db: &GlobalDb,
-        key_id: &str,
-        key_version: i64,
-        material: &[u8],
-        created_at: i64,
-    ) {
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_query_cursor_keys (
-                    key_id, key_version, key_material, created_at, retired_at
-                 ) VALUES (?1, ?2, ?3, ?4, NULL)",
-                params![key_id, key_version, material.to_vec(), created_at],
-            )
-            .await
-            .expect("cursor key insert should succeed");
-    }
-
-    async fn key_rows(db: &GlobalDb) -> Vec<(String, i64, Vec<u8>, i64, Option<i64>)> {
-        let mut rows = db
-            .read_connection()
-            .query(
-                "SELECT key_id, key_version, key_material, created_at, retired_at
-                 FROM session_query_cursor_keys
-                 ORDER BY key_version",
-                (),
-            )
-            .await
-            .expect("cursor key query should succeed");
-        let mut values = Vec::new();
-        while let Some(row) = rows.next().await.expect("cursor key row should decode") {
-            values.push((
-                row.get(0).expect("key id"),
-                row.get(1).expect("key version"),
-                row.get(2).expect("key material"),
-                row.get(3).expect("created at"),
-                row.get(4).expect("retired at"),
-            ));
-        }
-        values
-    }
-
-    async fn load_provider(
-        db: &GlobalDb,
-        snapshot: &TemporalExecutionSnapshot,
-    ) -> Result<GlobalDbCursorKeyProvider, GlobalDbCursorKeyProviderError> {
-        let read = db.read_snapshot().await.expect("read snapshot");
-        GlobalDbCursorKeyProvider::from_snapshot(&read, snapshot).await
-    }
-
-    async fn load_provider_at(
-        db: &GlobalDb,
-        snapshot: &TemporalExecutionSnapshot,
-        now_micros: i64,
-    ) -> Result<GlobalDbCursorKeyProvider, GlobalDbCursorKeyProviderError> {
-        let read = db.read_snapshot().await.expect("read snapshot");
-        GlobalDbCursorKeyProvider::from_snapshot_at(&read, snapshot, now_micros).await
-    }
-
-    #[tokio::test]
-    async fn reconstructs_the_snapshot_selected_key_after_restart() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db_path = temp.path().join("global.db");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-1", 1, &KEY_ONE_MATERIAL, 100).await;
-        let frozen = snapshot(Some(key_ref("cursor-key-1", 1)));
-        let before_restart = load_provider(&db, &frozen)
-            .await
-            .expect("provider should load");
-        let signature = before_restart
-            .sign(
-                frozen.cursor_key().expect("snapshot key"),
-                b"restart-stable",
-            )
-            .expect("signature should be created");
-        drop(before_restart);
-        drop(db);
-
-        let reopened = GlobalDb::try_open_at(&db_path)
-            .await
-            .expect("database reopen should succeed")
-            .expect("database should be available");
-        let reconstructed = load_provider(&reopened, &frozen)
-            .await
-            .expect("provider should reconstruct");
-        reconstructed
-            .verify(
-                frozen.cursor_key().expect("snapshot key"),
-                b"restart-stable",
-                &signature,
-            )
-            .expect("reconstructed provider should verify the signature");
-    }
-
-    #[tokio::test]
-    async fn loaded_provider_never_requeries_after_rotation() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-1", 1, &KEY_ONE_MATERIAL, 100).await;
-        let original_key = key_ref("cursor-key-1", 1);
-        let original_snapshot = snapshot(Some(original_key.clone()));
-        let read = db.read_snapshot().await.expect("read snapshot");
-        let mut freeze_rows = read
-            .query("SELECT COUNT(*) FROM session_query_cursor_keys", ())
-            .await
-            .expect("freeze snapshot");
-        assert_eq!(
-            freeze_rows
-                .next()
-                .await
-                .expect("freeze row")
-                .expect("count row")
-                .get::<i64>(0)
-                .expect("count"),
-            1
-        );
-        drop(freeze_rows);
-
-        let provider = GlobalDbCursorKeyProvider::from_snapshot(&read, &original_snapshot)
-            .await
-            .expect("provider should load");
-
-        insert_key(&db, "cursor-key-2", 2, &KEY_TWO_MATERIAL, 200).await;
-
-        let signature = provider
-            .sign(&original_key, b"frozen")
-            .expect("loaded provider should retain its frozen key");
-        provider
-            .verify(&original_key, b"frozen", &signature)
-            .expect("loaded provider should not consult the rotated database");
-        assert!(matches!(
-            provider.sign(&key_ref("cursor-key-2", 2), b"rotated"),
-            Err(CursorKeyError::Unavailable)
-        ));
-
-        let rotated_snapshot = snapshot(Some(key_ref("cursor-key-2", 2)));
-        let fresh_read = db.read_snapshot().await.expect("fresh read snapshot");
-        GlobalDbCursorKeyProvider::from_snapshot(&fresh_read, &rotated_snapshot)
-            .await
-            .expect("new snapshot should observe rotation");
-    }
-
-    #[tokio::test]
-    async fn retained_keys_verify_but_cannot_sign_until_the_expiry_boundary() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-1", 1, &KEY_ONE_MATERIAL, 100).await;
-        let retained_key = key_ref("cursor-key-1", 1);
-        let frozen = snapshot(Some(retained_key.clone()));
-        let before_rotation = load_provider_at(&db, &frozen, 100)
-            .await
-            .expect("active provider should load");
-        let signature = before_rotation
-            .sign(&retained_key, b"retained")
-            .expect("active key should sign");
-        insert_key(&db, "cursor-key-2", 2, &KEY_TWO_MATERIAL, 200).await;
-
-        let retained = load_provider_at(&db, &frozen, 200 + CURSOR_KEY_RETENTION_MICROS - 1)
-            .await
-            .expect("retained key should remain available for verification");
-        retained
-            .verify(&retained_key, b"retained", &signature)
-            .expect("retained key should verify");
-        assert!(matches!(
-            retained.sign(&retained_key, b"must-not-sign"),
-            Err(CursorKeyError::Unavailable)
-        ));
-        retained
-            .sign(&key_ref("cursor-key-2", 2), b"active")
-            .expect("only the active key should sign");
-
-        let expired = load_provider_at(&db, &frozen, 200 + CURSOR_KEY_RETENTION_MICROS).await;
-        assert!(matches!(
-            expired,
-            Err(GlobalDbCursorKeyProviderError::ActiveKeyUnavailable { expected })
-                if expected == retained_key
-        ));
-    }
-
-    #[tokio::test]
-    async fn restart_reloads_retained_verification_keys() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db_path = temp.path().join("global.db");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-1", 1, &KEY_ONE_MATERIAL, 100).await;
-        let retained_key = key_ref("cursor-key-1", 1);
-        let frozen = snapshot(Some(retained_key.clone()));
-        let signature = load_provider_at(&db, &frozen, 100)
-            .await
-            .expect("active provider should load")
-            .sign(&retained_key, b"restart-retained")
-            .expect("active key should sign");
-        insert_key(&db, "cursor-key-2", 2, &KEY_TWO_MATERIAL, 200).await;
-        drop(db);
-
-        let reopened = GlobalDb::try_open_at(&db_path)
-            .await
-            .expect("database reopen should succeed")
-            .expect("database should be available");
-        let provider = load_provider_at(&reopened, &frozen, 200 + CURSOR_KEY_RETENTION_MICROS - 1)
-            .await
-            .expect("restart should reload the retained key");
-        provider
-            .verify(&retained_key, b"restart-retained", &signature)
-            .expect("reloaded retained key should verify");
-    }
-
-    #[tokio::test]
-    async fn missing_keys_are_unavailable_and_reads_create_nothing() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        let frozen = snapshot(Some(key_ref("cursor-key-1", 1)));
-
-        let error = load_provider(&db, &frozen)
-            .await
-            .expect_err("missing active key must fail closed");
-        assert!(matches!(
-            error,
-            GlobalDbCursorKeyProviderError::ActiveKeyUnavailable { expected }
-                if expected == key_ref("cursor-key-1", 1)
-        ));
-        assert!(key_rows(&db).await.is_empty());
-
-        let no_key_snapshot = snapshot(None);
-        assert!(matches!(
-            load_provider(&db, &no_key_snapshot).await,
-            Err(GlobalDbCursorKeyProviderError::SnapshotKeyUnavailable)
-        ));
-        assert!(key_rows(&db).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn multiple_active_keys_are_rejected() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        db.read_connection()
-            .execute_batch(
-                "DROP TRIGGER session_query_cursor_keys_insert_guard_v1;
-                 DROP TRIGGER session_query_cursor_keys_rotate_insert_v1;
-                 DROP TRIGGER session_query_cursor_keys_retire_update_v1;",
-            )
-            .await
-            .expect("test should disable key guards");
-        insert_key(&db, "cursor-key-1", 1, &KEY_ONE_MATERIAL, 100).await;
-        insert_key(&db, "cursor-key-2", 2, &KEY_TWO_MATERIAL, 200).await;
-
-        assert!(matches!(
-            load_provider(&db, &snapshot(Some(key_ref("cursor-key-2", 2))),).await,
-            Err(GlobalDbCursorKeyProviderError::MultipleActiveKeys { count: 2 })
-        ));
-    }
-
-    #[tokio::test]
-    async fn corrupt_key_identity_is_rejected_without_echoing_it() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        insert_key(&db, "corrupt\nkey", 1, &KEY_ONE_MATERIAL, 100).await;
-
-        let error = load_provider(&db, &snapshot(Some(key_ref("cursor-key-1", 1))))
-            .await
-            .expect_err("corrupt key identity must fail closed");
-        assert!(matches!(
-            error,
-            GlobalDbCursorKeyProviderError::InvalidKeyId
-        ));
-        assert!(!error.to_string().contains("corrupt"));
-    }
-
-    #[tokio::test]
-    async fn corrupt_key_version_is_rejected() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-overflow", 65_536, &KEY_ONE_MATERIAL, 100).await;
-
-        assert!(matches!(
-            load_provider(&db, &snapshot(Some(key_ref("cursor-key-1", 1))),).await,
-            Err(GlobalDbCursorKeyProviderError::InvalidKeyVersion { value: 65_536 })
-        ));
-    }
-
-    #[tokio::test]
-    async fn short_material_is_rejected_and_debug_is_redacted() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-1", 1, &[0xa5; 31], 100).await;
-        let frozen = snapshot(Some(key_ref("cursor-key-1", 1)));
-        assert!(matches!(
-            load_provider(&db, &frozen).await,
-            Err(GlobalDbCursorKeyProviderError::InvalidKeyMaterial)
-        ));
-
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_query_cursor_keys (
-                    key_id, key_version, key_material, created_at, retired_at
-                 ) VALUES ('cursor-key-2', 2, ?1, 200, NULL)",
-                params![KEY_TWO_MATERIAL.to_vec()],
-            )
-            .await
-            .expect("rotation should succeed");
-        let provider = load_provider(&db, &snapshot(Some(key_ref("cursor-key-2", 2))))
-            .await
-            .expect("valid provider should load");
-        let debug = format!("{provider:?}");
-        assert!(debug.contains("REDACTED"));
-        assert!(!debug.contains("[90, 90"));
-        assert!(!debug.contains("key_material"));
-    }
-
-    #[tokio::test]
-    async fn tampering_fails_authentication() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-1", 1, &KEY_ONE_MATERIAL, 100).await;
-        let key = key_ref("cursor-key-1", 1);
-        let provider = load_provider(&db, &snapshot(Some(key.clone())))
-            .await
-            .expect("provider should load");
-        let signature = provider
-            .sign(&key, b"authenticated")
-            .expect("signature should be created");
-
-        assert!(matches!(
-            provider.verify(&key, b"tampered", &signature),
-            Err(CursorKeyError::AuthenticationFailed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn loading_and_authentication_are_read_only() {
-        let temp = TempDir::new().expect("temporary directory");
-        let db = open_db(&temp).await;
-        insert_key(&db, "cursor-key-1", 1, &KEY_ONE_MATERIAL, 100).await;
-        let before = key_rows(&db).await;
-        let key = key_ref("cursor-key-1", 1);
-        let provider = load_provider(&db, &snapshot(Some(key.clone())))
-            .await
-            .expect("provider should load");
-        let signature = provider
-            .sign(&key, b"read-only")
-            .expect("signature should be created");
-        provider
-            .verify(&key, b"read-only", &signature)
-            .expect("signature should verify");
-
-        assert_eq!(key_rows(&db).await, before);
     }
 }

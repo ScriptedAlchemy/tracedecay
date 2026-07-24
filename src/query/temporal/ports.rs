@@ -475,6 +475,86 @@ fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortEr
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TemporalSessionScopeFilterV1 {
+    #[default]
+    All,
+    ParentsOnly,
+    SubagentsOnly,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TemporalMessageTypeFilterV1 {
+    #[default]
+    All,
+    DirectUser,
+    ToolResult,
+}
+
+/// Canonical semantic eligibility applied by the read port before candidates
+/// enter ranking, limiting, record loading, or hydration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct TemporalCandidateFilterV1 {
+    pub(crate) project_key: Option<String>,
+    pub(crate) parent_session_id: Option<String>,
+    pub(crate) session_scope: TemporalSessionScopeFilterV1,
+    pub(crate) message_type: TemporalMessageTypeFilterV1,
+    pub(crate) roles: Vec<String>,
+    pub(crate) start_time: Option<i64>,
+    pub(crate) end_time: Option<i64>,
+    pub(crate) git_branch: Option<String>,
+    pub(crate) git_worktree: Option<String>,
+    pub(crate) git_commit: Option<String>,
+    pub(crate) workflow_run: Option<String>,
+    pub(crate) workflow_agent: Option<String>,
+    pub(crate) goals: bool,
+}
+
+impl TemporalCandidateFilterV1 {
+    pub(crate) fn validate(&self) -> Result<(), TemporalPortError> {
+        if self
+            .start_time
+            .zip(self.end_time)
+            .is_some_and(|(start, end)| start > end)
+        {
+            return Err(TemporalPortError::InvalidBinding {
+                field: "semantic_time_range",
+            });
+        }
+        if self.workflow_agent.is_some() && self.workflow_run.is_none() {
+            return Err(TemporalPortError::InvalidBinding {
+                field: "workflow_agent",
+            });
+        }
+        for (field, value) in [
+            ("project_key", self.project_key.as_deref()),
+            ("parent_session_id", self.parent_session_id.as_deref()),
+            ("git_branch", self.git_branch.as_deref()),
+            ("git_worktree", self.git_worktree.as_deref()),
+            ("git_commit", self.git_commit.as_deref()),
+            ("workflow_run", self.workflow_run.as_deref()),
+            ("workflow_agent", self.workflow_agent.as_deref()),
+        ] {
+            if let Some(value) = value {
+                validate_label(field, value)?;
+            }
+        }
+        for role in &self.roles {
+            validate_label("role", role)?;
+        }
+        if self.roles.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(TemporalPortError::InvalidBinding { field: "roles" });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalSnapshotRequest {
     session_id: SessionId,
@@ -487,6 +567,7 @@ pub struct TemporalSnapshotRequest {
     access_digest: BindingDigest,
     temporal_mode: TemporalModeV1,
     grain: RetrievalGrainV1,
+    semantic_filter: TemporalCandidateFilterV1,
     limits: ExecutionLimits,
     control: ExecutionControl,
 }
@@ -512,6 +593,7 @@ impl TemporalSnapshotRequest {
             access_digest: BindingDigest::new("access_digest", access_digest)?,
             temporal_mode,
             grain,
+            semantic_filter: TemporalCandidateFilterV1::default(),
             limits: ExecutionLimits::default(),
             control: ExecutionControl::default(),
         })
@@ -569,6 +651,15 @@ impl TemporalSnapshotRequest {
         Ok(self)
     }
 
+    pub(crate) fn with_semantic_filter(
+        mut self,
+        semantic_filter: TemporalCandidateFilterV1,
+    ) -> Result<Self, TemporalPortError> {
+        semantic_filter.validate()?;
+        self.semantic_filter = semantic_filter;
+        Ok(self)
+    }
+
     #[must_use]
     pub fn with_cancellation_requested(self, requested: bool) -> Self {
         if requested {
@@ -621,6 +712,10 @@ impl TemporalSnapshotRequest {
 
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
+    }
+
+    pub(crate) fn semantic_filter(&self) -> &TemporalCandidateFilterV1 {
+        &self.semantic_filter
     }
 
     pub const fn limits(&self) -> ExecutionLimits {
@@ -1795,6 +1890,7 @@ struct CandidateWire<'a> {
     session: &'a Option<String>,
     source: &'a Option<String>,
     evidence_role: &'a Option<String>,
+    exact_ranges: &'a [tracedecay_domain::ByteRangeV1],
 }
 
 impl MeasuredTemporalValue for RankingCandidate {
@@ -1825,6 +1921,7 @@ impl MeasuredTemporalValue for RankingCandidate {
                 session: &self.session,
                 source: &self.source,
                 evidence_role: &self.evidence_role,
+                exact_ranges: &self.exact_ranges,
             },
         )
     }
@@ -2230,6 +2327,54 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_request_freezes_validated_semantic_filter_before_reads() {
+        let request = TemporalSnapshotRequest::new(
+            session_id(),
+            digest('0'),
+            digest('1'),
+            digest('2'),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::LogicalMessage,
+        )
+        .expect("valid request");
+        let filter = TemporalCandidateFilterV1 {
+            git_branch: Some("feature/filters".to_string()),
+            workflow_run: Some("wf_filters".to_string()),
+            roles: vec!["assistant".to_string(), "user".to_string()],
+            goals: true,
+            ..TemporalCandidateFilterV1::default()
+        };
+
+        let request = request
+            .with_semantic_filter(filter.clone())
+            .expect("canonical semantic filter");
+
+        assert_eq!(request.semantic_filter(), &filter);
+    }
+
+    #[test]
+    fn semantic_filter_rejects_ambiguous_or_unstable_bindings() {
+        let unsorted = TemporalCandidateFilterV1 {
+            roles: vec!["user".to_string(), "assistant".to_string()],
+            ..TemporalCandidateFilterV1::default()
+        };
+        assert_eq!(
+            unsorted.validate(),
+            Err(TemporalPortError::InvalidBinding { field: "roles" })
+        );
+        let orphan_agent = TemporalCandidateFilterV1 {
+            workflow_agent: Some("worker".to_string()),
+            ..TemporalCandidateFilterV1::default()
+        };
+        assert_eq!(
+            orphan_agent.validate(),
+            Err(TemporalPortError::InvalidBinding {
+                field: "workflow_agent"
+            })
+        );
+    }
+
+    #[test]
     fn snapshot_request_freezes_typed_retrieval_scope_additively() {
         let session = session_id();
         let authorized_root =
@@ -2580,6 +2725,7 @@ mod tests {
             session: Some("session-1".to_string()),
             source: Some("source-1".to_string()),
             evidence_role: Some("message".to_string()),
+            exact_ranges: Vec::new(),
         }
     }
 

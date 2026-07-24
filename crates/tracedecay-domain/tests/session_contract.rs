@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, CanonicalObservationRelationsV1, CompactContextBundleV1,
+    ByteRangeV1, CanonicalObservationIdV1, CanonicalObservationRelationsV1, CompactContextBundleV1,
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
     CompactContextRecordV1, ContextOmissionReasonV1, CopyProofV1, EntityKind, GroupingProvenanceV1,
     HydrationStateV1, LogicalCopyRecordV1, MessageId, MessageOccurrenceIdV1,
@@ -151,6 +151,29 @@ fn temporal_modes_round_trip_and_unknown_valid_time_is_not_representative_as_of(
             valid_at: UtcMicros(45)
         }
         .is_representative_at(UtcMicros(55), TemporalModeV1::AsOf { cutoff })
+    );
+}
+
+#[test]
+fn exact_byte_ranges_are_canonical_half_open_domain_values() {
+    let range = ByteRangeV1::new(3, 11).expect("ordered non-empty byte range");
+    assert_eq!((range.start(), range.end()), (3, 11));
+    assert_json_round_trip!(range);
+    assert_eq!(
+        ByteRangeV1::new(3, 3),
+        Err(SessionContractError::InvalidByteRange)
+    );
+    assert_eq!(
+        ByteRangeV1::new(4, 3),
+        Err(SessionContractError::InvalidByteRange)
+    );
+    assert!(
+        serde_json::from_value::<ByteRangeV1>(json!({
+            "start": 3,
+            "end": 11,
+            "inclusive": true
+        }))
+        .is_err()
     );
 }
 

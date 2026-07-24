@@ -26,6 +26,8 @@ pub enum SessionContractError {
     InvalidIdentity { field: &'static str },
     #[error("{field} must be non-zero")]
     ZeroValue { field: &'static str },
+    #[error("a byte range must be non-empty and ordered")]
+    InvalidByteRange,
     #[error("message occurrence identity does not match its observation and ordinal")]
     OccurrenceIdentityMismatch,
     #[error("a logical copy cannot reference itself")]
@@ -335,6 +337,31 @@ impl RetrievalGrainV1 {
             Self::EvidenceSpan => "evidence_span",
             Self::EvidenceBurst => "evidence_burst",
         }
+    }
+}
+
+/// Canonical half-open UTF-8 byte range retained by exact retrieval evidence.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct ByteRangeV1 {
+    start: u64,
+    end: u64,
+}
+
+impl ByteRangeV1 {
+    pub const fn new(start: u64, end: u64) -> Result<Self, SessionContractError> {
+        if start >= end {
+            return Err(SessionContractError::InvalidByteRange);
+        }
+        Ok(Self { start, end })
+    }
+
+    pub const fn start(self) -> u64 {
+        self.start
+    }
+
+    pub const fn end(self) -> u64 {
+        self.end
     }
 }
 

@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{EntityKind, RetrievalAnchorRecord, RetrievalAnchorTargetV2};
 
@@ -22,7 +22,7 @@ enum PublicationRule<'a> {
 }
 
 pub(crate) async fn publish_immutable_summary(
-    conn: &Connection,
+    conn: &impl Executor,
     publication: LcmImmutableSummaryPublication,
 ) -> Result<LcmSummaryPublicationReceipt, LcmError> {
     let rule = validate_publication_shape(&publication)?;
@@ -167,7 +167,7 @@ fn validate_publication_shape(
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_canonical_node(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     session_id: &str,
     summary_anchor_id: &str,
@@ -196,7 +196,7 @@ async fn insert_canonical_node(
 }
 
 async fn insert_canonical_sources(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
 ) -> Result<(), LcmError> {
@@ -228,7 +228,7 @@ async fn insert_canonical_sources(
 }
 
 async fn exact_replay_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
     manifest: CanonicalPublicationManifest,
     created_at: i64,
@@ -262,7 +262,7 @@ async fn exact_replay_receipt(
 }
 
 async fn verify_canonical_node(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
     created_at: i64,
@@ -294,7 +294,7 @@ async fn verify_canonical_node(
 }
 
 async fn verify_canonical_sources(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
 ) -> Result<(), LcmError> {
@@ -326,7 +326,7 @@ async fn verify_canonical_sources(
 }
 
 async fn verify_predecessor(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     expected: Option<&str>,
 ) -> Result<(), LcmError> {
@@ -345,7 +345,7 @@ async fn verify_predecessor(
 }
 
 async fn verify_summary_anchor(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
     created_at: i64,
@@ -396,7 +396,7 @@ async fn verify_summary_anchor(
 }
 
 async fn insert_sanitization_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     receipt_id: &str,
     payload_digest: &str,
     receipt: &FrozenPublicationReceipt,
@@ -426,7 +426,7 @@ async fn insert_sanitization_receipt(
 }
 
 async fn verify_receipt_row(
-    conn: &Connection,
+    conn: &impl Executor,
     receipt_id: &str,
     payload_digest: &str,
     receipt_json: &str,
@@ -452,7 +452,7 @@ async fn verify_receipt_row(
 }
 
 async fn load_and_verify_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
     created_at: i64,

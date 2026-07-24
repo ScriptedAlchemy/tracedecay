@@ -5,7 +5,7 @@ mod sources;
 
 use std::collections::BTreeMap;
 
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -198,7 +198,7 @@ pub(super) fn normalize_timestamp(value: i64) -> i64 {
     }
 }
 
-pub(super) async fn unixepoch(conn: &Connection) -> Result<i64, LcmError> {
+pub(super) async fn unixepoch(conn: &impl Executor) -> Result<i64, LcmError> {
     let mut rows = conn.query("SELECT unixepoch() * 1000000", ()).await?;
     rows.next()
         .await?
@@ -208,7 +208,7 @@ pub(super) async fn unixepoch(conn: &Connection) -> Result<i64, LcmError> {
 }
 
 pub(super) async fn load_manifest(
-    conn: &Connection,
+    conn: &impl Executor,
     summary_id: &str,
 ) -> Result<Option<(CanonicalPublicationManifest, i64)>, LcmError> {
     let mut rows = conn

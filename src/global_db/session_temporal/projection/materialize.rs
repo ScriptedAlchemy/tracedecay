@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use libsql::{Connection, params};
+use crate::db::engine::{QueryExecutor, params};
 use serde_json::json;
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1, MessageId,
@@ -24,7 +24,7 @@ use super::persist::*;
 use super::receipts::*;
 
 pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     recovery: &SessionRefreshRecoveryV1,
 ) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>> {
     let (
@@ -233,7 +233,7 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
 }
 
 pub(super) async fn materialize_effect_occurrences(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     effects: &[(tracedecay_domain::CanonicalObservationIdV1, u64, usize)],
     item_count: usize,
 ) -> SessionStoreResult<Vec<MessageOccurrenceRecordV1>> {
@@ -274,7 +274,7 @@ pub(super) fn derived_temporal_assertion_id(
 /// Prefer `ProviderLinkage` when the parent message id is the source observation's
 /// stable provider record id; otherwise emit `ParentMessageLinkage`.
 pub(super) async fn canonical_parent_copy_proof(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     parent_occurrence_id: &MessageOccurrenceIdV1,
     parent_message_id: &str,
@@ -333,7 +333,7 @@ pub(super) async fn canonical_parent_copy_proof(
 }
 
 pub(super) async fn canonical_copy_proof_for_retained(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     batch: &SessionTemporalProjectionBatchV1,
     copy: &LogicalCopyRecordV1,
 ) -> SessionStoreResult<CopyProofV1> {
@@ -363,7 +363,7 @@ pub(super) async fn canonical_copy_proof_for_retained(
 /// the authority until the domain/store copy-bitemporality contract exposes a
 /// canonical derivation identity for copied evidence.
 pub(super) async fn derive_retained_projection_relations(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &SessionId,
     source_frontier: u64,
     occurrences: &[MessageOccurrenceRecordV1],
@@ -479,7 +479,7 @@ pub(super) async fn derive_retained_projection_relations(
 }
 
 pub(crate) async fn canonical_parent_message_resolver(
-    conn: &Connection,
+    conn: &impl QueryExecutor,
     session_id: &str,
     source_frontier: u64,
     operation: &'static str,

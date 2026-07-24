@@ -240,6 +240,7 @@ fn candidate(stable_id: &str, anchor_id: &str, raw_score: i64) -> RankingCandida
         session: Some("session-1".to_string()),
         source: Some("source-1".to_string()),
         evidence_role: Some("message".to_string()),
+        exact_ranges: Vec::new(),
     }
 }
 
@@ -741,6 +742,46 @@ fn invalid_summary_successor_does_not_hide_eligible_predecessor() {
 }
 
 #[test]
+fn summary_lineage_is_limited_to_the_selected_ranked_page() {
+    block_on(async {
+        let port = FakeReadPort::new(
+            vec![
+                candidate("summary-one", "summary-one", 20),
+                candidate("summary-two", "summary-two", 10),
+            ],
+            vec![
+                TemporalRecord::Summary(summary("one", "source-one", 7)),
+                TemporalRecord::Summary(summary("two", "source-two", 7)),
+                covered_summary_source("source-one", 7),
+                covered_summary_source("source-two", 7),
+            ],
+        );
+
+        let result = execute_temporal_kernel(
+            &request(TemporalModeV1::Current, 1),
+            &port,
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("first summary page");
+
+        assert_eq!(result.ranked.len(), 1);
+        assert_eq!(result.ranked[0].anchor_id, anchor("summary-one"));
+        assert_eq!(result.lineage.len(), 1);
+        assert_eq!(result.lineage[0].subject_anchor_id, anchor("summary-one"));
+        assert_eq!(result.lineage[0].object_anchor_id, anchor("source-one"));
+        assert!(
+            result
+                .lineage
+                .iter()
+                .all(|edge| edge.subject_anchor_id != anchor("summary-two"))
+        );
+    });
+}
+
+#[test]
 fn summary_availability_maps_to_explicit_coverage_and_canonical_omissions() {
     block_on(async {
         let port = FakeReadPort::new(
@@ -887,6 +928,131 @@ fn denied_hydration_is_authorized_first_and_payload_read_is_impossible() {
         assert_eq!(result.context.bundle.omissions.len(), 1);
         assert_eq!(result.coverage.redacted, 1);
         assert_eq!(result.coverage.total(), Some(1));
+    });
+}
+
+#[test]
+fn interleaved_hydration_preserves_ranked_results_omissions_and_cursor() {
+    block_on(async {
+        let candidates = vec![
+            candidate("available-high", "available-high", 50),
+            candidate("denied-z", "z-denied", 40),
+            candidate("available-mid", "available-mid", 30),
+            candidate("denied-a", "a-denied", 20),
+            candidate("page-tail", "page-tail", 10),
+        ];
+        let records = vec![
+            TemporalRecord::Occurrence(occurrence('a', "available-high", 50)),
+            TemporalRecord::Occurrence(occurrence('b', "z-denied", 40)),
+            TemporalRecord::Occurrence(occurrence('c', "available-mid", 30)),
+            TemporalRecord::Occurrence(occurrence('d', "a-denied", 20)),
+            TemporalRecord::Occurrence(occurrence('e', "page-tail", 10)),
+        ];
+        let denied_request = request(TemporalModeV1::Current, 4);
+        let hydrator = FakeHydrator {
+            denials: [
+                (anchor("z-denied"), HydrationStateV1::Redacted),
+                (anchor("a-denied"), HydrationStateV1::Locked),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeHydrator::default()
+        };
+
+        let denied = execute_temporal_kernel(
+            &denied_request,
+            &FakeReadPort::new(
+                candidates.clone(),
+                records.iter().map(clone_temporal_record).collect(),
+            ),
+            &hydrator,
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("interleaved hydration");
+        let authorized = execute_temporal_kernel(
+            &denied_request,
+            &FakeReadPort::new(candidates, records),
+            &FakeHydrator::default(),
+            &authenticator("key-1", 1, 7),
+            &Words,
+        )
+        .await
+        .expect("fully authorized hydration");
+
+        assert_eq!(
+            denied
+                .hydrated
+                .iter()
+                .map(|result| {
+                    (
+                        result.rank(),
+                        result.stable_id().to_string(),
+                        result.anchor_id().clone(),
+                        result.state(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    0,
+                    "available-high".to_string(),
+                    anchor("available-high"),
+                    HydrationStateV1::Available,
+                ),
+                (
+                    1,
+                    "denied-z".to_string(),
+                    anchor("z-denied"),
+                    HydrationStateV1::Redacted,
+                ),
+                (
+                    2,
+                    "available-mid".to_string(),
+                    anchor("available-mid"),
+                    HydrationStateV1::Available,
+                ),
+                (
+                    3,
+                    "denied-a".to_string(),
+                    anchor("a-denied"),
+                    HydrationStateV1::Locked,
+                ),
+            ]
+        );
+        assert_eq!(
+            denied
+                .context
+                .bundle
+                .omissions
+                .iter()
+                .map(|omission| omission.anchor_id.clone())
+                .collect::<Vec<_>>(),
+            vec![Some(anchor("z-denied")), Some(anchor("a-denied"))]
+        );
+        assert_eq!(
+            denied
+                .hydrated
+                .iter()
+                .map(|result| result.content().is_some())
+                .collect::<Vec<_>>(),
+            vec![true, false, true, false]
+        );
+        let rendered: serde_json::Value =
+            serde_json::from_str(&denied.context.rendered).expect("rendered context");
+        assert_eq!(
+            rendered["bundle"]["omissions"]
+                .as_array()
+                .expect("omission array")
+                .iter()
+                .map(|omission| omission["anchor_id"].as_str())
+                .collect::<Vec<_>>(),
+            vec![Some("z-denied"), Some("a-denied")]
+        );
+        assert_eq!(denied.ranked, authorized.ranked);
+        assert_eq!(denied.next_cursor, authorized.next_cursor);
+        assert!(denied.next_cursor.is_some());
     });
 }
 

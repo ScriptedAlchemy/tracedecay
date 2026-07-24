@@ -6,7 +6,7 @@ pub mod ports;
 pub mod ranking;
 pub mod resolution;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use thiserror::Error;
@@ -52,26 +52,50 @@ pub struct TemporalKernelRequest {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct TemporalHydratedResult {
+    rank: u32,
+    stable_id: String,
     anchor_id: RetrievalAnchorId,
     state: HydrationStateV1,
     content: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl TemporalHydratedResult {
-    fn available(anchor_id: RetrievalAnchorId, content: Zeroizing<Vec<u8>>) -> Self {
+    fn available(
+        rank: u32,
+        stable_id: String,
+        anchor_id: RetrievalAnchorId,
+        content: Zeroizing<Vec<u8>>,
+    ) -> Self {
         Self {
+            rank,
+            stable_id,
             anchor_id,
             state: HydrationStateV1::Available,
             content: Some(content),
         }
     }
 
-    fn unavailable(anchor_id: RetrievalAnchorId, state: HydrationStateV1) -> Self {
+    fn unavailable(
+        rank: u32,
+        stable_id: String,
+        anchor_id: RetrievalAnchorId,
+        state: HydrationStateV1,
+    ) -> Self {
         Self {
+            rank,
+            stable_id,
             anchor_id,
             state,
             content: None,
         }
+    }
+
+    pub const fn rank(&self) -> u32 {
+        self.rank
+    }
+
+    pub fn stable_id(&self) -> &str {
+        &self.stable_id
     }
 
     pub fn anchor_id(&self) -> &RetrievalAnchorId {
@@ -86,16 +110,48 @@ impl TemporalHydratedResult {
         self.content.as_deref().map(Vec::as_slice)
     }
 
-    fn from_batch(batch: HydrationBatch) -> Vec<Self> {
-        let mut results = Vec::with_capacity(batch.available.len() + batch.unavailable.len());
-        for payload in batch.available {
-            let (anchor_id, content) = payload.into_parts();
-            results.push(Self::available(anchor_id, content));
+    fn from_batch(batch: HydrationBatch, selected: &[RankedCandidate]) -> Vec<Self> {
+        let mut available = VecDeque::from(batch.available);
+        let mut unavailable = VecDeque::from(batch.unavailable);
+        let mut results = Vec::with_capacity(selected.len());
+        for (rank, candidate) in selected.iter().enumerate() {
+            let rank = u32::try_from(rank).expect("bounded hydration rank must fit u32");
+            let expected_anchor = &candidate.anchor_id;
+            if available
+                .front()
+                .is_some_and(|payload| payload.anchor_id() == expected_anchor)
+            {
+                let (anchor_id, content) = available
+                    .pop_front()
+                    .expect("available hydration was observed above")
+                    .into_parts();
+                results.push(Self::available(
+                    rank,
+                    candidate.stable_id.clone(),
+                    anchor_id,
+                    content,
+                ));
+            } else {
+                let (anchor_id, state) = unavailable
+                    .pop_front()
+                    .expect("selected anchor must have one hydration outcome")
+                    .into_parts();
+                assert_eq!(
+                    &anchor_id, expected_anchor,
+                    "hydration outcome order must remain a selected-order subsequence"
+                );
+                results.push(Self::unavailable(
+                    rank,
+                    candidate.stable_id.clone(),
+                    anchor_id,
+                    state,
+                ));
+            }
         }
-        for unavailable in batch.unavailable {
-            let (anchor_id, state) = unavailable.into_parts();
-            results.push(Self::unavailable(anchor_id, state));
-        }
+        assert!(
+            available.is_empty() && unavailable.is_empty(),
+            "hydration cannot add outcomes outside the selected page"
+        );
         results
     }
 }
@@ -104,6 +160,8 @@ impl fmt::Debug for TemporalHydratedResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TemporalHydratedResult")
+            .field("rank", &self.rank)
+            .field("stable_id", &self.stable_id)
             .field("anchor_id", &self.anchor_id)
             .field("state", &self.state)
             .field(
@@ -174,6 +232,8 @@ pub async fn execute_temporal_kernel(
     check_control(snapshot)?;
     let plan = if let Some(anchor_id) = request.direct_anchor.as_ref() {
         candidates::plan_anchor(anchor_id)
+    } else if snapshot.request().semantic_filter().goals {
+        candidates::plan_scope_candidates()
     } else if request.query.trim().is_empty()
         && snapshot.temporal_mode() == TemporalModeV1::Forensic
         && matches!(
@@ -292,11 +352,15 @@ pub async fn execute_temporal_kernel(
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
-    let mut ranked_anchors = BTreeSet::new();
-    ranked.retain(|candidate| ranked_anchors.insert(candidate.anchor_id.clone()));
+    let mut deduplicated_anchors = BTreeSet::new();
+    ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
 
     let has_more = ranked.len() > request.limit;
     ranked.truncate(request.limit);
+    let ranked_anchors = ranked
+        .iter()
+        .map(|candidate| candidate.anchor_id.clone())
+        .collect::<BTreeSet<_>>();
     let anchors = ranked
         .iter()
         .map(|candidate| candidate.anchor_id.clone())
@@ -312,6 +376,7 @@ pub async fn execute_temporal_kernel(
         &resolved.lineage_edges,
         &hydration,
         &records.summaries,
+        &ranked_anchors,
         &summary_eligibility,
     );
     let context = assemble_context_with_frames_controlled(
@@ -335,7 +400,7 @@ pub async fn execute_temporal_kernel(
     };
 
     let summary_omissions = public_summary_omissions(&summary_eligibility);
-    let hydrated = TemporalHydratedResult::from_batch(hydration);
+    let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),
@@ -474,6 +539,7 @@ fn temporal_context_frames(
     lineage_edges: &[ResolutionLineageEdge],
     hydration: &HydrationBatch,
     summaries: &[SessionSummaryRecordV1],
+    ranked_anchors: &BTreeSet<RetrievalAnchorId>,
     summary_eligibility: &SummaryLineageEligibility,
 ) -> TemporalContextFrames {
     let unknown_anchors = resolved
@@ -521,14 +587,16 @@ fn temporal_context_frames(
         .collect();
     let mut lineage: Vec<CompactContextLineageEdgeV1> =
         lineage_edges.iter().map(context_lineage_edge).collect();
-    // Eligible summaries carry their own provenance: each summary anchor
+    // Ranked summaries carry their own provenance: each summary anchor
     // supports-derives from its source anchors. Surfacing that as Supports
     // lineage keeps summary describes traceable without a stored assertion
-    // row per source.
+    // row per source. Only summaries actually returned contribute edges —
+    // merely-eligible summaries must not pollute unrelated results' lineage.
     for summary in summaries {
-        if !summary_eligibility
-            .eligible_anchor_ids
-            .contains(summary.summary_anchor_id())
+        if !ranked_anchors.contains(summary.summary_anchor_id())
+            || !summary_eligibility
+                .eligible_anchor_ids
+                .contains(summary.summary_anchor_id())
         {
             continue;
         }
@@ -838,6 +906,7 @@ mod scope_tests {
             &[],
             &HydrationBatch::default(),
             &[],
+            &BTreeSet::new(),
             &eligibility,
         );
 
@@ -913,6 +982,7 @@ mod scope_tests {
             &[],
             &HydrationBatch::default(),
             &[],
+            &BTreeSet::new(),
             &eligibility,
         );
 
@@ -987,6 +1057,7 @@ mod scope_tests {
             &[],
             &HydrationBatch::default(),
             &[],
+            &BTreeSet::new(),
             &eligibility,
         );
 

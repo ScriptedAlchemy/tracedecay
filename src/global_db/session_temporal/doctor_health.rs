@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use libsql::Connection as LibsqlConnection;
 use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::global_db::GlobalDb;
+use crate::db::engine::{Error as EngineError, Executor};
+use crate::global_db::RegisteredGlobalDb;
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -666,7 +666,7 @@ pub(crate) async fn session_temporal_doctor_health_at(
     diagnose_connection(&connection)
 }
 
-impl GlobalDb {
+impl RegisteredGlobalDb {
     /// Produces a redacted, non-mutating temporal health snapshot for Doctor.
     ///
     /// Delegates to [`session_temporal_doctor_health_at`] so diagnosis never
@@ -685,7 +685,7 @@ impl GlobalDb {
     pub(crate) async fn repair_session_temporal_fts(
         &self,
         apply: bool,
-    ) -> Result<(usize, usize), libsql::Error> {
+    ) -> crate::db::engine::Result<(usize, usize)> {
         let report = session_temporal_doctor_health_at(self.db_path()).await;
         if report.status != SessionTemporalHealthStatus::Complete {
             return Err(repair_refused(
@@ -716,19 +716,22 @@ impl GlobalDb {
             return Ok((planned, 0));
         }
 
-        let transaction = self.begin_write_transaction().await?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| EngineError::Runtime(error.to_string()))?;
         require_quick_check(&transaction, repair_occurrences, repair_summaries).await?;
         let occurrence_sources = connection_count(&transaction, "session_occurrences").await?;
         let summary_sources = connection_count(&transaction, "session_summary_nodes").await?;
 
         if repair_occurrences {
-            transaction
-                .execute(
-                    "INSERT INTO session_occurrences_fts(session_occurrences_fts)
+            Executor::execute(
+                &transaction,
+                "INSERT INTO session_occurrences_fts(session_occurrences_fts)
                      VALUES ('rebuild')",
-                    (),
-                )
-                .await?;
+                (),
+            )
+            .await?;
             verify_fts_repair(
                 &transaction,
                 "INSERT INTO session_occurrences_fts(session_occurrences_fts, rank)
@@ -738,13 +741,13 @@ impl GlobalDb {
             .await?;
         }
         if repair_summaries {
-            transaction
-                .execute(
-                    "INSERT INTO session_summary_nodes_fts(session_summary_nodes_fts)
+            Executor::execute(
+                &transaction,
+                "INSERT INTO session_summary_nodes_fts(session_summary_nodes_fts)
                      VALUES ('rebuild')",
-                    (),
-                )
-                .await?;
+                (),
+            )
+            .await?;
             verify_fts_repair(
                 &transaction,
                 "INSERT INTO session_summary_nodes_fts(session_summary_nodes_fts, rank)
@@ -761,7 +764,10 @@ impl GlobalDb {
                 "authoritative temporal sources changed during FTS repair",
             ));
         }
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| EngineError::Runtime(error.to_string()))?;
         self.checkpoint_result()
             .await
             .map_err(|_| repair_refused("temporal FTS repair checkpoint did not complete"))?;
@@ -1009,11 +1015,9 @@ fn is_fts_finding(kind: SessionTemporalHealthFindingKind) -> bool {
     )
 }
 
-fn is_fts_virtual_table_corruption(error: &libsql::Error) -> bool {
-    matches!(
-        error,
-        libsql::Error::SqliteFailure(code, _) if *code == SQLITE_CORRUPT_VTAB
-    )
+fn is_fts_virtual_table_corruption(error: &EngineError) -> bool {
+    error.sqlite_extended_code() == Some(SQLITE_CORRUPT_VTAB)
+        || error.sqlite_code() == Some(SQLITE_CORRUPT_VTAB)
 }
 
 fn is_rusqlite_fts_virtual_table_corruption(error: &rusqlite::Error) -> bool {
@@ -1023,10 +1027,10 @@ fn is_rusqlite_fts_virtual_table_corruption(error: &rusqlite::Error) -> bool {
 }
 
 async fn require_quick_check(
-    conn: &LibsqlConnection,
+    conn: &impl Executor,
     repair_occurrences: bool,
     repair_summaries: bool,
-) -> Result<(), libsql::Error> {
+) -> crate::db::engine::Result<()> {
     let mut rows = match conn.query("PRAGMA quick_check", ()).await {
         Ok(rows) => rows,
         Err(error) if is_fts_virtual_table_corruption(&error) => return Ok(()),
@@ -1066,7 +1070,7 @@ fn is_allowed_fts_quick_check(
             && message == "malformed inverted index for FTS5 table main.session_summary_nodes_fts")
 }
 
-async fn connection_count(conn: &LibsqlConnection, table: &str) -> Result<i64, libsql::Error> {
+async fn connection_count(conn: &impl Executor, table: &str) -> crate::db::engine::Result<i64> {
     let sql = match table {
         "session_occurrences" => "SELECT COUNT(*) FROM session_occurrences",
         "session_summary_nodes" => "SELECT COUNT(*) FROM session_summary_nodes",
@@ -1080,10 +1084,10 @@ async fn connection_count(conn: &LibsqlConnection, table: &str) -> Result<i64, l
 }
 
 async fn verify_fts_repair(
-    conn: &LibsqlConnection,
+    conn: &impl Executor,
     integrity_sql: &str,
     drift_sql: &str,
-) -> Result<(), libsql::Error> {
+) -> crate::db::engine::Result<()> {
     conn.execute(integrity_sql, ()).await?;
     let mut rows = conn.query(drift_sql, ()).await?;
     let Some(row) = rows.next().await? else {
@@ -1100,8 +1104,8 @@ async fn verify_fts_repair(
     }
 }
 
-fn repair_refused(message: &str) -> libsql::Error {
-    libsql::Error::Misuse(message.to_string())
+fn repair_refused(message: &str) -> EngineError {
+    EngineError::invalid_operation(message)
 }
 
 fn classify_rusqlite_error(

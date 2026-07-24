@@ -4,17 +4,17 @@ use std::path::Path;
 use std::pin::Pin;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{Connection, params};
+use crate::db::engine::params;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    AnchorDurabilityClass, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
-    DurableObservationV1, HydrationStateV1, ObservationScopeV1, PayloadAccessState, ProjectId,
-    RetrievalAnchorId, RetrievalAnchorRecord,
+    AnchorDurabilityClass, CanonicalObservationEnvelopeV1, DurableObservationV1, HydrationStateV1,
+    ObservationScopeV1, PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
 };
 use zeroize::Zeroizing;
 
-use crate::global_db::GlobalDbReadSnapshot;
+use crate::db::engine;
+use crate::global_db::observation_projection::derive_projection;
 use crate::query::temporal::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
     HydrationSink, TemporalHydrationPort,
@@ -23,9 +23,10 @@ use crate::query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
 };
 use crate::sessions::SessionMessageRecord;
-use crate::sessions::lcm::payload::{expand_payload, validate_payload_ref};
+use crate::sessions::lcm::payload::{read_verified_payload_content, validate_payload_ref};
 
 use super::operations::CanonicalPublicationManifest;
+use super::sql::TemporalSqlRead;
 
 type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HydrationError>> + Send + 'a>>;
 
@@ -192,16 +193,30 @@ impl<B: TemporalHydrationBackend> TemporalHydrationPort for SessionTemporalHydra
 }
 
 pub(crate) struct GlobalDbHydrationBackend<'snapshot> {
-    read: &'snapshot GlobalDbReadSnapshot,
+    read: TemporalSqlRead<'snapshot>,
     storage_root: &'snapshot Path,
 }
 
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
+    #[cfg(test)]
     pub(crate) const fn new(
-        read: &'snapshot GlobalDbReadSnapshot,
+        read: &'snapshot engine::Connection,
         storage_root: &'snapshot Path,
     ) -> Self {
-        Self { read, storage_root }
+        Self {
+            read: TemporalSqlRead::engine_connection(read),
+            storage_root,
+        }
+    }
+
+    pub(crate) const fn new_registered(
+        read: &'snapshot engine::ReadSnapshot,
+        storage_root: &'snapshot Path,
+    ) -> Self {
+        Self {
+            read: TemporalSqlRead::registered(read),
+            storage_root,
+        }
     }
 }
 
@@ -209,16 +224,24 @@ pub(crate) type GlobalDbTemporalHydrationPort<'snapshot> =
     SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
 
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
+    #[cfg(test)]
     pub(crate) const fn for_snapshot(
-        read: &'snapshot GlobalDbReadSnapshot,
+        read: &'snapshot engine::Connection,
         storage_root: &'snapshot Path,
     ) -> Self {
         Self::new(GlobalDbHydrationBackend::new(read, storage_root))
     }
+
+    pub(crate) const fn for_registered_snapshot(
+        read: &'snapshot engine::ReadSnapshot,
+        storage_root: &'snapshot Path,
+    ) -> Self {
+        Self::new(GlobalDbHydrationBackend::new_registered(read, storage_root))
+    }
 }
 
 pub(super) async fn session_message_from_hydrated_bytes(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     snapshot: &TemporalExecutionSnapshot,
     anchor_id: &RetrievalAnchorId,
     bytes: &[u8],
@@ -285,59 +308,42 @@ pub(super) async fn session_message_from_hydrated_bytes(
     }
     let observation: DurableObservationV1 =
         serde_json::from_str(&observation_json).map_err(|_| HydrationError::Unavailable)?;
-    let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone())
-            .map_err(|_| HydrationError::Unavailable)?;
-    if envelope
-        .relations()
-        .message_id()
-        .is_none_or(|candidate| candidate.as_str() != message_id)
-    {
+    let message = canonical_projected_message(&observation, &message_id, ordinal)
+        .ok_or(HydrationError::Unavailable)?;
+    if message.role != role || message.text != text {
         return Err(HydrationError::Unavailable);
     }
-    let (model, timestamp) = envelope
-        .facts()
-        .iter()
-        .find_map(|fact| match fact {
-            CanonicalObservationFactV1::Message {
-                model, timestamp, ..
-            } => Some((model.clone(), *timestamp)),
-            _ => None,
-        })
-        .ok_or(HydrationError::Unavailable)?;
-    let tool_names = envelope
-        .facts()
-        .iter()
-        .filter_map(|fact| match fact {
-            CanonicalObservationFactV1::ToolInvocation { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    Ok(message)
+}
 
-    Ok(SessionMessageRecord {
-        provider: observation.source().provider().as_str().to_string(),
-        message_id,
-        session_id: observation.source().session_id().as_str().to_string(),
-        role,
-        timestamp,
-        ordinal,
-        text,
-        kind: Some("message".to_string()),
-        model,
-        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: None,
-        source_offset: None,
-        metadata_json: None,
-    })
+fn canonical_projected_message(
+    observation: &DurableObservationV1,
+    message_id: &str,
+    output_ordinal: i64,
+) -> Option<SessionMessageRecord> {
+    let output_ordinal = u32::try_from(output_ordinal).ok()?;
+    let projection = derive_projection(observation).ok()?;
+    projection
+        .messages()
+        .find(|output| {
+            output.output_ordinal() == output_ordinal
+                && output.message().provider == observation.source().provider().as_str()
+                && output.message().session_id == observation.source().session_id().as_str()
+                && output.message().message_id == message_id
+        })
+        .map(|output| output.message().clone())
 }
 
 pub(super) async fn hydrate_authorized_anchor_bytes(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     storage_root: &Path,
     snapshot: &TemporalExecutionSnapshot,
     anchor_id: &RetrievalAnchorId,
 ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
-    let adapter = GlobalDbTemporalHydrationPort::for_snapshot(read, storage_root);
+    let adapter = SessionTemporalHydrationAdapter::new(GlobalDbHydrationBackend {
+        read: *read,
+        storage_root,
+    });
     let limits = snapshot.request().limits();
     let mut bytes = Zeroizing::new(Vec::new());
     adapter
@@ -364,7 +370,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         Box::pin(async move {
             let control = snapshot.request().execution_control();
             control.checkpoint()?;
-            let resolution = resolve_current(self.read, snapshot, anchor_id)
+            let resolution = resolve_current(&self.read, snapshot, anchor_id)
                 .await
                 .unwrap_or(HydrationResolution::Unavailable(
                     HydrationStateV1::RetainedButUnavailable,
@@ -422,18 +428,16 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
                     payload_ref,
                     char_count,
                 } => {
-                    let expansion = expand_payload(
-                        self.read,
+                    let content = read_verified_payload_content(
                         self.storage_root,
-                        provider,
-                        session_id,
                         payload_ref,
-                        0,
+                        &descriptor.content_hash,
+                        descriptor.byte_count,
                         *char_count,
                     )
-                    .await
                     .map_err(|_| HydrationError::Unavailable)?;
-                    bounded_copy(expansion.content.as_bytes(), max_bytes, control)
+                    let _ = (provider, session_id);
+                    bounded_copy(content.as_bytes(), max_bytes, control)
                 }
             }
         })
@@ -441,7 +445,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
 }
 
 async fn resolve_current(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     snapshot: &TemporalExecutionSnapshot,
     requested_anchor: &RetrievalAnchorId,
 ) -> Result<HydrationResolution, ()> {
@@ -519,7 +523,7 @@ async fn resolve_current(
 }
 
 async fn resolve_occurrence(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     snapshot: &TemporalExecutionSnapshot,
     anchor_id: &RetrievalAnchorId,
     anchor: &RetrievalAnchorRecord,
@@ -530,6 +534,7 @@ async fn resolve_occurrence(
         TemporalRetrievalScope::Session(session_id) => {
             conn.query(
                 "SELECT occurrence.session_id, COALESCE(occurrence.message_id, ''),
+                        occurrence.projection_output_ordinal,
                         observation.observation_id, observation.observation_json
                  FROM session_occurrences occurrence
                  JOIN observations observation
@@ -551,6 +556,7 @@ async fn resolve_occurrence(
                 .project_key();
             conn.query(
                 "SELECT occurrence.session_id, COALESCE(occurrence.message_id, ''),
+                        occurrence.projection_output_ordinal,
                         observation.observation_id, observation.observation_json
                  FROM session_occurrences occurrence
                  JOIN session_temporal_generations generation
@@ -581,8 +587,9 @@ async fn resolve_occurrence(
     };
     let session_id: String = row.get(0).map_err(|_| ())?;
     let message_id: String = row.get(1).map_err(|_| ())?;
-    let stored_observation_id: String = row.get(2).map_err(|_| ())?;
-    let observation_json: String = row.get(3).map_err(|_| ())?;
+    let projection_output_ordinal: i64 = row.get(2).map_err(|_| ())?;
+    let stored_observation_id: String = row.get(3).map_err(|_| ())?;
+    let observation_json: String = row.get(4).map_err(|_| ())?;
     if rows.next().await.map_err(|_| ())?.is_some() {
         return Ok(Some(HydrationResolution::Unavailable(
             HydrationStateV1::RetainedButUnavailable,
@@ -646,22 +653,10 @@ async fn resolve_occurrence(
             HydrationStateV1::UnverifiableLegacy,
         )));
     }
-    if let Some(content) = envelope.facts().iter().find_map(|fact| match fact {
-        CanonicalObservationFactV1::Message { content, .. }
-        | CanonicalObservationFactV1::ToolResult { content, .. }
-        | CanonicalObservationFactV1::ToolInvocation {
-            arguments: content, ..
-        } => Some(content),
-        _ => None,
-    }) {
-        let content = match crate::global_db::observation_projection::canonical_fact_text(content) {
-            Ok(content) => Zeroizing::new(content.into_bytes()),
-            Err(_) => {
-                return Ok(Some(HydrationResolution::Unavailable(
-                    HydrationStateV1::UnverifiableLegacy,
-                )));
-            }
-        };
+    if let Some(message) =
+        canonical_projected_message(&observation, &message_id, projection_output_ordinal)
+    {
+        let content = Zeroizing::new(message.text.into_bytes());
         let content_hash = sha256_hex(content.as_slice());
         return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
             byte_count: content.len(),
@@ -731,7 +726,7 @@ async fn resolve_occurrence(
 }
 
 async fn resolve_summary(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     snapshot: &TemporalExecutionSnapshot,
     anchor_id: &RetrievalAnchorId,
     anchor: &RetrievalAnchorRecord,
@@ -794,7 +789,7 @@ async fn resolve_summary(
     let Some(row) = rows.next().await.map_err(|_| ())? else {
         return Ok(None);
     };
-    // libsql invalidates prior Row values after the next advance — copy first.
+    // Copy the selected values before advancing for the uniqueness probe.
     let session_id: String = row.get(0).map_err(|_| ())?;
     let generation: i64 = row.get(1).map_err(|_| ())?;
     let summary_id: String = row.get(2).map_err(|_| ())?;
@@ -861,7 +856,7 @@ async fn resolve_summary(
 }
 
 async fn summary_has_provider_evidence(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     session_id: &str,
     generation: i64,
     summary_id: &str,
@@ -922,7 +917,7 @@ struct ExternalManifest {
 }
 
 async fn resolve_external_manifest(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &str,
     message_id: &str,
@@ -963,7 +958,7 @@ async fn resolve_external_manifest(
     let Some(row) = rows.next().await.map_err(|_| ())? else {
         return Ok(HydrationResolution::Unavailable(HydrationStateV1::Deleted));
     };
-    // libsql invalidates prior Row values after the next advance — copy first.
+    // Copy the selected values before advancing for the uniqueness probe.
     let stored_hash: String = row.get(0).map_err(|_| ())?;
     let byte_count = nonnegative_usize(row.get::<Option<i64>>(1).map_err(|_| ())?)?;
     let char_count = nonnegative_usize(row.get::<Option<i64>>(2).map_err(|_| ())?)?;
@@ -1014,7 +1009,7 @@ fn authorized_root_owner(snapshot: &TemporalExecutionSnapshot) -> Option<Observa
 }
 
 async fn session_owner(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &str,
 ) -> Result<Option<ObservationScopeV1>, ()> {
@@ -1158,12 +1153,13 @@ fn now_micros() -> i64 {
 mod tests {
     use std::fs;
     use std::future::Future;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use libsql::params;
+    use crate::db::engine::{Executor, ReadSnapshot, params};
     use serde_json::{Value, json};
     use tempfile::tempdir;
     use tracedecay_domain::{
@@ -1182,13 +1178,429 @@ mod tests {
     };
 
     use super::*;
-    use crate::global_db::GlobalDb;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use crate::query::temporal::ports::{
         BindingDigest, ExecutionLimits, KernelVersions, TemporalAuthorizedRoot, TemporalPortError,
         TemporalSnapshotRequest, TemporalWatermarks,
     };
     use crate::query::temporal::resolution::ValidatedAuthorization;
-    use crate::store::GlobalDbObservationStore;
+
+    struct RegisteredHydrationRead {
+        read: ReadSnapshot,
+        storage_root: PathBuf,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct HydrationStorageFingerprint {
+        database: [u8; 32],
+        payload: [u8; 32],
+        payload_entries: usize,
+    }
+
+    impl RegisteredHydrationRead {
+        fn adapter(&self) -> GlobalDbTemporalHydrationPort<'_> {
+            GlobalDbTemporalHydrationPort::for_registered_snapshot(
+                &self.read,
+                self.storage_root.as_path(),
+            )
+        }
+    }
+
+    impl HostAdmissionTestRuntimeV1 {
+        async fn hydration_read_for_test(&self) -> RegisteredHydrationRead {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            RegisteredHydrationRead {
+                read: database.read_snapshot().await.expect("read snapshot"),
+                storage_root: database
+                    .db_path()
+                    .parent()
+                    .expect("registered profile storage root")
+                    .to_path_buf(),
+            }
+        }
+
+        async fn activate_temporal_generation_for_hydration_test(&self, session_id: &str) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let frozen = serde_json::json!({
+                "active_generation": 1,
+                "cursor_key": null,
+                "projection_frontier": 0,
+                "source_frontier": 0,
+                "summary_frontier": 0
+            })
+            .to_string();
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_temporal_generations (
+                    session_id, generation, state, frozen_watermarks_json, created_at,
+                    ready_at, activated_at, completed_at
+                 ) VALUES (?1, 1, 'building', ?2, 1, NULL, NULL, NULL)",
+                params![session_id, frozen],
+            )
+            .await
+            .expect("building generation");
+            Executor::execute(
+                &writer,
+                "UPDATE session_temporal_generations
+                 SET state = 'ready', ready_at = 1
+                 WHERE session_id = ?1 AND generation = 1",
+                [session_id],
+            )
+            .await
+            .expect("ready generation");
+            Executor::execute(
+                &writer,
+                "UPDATE session_temporal_generations
+                 SET state = 'active', activated_at = 1
+                 WHERE session_id = ?1 AND generation = 1",
+                [session_id],
+            )
+            .await
+            .expect("active generation");
+        }
+
+        async fn seed_root_hydration_fixture_for_test(
+            &self,
+            provider: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            canonical_payload: &str,
+            legacy_projection_poison: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute(
+                &writer,
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES
+                    (?1, 'session-1', 'user', '/root-hydration-test'),
+                    (?1, 'session-2', 'user', '/root-hydration-test')",
+                [provider],
+            )
+            .await
+            .expect("session owner");
+            self.activate_temporal_generation_for_hydration_test("session-2")
+                .await;
+            Executor::execute(
+                &writer,
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref,
+                    snippet_text, index_text, legacy_source, legacy_truncated
+                 ) VALUES (
+                    ?1, 'message-1', 'session-2', 'assistant', 1, 1,
+                    ?2, ?3, 'inline', NULL, ?2, ?2, 0, 0
+                 )",
+                params![
+                    provider,
+                    legacy_projection_poison,
+                    hash(legacy_projection_poison.as_bytes())
+                ],
+            )
+            .await
+            .expect("raw message");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    projection_output_ordinal, retrieval_anchor_id, message_id,
+                    role, knowledge_at, valid_time_json, evidence_json,
+                    snippet_text, index_text
+                 ) VALUES (
+                    'session-2', 1, 'occurrence-1', ?1, 0, ?2, 'message-1',
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?3, ?3
+                 )",
+                params![
+                    observation.observation_id().as_str(),
+                    anchor.anchor_id().as_str(),
+                    canonical_payload
+                ],
+            )
+            .await
+            .expect("occurrence");
+        }
+
+        async fn move_hydration_session_outside_root_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            Executor::execute(
+                &database
+                    .writer_connection()
+                    .expect("registered profile writer"),
+                "UPDATE sessions
+                 SET project_key = 'different-project'
+                 WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+            )
+            .await
+            .expect("move target session outside authorized root");
+        }
+
+        async fn seed_snapshot_hydration_fixture_for_test(
+            &self,
+            occurrence_observation: &DurableObservationV1,
+            occurrence_anchor: &RetrievalAnchorRecord,
+            summary_anchor: &RetrievalAnchorRecord,
+            authority_anchor: &RetrievalAnchorRecord,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            let provider = occurrence_observation.source().provider().as_str();
+            Executor::execute(
+                &writer,
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES (?1, 'session-1', 'user', '/snapshot-test')",
+                [provider],
+            )
+            .await
+            .expect("session owner");
+            self.activate_temporal_generation_for_hydration_test("session-1")
+                .await;
+
+            let occurrence_payload = "non-empty occurrence payload";
+            let occurrence_hash = hash(occurrence_payload.as_bytes());
+            let payload_ref = "snapshot-payload.bin";
+            let storage_root = database
+                .db_path()
+                .parent()
+                .expect("registered profile storage root");
+            let payload_dir = storage_root.join("lcm-payloads");
+            fs::create_dir(&payload_dir).expect("payload directory");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                fs::set_permissions(&payload_dir, fs::Permissions::from_mode(0o700))
+                    .expect("private payload directory");
+            }
+            let payload_path = payload_dir.join(payload_ref);
+            fs::write(&payload_path, occurrence_payload).expect("external payload");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                fs::set_permissions(&payload_path, fs::Permissions::from_mode(0o600))
+                    .expect("private payload file");
+            }
+            Executor::execute(
+                &writer,
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref,
+                    snippet_text, index_text, legacy_source, legacy_truncated
+                 ) VALUES (
+                    ?1, 'message-1', 'session-1', 'assistant', 1, 1,
+                    NULL, ?2, 'external', ?3, ?4, ?4, 0, 0
+                 )",
+                params![
+                    provider,
+                    occurrence_hash.as_str(),
+                    payload_ref,
+                    occurrence_payload
+                ],
+            )
+            .await
+            .expect("raw message");
+            Executor::execute(
+                &writer,
+                "INSERT INTO lcm_external_payloads (
+                    payload_ref, provider, session_id, message_id, kind,
+                    content_hash, byte_count, char_count, created_at
+                 ) VALUES (?1, ?2, 'session-1', 'message-1', 'message', ?3, ?4, ?5, 1)",
+                params![
+                    payload_ref,
+                    provider,
+                    occurrence_hash.as_str(),
+                    i64::try_from(occurrence_payload.len()).expect("payload bytes"),
+                    i64::try_from(occurrence_payload.chars().count()).expect("payload chars")
+                ],
+            )
+            .await
+            .expect("external payload metadata");
+            let external_manifest = serde_json::json!({
+                "provider": provider,
+                "session_id": "session-1",
+                "message_id": "message-1",
+                "byte_count": occurrence_payload.len(),
+                "char_count": occurrence_payload.chars().count()
+            })
+            .to_string();
+            let authority_publication = serde_json::json!({
+                "receipt_id": "receipt-3",
+                "payloads": [{
+                    "payload_ref": payload_ref,
+                    "digest": occurrence_hash.as_str(),
+                    "manifest_json": external_manifest.clone()
+                }]
+            })
+            .to_string();
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_summary_nodes (
+                    summary_id, session_id, summary_anchor_id, summary_text,
+                    index_text, source_horizon_json, publication_json, created_at
+                 ) VALUES (
+                    'summary-authority', 'session-1', ?1, 'authority',
+                    'authority', '{}', ?2, 1
+                 )",
+                params![authority_anchor.anchor_id().as_str(), authority_publication],
+            )
+            .await
+            .expect("payload authority summary");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_external_payload_manifests (
+                    payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
+                 ) VALUES (?1, 'session-1', ?2, ?3, 'receipt-3', 1)",
+                params![
+                    payload_ref,
+                    occurrence_hash.as_str(),
+                    external_manifest.as_str()
+                ],
+            )
+            .await
+            .expect("external payload manifest");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    projection_output_ordinal, retrieval_anchor_id, message_id,
+                    role, knowledge_at, valid_time_json, evidence_json,
+                    snippet_text, index_text
+                 ) VALUES (
+                    'session-1', 1, 'occurrence-1', ?1, 0, ?2, 'message-1',
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}',
+                    'non-empty occurrence payload', 'non-empty occurrence payload'
+                 )",
+                params![
+                    occurrence_observation.observation_id().as_str(),
+                    occurrence_anchor.anchor_id().as_str()
+                ],
+            )
+            .await
+            .expect("occurrence");
+
+            let summary_payload = "non-empty summary payload";
+            let publication = CanonicalPublicationManifest {
+                version: 1,
+                provider: provider.to_string(),
+                conversation_id: "session-1".to_string(),
+                session_id: "session-1".to_string(),
+                depth: 1,
+                summary_text: summary_payload.to_string(),
+                summary_hash: hash(summary_payload.as_bytes()),
+                source_refs: Vec::new(),
+                canonical_sources: Vec::new(),
+                source_token_count: 1,
+                summary_token_count: 1,
+                source_time_start: None,
+                source_time_end: None,
+                expand_hint: None,
+                metadata_json: None,
+                source_horizon_json: "{}".to_string(),
+                owner_json: serde_json::to_string(summary_anchor.owner()).expect("owner json"),
+                summary_anchor_id: summary_anchor.anchor_id().to_string(),
+                receipt_id: "summary-receipt".to_string(),
+                predecessor_summary_id: None,
+                logical_identity_digest: digest('a'),
+                payloads: Vec::new(),
+                model_route: "snapshot-test".to_string(),
+                configuration_digest: digest('b'),
+                sanitization_receipt: "summary-receipt".to_string(),
+                route: Value::Null,
+            };
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_summary_nodes (
+                    summary_id, session_id, summary_anchor_id, summary_text,
+                    index_text, source_horizon_json, publication_json, created_at
+                 ) VALUES ('summary-1', 'session-1', ?1, ?2, ?2, '{}', ?3, 1)",
+                params![
+                    summary_anchor.anchor_id().as_str(),
+                    summary_payload,
+                    serde_json::to_string(&publication).expect("publication json")
+                ],
+            )
+            .await
+            .expect("summary node");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_summary_availability (
+                    session_id, generation, summary_id, availability,
+                    source_horizon_json, reason, checked_at
+                 ) VALUES ('session-1', 1, 'summary-1', 'available', '{}', NULL, 1)",
+                (),
+            )
+            .await
+            .expect("summary availability");
+            Executor::execute_batch(&writer, "DROP TRIGGER retrieval_anchors_immutable_update;")
+                .await
+                .expect("allow drift fixture");
+        }
+
+        fn hydration_storage_fingerprint_for_test(&self) -> HydrationStorageFingerprint {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let storage_root = database
+                .db_path()
+                .parent()
+                .expect("registered profile storage root");
+            let payload_dir = storage_root.join("lcm-payloads");
+            HydrationStorageFingerprint {
+                database: Sha256::digest(fs::read(database.db_path()).expect("database bytes"))
+                    .into(),
+                payload: Sha256::digest(
+                    fs::read(payload_dir.join("snapshot-payload.bin")).expect("payload bytes"),
+                )
+                .into(),
+                payload_entries: fs::read_dir(payload_dir).expect("payload entries").count(),
+            }
+        }
+
+        async fn drift_hydration_anchor_owner_for_test(&self, anchor_id: &RetrievalAnchorId) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            Executor::execute(
+                &database
+                    .writer_connection()
+                    .expect("registered profile writer"),
+                "UPDATE retrieval_anchors
+                 SET anchor_json = json_set(
+                     anchor_json,
+                     '$.owner',
+                     json('{\"kind\":\"project\",\"project_id\":\"drifted-project\"}')
+                 )
+                 WHERE anchor_id = ?1",
+                [anchor_id.as_str()],
+            )
+            .await
+            .expect("drift anchor owner");
+        }
+    }
 
     struct ThreadWake(thread::Thread);
 
@@ -1398,15 +1810,68 @@ mod tests {
         .expect("observation")
     }
 
+    fn checked_in_goal_observation() -> DurableObservationV1 {
+        let record_id = ObservationId::new("record.goal.fixture").expect("record");
+        let encoded = include_str!(
+            "../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
+        )
+        .replace("$STABLE_RECORD_ID", record_id.as_str());
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_str(&encoded).expect("checked-in goal envelope");
+        let source = ObservationSourceIdentityV1::for_provider(
+            envelope.provider().clone(),
+            envelope.relations().session_id().clone(),
+        )
+        .expect("source");
+        let range = envelope.evidence().range();
+        let payload = serde_json::to_value(&envelope).expect("payload");
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).expect("source generation"),
+            range,
+            envelope.evidence().ordering_domain(),
+            record_id,
+        )
+        .expect("identity");
+        DurableObservationV1::new(
+            identity,
+            receipt("receipt-goal", &payload),
+            RetentionClass::new("retention.snapshot-test").expect("retention"),
+            payload,
+        )
+        .expect("observation")
+    }
+
+    #[test]
+    fn checked_in_codex_goal_hydrates_as_typed_session_message() {
+        let observation = checked_in_goal_observation();
+        let message = canonical_projected_message(&observation, "record.goal.fixture", 0)
+            .expect("canonical goal projection");
+
+        assert_eq!(message.provider, "codex");
+        assert_eq!(message.session_id, "codex-golden-session");
+        assert_eq!(message.message_id, "record.goal.fixture");
+        assert_eq!(message.role, "system");
+        assert_eq!(message.kind.as_deref(), Some("goal"));
+        assert_eq!(
+            message.text,
+            "phlogiston pipeline overhaul and reconciliation"
+        );
+        assert_eq!(message.timestamp, Some(1_783_500_569));
+        assert_eq!(message.ordinal, 0);
+        assert_eq!(message.source_offset, Some(0));
+    }
+
     async fn persist_anchor(
-        db: &GlobalDb,
+        runtime: &HostAdmissionTestRuntimeV1,
         ordinal: u64,
     ) -> (DurableObservationV1, RetrievalAnchorRecord) {
-        Box::pin(persist_anchor_for_session(db, ordinal, "session-1")).await
+        Box::pin(persist_anchor_for_session(runtime, ordinal, "session-1")).await
     }
 
     async fn persist_anchor_for_session(
-        db: &GlobalDb,
+        runtime: &HostAdmissionTestRuntimeV1,
         ordinal: u64,
         session_id: &str,
     ) -> (DurableObservationV1, RetrievalAnchorRecord) {
@@ -1446,7 +1911,9 @@ mod tests {
             authorization,
         )
         .expect("anchor");
-        GlobalDbObservationStore::new(db)
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .expect("registered profile observation store")
             .persist_observation(
                 AnchoredObservationWrite::new(write, anchor.clone(), projection)
                     .expect("anchored write"),
@@ -1459,12 +1926,11 @@ mod tests {
     #[tokio::test]
     async fn persist_anchor_appends_two_observations_without_cursor_conflict() {
         let dir = tempdir().expect("temporary directory");
-        let db = GlobalDb::try_open_at(&dir.path().join("global.db"))
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
             .await
-            .expect("open database")
-            .expect("database");
-        let (first, first_anchor) = Box::pin(persist_anchor(&db, 1)).await;
-        let (second, second_anchor) = Box::pin(persist_anchor(&db, 2)).await;
+            .expect("registered profile runtime");
+        let (first, first_anchor) = Box::pin(persist_anchor(&runtime, 1)).await;
+        let (second, second_anchor) = Box::pin(persist_anchor(&runtime, 2)).await;
         assert_ne!(
             first.observation_id(),
             second.observation_id(),
@@ -1535,112 +2001,30 @@ mod tests {
         .expect("snapshot")
     }
 
-    async fn insert_active_generation(db: &GlobalDb) {
-        insert_active_generation_for_session(db, "session-1").await;
-    }
-
-    async fn insert_active_generation_for_session(db: &GlobalDb, session_id: &str) {
-        let frozen = serde_json::json!({
-            "active_generation": 1,
-            "cursor_key": null,
-            "projection_frontier": 0,
-            "source_frontier": 0,
-            "summary_frontier": 0
-        })
-        .to_string();
-        // frozen_watermarks_json is immutable after insert; seed it on building.
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_temporal_generations (
-                    session_id, generation, state, frozen_watermarks_json, created_at,
-                    ready_at, activated_at, completed_at
-                 ) VALUES (?1, 1, 'building', ?2, 1, NULL, NULL, NULL)",
-                params![session_id, frozen],
-            )
-            .await
-            .expect("building generation");
-        db.read_connection()
-            .execute(
-                "UPDATE session_temporal_generations
-                 SET state = 'ready', ready_at = 1
-                 WHERE session_id = ?1 AND generation = 1",
-                [session_id],
-            )
-            .await
-            .expect("ready generation");
-        db.read_connection()
-            .execute(
-                "UPDATE session_temporal_generations
-                 SET state = 'active', activated_at = 1
-                 WHERE session_id = ?1 AND generation = 1",
-                [session_id],
-            )
-            .await
-            .expect("active generation");
-    }
-
     #[tokio::test]
     async fn root_snapshot_hydrates_an_authorized_cross_session_occurrence() {
         let dir = tempdir().expect("temporary directory");
-        let db = GlobalDb::try_open_at(&dir.path().join("global.db"))
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
             .await
-            .expect("open database")
-            .expect("database");
-        let (observation, anchor) = Box::pin(persist_anchor_for_session(&db, 1, "session-2")).await;
+            .expect("registered profile runtime");
+        let (observation, anchor) =
+            Box::pin(persist_anchor_for_session(&runtime, 1, "session-2")).await;
         let provider = observation.source().provider().as_str();
-        db.read_connection()
-            .execute(
-                "INSERT INTO sessions (
-                    provider, session_id, project_key, project_path
-                 ) VALUES
-                    (?1, 'session-1', 'user', '/root-hydration-test'),
-                    (?1, 'session-2', 'user', '/root-hydration-test')",
-                [provider],
-            )
-            .await
-            .expect("session owner");
-        insert_active_generation_for_session(&db, "session-2").await;
-
         let canonical_payload = "payload-1";
         let legacy_projection_poison = "legacy projection poison";
-        let content_hash = hash(legacy_projection_poison.as_bytes());
-        db.read_connection()
-            .execute(
-                "INSERT INTO lcm_raw_messages (
-                    provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref,
-                    snippet_text, index_text, legacy_source, legacy_truncated
-                 ) VALUES (
-                    ?1, 'message-1', 'session-2', 'assistant', 1, 1,
-                    ?2, ?3, 'inline', NULL, ?2, ?2, 0, 0
-                 )",
-                params![provider, legacy_projection_poison, content_hash],
+        runtime
+            .seed_root_hydration_fixture_for_test(
+                provider,
+                &observation,
+                &anchor,
+                canonical_payload,
+                legacy_projection_poison,
             )
-            .await
-            .expect("raw message");
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_occurrences (
-                    session_id, generation, occurrence_id, source_observation_id,
-                    projection_output_ordinal, retrieval_anchor_id, message_id,
-                    role, knowledge_at, valid_time_json, evidence_json,
-                    snippet_text, index_text
-                 ) VALUES (
-                    'session-2', 1, 'occurrence-1', ?1, 0, ?2, 'message-1',
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?3, ?3
-                 )",
-                params![
-                    observation.observation_id().as_str(),
-                    anchor.anchor_id().as_str(),
-                    canonical_payload
-                ],
-            )
-            .await
-            .expect("occurrence");
+            .await;
 
         let snapshot = authorized_root_snapshot(&anchor);
-        let read = db.read_snapshot().await.expect("read snapshot");
-        let adapter = GlobalDbTemporalHydrationPort::for_snapshot(&read, db.storage_root.as_path());
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
         assert_eq!(
             adapter.authorize(&snapshot, anchor.anchor_id()).await,
             Ok(HydrationAuthorization::Authorized)
@@ -1655,20 +2039,13 @@ mod tests {
             .expect("cross-session hydration");
         assert_eq!(output, canonical_payload.as_bytes());
 
-        let _ = adapter;
-        let _ = read;
-        db.read_connection()
-            .execute(
-                "UPDATE sessions
-                 SET project_key = 'different-project'
-                 WHERE provider = ?1 AND session_id = 'session-2'",
-                [provider],
-            )
-            .await
-            .expect("move target session outside authorized root");
-        let different_root = db.read_snapshot().await.expect("different root snapshot");
-        let different_root_adapter =
-            GlobalDbTemporalHydrationPort::for_snapshot(&different_root, db.storage_root.as_path());
+        drop(adapter);
+        drop(read);
+        runtime
+            .move_hydration_session_outside_root_for_test(provider, "session-2")
+            .await;
+        let different_root = runtime.hydration_read_for_test().await;
+        let different_root_adapter = different_root.adapter();
         let authorization = different_root_adapter
             .authorize(&snapshot, anchor.anchor_id())
             .await;
@@ -1685,203 +2062,21 @@ mod tests {
     #[tokio::test]
     async fn one_snapshot_hydrates_occurrence_and_summary_without_request_digest_binding() {
         let dir = tempdir().expect("temporary directory");
-        let db = GlobalDb::try_open_at(&dir.path().join("global.db"))
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
             .await
-            .expect("open database")
-            .expect("database");
-        let (occurrence_observation, occurrence_anchor) = Box::pin(persist_anchor(&db, 1)).await;
-        let (_, summary_anchor) = Box::pin(persist_anchor(&db, 2)).await;
-        let (_, authority_anchor) = Box::pin(persist_anchor(&db, 3)).await;
-        let provider = occurrence_observation.source().provider().as_str();
-        db.read_connection()
-            .execute(
-                "INSERT INTO sessions (
-                    provider, session_id, project_key, project_path
-                 ) VALUES (?1, 'session-1', 'user', '/snapshot-test')",
-                [provider],
+            .expect("registered profile runtime");
+        let (occurrence_observation, occurrence_anchor) =
+            Box::pin(persist_anchor(&runtime, 1)).await;
+        let (_, summary_anchor) = Box::pin(persist_anchor(&runtime, 2)).await;
+        let (_, authority_anchor) = Box::pin(persist_anchor(&runtime, 3)).await;
+        runtime
+            .seed_snapshot_hydration_fixture_for_test(
+                &occurrence_observation,
+                &occurrence_anchor,
+                &summary_anchor,
+                &authority_anchor,
             )
-            .await
-            .expect("session owner");
-        insert_active_generation(&db).await;
-
-        let occurrence_payload = "non-empty occurrence payload";
-        let occurrence_hash = hash(occurrence_payload.as_bytes());
-        let payload_ref = "snapshot-payload.bin";
-        let payload_dir = db.storage_root.join("lcm-payloads");
-        fs::create_dir(&payload_dir).expect("payload directory");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            fs::set_permissions(&payload_dir, fs::Permissions::from_mode(0o700))
-                .expect("private payload directory");
-        }
-        let payload_path = payload_dir.join(payload_ref);
-        fs::write(&payload_path, occurrence_payload).expect("external payload");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            fs::set_permissions(&payload_path, fs::Permissions::from_mode(0o600))
-                .expect("private payload file");
-        }
-        db.read_connection()
-            .execute(
-                "INSERT INTO lcm_raw_messages (
-                    provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref,
-                    snippet_text, index_text, legacy_source, legacy_truncated
-                 ) VALUES (
-                    ?1, 'message-1', 'session-1', 'assistant', 1, 1,
-                    NULL, ?2, 'external', ?3, ?4, ?4, 0, 0
-                 )",
-                params![
-                    provider,
-                    occurrence_hash.as_str(),
-                    payload_ref,
-                    occurrence_payload
-                ],
-            )
-            .await
-            .expect("raw message");
-        db.read_connection()
-            .execute(
-                "INSERT INTO lcm_external_payloads (
-                    payload_ref, provider, session_id, message_id, kind,
-                    content_hash, byte_count, char_count, created_at
-                 ) VALUES (?1, ?2, 'session-1', 'message-1', 'message', ?3, ?4, ?5, 1)",
-                params![
-                    payload_ref,
-                    provider,
-                    occurrence_hash.as_str(),
-                    i64::try_from(occurrence_payload.len()).expect("payload bytes"),
-                    i64::try_from(occurrence_payload.chars().count()).expect("payload chars")
-                ],
-            )
-            .await
-            .expect("external payload metadata");
-        let external_manifest = serde_json::json!({
-            "provider": provider,
-            "session_id": "session-1",
-            "message_id": "message-1",
-            "byte_count": occurrence_payload.len(),
-            "char_count": occurrence_payload.chars().count()
-        })
-        .to_string();
-        let authority_publication = serde_json::json!({
-            "receipt_id": "receipt-3",
-            "payloads": [{
-                "payload_ref": payload_ref,
-                "digest": occurrence_hash.as_str(),
-                "manifest_json": external_manifest.clone()
-            }]
-        })
-        .to_string();
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_summary_nodes (
-                    summary_id, session_id, summary_anchor_id, summary_text,
-                    index_text, source_horizon_json, publication_json, created_at
-                 ) VALUES (
-                    'summary-authority', 'session-1', ?1, 'authority',
-                    'authority', '{}', ?2, 1
-                 )",
-                params![authority_anchor.anchor_id().as_str(), authority_publication],
-            )
-            .await
-            .expect("payload authority summary");
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_external_payload_manifests (
-                    payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
-                 ) VALUES (?1, 'session-1', ?2, ?3, 'receipt-3', 1)",
-                params![
-                    payload_ref,
-                    occurrence_hash.as_str(),
-                    external_manifest.as_str()
-                ],
-            )
-            .await
-            .expect("external payload manifest");
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_occurrences (
-                    session_id, generation, occurrence_id, source_observation_id,
-                    projection_output_ordinal, retrieval_anchor_id, message_id,
-                    role, knowledge_at, valid_time_json, evidence_json,
-                    snippet_text, index_text
-                 ) VALUES (
-                    'session-1', 1, 'occurrence-1', ?1, 0, ?2, 'message-1',
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}',
-                    'non-empty occurrence payload', 'non-empty occurrence payload'
-                 )",
-                params![
-                    occurrence_observation.observation_id().as_str(),
-                    occurrence_anchor.anchor_id().as_str()
-                ],
-            )
-            .await
-            .expect("occurrence");
-
-        let summary_payload = "non-empty summary payload";
-        let summary_hash = hash(summary_payload.as_bytes());
-        let owner_json = serde_json::to_string(summary_anchor.owner()).expect("owner json");
-        let publication = CanonicalPublicationManifest {
-            version: 1,
-            provider: provider.to_string(),
-            conversation_id: "session-1".to_string(),
-            session_id: "session-1".to_string(),
-            depth: 1,
-            summary_text: summary_payload.to_string(),
-            summary_hash,
-            source_refs: Vec::new(),
-            canonical_sources: Vec::new(),
-            source_token_count: 1,
-            summary_token_count: 1,
-            source_time_start: None,
-            source_time_end: None,
-            expand_hint: None,
-            metadata_json: None,
-            source_horizon_json: "{}".to_string(),
-            owner_json,
-            summary_anchor_id: summary_anchor.anchor_id().to_string(),
-            receipt_id: "summary-receipt".to_string(),
-            predecessor_summary_id: None,
-            logical_identity_digest: digest('a'),
-            payloads: Vec::new(),
-            model_route: "snapshot-test".to_string(),
-            configuration_digest: digest('b'),
-            sanitization_receipt: "summary-receipt".to_string(),
-            route: Value::Null,
-        };
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_summary_nodes (
-                    summary_id, session_id, summary_anchor_id, summary_text,
-                    index_text, source_horizon_json, publication_json, created_at
-                 ) VALUES ('summary-1', 'session-1', ?1, ?2, ?2, '{}', ?3, 1)",
-                params![
-                    summary_anchor.anchor_id().as_str(),
-                    summary_payload,
-                    serde_json::to_string(&publication).expect("publication json")
-                ],
-            )
-            .await
-            .expect("summary node");
-        db.read_connection()
-            .execute(
-                "INSERT INTO session_summary_availability (
-                    session_id, generation, summary_id, availability,
-                    source_horizon_json, reason, checked_at
-                 ) VALUES ('session-1', 1, 'summary-1', 'available', '{}', NULL, 1)",
-                (),
-            )
-            .await
-            .expect("summary availability");
-        db.read_connection()
-            .execute_batch("DROP TRIGGER retrieval_anchors_immutable_update;")
-            .await
-            .expect("allow drift fixture");
+            .await;
 
         let snapshot = authorized_snapshot(&occurrence_anchor);
         assert_ne!(
@@ -1891,13 +2086,12 @@ mod tests {
                 .as_str(),
             snapshot.request_digest().as_str()
         );
-        let before = Sha256::digest(fs::read(&db.db_path).expect("database bytes"));
-        let payload_before = Sha256::digest(fs::read(&payload_path).expect("payload bytes"));
-        let payload_entries_before = fs::read_dir(&payload_dir).expect("payload entries").count();
-        let read = db.read_snapshot().await.expect("read snapshot");
-        let adapter = GlobalDbTemporalHydrationPort::for_snapshot(&read, db.storage_root.as_path());
+        let before = runtime.hydration_storage_fingerprint_for_test();
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
 
         let canonical_occurrence_payload = "payload-1";
+        let summary_payload = "non-empty summary payload";
         for (anchor, expected) in [
             (occurrence_anchor.anchor_id(), canonical_occurrence_payload),
             (summary_anchor.anchor_id(), summary_payload),
@@ -1916,31 +2110,12 @@ mod tests {
                 .expect("hydrate payload");
             assert_eq!(output, expected.as_bytes());
         }
-        let after = Sha256::digest(fs::read(&db.db_path).expect("database bytes"));
-        assert_eq!(before, after);
-        assert_eq!(
-            Sha256::digest(fs::read(&payload_path).expect("payload bytes")),
-            payload_before
-        );
-        assert_eq!(
-            fs::read_dir(&payload_dir).expect("payload entries").count(),
-            payload_entries_before
-        );
+        assert_eq!(runtime.hydration_storage_fingerprint_for_test(), before);
 
         // Drift embedded owner without rewriting owner_json (composite FKs).
-        db.read_connection()
-            .execute(
-                "UPDATE retrieval_anchors
-                 SET anchor_json = json_set(
-                     anchor_json,
-                     '$.owner',
-                     json('{\"kind\":\"project\",\"project_id\":\"drifted-project\"}')
-                 )
-                 WHERE anchor_id = ?1",
-                [occurrence_anchor.anchor_id().as_str()],
-            )
-            .await
-            .expect("drift anchor owner");
+        runtime
+            .drift_hydration_anchor_owner_for_test(occurrence_anchor.anchor_id())
+            .await;
 
         let mut frozen_output = Vec::new();
         adapter
@@ -1958,9 +2133,8 @@ mod tests {
             .expect("frozen snapshot remains authorized");
         assert_eq!(frozen_output, canonical_occurrence_payload.as_bytes());
 
-        let fresh_read = db.read_snapshot().await.expect("fresh read snapshot");
-        let fresh_adapter =
-            GlobalDbTemporalHydrationPort::for_snapshot(&fresh_read, db.storage_root.as_path());
+        let fresh_read = runtime.hydration_read_for_test().await;
+        let fresh_adapter = fresh_read.adapter();
         assert!(matches!(
             fresh_adapter
                 .authorize(&snapshot, occurrence_anchor.anchor_id())

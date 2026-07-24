@@ -1,4 +1,4 @@
-use libsql::{Connection, params};
+use crate::db::engine::{Executor, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, RetrievalAnchorRecord};
@@ -14,7 +14,7 @@ use super::super::query::{
 use super::persist::*;
 
 pub(crate) async fn validate_final_projection_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     watermarks: &tracedecay_store::SessionFrozenWatermarksV1,
@@ -142,7 +142,7 @@ pub(crate) async fn validate_final_projection_receipt(
 }
 
 pub(super) async fn validate_canonical_assertion_completeness(
-    conn: &Connection,
+    conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     generation: i64,
     source_frontier: u64,
@@ -277,7 +277,7 @@ pub(super) fn digest_bytes(bytes: &[u8]) -> String {
 }
 
 pub(in crate::global_db) async fn record_canonical_observation_effect(
-    conn: &Connection,
+    conn: &impl Executor,
     sequence: u64,
     observation: &tracedecay_domain::DurableObservationV1,
     effect: &ObservationProjection,
@@ -301,9 +301,11 @@ pub(in crate::global_db) async fn record_canonical_observation_effect(
         })
         .collect::<Vec<_>>();
     outputs.sort_unstable_by_key(ToString::to_string);
+    let temporal_output_count = outputs.len();
     let effect_digest = digest_bytes(
         &serde_json::to_vec(&json!({
             "observation_id": observation.observation_id().as_str(),
+            "output_count": temporal_output_count,
             "outputs": outputs,
             "session_id": envelope.relations().session_id().as_str(),
         }))
@@ -315,7 +317,7 @@ pub(in crate::global_db) async fn record_canonical_observation_effect(
     );
     let sequence =
         i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
-    let output_count = i64::try_from(effect.output_count())
+    let output_count = i64::try_from(temporal_output_count)
         .map_err(|_| ProjectionStoreError::SequenceOverflow(u64::MAX))?;
     conn.execute(
         "INSERT INTO session_temporal_observation_effects (
@@ -430,7 +432,7 @@ pub(super) fn canonical_batch_digest(
 }
 
 pub(super) async fn read_projection_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     batch_digest: &str,
 ) -> SessionStoreResult<Option<SessionTemporalProjectionBatchReceiptV1>> {
@@ -521,7 +523,7 @@ pub(super) async fn read_projection_receipt(
 }
 
 pub(super) async fn require_contiguous_checkpoint(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {
     let mut rows = conn
@@ -579,7 +581,7 @@ pub(super) async fn require_contiguous_checkpoint(
 }
 
 pub(super) async fn digest_query_rows(
-    conn: &Connection,
+    conn: &impl Executor,
     sql: &str,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<(usize, String)> {
@@ -609,7 +611,7 @@ pub(super) async fn digest_query_rows(
 }
 
 pub(super) async fn projection_coverage(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<ProjectionCoverage> {
     let occurrences = digest_query_rows(
@@ -710,7 +712,7 @@ pub(super) async fn projection_coverage(
 }
 
 pub(super) async fn insert_projection_receipt(
-    conn: &Connection,
+    conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     batch_digest: &str,
     coverage: &ProjectionCoverage,

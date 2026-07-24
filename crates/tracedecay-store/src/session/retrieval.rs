@@ -1,9 +1,10 @@
 use std::future::Future;
 
 use tracedecay_domain::{
-    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1, LogicalCopyRecordV1,
-    MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalGrainV1, SessionId,
-    SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
+    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1, HydrationStateV1,
+    LogicalCopyRecordV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalGrainV1,
+    SessionId, SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1,
+    TemporalModeV1,
 };
 
 use super::common::{
@@ -208,9 +209,9 @@ fn deep_record_count(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DerivedEvidenceMemberPageItemV1 {
     pub ordinal: u32,
-    pub occurrence_id: MessageOccurrenceIdV1,
+    pub occurrence_id: Option<MessageOccurrenceIdV1>,
     pub member_role: DerivedEvidenceMemberRoleV1,
-    pub available: bool,
+    pub availability: HydrationStateV1,
 }
 
 /// Bounded lossless expansion of derived evidence members.
@@ -234,6 +235,28 @@ impl DerivedEvidenceMemberPageV1 {
                 field: "derived evidence member page",
                 count: members.len(),
                 max: MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE,
+            });
+        }
+        if members
+            .windows(2)
+            .any(|pair| pair[0].ordinal >= pair[1].ordinal)
+        {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "derived evidence member ordinal order",
+            });
+        }
+        if members.iter().any(|member| {
+            (member.availability == HydrationStateV1::Available) != member.occurrence_id.is_some()
+        }) {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "derived evidence member availability",
+            });
+        }
+        if next_after_ordinal.is_some()
+            && next_after_ordinal != members.last().map(|member| member.ordinal)
+        {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "derived evidence member continuation",
             });
         }
         Ok(Self {

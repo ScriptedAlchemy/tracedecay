@@ -115,7 +115,7 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
             omission.anchor_id = None;
         }
     }
-    bundle.omissions.sort_by(compare_omissions);
+    order_context_omissions(&mut bundle.omissions, unavailable);
 
     let policy = estimator.token_policy();
     let prepared = prepare_admission(
@@ -167,6 +167,27 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
         estimated_tokens: measurement.tokens(),
         estimator_version: budget.estimator_version,
     })
+}
+
+fn order_context_omissions<U: ContextUnavailable>(
+    omissions: &mut [CompactContextOmissionV1],
+    unavailable: &[U],
+) {
+    let hydration_position = |omission: &CompactContextOmissionV1| {
+        omission.anchor_id.as_ref().and_then(|anchor_id| {
+            unavailable
+                .iter()
+                .position(|item| item.anchor_id() == anchor_id)
+        })
+    };
+    omissions.sort_by(
+        |left, right| match (hydration_position(left), hydration_position(right)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            (None, None) => compare_omissions(left, right),
+        },
+    );
 }
 
 pub fn try_reserve<T>(values: &mut Vec<T>, additional: usize) -> Result<(), ContextError> {

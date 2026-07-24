@@ -9,10 +9,14 @@ mod projection;
 mod query;
 mod rebuild;
 mod refresh;
+mod registered_lcm_render;
 mod retrieval;
 mod schema;
+mod sql;
+#[cfg(test)]
+mod tests;
 
-use libsql::params;
+use crate::db::engine::params;
 use serde::Deserialize;
 use tracedecay_domain::{RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 
@@ -20,7 +24,7 @@ use crate::application::session::{
     AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
-use crate::global_db::{GlobalDb, GlobalDbReadSnapshot};
+use crate::global_db::RegisteredGlobalDb;
 use crate::query::temporal::context::VersionedTokenEstimator;
 use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use crate::query::temporal::execute_temporal_kernel;
@@ -33,13 +37,14 @@ use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::lcm::{
     LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError, LcmExpandRequest,
-    LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmSourceRef,
+    LcmExpandResponse, LcmExpandTarget,
 };
 
 pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub(crate) use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
+use self::sql::TemporalSqlRead;
 
 // Consumed by the pr8/transport cold-Doctor route when that branch is integrated.
 #[allow(unused_imports)]
@@ -51,13 +56,32 @@ pub(in crate::global_db) use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub(crate) use schema::{ensure_session_temporal_schema, repair_session_temporal_state};
 
-/// Production temporal executor over one already-open authoritative global DB.
-pub struct GlobalDbSessionTemporalExecution<'db> {
-    db: &'db GlobalDb,
+impl RegisteredGlobalDb {
+    pub(crate) async fn ensure_active_session_cursor_key_result(
+        &self,
+    ) -> tracedecay_store::SessionStoreResult<SignedCursorKeyRefV1> {
+        const OPERATION: &str = "provision registered session cursor authentication key";
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| query::storage(OPERATION, error))?;
+        let key =
+            cursor_keys::ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| query::storage(OPERATION, error))?;
+        Ok(key)
+    }
 }
 
-impl<'db> GlobalDbSessionTemporalExecution<'db> {
-    pub const fn new(db: &'db GlobalDb) -> Self {
+/// Transitional PR8 rendering adapter over one registry-owned session shard.
+pub(crate) struct RegisteredGlobalDbSessionTemporalExecution<'db> {
+    db: &'db RegisteredGlobalDb,
+}
+
+impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
+    pub(crate) const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
     }
 
@@ -72,9 +96,14 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        hydration::session_message_from_hydrated_bytes(&read, snapshot, anchor_id, content)
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)
+        hydration::session_message_from_hydrated_bytes(
+            &TemporalSqlRead::registered(&read),
+            snapshot,
+            anchor_id,
+            content,
+        )
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)
     }
 
     pub(crate) async fn resolve_lcm_describe_target(
@@ -88,7 +117,13 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        direct::resolve_describe_target(&read, provider, session_id, target).await
+        direct::resolve_describe_target(
+            &TemporalSqlRead::registered(&read),
+            provider,
+            session_id,
+            target,
+        )
+        .await
     }
 
     pub(crate) async fn resolve_lcm_expand_target(
@@ -102,33 +137,42 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        direct::resolve_expand_target(&read, provider, session_id, target).await
+        direct::resolve_expand_target(
+            &TemporalSqlRead::registered(&read),
+            provider,
+            session_id,
+            target,
+        )
+        .await
     }
 
     pub(crate) async fn render_lcm_describe(
         &self,
         request: LcmDescribeRequest,
     ) -> Result<LcmDescribeResponse, SessionTemporalExecutionError> {
-        lcm_render::describe(self.db, request)
+        let snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        registered_lcm_render::describe(&snapshot, request)
             .await
             .map_err(map_lcm_error)
     }
 
     pub(crate) async fn render_lcm_expand(
         &self,
-        snapshot: &TemporalExecutionSnapshot,
         request: LcmExpandRequest,
         canonical_content: &str,
     ) -> Result<LcmExpandResponse, SessionTemporalExecutionError> {
-        let provider = request.provider.clone();
-        let session_id = SessionId::new(request.session_id.clone())
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let mut expansion = lcm_render::expand(self.db, request, canonical_content)
+        let snapshot = self
+            .db
+            .read_snapshot()
             .await
-            .map_err(map_lcm_error)?;
-        self.canonicalize_lcm_summary_sources(snapshot, &provider, &session_id, &mut expansion)
-            .await?;
-        Ok(expansion)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        registered_lcm_render::expand(&snapshot, request, canonical_content)
+            .await
+            .map_err(map_lcm_error)
     }
 
     pub(crate) async fn encode_lcm_source_cursor(
@@ -142,7 +186,7 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let authenticator = GlobalDbCursorKeyProvider::from_snapshot(&read, snapshot)
+        let authenticator = GlobalDbCursorKeyProvider::from_registered_snapshot(&read, snapshot)
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         encode_cursor(
@@ -164,7 +208,7 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let authenticator = GlobalDbCursorKeyProvider::from_snapshot(&read, snapshot)
+        let authenticator = GlobalDbCursorKeyProvider::from_registered_snapshot(&read, snapshot)
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         let sort_key =
@@ -172,52 +216,13 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
         parse_lcm_source_cursor_offset(binding, &sort_key)
     }
 
-    async fn canonicalize_lcm_summary_sources(
-        &self,
-        snapshot: &TemporalExecutionSnapshot,
-        provider: &str,
-        session_id: &SessionId,
-        expansion: &mut LcmExpandResponse,
-    ) -> Result<(), SessionTemporalExecutionError> {
-        if expansion.summary_sources.is_empty() {
-            return Ok(());
-        }
-        let read = self
-            .db
-            .read_snapshot()
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        for source in &mut expansion.summary_sources {
-            let target = match &source.source_ref {
-                LcmSourceRef::RawMessage { store_id } => LcmExpandTarget::RawMessage {
-                    store_id: *store_id,
-                },
-                LcmSourceRef::SummaryNode { node_id } => LcmExpandTarget::SummaryNode {
-                    node_id: node_id.clone(),
-                },
-            };
-            let direct =
-                direct::resolve_expand_target(&read, provider, session_id, &target).await?;
-            let bytes = hydration::hydrate_authorized_anchor_bytes(
-                &read,
-                &self.db.storage_root,
-                snapshot,
-                &direct.anchor_id,
-            )
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            let canonical_content = String::from_utf8(bytes.to_vec())
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            replace_summary_source_content(source, &canonical_content)?;
-        }
-        Ok(())
-    }
-
     async fn freeze(
         &self,
         request: &AuthorizedTemporalExecutionRequest,
-    ) -> Result<(GlobalDbReadSnapshot, TemporalExecutionSnapshot), SessionTemporalExecutionError>
-    {
+    ) -> Result<
+        (crate::db::engine::ReadSnapshot, TemporalExecutionSnapshot),
+        SessionTemporalExecutionError,
+    > {
         let control = request.snapshot_request().execution_control();
         control.checkpoint().map_err(map_control_error)?;
         let read = self
@@ -225,7 +230,8 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let (participants, watermarks, cursor_key) = freeze_participants(&read, request).await?;
+        let (participants, watermarks, cursor_key) =
+            freeze_participants(&TemporalSqlRead::registered(&read), request).await?;
         control.checkpoint().map_err(map_control_error)?;
         let snapshot = TemporalExecutionSnapshot::new_authorized(
             request.snapshot_request().clone(),
@@ -249,7 +255,7 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
 }
 
 async fn freeze_participants(
-    read: &GlobalDbReadSnapshot,
+    read: &TemporalSqlRead<'_>,
     request: &AuthorizedTemporalExecutionRequest,
 ) -> Result<
     (
@@ -386,7 +392,7 @@ async fn freeze_participants(
     Ok((participants, aggregate, shared_cursor_key.flatten()))
 }
 
-impl SessionTemporalExecutionPort for GlobalDbSessionTemporalExecution<'_> {
+impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution<'_> {
     fn execute<'a, E>(
         &'a self,
         request: AuthorizedTemporalExecutionRequest,
@@ -397,13 +403,21 @@ impl SessionTemporalExecutionPort for GlobalDbSessionTemporalExecution<'_> {
     {
         Box::pin(async move {
             let (read_snapshot, snapshot) = self.freeze(&request).await?;
-            let authenticator = GlobalDbCursorKeyProvider::from_snapshot(&read_snapshot, &snapshot)
-                .await
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let authenticator =
+                GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
+                    .await
+                    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let storage_root = self
+                .db
+                .db_path()
+                .parent()
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
             let kernel_request = request.into_kernel_request(snapshot);
-            let read = GlobalDbTemporalReadPort::new(&read_snapshot);
-            let hydration =
-                GlobalDbTemporalHydrationPort::for_snapshot(&read_snapshot, &self.db.storage_root);
+            let read = GlobalDbTemporalReadPort::new_registered(&read_snapshot);
+            let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot(
+                &read_snapshot,
+                storage_root,
+            );
             let result = execute_temporal_kernel(
                 &kernel_request,
                 &read,
@@ -470,53 +484,6 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
         }
         _ => SessionTemporalExecutionError::Unavailable,
     }
-}
-
-fn replace_summary_source_content(
-    source: &mut LcmExpandedSummarySource,
-    canonical_content: &str,
-) -> Result<(), SessionTemporalExecutionError> {
-    let total_chars = canonical_content.chars().count();
-    let (offset, limit) = source
-        .content_range
-        .as_ref()
-        .map(|range| {
-            let offset = usize::try_from(range.offset)
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            let limit = usize::try_from(range.limit)
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            Ok((offset, limit))
-        })
-        .transpose()?
-        .unwrap_or((0, total_chars));
-    let offset = offset.min(total_chars);
-    let content = canonical_content
-        .chars()
-        .skip(offset)
-        .take(limit)
-        .collect::<String>();
-    let returned_chars = content.chars().count();
-    let truncated = offset > 0 || offset.saturating_add(returned_chars) < total_chars;
-    source.content.clone_from(&content);
-    source.content_truncated = truncated;
-    if let Some(range) = source.content_range.as_mut() {
-        range.offset =
-            u64::try_from(offset).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        range.limit =
-            u64::try_from(limit).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        range.returned_chars = u64::try_from(returned_chars)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        range.total_chars =
-            u64::try_from(total_chars).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        range.truncated = truncated;
-    }
-    if let Some(raw) = source.raw_message.as_mut() {
-        raw.content.clone_from(&content);
-    }
-    if let Some(summary) = source.summary_node.as_deref_mut() {
-        summary.summary_text = content;
-    }
-    Ok(())
 }
 
 fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> StableSortKey {

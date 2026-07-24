@@ -1,6 +1,6 @@
 use std::cmp;
 
-use libsql::{Connection, Row, Value as SqlValue};
+use crate::db::engine::Value as SqlValue;
 
 use crate::query::temporal::candidates::{CandidateChannel, CandidateClause};
 use crate::query::temporal::ports::{
@@ -10,6 +10,7 @@ use crate::query::temporal::ports::{
 use crate::query::temporal::ranking::RankingCandidate;
 use crate::timeutil::parse_rfc3339_timestamp;
 
+use super::super::sql::{TemporalSqlRead, TemporalSqlRow, TemporalSqlRows};
 use super::cursors::*;
 use super::queries::*;
 use super::rows::*;
@@ -47,6 +48,23 @@ pub(super) fn bounded_window_end(total: usize, start: usize, capacity: usize) ->
     cmp::min(total, start.saturating_add(capacity))
 }
 
+pub(super) fn exact_match_ranges(text: &str, literal: &str) -> Vec<tracedecay_domain::ByteRangeV1> {
+    if literal.is_empty() {
+        return Vec::new();
+    }
+    text.char_indices()
+        .filter_map(|(start_byte, _)| {
+            text[start_byte..].starts_with(literal).then(|| {
+                let end_byte = start_byte.saturating_add(literal.len());
+                let start = u64::try_from(start_byte).expect("byte offset fits u64");
+                let end = u64::try_from(end_byte).expect("byte offset fits u64");
+                tracedecay_domain::ByteRangeV1::new(start, end)
+                    .expect("non-empty exact literal produces a valid byte range")
+            })
+        })
+        .collect()
+}
+
 pub(super) fn authorized_root_project_key<'a>(
     scope: &TemporalRetrievalScope,
     snapshot: &'a TemporalExecutionSnapshot,
@@ -62,7 +80,7 @@ pub(super) fn authorized_root_project_key<'a>(
 }
 
 pub(super) async fn require_candidate_root_authority(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     candidate: &RankingCandidate,
     project_key: &str,
     provider: Option<&str>,
@@ -262,7 +280,7 @@ pub(super) async fn require_candidate_root_authority(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn query_candidate_clause(
-    conn: &Connection,
+    conn: &TemporalSqlRead<'_>,
     scope: &TemporalRetrievalScope,
     snapshot: &TemporalExecutionSnapshot,
     clause: &CandidateClause,
@@ -270,7 +288,7 @@ pub(super) async fn query_candidate_clause(
     limit: usize,
     request: &PageRequest,
     root_project_key: Option<&str>,
-) -> Result<libsql::Rows, TemporalPortError> {
+) -> Result<TemporalSqlRows, TemporalPortError> {
     snapshot.request().execution_control().checkpoint()?;
     let generation = i64::try_from(snapshot.watermarks().generation)
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
@@ -331,7 +349,6 @@ pub(super) async fn query_candidate_clause(
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Text(clause.value.clone()),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
@@ -436,7 +453,6 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Text(clause.value.clone()),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -556,7 +572,7 @@ pub(super) async fn query_candidate_clause(
 }
 
 pub(super) fn candidate_from_row(
-    row: &Row,
+    row: &TemporalSqlRow,
     channel: CandidateChannel,
     _scope: &TemporalRetrievalScope,
 ) -> Result<RankingCandidate, TemporalPortError> {
@@ -572,6 +588,24 @@ pub(super) fn candidate_from_row(
     let source_partition: String = row
         .get(7)
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+    let exact_ranges = if channel == CandidateChannel::ExactMessage {
+        let snippet: String = row
+            .get(8)
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let literal: String = row
+            .get(9)
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let ranges = exact_match_ranges(&snippet, &literal);
+        if ranges.is_empty() {
+            return Err(read_message(
+                CANDIDATE_OPERATION,
+                "exact candidate row contains no exact byte range",
+            ));
+        }
+        ranges
+    } else {
+        Vec::new()
+    };
     Ok(RankingCandidate {
         stable_id: anchor.clone(),
         anchor_id: parse_text(anchor, CANDIDATE_OPERATION)?,
@@ -592,6 +626,7 @@ pub(super) fn candidate_from_row(
         evidence_role: row
             .get(6)
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?,
+        exact_ranges,
     })
 }
 
