@@ -1,5 +1,10 @@
 /** Loom track model: pure data + layout, no DOM. The canvas renderer consumes
- * this; tests and future virtualization reason about it directly. */
+ * this; tests and future virtualization reason about it directly.
+ *
+ * Everything here is derived from real spans. Nothing in this module invents a
+ * span, a track, or a magnitude — the density profile and the lane packing are
+ * projections of the same session rows the canvas draws.
+ */
 
 export interface LoomSpan {
   id: string;
@@ -23,11 +28,39 @@ export interface LoomWindow {
   end: number;
 }
 
-/** Track rows are fixed-height lanes (calm density; no packing puzzle). */
-export const TRACK_HEIGHT = 28;
-export const TRACK_GAP = 6;
-export const AXIS_HEIGHT = 22;
+/* -------------------------------------------------------------------------
+ * Rhythm. Lanes are thin because the interesting axis is horizontal; a track
+ * grows by stacking sub-lanes only when its spans genuinely overlap.
+ * ---------------------------------------------------------------------- */
 
+/** One packed sub-lane inside a track. */
+export const LANE_HEIGHT = 16;
+export const LANE_GAP = 3;
+/** Breathing room above/below a track's stack of lanes. */
+export const TRACK_PAD = 7;
+/** Two-tier axis: a day-band row over a fine tick row. */
+export const AXIS_HEIGHT = 34;
+export const DAY_BAND_HEIGHT = 16;
+/** Overview strip: density profile + viewport brush. */
+export const MINIMAP_HEIGHT = 34;
+
+/** Minimum on-screen width of a mark, in CSS pixels. */
+export const MIN_MARK_PX = 3;
+
+export interface TrackLayout {
+  track: LoomTrack;
+  /** Spans packed into non-overlapping sub-lanes, earliest first. */
+  lanes: LoomSpan[][];
+  /** Top edge of the track band, relative to the top of the axis. */
+  top: number;
+  height: number;
+}
+
+/* -------------------------------------------------------------------------
+ * Windows
+ * ---------------------------------------------------------------------- */
+
+/** Full data extent across every track, or null when nothing is timestamped. */
 export function windowOf(tracks: LoomTrack[]): LoomWindow | null {
   let start = Infinity;
   let end = -Infinity;
@@ -42,6 +75,68 @@ export function windowOf(tracks: LoomTrack[]): LoomWindow | null {
   return { start, end };
 }
 
+/** The extent with a small margin, so the first and last mark are not welded
+ * to the frame. This is the default viewport and the "fit" target. */
+export function fittedWindow(extent: LoomWindow): LoomWindow {
+  const pad = Math.max((extent.end - extent.start) * 0.02, 60);
+  return { start: extent.start - pad, end: extent.end + pad };
+}
+
+/** Never zoom past a minute of span, nor further out than 8x the data. */
+function windowLimits(extent: LoomWindow): { min: number; max: number } {
+  const full = Math.max(extent.end - extent.start, 60);
+  return { min: 60, max: full * 8 };
+}
+
+export function clampWindow(view: LoomWindow, extent: LoomWindow): LoomWindow {
+  const { min, max } = windowLimits(extent);
+  const span = Math.min(Math.max(view.end - view.start, min), max);
+  const full = fittedWindow(extent);
+  // Keep at least a third of the viewport over real data at every zoom level:
+  // panning can never strand the eye in empty time.
+  const slack = span * (2 / 3);
+  let start = view.start;
+  if (start > full.end - span + slack) start = full.end - span + slack;
+  if (start < full.start - slack) start = full.start - slack;
+  return { start, end: start + span };
+}
+
+export function zoomWindow(
+  view: LoomWindow,
+  extent: LoomWindow,
+  factor: number,
+  focusTime: number,
+): LoomWindow {
+  const span = view.end - view.start;
+  const nextSpan = span * factor;
+  const ratio = span === 0 ? 0.5 : (focusTime - view.start) / span;
+  return clampWindow(
+    { start: focusTime - ratio * nextSpan, end: focusTime + (1 - ratio) * nextSpan },
+    extent,
+  );
+}
+
+export function panWindow(
+  view: LoomWindow,
+  extent: LoomWindow,
+  deltaSeconds: number,
+): LoomWindow {
+  return clampWindow(
+    { start: view.start + deltaSeconds, end: view.end + deltaSeconds },
+    extent,
+  );
+}
+
+/** True when the viewport is (near enough) the whole fitted extent. */
+export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
+  const full = fittedWindow(extent);
+  const tolerance = (full.end - full.start) * 0.005;
+  return (
+    Math.abs(view.start - full.start) <= tolerance &&
+    Math.abs(view.end - full.end) <= tolerance
+  );
+}
+
 export function xFor(time: number, window: LoomWindow, width: number): number {
   return ((time - window.start) / (window.end - window.start)) * width;
 }
@@ -50,48 +145,271 @@ export function timeFor(x: number, window: LoomWindow, width: number): number {
   return window.start + (x / width) * (window.end - window.start);
 }
 
-/** Pick the span under a canvas-space point, if any. */
-export function pick(
+/* -------------------------------------------------------------------------
+ * Lane packing
+ * ---------------------------------------------------------------------- */
+
+/** Greedy interval packing: each span drops into the first sub-lane whose last
+ * mark has already ended (plus a pixel-sized gap, so two marks that would touch
+ * on screen are still separated). Overlap becomes structure instead of mud. */
+export function packTrack(spans: LoomSpan[], minGapSeconds = 0): LoomSpan[][] {
+  const ordered = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
+  const lanes: LoomSpan[][] = [];
+  const lastEnd: number[] = [];
+  for (const span of ordered) {
+    const end = Math.max(span.end, span.start + minGapSeconds);
+    let placed = false;
+    for (let lane = 0; lane < lanes.length; lane += 1) {
+      if ((lastEnd[lane] ?? -Infinity) + minGapSeconds <= span.start) {
+        lanes[lane]!.push(span);
+        lastEnd[lane] = end;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      lanes.push([span]);
+      lastEnd.push(end);
+    }
+  }
+  return lanes;
+}
+
+/** Lay every track out vertically, packing each one against the current
+ * viewport so lane count reflects what actually collides on screen. */
+export function layoutTracks(
   tracks: LoomTrack[],
-  window: LoomWindow,
+  view: LoomWindow,
+  width: number,
+): TrackLayout[] {
+  const minGap = width > 0 ? ((view.end - view.start) / width) * MIN_MARK_PX : 0;
+  const layouts: TrackLayout[] = [];
+  let top = 0;
+  for (const track of tracks) {
+    const lanes = packTrack(track.spans, minGap);
+    const laneCount = Math.max(lanes.length, 1);
+    const height = TRACK_PAD * 2 + laneCount * LANE_HEIGHT + (laneCount - 1) * LANE_GAP;
+    layouts.push({ track, lanes, top, height });
+    top += height;
+  }
+  return layouts;
+}
+
+export function layoutHeight(layouts: TrackLayout[]): number {
+  const last = layouts[layouts.length - 1];
+  return last ? last.top + last.height : 0;
+}
+
+/** Pick the span under a canvas-space point, if any. `y` is measured from the
+ * top of the canvas (axis included). */
+export function pick(
+  layouts: TrackLayout[],
+  view: LoomWindow,
   width: number,
   x: number,
   y: number,
 ): { track: LoomTrack; span: LoomSpan } | null {
-  const row = Math.floor((y - AXIS_HEIGHT) / (TRACK_HEIGHT + TRACK_GAP));
-  const track = tracks[row];
-  if (!track) return null;
-  for (const span of track.spans) {
-    const x0 = xFor(span.start, window, width);
-    const x1 = Math.max(xFor(span.end, window, width), x0 + 3);
-    if (x >= x0 - 2 && x <= x1 + 2) return { track, span };
+  const localY = y - AXIS_HEIGHT;
+  const layout = layouts.find(
+    (candidate) => localY >= candidate.top && localY < candidate.top + candidate.height,
+  );
+  if (!layout) return null;
+  const laneY = localY - layout.top - TRACK_PAD;
+  const lane = Math.floor(laneY / (LANE_HEIGHT + LANE_GAP));
+  const spans = layout.lanes[lane];
+  if (!spans) return null;
+  let best: LoomSpan | null = null;
+  for (const span of spans) {
+    const x0 = xFor(span.start, view, width);
+    const x1 = Math.max(xFor(span.end, view, width), x0 + MIN_MARK_PX);
+    if (x >= x0 - 2 && x <= x1 + 2) best = span;
   }
-  return null;
+  return best ? { track: layout.track, span: best } : null;
 }
 
-/** Human tick labels for the axis at a sensible cadence for the window. */
-export function axisTicks(window: LoomWindow, width: number): Array<{ x: number; label: string }> {
-  const spanSeconds = window.end - window.start;
-  const stepCandidates = [
-    3600,
-    6 * 3600,
-    24 * 3600,
-    7 * 24 * 3600,
-    30 * 24 * 3600,
-  ];
-  const target = spanSeconds / Math.max(3, Math.floor(width / 120));
-  const step =
-    stepCandidates.find((candidate) => candidate >= target) ??
-    stepCandidates[stepCandidates.length - 1]!;
-  const ticks: Array<{ x: number; label: string }> = [];
-  const first = Math.ceil(window.start / step) * step;
-  for (let t = first; t <= window.end; t += step) {
-    const date = new Date(t * 1000);
-    const label =
-      step >= 24 * 3600
-        ? date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-        : date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-    ticks.push({ x: xFor(t, window, width), label });
+/* -------------------------------------------------------------------------
+ * Axis
+ * ---------------------------------------------------------------------- */
+
+export interface AxisTick {
+  x: number;
+  time: number;
+  label: string;
+}
+
+/** A 1/2/5-style ladder that stays calendar-honest at the day scale and above,
+ * so a five-day window ticks in hours and a five-month window ticks in weeks
+ * instead of both collapsing onto the same five candidates. */
+const TICK_STEPS = [
+  1, 2, 5, 10, 15, 30,
+  60, 120, 300, 600, 900, 1800,
+  3600, 2 * 3600, 3 * 3600, 6 * 3600, 12 * 3600,
+  86_400, 2 * 86_400, 7 * 86_400, 14 * 86_400,
+  30 * 86_400, 90 * 86_400, 180 * 86_400, 365 * 86_400,
+] as const;
+
+export function tickStepFor(spanSeconds: number, width: number): number {
+  const maxTicks = Math.min(Math.max(Math.floor(width / 96), 2), 14);
+  const target = spanSeconds / maxTicks;
+  return TICK_STEPS.find((step) => step >= target) ?? TICK_STEPS[TICK_STEPS.length - 1]!;
+}
+
+/** Fine ticks: clock time inside a day, calendar dates above it. */
+export function axisTicks(view: LoomWindow, width: number): AxisTick[] {
+  if (width <= 0) return [];
+  const step = tickStepFor(view.end - view.start, width);
+  const ticks: AxisTick[] = [];
+  const first = Math.ceil(view.start / step) * step;
+  for (let t = first; t <= view.end; t += step) {
+    ticks.push({ x: xFor(t, view, width), time: t, label: tickLabel(t, step) });
+    if (ticks.length > 64) break;
   }
   return ticks;
+}
+
+function tickLabel(epochSeconds: number, step: number): string {
+  const date = new Date(epochSeconds * 1000);
+  if (step < 60) {
+    return date.toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }
+  if (step < 86_400) {
+    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  if (step < 30 * 86_400) {
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+  return date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+}
+
+export interface DayBand {
+  x0: number;
+  x1: number;
+  /** Local midnight that opens the band. */
+  time: number;
+  label: string;
+  /** Alternating parity, so consecutive days can be tinted apart. */
+  odd: boolean;
+}
+
+/** Calendar bands behind the ticks. Below a day of span the bands become the
+ * hour scaffolding instead, so the upper axis tier is never empty. */
+export function dayBands(view: LoomWindow, width: number): DayBand[] {
+  if (width <= 0) return [];
+  const spanSeconds = view.end - view.start;
+  const bands: DayBand[] = [];
+  const subDay = spanSeconds <= 36 * 3600;
+  const cursor = new Date(view.start * 1000);
+  if (subDay) {
+    cursor.setMinutes(0, 0, 0);
+  } else {
+    cursor.setHours(0, 0, 0, 0);
+  }
+  let guard = 0;
+  while (cursor.getTime() / 1000 < view.end && guard < 400) {
+    guard += 1;
+    const time = cursor.getTime() / 1000;
+    const next = new Date(cursor);
+    if (subDay) next.setHours(next.getHours() + Math.max(1, Math.round(spanSeconds / 3600 / 8)));
+    else next.setDate(next.getDate() + 1);
+    const nextTime = next.getTime() / 1000;
+    if (nextTime > view.start) {
+      bands.push({
+        x0: xFor(Math.max(time, view.start), view, width),
+        x1: xFor(Math.min(nextTime, view.end), view, width),
+        time,
+        label: subDay
+          ? new Date(time * 1000).toLocaleTimeString(undefined, {
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          : new Date(time * 1000).toLocaleDateString(undefined, {
+              weekday: 'short',
+              month: 'short',
+              day: 'numeric',
+            }),
+        odd: bands.length % 2 === 1,
+      });
+    }
+    cursor.setTime(next.getTime());
+  }
+  return bands;
+}
+
+/* -------------------------------------------------------------------------
+ * Density
+ * ---------------------------------------------------------------------- */
+
+/** Weight-per-bucket across the full extent: the overview profile drawn in the
+ * minimap. Each span contributes its weight spread evenly over the buckets it
+ * covers, so a long quiet session does not out-shout a short dense one. */
+export function densityProfile(
+  tracks: LoomTrack[],
+  extent: LoomWindow,
+  buckets: number,
+): number[] {
+  const out = new Array<number>(Math.max(buckets, 1)).fill(0);
+  const span = extent.end - extent.start;
+  if (span <= 0) return out;
+  const width = span / out.length;
+  for (const track of tracks) {
+    for (const mark of track.spans) {
+      const from = Math.max(0, Math.floor((mark.start - extent.start) / width));
+      const to = Math.min(out.length - 1, Math.floor((mark.end - extent.start) / width));
+      const covered = Math.max(1, to - from + 1);
+      const share = mark.weight / covered;
+      for (let i = from; i <= to; i += 1) out[i] = (out[i] ?? 0) + share;
+    }
+  }
+  return out;
+}
+
+/** Highest number of marks alive at once in a track — the honest headline for
+ * "how tangled is this lane". */
+export function peakConcurrency(track: LoomTrack): number {
+  const edges: Array<[number, number]> = [];
+  for (const span of track.spans) {
+    edges.push([span.start, 1], [Math.max(span.end, span.start), -1]);
+  }
+  edges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let live = 0;
+  let peak = 0;
+  for (const [, delta] of edges) {
+    live += delta;
+    if (live > peak) peak = live;
+  }
+  return peak;
+}
+
+/* -------------------------------------------------------------------------
+ * Formatting
+ * ---------------------------------------------------------------------- */
+
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 36 * 3600) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.round((seconds % 3600) / 60);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  return `${Math.round(seconds / 86_400)}d`;
+}
+
+export function formatMoment(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+/** Span of the viewport in words — the zoom readout. */
+export function formatWindowSpan(view: LoomWindow): string {
+  return formatDuration(view.end - view.start);
 }

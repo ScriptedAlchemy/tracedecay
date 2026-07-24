@@ -1,0 +1,164 @@
+import { describe, expect, it } from 'vitest';
+import {
+  AXIS_HEIGHT,
+  LANE_HEIGHT,
+  TRACK_PAD,
+  axisTicks,
+  clampWindow,
+  densityProfile,
+  fittedWindow,
+  formatDuration,
+  isFitted,
+  layoutHeight,
+  layoutTracks,
+  packTrack,
+  peakConcurrency,
+  pick,
+  tickStepFor,
+  windowOf,
+  zoomWindow,
+  type LoomSpan,
+  type LoomTrack,
+} from './tracks.ts';
+
+const HOUR = 3600;
+const DAY = 86_400;
+
+function span(id: string, start: number, end: number, weight = 10): LoomSpan {
+  return { id, start, end, label: id, weight };
+}
+
+function track(id: string, spans: LoomSpan[]): LoomTrack {
+  return { id, label: id, spans };
+}
+
+describe('windowOf', () => {
+  it('returns null when no track carries a span', () => {
+    expect(windowOf([track('a', [])])).toBeNull();
+  });
+
+  it('widens a degenerate extent to an hour so the axis stays drawable', () => {
+    const extent = windowOf([track('a', [span('s', 1000, 1000)])]);
+    expect(extent).toEqual({ start: 1000, end: 1000 + HOUR });
+  });
+});
+
+describe('packTrack', () => {
+  it('keeps non-overlapping spans in a single lane', () => {
+    const lanes = packTrack([span('a', 0, 10), span('b', 20, 30), span('c', 40, 50)]);
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0]).toHaveLength(3);
+  });
+
+  it('stacks overlapping spans into separate lanes instead of drawing mud', () => {
+    const lanes = packTrack([span('a', 0, 100), span('b', 10, 110), span('c', 20, 120)]);
+    expect(lanes).toHaveLength(3);
+  });
+
+  it('treats a pixel-sized gap as collision so touching marks stay separated', () => {
+    expect(packTrack([span('a', 0, 10), span('b', 12, 20)], 0)).toHaveLength(1);
+    expect(packTrack([span('a', 0, 10), span('b', 12, 20)], 5)).toHaveLength(2);
+  });
+
+  it('reuses a lane once its previous span has ended', () => {
+    const lanes = packTrack([span('a', 0, 100), span('b', 10, 20), span('c', 30, 40)]);
+    expect(lanes).toHaveLength(2);
+    expect(lanes[1]?.map((s) => s.id)).toEqual(['b', 'c']);
+  });
+});
+
+describe('layoutTracks', () => {
+  it('gives every track a band tall enough for its packed lanes', () => {
+    const layouts = layoutTracks(
+      [track('a', [span('x', 0, 100), span('y', 10, 110)]), track('b', [span('z', 0, 5)])],
+      { start: 0, end: 200 },
+      200,
+    );
+    expect(layouts[0]?.lanes).toHaveLength(2);
+    expect(layouts[0]?.height).toBeGreaterThan(layouts[1]!.height);
+    expect(layouts[1]?.top).toBe(layouts[0]!.height);
+    expect(layoutHeight(layouts)).toBe(layouts[1]!.top + layouts[1]!.height);
+  });
+});
+
+describe('pick', () => {
+  const view = { start: 0, end: 100 };
+  const layouts = layoutTracks([track('a', [span('x', 10, 40)])], view, 100);
+
+  it('finds the span under a point inside its lane', () => {
+    const hit = pick(layouts, view, 100, 20, AXIS_HEIGHT + TRACK_PAD + LANE_HEIGHT / 2);
+    expect(hit?.span.id).toBe('x');
+  });
+
+  it('returns null above the first track and beyond the last mark', () => {
+    expect(pick(layouts, view, 100, 20, 2)).toBeNull();
+    expect(
+      pick(layouts, view, 100, 80, AXIS_HEIGHT + TRACK_PAD + LANE_HEIGHT / 2),
+    ).toBeNull();
+  });
+});
+
+describe('axis', () => {
+  it('picks a finer step for a short window than a long one', () => {
+    expect(tickStepFor(2 * HOUR, 800)).toBeLessThan(tickStepFor(90 * DAY, 800));
+  });
+
+  it('keeps the tick count within a readable band across wild spans', () => {
+    for (const seconds of [600, 6 * HOUR, 5 * DAY, 120 * DAY, 900 * DAY]) {
+      const ticks = axisTicks({ start: 1_700_000_000, end: 1_700_000_000 + seconds }, 900);
+      expect(ticks.length).toBeGreaterThan(1);
+      expect(ticks.length).toBeLessThanOrEqual(20);
+    }
+  });
+});
+
+describe('viewport', () => {
+  const extent = { start: 0, end: 10 * DAY };
+
+  it('fits with a margin on both sides', () => {
+    const fitted = fittedWindow(extent);
+    expect(fitted.start).toBeLessThan(extent.start);
+    expect(fitted.end).toBeGreaterThan(extent.end);
+    expect(isFitted(fitted, extent)).toBe(true);
+  });
+
+  it('zooms around the focus point and never past the floor', () => {
+    const view = fittedWindow(extent);
+    const zoomed = zoomWindow(view, extent, 0.5, 5 * DAY);
+    expect(zoomed.end - zoomed.start).toBeCloseTo((view.end - view.start) / 2, 3);
+    let deep = view;
+    for (let i = 0; i < 40; i += 1) deep = zoomWindow(deep, extent, 0.5, 5 * DAY);
+    expect(deep.end - deep.start).toBeGreaterThanOrEqual(60);
+  });
+
+  it('refuses to strand the viewport in empty time', () => {
+    const view = clampWindow({ start: 500 * DAY, end: 501 * DAY }, extent);
+    expect(view.start).toBeLessThan(extent.end + DAY);
+  });
+});
+
+describe('density', () => {
+  it('spreads a span over the buckets it covers and totals its weight', () => {
+    const profile = densityProfile(
+      [track('a', [span('x', 0, 100, 40)])],
+      { start: 0, end: 100 },
+      4,
+    );
+    expect(profile).toHaveLength(4);
+    expect(profile.reduce((sum, n) => sum + n, 0)).toBeCloseTo(40, 5);
+  });
+
+  it('reports the true peak concurrency of a lane', () => {
+    expect(peakConcurrency(track('a', [span('x', 0, 10), span('y', 20, 30)]))).toBe(1);
+    expect(peakConcurrency(track('a', [span('x', 0, 30), span('y', 10, 40)]))).toBe(2);
+  });
+});
+
+describe('formatDuration', () => {
+  it('speaks in the largest honest unit', () => {
+    expect(formatDuration(45)).toBe('45s');
+    expect(formatDuration(600)).toBe('10m');
+    expect(formatDuration(2 * HOUR + 30 * 60)).toBe('2h 30m');
+    expect(formatDuration(5 * DAY)).toBe('5d');
+  });
+});
