@@ -70,6 +70,7 @@ pub enum HttpApplicationOperation {
     ModuleApi,
     FileMetadata,
     HealthRead,
+    HealthDelta,
     StorageStatus,
     DiagnosticsRead,
     ConfigurationList,
@@ -146,6 +147,7 @@ impl HttpApplicationOperation {
             Self::ModuleApi => "module_api",
             Self::FileMetadata => "file_metadata",
             Self::HealthRead => "health_read",
+            Self::HealthDelta => "health_delta",
             Self::StorageStatus => "storage_status",
             Self::DiagnosticsRead => "diagnostics_read",
             Self::ConfigurationList => "configuration_list",
@@ -210,6 +212,7 @@ impl HttpApplicationOperation {
             | Self::ModuleApi
             | Self::FileMetadata
             | Self::HealthRead
+            | Self::HealthDelta
             | Self::StorageStatus
             | Self::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
             Self::ConfigurationList
@@ -683,6 +686,7 @@ where
         "module_api" => HttpApplicationOperation::ModuleApi,
         "file_metadata" => HttpApplicationOperation::FileMetadata,
         "health_read" => HttpApplicationOperation::HealthRead,
+        "health_delta" => HttpApplicationOperation::HealthDelta,
         "storage_status" => HttpApplicationOperation::StorageStatus,
         "diagnostics_read" => HttpApplicationOperation::DiagnosticsRead,
         _ => {

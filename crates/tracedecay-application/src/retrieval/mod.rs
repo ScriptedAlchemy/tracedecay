@@ -38,10 +38,13 @@ pub use ports::{
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,
     AnchorExpandResult, GraphCallersRequest, GraphCallersResult, GraphImpactRequest,
-    GraphImpactResult, HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, PageRequest,
-    ResultProjection, RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest,
-    SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
-    SymbolSearchRequest, SymbolSearchResult,
+    GraphImpactResult,
+    HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaRequest,
+    HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
+    HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, PageRequest, ResultProjection,
+    RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest, SessionLookupResult,
+    SourceLinesRequest, SourceLinesResult, SourceReference, SymbolSearchRequest,
+    SymbolSearchResult,
 };
 pub use service::{
     AffectedTestsService, GraphCallersService, SourceLinesService, SymbolSearchService,

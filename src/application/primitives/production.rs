@@ -12,6 +12,7 @@ use tracedecay_application::retrieval::grep_analysis::{
 use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1,
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthReadRequest,
+    HealthDeltaRequest, HealthDeltaResult,
     HealthReadResult, OperationalRetrievalPort, RankedAffectedTestV1, RetrievalPortContext,
     RetrievalPortOutcome, SessionLookupRequest, SessionLookupResult, SourceLinesRequest,
     SourceLinesResult, SourceReference, SourceRetrievalPort, SymbolPrimitiveRecord,
@@ -986,6 +987,25 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 EvidenceDomain::Source,
                 now_observed(),
             )
+        })
+    }
+
+    fn health_delta<'a>(
+        &'a self,
+        _context: RetrievalPortContext<'a>,
+        request: &'a HealthDeltaRequest,
+    ) -> Pr12ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
+        Box::pin(async move {
+            match crate::mcp::tools::handlers::health::compute_health_delta_result(
+                &self.graph,
+                request.before_cursor.as_deref(),
+                request.path_prefix.as_deref(),
+            )
+            .await
+            {
+                Ok(result) => completed(result, EvidenceDomain::Operational, now_observed()),
+                Err(_) => failed(EvidenceDomain::Operational, now_observed()),
+            }
         })
     }
 
