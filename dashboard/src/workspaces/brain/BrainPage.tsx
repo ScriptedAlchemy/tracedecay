@@ -10,7 +10,13 @@ import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { SignalPanel } from './SignalPanel.tsx';
-import { composeRegistryField, indexedMass, type RegistryField } from './field.ts';
+import {
+  composeRegistryField,
+  indexedMass,
+  summarizeHoldings,
+  type HoldingsSummary,
+  type RegistryField,
+} from './field.ts';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import {
   ProjectsPayloadSchema,
@@ -42,6 +48,7 @@ export function BrainPage() {
         const groups = [...data.project_tree].sort(
           (a, b) => latestSeen(b) - latestSeen(a),
         );
+        const holdings = summarizeHoldings(groups.flatMap((group) => group.projects));
         return (
           <div className="flex h-full min-h-0 flex-col">
             <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
@@ -72,10 +79,20 @@ export function BrainPage() {
                 tabIndex={0}
                 className="flex w-full shrink-0 flex-col gap-2 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
               >
+                {/* The counts that are the same on every row, said once. Every
+                  * project in a real registry holds exactly one store and three
+                  * to five artifacts, so "1 ST · 4 ART" printed forty-four times
+                  * was one fact with forty-three echoes. */}
+                {holdings?.uniformLine ? (
+                  <p className="text-3xs leading-relaxed text-text-muted">
+                    {holdings.uniformLine}
+                  </p>
+                ) : null}
                 {groups.map((group, index) => (
                   <RepoGroupCard
                     key={`${group.git_common_dir ?? group.label}#${index}`}
                     group={group}
+                    holdings={holdings}
                   />
                 ))}
               </aside>
@@ -279,10 +296,21 @@ function FieldAxis({ field }: { field: RegistryField }) {
           </div>
         ))}
       </div>
-      <p className="text-2xs text-text-muted">
+      <p className="text-2xs leading-relaxed text-text-muted">
         Each body is one project: column = when TraceDecay last saw it, height =
         indexed mass (stores + scopes + artifacts, log scale), size = the same
         mass, brightness = the same recency.{' '}
+        {/* Both continuous channels are anchored to what this registry actually
+          * contains rather than to fixed bounds, and both say so. A brightness
+          * scale fixed at ninety days spent its whole lower half on ages no
+          * project here has, which left today and this-week fifteen percent
+          * apart — indistinguishable on a dark field. */}
+        Brightness runs full at this moment to out at{' '}
+        {formatHorizon(field.vitalityHorizonDays)} — the age nine in ten projects
+        here are younger than; anything older rests at the floor.{' '}
+        {field.mass.total > 0 && field.mass.lowerHalfCount > field.mass.total / 2
+          ? `The mass axis is lopsided and that is the reading, not a fault: ${field.mass.lowerHalfCount} of ${field.mass.total} projects hold ${field.mass.floor}–${field.mass.median} units against a single heaviest at ${field.mass.ceiling}, which sets the top of the scale.`
+          : ''}{' '}
         {field.sharedRepoCount > 0
           ? `${field.sharedRepoCount} ${field.sharedRepoCount === 1 ? 'repository has' : 'repositories have'} more than one checkout and ${field.sharedRepoCount === 1 ? 'is' : 'are'} drawn wired to theirs — every other project stands alone because it genuinely is.`
           : 'No repository here has a second checkout, so nothing is wired to anything: these projects share no relation for a line to state.'}
@@ -291,12 +319,19 @@ function FieldAxis({ field }: { field: RegistryField }) {
   );
 }
 
+/** The vitality horizon in the shortest form that keeps it readable. */
+function formatHorizon(days: number): string {
+  if (days < 2) return `${Math.round(days * 24)} h`;
+  if (days < 60) return `${days < 10 ? days.toFixed(1) : Math.round(days)} d`;
+  return `${Math.round(days / 30)} mo`;
+}
+
 function fieldDescription(field: RegistryField): string {
   const occupied = field.columns
     .filter((column) => column.count > 0)
     .map((column) => `${column.count} ${column.label}`)
     .join(', ');
-  return `Registry field: projects placed by when they were last seen (${occupied || 'none'}) and by indexed mass. The project registry list alongside is the accessible equivalent.`;
+  return `Registry field: projects placed by when they were last seen (${occupied || 'none'}) and by indexed mass, which runs from ${field.mass.floor} to ${field.mass.ceiling} across ${field.mass.total} projects. Brightness is recency, full now and out at ${formatHorizon(field.vitalityHorizonDays)}, the age nine in ten of them are younger than. The project registry list alongside is the accessible equivalent.`;
 }
 
 /** Which recency column a timestamp lands in, as a memo key. Keying the field
@@ -354,7 +389,13 @@ function strikeIntensity(family: string): number {
   return 0.5;
 }
 
-function RepoGroupCard({ group }: { group: ProjectRepoGroup }) {
+function RepoGroupCard({
+  group,
+  holdings,
+}: {
+  group: ProjectRepoGroup;
+  holdings: HoldingsSummary | null;
+}) {
   return (
     <section className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1">
       <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
@@ -371,6 +412,7 @@ function RepoGroupCard({ group }: { group: ProjectRepoGroup }) {
           <ProjectRow
             key={`${project.project_id}:${project.canonical_root}`}
             project={project}
+            holdings={holdings}
           />
         ))}
       </div>
@@ -378,7 +420,13 @@ function RepoGroupCard({ group }: { group: ProjectRepoGroup }) {
   );
 }
 
-function ProjectRow({ project }: { project: ProjectRegistryEntry }) {
+function ProjectRow({
+  project,
+  holdings,
+}: {
+  project: ProjectRegistryEntry;
+  holdings: HoldingsSummary | null;
+}) {
   const scope = useScope((s) => s.scope);
   const selectProject = useScope((s) => s.selectProject);
   const selected =
@@ -431,11 +479,16 @@ function ProjectRow({ project }: { project: ProjectRegistryEntry }) {
           </span>
         ) : null}
         <span aria-hidden className="td-rule" />
+        {/* The row carries the channel that actually varies across the
+          * registry — graph scopes span 0 to 242 here — plus any other channel
+          * that departs from what the rail stated above it. A project holding
+          * five artifacts where everything else holds four IS a reading, and
+          * must not be swallowed by the summary. */}
         <span
           className="td-legend shrink-0 text-text-muted"
           data-cell="numeric"
         >
-          {project.store_count} st · {project.artifact_count} art
+          {holdingsLabel(project, holdings)}
         </span>
       </span>
     </button>
@@ -466,6 +519,30 @@ export function RecencyDot({
       className={cn('size-1.5 shrink-0 rounded-full', style, className)}
     />
   );
+}
+
+/** The per-row holdings label: the varying channel, plus any channel that
+ * differs from the value the rail has already stated for everything else. */
+function holdingsLabel(
+  project: ProjectRegistryEntry,
+  holdings: HoldingsSummary | null,
+): string {
+  if (!holdings) {
+    return `${project.store_count} st · ${project.artifact_count} art`;
+  }
+  const parts: string[] = [];
+  if (holdings.scopes.uniform == null) {
+    parts.push(`${project.graph_scope_count} sc`);
+  }
+  if (holdings.artifacts.uniform == null && project.artifact_count !== holdings.artifacts.mode) {
+    parts.push(`${project.artifact_count} art`);
+  }
+  if (holdings.stores.uniform == null) {
+    parts.push(`${project.store_count} st`);
+  }
+  // A registry where literally every channel agrees still has to say something
+  // on the row rather than render an empty cell.
+  return parts.length > 0 ? parts.join(' · ') : `${indexedMass(project)} indexed`;
 }
 
 function latestSeen(group: ProjectRepoGroup): number {
