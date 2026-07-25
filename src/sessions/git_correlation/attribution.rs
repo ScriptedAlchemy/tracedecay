@@ -224,14 +224,31 @@ pub struct ScannedCommit {
     pub committed_at: i64,
 }
 
+/// Outcome of scanning one span target's git history for candidate commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetScan {
+    /// The scan ran; these are the commits it found (possibly none).
+    Scanned(Vec<ScannedCommit>),
+    /// The scan could not run — the worktree is gone, `git log` failed, or the
+    /// repository was unreadable. Distinct from `Scanned(vec![])`: the target's
+    /// commits are unknown, not absent, so the sweep watermark must not move
+    /// past it or the target would never be revisited.
+    Unavailable,
+}
+
 /// Runs commit attribution for span targets touched since the last sweep.
+///
+/// The watermark advances only through the leading run of targets (ordered by
+/// span write time) that actually scanned. A target the scanner could not read
+/// stops the watermark there, so a transient git failure defers attribution to
+/// the next sweep instead of silently dropping those spans forever.
 pub(crate) async fn run_commit_attribution_sweep<F>(
     conn: &(impl Executor + ?Sized),
     gap_secs: i64,
     mut scan: F,
 ) -> Result<usize, GitCorrelationError>
 where
-    F: FnMut(&SpanScanTarget) -> Vec<ScannedCommit>,
+    F: FnMut(&SpanScanTarget) -> TargetScan,
 {
     if !correlation_tables_present(conn).await? {
         return Ok(0);
@@ -239,18 +256,29 @@ where
     let watermark = read_meta_value(conn, COMMIT_SWEEP_WATERMARK_KEY)
         .await?
         .unwrap_or(0);
-    let targets = scan_targets_since(conn, watermark).await?;
+    let mut targets = scan_targets_since(conn, watermark).await?;
+    // Oldest write first so the watermark can checkpoint a contiguous prefix.
+    targets.sort_by_key(|target| (target.max_updated_at, target.worktree.clone()));
     let mut inserted = 0usize;
     let mut new_watermark = watermark;
+    let mut watermark_blocked = false;
     for target in &targets {
-        // Advance on write time, not event time, so the watermark reflects how
-        // far ingestion has progressed rather than how recent the commits are.
-        new_watermark = new_watermark.max(target.max_updated_at);
         let spans = span_windows_for(conn, target.branch.as_deref(), &target.worktree).await?;
         if spans.is_empty() {
+            // No windows to attribute against; nothing to retry either.
+            if !watermark_blocked {
+                new_watermark = new_watermark.max(target.max_updated_at);
+            }
             continue;
         }
-        for commit in scan(target) {
+        let TargetScan::Scanned(commits) = scan(target) else {
+            // Unknown, not empty: hold the watermark here and keep going, so
+            // later targets are still attributed this pass but all of them are
+            // rescanned next pass.
+            watermark_blocked = true;
+            continue;
+        };
+        for commit in commits {
             let records = match_commit_to_spans(
                 &commit.sha,
                 target.branch.as_deref(),
@@ -264,6 +292,11 @@ where
                     inserted += 1;
                 }
             }
+        }
+        // Advance on write time, not event time, so the watermark reflects how
+        // far ingestion has progressed rather than how recent the commits are.
+        if !watermark_blocked {
+            new_watermark = new_watermark.max(target.max_updated_at);
         }
     }
     if new_watermark > watermark {

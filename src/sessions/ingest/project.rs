@@ -310,17 +310,19 @@ async fn attribute_commits_after_ingest(db: &RegisteredGlobalDb) {
 }
 
 /// Reads commits on one span target's branch within its (gap-widened) window
-/// via `git log`. Returns an empty list on any error so the sweep simply
-/// attributes nothing for that target rather than failing. The worktree value
-/// is a recorded span path; if it no longer exists on disk the scan yields
-/// nothing.
-fn git_scan_commits(
+/// via `git log`.
+///
+/// Reports [`TargetScan::Unavailable`] — not an empty commit list — when the
+/// recorded worktree is gone or `git log` fails, so the sweep holds its
+/// watermark and retries the target rather than treating "could not look" as
+/// "nothing there" and never revisiting those spans.
+pub(super) fn git_scan_commits(
     target: &git_correlation::SpanScanTarget,
     gap_secs: i64,
-) -> Vec<git_correlation::ScannedCommit> {
+) -> git_correlation::TargetScan {
     let worktree = Path::new(&target.worktree);
     if !worktree.is_dir() {
-        return Vec::new();
+        return git_correlation::TargetScan::Unavailable;
     }
     let since = target.window_start.saturating_sub(gap_secs);
     let until = target.window_end.saturating_add(gap_secs);
@@ -339,12 +341,14 @@ fn git_scan_commits(
         _ => {}
     }
     let Ok(output) = command.output() else {
-        return Vec::new();
+        return git_correlation::TargetScan::Unavailable;
     };
     if !output.status.success() {
-        return Vec::new();
+        return git_correlation::TargetScan::Unavailable;
     }
-    parse_git_log_commits(&String::from_utf8_lossy(&output.stdout))
+    git_correlation::TargetScan::Scanned(parse_git_log_commits(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// Parses `%H %ct` lines from `git log` into scanned commits, skipping
