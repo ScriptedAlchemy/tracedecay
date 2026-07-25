@@ -519,7 +519,15 @@ async fn resolve_plan_inner(
     let evidence = match evidence {
         Some(evidence) => {
             evidence.validate_content(&source_graphs, &target_graphs, &session_paths)?;
-            evidence
+            Arc::new(
+                capture_input_evidence(
+                    &source_graphs,
+                    &target_graphs,
+                    &session_paths,
+                    scratch_root.path(),
+                )
+                .await?,
+            )
         }
         None => Arc::new(
             capture_input_evidence(

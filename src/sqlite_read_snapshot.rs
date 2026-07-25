@@ -216,7 +216,10 @@ impl SnapshotDatabase {
     }
 
     pub(crate) fn validate_source(&self) -> io::Result<()> {
-        if family_state(&self.source)? == self.source_state {
+        let current = family_state(&self.source)?;
+        if durable_family_state(&self.source, &current)
+            == durable_family_state(&self.source, &self.source_state)
+        {
             return Ok(());
         }
         Err(io::Error::other(format!(
@@ -301,7 +304,10 @@ pub(crate) struct SourceGeneration {
 
 impl SourceGeneration {
     pub(crate) fn validate(&self) -> io::Result<()> {
-        if family_state(&self.source)? == self.states {
+        let current = family_state(&self.source)?;
+        if durable_family_state(&self.source, &current)
+            == durable_family_state(&self.source, &self.states)
+        {
             return Ok(());
         }
         Err(io::Error::other(format!(
@@ -877,6 +883,15 @@ fn family_state(path: &Path) -> io::Result<Vec<FileState>> {
     Ok(states)
 }
 
+fn durable_family_state(path: &Path, states: &[FileState]) -> Vec<FileState> {
+    let wal = with_suffix(path, "-wal");
+    states
+        .iter()
+        .filter(|state| state.path == path || (state.path == wal && state.bytes > 0))
+        .cloned()
+        .collect()
+}
+
 fn family_paths(path: &Path) -> [PathBuf; 3] {
     [
         path.to_path_buf(),
@@ -961,6 +976,43 @@ mod tests {
             .exists())
         );
         assert_eq!(family_state(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn copied_snapshot_survives_empty_writer_sidecar_cleanup() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE durable(value TEXT NOT NULL);
+                 PRAGMA wal_checkpoint(TRUNCATE);
+                 BEGIN IMMEDIATE;",
+            )
+            .unwrap();
+        let wal = with_suffix(&path, "-wal");
+        let shm = with_suffix(&path, "-shm");
+        assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
+        assert!(shm.is_file());
+
+        let snapshot = open(&path).await.unwrap();
+        assert_ne!(snapshot.identity_path, path);
+
+        writer.execute_batch("ROLLBACK;").unwrap();
+        drop(writer);
+        for sidecar in [wal, shm] {
+            match fs::remove_file(sidecar) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => panic!("could not remove transient sidecar: {error}"),
+            }
+        }
+
+        assert_eq!(
+            snapshot.attach_token().unwrap().verified_path().unwrap(),
+            snapshot.path()
+        );
     }
 
     #[cfg(not(windows))]
