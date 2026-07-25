@@ -34,12 +34,12 @@ pub use ports::{
     SymbolRetrievalPort, TemporalRetrievalPort, TestRetrievalPort,
 };
 pub use requests::{
-    AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest, AnchorExpandResult,
-    GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
-    HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, PageRequest, ResultProjection,
-    RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest, SessionLookupResult,
-    SourceLinesRequest, SourceLinesResult, SourceReference, SymbolSearchRequest,
-    SymbolSearchResult,
+    AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,
+    AnchorExpandResult, GraphCallersRequest, GraphCallersResult, GraphImpactRequest,
+    GraphImpactResult, HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, PageRequest,
+    ResultProjection, RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest,
+    SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
+    SymbolSearchRequest, SymbolSearchResult,
 };
 pub use service::{
     AffectedTestsService, GraphCallersService, SourceLinesService, SymbolSearchService,
