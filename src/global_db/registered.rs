@@ -499,6 +499,17 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
     }
 }
 
+impl crate::db::engine::DatabaseAttachmentExecutor for RegisteredGlobalDbWriteTransaction<'_> {
+    async fn attach_database(
+        &self,
+        path: &Path,
+        database_name: &str,
+    ) -> crate::db::engine::Result<()> {
+        self.require_active("attach registered consolidation input")?;
+        self.transaction.attach_database(path, database_name).await
+    }
+}
+
 impl RegisteredGlobalDbWriteTransaction<'_> {
     pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where

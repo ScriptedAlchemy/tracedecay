@@ -12,7 +12,9 @@ mod value;
 
 pub(crate) use connection::{Connection, ReadConnection};
 pub(crate) use error::{Error, Result};
-pub(crate) use executor::{Executor, QueryExecutor, WalCheckpointExecutor};
+pub(crate) use executor::{
+    DatabaseAttachmentExecutor, Executor, QueryExecutor, WalCheckpointExecutor,
+};
 pub(crate) use params::{IntoParams, IntoValue, Params, params, params_from_iter};
 pub(crate) use row::{Row, Rows};
 pub(crate) use snapshot::ReadSnapshot;
