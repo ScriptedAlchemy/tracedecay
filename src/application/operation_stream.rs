@@ -1631,4 +1631,51 @@ mod tests {
             ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::DocumentContent)
         );
     }
+
+    #[tokio::test]
+    async fn canonical_test_run_reader_rejects_exact_source_identity_drift() {
+        let authority = OperationEventAuthority::default();
+        let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
+        let generation = CodeGenerationId::new("generation.test.current").expect("code generation");
+        authority
+            .begin_managed_test_run(
+                "file:///workspace".to_owned(),
+                RequestId::new("request.test-run.source-drift").expect("request id"),
+                Some(head.clone()),
+                Some(generation.clone()),
+                BTreeMap::new(),
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+            .await
+            .expect("managed test run");
+        let reader = CanonicalManagedTestRunReader::new(authority);
+
+        for current in [
+            ManagedTestRunCurrentScope {
+                root_uri: "file:///workspace".to_owned(),
+                head_commit_id: Some(
+                    CommitId::new("fedcba9876543210fedcba9876543210fedcba98")
+                        .expect("changed head"),
+                ),
+                code_generation_id: Some(generation.clone()),
+                document_uri: None,
+                document_content_digest: None,
+            },
+            ManagedTestRunCurrentScope {
+                root_uri: "file:///workspace".to_owned(),
+                head_commit_id: Some(head.clone()),
+                code_generation_id: Some(
+                    CodeGenerationId::new("generation.test.changed")
+                        .expect("changed code generation"),
+                ),
+                document_uri: None,
+                document_content_digest: None,
+            },
+        ] {
+            assert_eq!(
+                reader.latest_current(&current).await,
+                ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity)
+            );
+        }
+    }
 }
