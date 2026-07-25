@@ -1388,17 +1388,29 @@ where
     }
 }
 
+/// Authorizes the migration writer channel.
+///
+/// This channel legitimately builds durable schema, so ordinary `CREATE
+/// TABLE` / `CREATE TRIGGER` is allowed. Temporary **tables and indexes** are
+/// allowed for the same reason and with strictly less reach: a temp object
+/// lives in the connection's own `temp` schema, cannot alias or mutate
+/// anything in `main`, and disappears with the connection. Denying them while
+/// permitting durable DDL inverted the blast radius, and it left derived
+/// per-connection scratch — the projection output-state cache — unable to
+/// exist at all.
+///
+/// Temporary **triggers and views** stay denied. A temp trigger can fire on a
+/// durable table and mutate it outside the invariant trigger contract, which
+/// is exactly the authority this channel must not hand out; temp views have no
+/// caller. `ATTACH`/`DETACH`, `load_extension`, unrecognized actions, and
+/// non-allowlisted pragmas remain denied unconditionally.
 fn authorize_migration_writer(context: rusqlite::hooks::AuthContext<'_>) -> Authorization {
     if matches!(
         context.action,
         AuthAction::Attach { .. }
             | AuthAction::Detach { .. }
-            | AuthAction::CreateTempIndex { .. }
-            | AuthAction::CreateTempTable { .. }
             | AuthAction::CreateTempTrigger { .. }
             | AuthAction::CreateTempView { .. }
-            | AuthAction::DropTempIndex { .. }
-            | AuthAction::DropTempTable { .. }
             | AuthAction::DropTempTrigger { .. }
             | AuthAction::DropTempView { .. }
             | AuthAction::Unknown { .. }
@@ -1838,6 +1850,64 @@ mod tests {
             assert!(
                 matches!(error, MigrationSqlError::Sqlite { .. }),
                 "{pragma}: {error}"
+            );
+        }
+    }
+
+    /// The projection output-state cache is derived, per-connection scratch
+    /// rebuilt from `observation_projection_provenance` whenever
+    /// `PRAGMA data_version` moves. It must be able to exist on this channel;
+    /// denying it made every projection version migration and rebuild fail.
+    #[test]
+    fn writer_actor_allows_temp_tables_and_indexes_but_not_temp_triggers_or_views() {
+        let fixture = fixture('a', 'a');
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+        channel
+            .execute_batch("CREATE TABLE durable (value INTEGER NOT NULL)".to_owned())
+            .expect("durable table remains available");
+
+        // The exact shape the projection output-state cache creates.
+        channel
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state (
+                    projector_version TEXT NOT NULL,
+                    output_provider TEXT NOT NULL,
+                    output_message_id TEXT NOT NULL,
+                    canonical_observation_id TEXT NOT NULL,
+                    latest_observation_id TEXT NOT NULL,
+                    latest_sequence INTEGER NOT NULL CHECK(latest_sequence >= 0),
+                    projector_owned INTEGER NOT NULL CHECK(projector_owned IN (0, 1)),
+                    owner_count INTEGER NOT NULL CHECK(owner_count > 0),
+                    PRIMARY KEY(projector_version, output_provider, output_message_id)
+                 ) WITHOUT ROWID;"
+                    .to_owned(),
+            )
+            .expect("projection output-state cache must be creatable");
+        channel
+            .execute_batch(
+                "CREATE TEMP TABLE scratch (value INTEGER NOT NULL);
+                 CREATE TEMP INDEX scratch_value ON scratch(value);
+                 INSERT INTO temp.scratch(value) VALUES (1);
+                 DELETE FROM temp.scratch;
+                 DROP INDEX temp.scratch_value;
+                 DROP TABLE temp.scratch;"
+                    .to_owned(),
+            )
+            .expect("temp scratch must be creatable, writable, and droppable");
+
+        // A temp trigger could mutate durable rows outside the invariant
+        // trigger contract, and a temp view has no caller: both stay denied.
+        for denied in [
+            "CREATE TEMP TRIGGER durable_guard AFTER INSERT ON durable
+             BEGIN DELETE FROM durable; END",
+            "CREATE TEMP VIEW durable_view AS SELECT value FROM durable",
+        ] {
+            let error = channel
+                .execute_batch(denied.to_owned())
+                .expect_err("temp triggers and views must stay denied");
+            assert!(
+                matches!(error, MigrationSqlError::Sqlite { .. }),
+                "{denied}: {error}"
             );
         }
     }
