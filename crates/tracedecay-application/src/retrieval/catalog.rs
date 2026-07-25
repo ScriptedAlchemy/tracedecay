@@ -34,6 +34,7 @@ pub fn application_catalog_contributions()
         crate::configuration::configuration_surface_catalog_contribution()?,
         crate::context_scout::context_scout_surface_catalog_contribution()?,
         crate::feedback::feedback_surface_catalog_contribution()?,
+        crate::retained_surfaces::retained_surface_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
     ])
 }
