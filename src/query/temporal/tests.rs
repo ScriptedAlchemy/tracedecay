@@ -13,7 +13,7 @@ use tracedecay_domain::{
 
 use super::candidates::{CandidateChannel, CandidatePlan};
 use super::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use super::cursor::CursorError;
+use super::cursor::{CursorError, verify_cursor};
 use super::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationFuture, HydrationGrant, HydrationSink,
     TemporalHydrationPort,
@@ -506,7 +506,9 @@ fn key_rotation_reports_precise_cursor_route_mismatch() {
             &second_request,
             &rotated_port,
             &FakeHydrator::default(),
-            &authenticator("key-2", 1, 9),
+            // The verifier retains the old key long enough to authenticate the
+            // route before reporting that the request now expects a new key.
+            &authenticator("key-1", 1, 7),
             &Words,
         )
         .await;
@@ -1239,8 +1241,20 @@ fn interleaved_hydration_preserves_ranked_results_omissions_and_cursor() {
             vec![Some("z-denied"), Some("a-denied")]
         );
         assert_eq!(denied.ranked, authorized.ranked);
-        assert_eq!(denied.next_cursor, authorized.next_cursor);
-        assert!(denied.next_cursor.is_some());
+        let cursor_authenticator = authenticator("key-1", 1, 7);
+        let denied_cursor = denied.next_cursor.as_deref().expect("denied cursor");
+        let authorized_cursor = authorized
+            .next_cursor
+            .as_deref()
+            .expect("authorized cursor");
+        assert_eq!(
+            verify_cursor(denied_cursor, &denied.snapshot, &cursor_authenticator),
+            verify_cursor(
+                authorized_cursor,
+                &authorized.snapshot,
+                &cursor_authenticator
+            )
+        );
     });
 }
 
@@ -1310,7 +1324,18 @@ fn full_pipeline_is_deterministic_across_restart_and_cursor_resume() {
         .await
         .expect("restart");
 
-        assert_eq!(first, restarted);
+        let first_cursor = first.next_cursor.as_deref().expect("first cursor");
+        let restarted_cursor = restarted.next_cursor.as_deref().expect("restarted cursor");
+        let cursor_authenticator = authenticator("key-1", 1, 7);
+        assert_eq!(
+            verify_cursor(first_cursor, &first.snapshot, &cursor_authenticator),
+            verify_cursor(restarted_cursor, &restarted.snapshot, &cursor_authenticator)
+        );
+        let mut first_without_cursor = first.clone();
+        first_without_cursor.next_cursor = None;
+        let mut restarted_without_cursor = restarted.clone();
+        restarted_without_cursor.next_cursor = None;
+        assert_eq!(first_without_cursor, restarted_without_cursor);
         assert_eq!(first.snapshot.watermarks().generation, 7);
         assert_eq!(restarted.snapshot, first.snapshot);
         assert_eq!(first.coverage.total(), Some(2));
