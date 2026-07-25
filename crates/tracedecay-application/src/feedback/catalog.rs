@@ -43,19 +43,21 @@ struct FeedbackSurfaceSpec {
     surfaces: &'static [BindingSurface],
 }
 
-/// Canonical feedback reads remain callable through the shared PR12
-/// CLI/MCP/HTTP transport owner.
-const PR12_TRANSPORT_SURFACES: [BindingSurface; 3] = [
+/// Canonical feedback reads retain their PR12 transports and gain the PR14
+/// dashboard adapter without changing the application owner.
+const FEEDBACK_READ_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
+    BindingSurface::Dashboard,
 ];
 
 /// PR13 advisory producers retain the shared transport reads and additionally
 /// project the same canonical result through the mounted LSP/native host path.
 /// Hook delivery is host-registration metadata rather than a callable catalog
-/// surface, and dashboard binding remains owned by PR14.
-const PR13_ADVISORY_SURFACES: [BindingSurface; 4] = [
+/// surface. Dashboard consumes their results through the canonical feedback
+/// readers above rather than advertising producer operations it cannot invoke.
+const ADVISORY_READ_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
@@ -78,7 +80,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Read the canonical completed feedback cycle for the authorized branch head.",
         example: "Read diagnostics from the current branch feedback cycle",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: FEEDBACK_GET_CAPABILITY_ID_V1,
@@ -90,7 +92,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Fetch one authorized feedback finding by durable identity.",
         example: "Get this feedback finding",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: FEEDBACK_EXPAND_CAPABILITY_ID_V1,
@@ -102,7 +104,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Expand authorized anchors and evidence for one feedback finding.",
         example: "Expand this feedback finding",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: FEEDBACK_LIST_CAPABILITY_ID_V1,
@@ -114,7 +116,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "List authorized feedback findings with Plan 05 cursors.",
         example: "List feedback findings for this branch",
         paginated: true,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.impact",
@@ -126,7 +128,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Project the canonical impact and affected-test state from an authorized completed feedback cycle.",
         example: "Read impact from the current branch feedback cycle",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.affected-tests",
@@ -138,7 +140,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Project affected-test state from an authorized completed feedback cycle.",
         example: "Read affected tests from this feedback cycle",
         paginated: true,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.test-results",
@@ -150,7 +152,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Read the latest daemon-retained managed test result for the admitted project root.",
         example: "Read the latest managed test results",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: ADVISORY_CYCLE_CAPABILITY_ID_V1,
