@@ -5803,6 +5803,76 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 mod tests {
     use super::*;
 
+    struct UnavailableDiagnosticAuthority;
+
+    impl crate::daemon::lsp_gateway::CanonicalDiagnosticSnapshotAuthority
+        for UnavailableDiagnosticAuthority
+    {
+        fn refresh(
+            &self,
+            _request: crate::daemon::lsp_gateway::CanonicalDiagnosticRefreshRequest,
+        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
+            Result<
+                crate::daemon::lsp_gateway::GenerationDiagnostics,
+                crate::daemon::lsp_gateway::LspRuntimeFailure,
+            >,
+        > {
+            Box::pin(async {
+                Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                    "test-diagnostics-unavailable",
+                ))
+            })
+        }
+    }
+
+    struct UnavailableCancellationAuthority;
+
+    impl crate::daemon::lsp_gateway::LspAnalyzerCancellationAuthority
+        for UnavailableCancellationAuthority
+    {
+        fn cancel_request(
+            &self,
+            _root: &AdmittedRoot,
+            _request_id: &crate::daemon::lsp_gateway::LspRequestId,
+        ) -> bool {
+            false
+        }
+    }
+
+    struct UnavailableContextAuthority;
+
+    impl crate::daemon::lsp_gateway::CanonicalContextProjectionAuthority
+        for UnavailableContextAuthority
+    {
+        fn registrations(&self) -> Vec<crate::daemon::lsp_gateway::ContextProjectionRegistration> {
+            Vec::new()
+        }
+
+        fn snapshot(
+            &self,
+            _root: AdmittedRoot,
+            _request_id: crate::daemon::lsp_gateway::LspRequestId,
+            _request: crate::daemon::lsp_gateway::ContextProjectionRequest,
+        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
+            crate::daemon::lsp_gateway::ContextProjectionOutcome,
+        > {
+            Box::pin(async { crate::daemon::lsp_gateway::ContextProjectionOutcome::Unsupported })
+        }
+    }
+
+    fn unavailable_lsp_session_factory() -> Arc<Pr12LspSessionFactory> {
+        Arc::new(Pr12LspSessionFactory::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(UnavailableFeedbackCycleRuntimeV1),
+            Arc::new(crate::daemon::lsp_gateway::UnavailableSemanticProvider),
+            Arc::new(UnavailableDiagnosticAuthority),
+            Arc::new(UnavailableCancellationAuthority),
+            Arc::new(UnavailableContextAuthority),
+            GatewayCapabilities::default(),
+            UpstreamCapabilities::default(),
+        ))
+    }
+
     struct CountingFeedbackCycle(Arc<std::sync::atomic::AtomicUsize>);
 
     impl FeedbackCycleRuntimePort for CountingFeedbackCycle {
@@ -6377,11 +6447,15 @@ mod tests {
     #[tokio::test]
     async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root() {
         let service = DaemonInvocationService::default();
+        let project_root = PathBuf::from("/authoritative");
+        DaemonLspOwnerRegistrar::new(&service)
+            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .await;
         let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
         let response = service
             .invoke(
                 &registry,
-                None,
+                Some(&project_root),
                 Some(AdmittedRoot::new("file:///authoritative")),
                 None,
                 DaemonInvocationRequest::lsp_open(
