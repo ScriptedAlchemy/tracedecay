@@ -142,7 +142,7 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(288, 80_000_000, 18_000)?,
+            ProfileBudget::new(288, 84_000_000, 18_000)?,
             true,
         ),
         (
@@ -559,8 +559,8 @@ mod tests {
             .copied()
             .map(u64::from)
             .sum::<u64>();
-        assert_eq!(default_schema_bytes, 76_033_408);
-        assert_eq!(default_profile.budget().maximum_schema_bytes(), 80_000_000);
+        assert_eq!(default_schema_bytes, 83_799_424);
+        assert_eq!(default_profile.budget().maximum_schema_bytes(), 84_000_000);
         assert!(default_schema_bytes <= u64::from(default_profile.budget().maximum_schema_bytes()));
     }
 
