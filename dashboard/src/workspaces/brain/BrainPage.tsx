@@ -281,6 +281,9 @@ function strikeIntensity(family: string): number {
   if (family === 'project_registry_changed') return 0.95;
   if (family === 'storage_telemetry_invalidated') return 0.6;
   if (family.startsWith('code_index')) return 0.8;
+  if (family === 'hook_activity') return 0.85;
+  if (family === 'tool_call_activity') return 0.7;
+  if (family === 'session_ingest_activity') return 0.65;
   return 0.5;
 }
 

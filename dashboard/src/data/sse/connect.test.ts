@@ -132,6 +132,74 @@ describe("dashboard SSE wire bridge", () => {
     connection.close();
   });
 
+  it("pulses live agent-activity families on the project that did the work", () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const connection = connectEvents("/api/events");
+    const source = FakeEventSource.instances[0]!;
+    const activity = (
+      eventName: string,
+      streamId: string,
+      family: string,
+      projectId: string,
+      payload: Record<string, unknown>,
+    ) => ({
+      eventName,
+      frame: {
+        stream: streamId,
+        run_id: "run-9-1700000000000000",
+        event_revision: 1,
+        entity_revision: 1,
+        // The daemon coalesces bursts, so coverage is honestly unknown.
+        coverage: { completeness: "unknown" },
+        scope: {
+          project_id: projectId,
+          storage_mode: "profile_sharded",
+          store_root: "/stores/profile",
+        },
+        observation_time_micros: 1700000000000000,
+        source_watermark: null,
+        kind: { family, count: 1, ...payload },
+      },
+    });
+
+    const frames = [
+      activity("hook_activity", "hook_activity:project.alpha", "hook_activity", "project.alpha", {
+        hook_events: 12,
+      }),
+      activity("tool_call", "tool_call:project.beta", "tool_call_activity", "project.beta", {
+        calls: 4,
+      }),
+      activity(
+        "session_ingest",
+        "session_ingest:project.gamma",
+        "session_ingest_activity",
+        "project.gamma",
+        { messages: 31 },
+      ),
+      activity(
+        "code_index_activity",
+        "code_index_activity:project.alpha",
+        "code_index_activity",
+        "project.alpha",
+        { files: 7 },
+      ),
+    ];
+    for (const { eventName, frame } of frames) source.emit(eventName, frame);
+
+    // Each named event must be subscribed, or the burst never reaches the UI.
+    expect(connection.activityRevision()).toBe(4);
+    expect(connection.activity()).toMatchObject([
+      { projectId: "project.alpha", family: "hook_activity" },
+      { projectId: "project.beta", family: "tool_call_activity" },
+      { projectId: "project.gamma", family: "session_ingest_activity" },
+      { projectId: "project.alpha", family: "code_index_activity" },
+    ]);
+    // Per-project streams keep their own revision sequence, so two projects
+    // both at revision 1 are two accepted events, not a duplicate.
+    expect(connection.reducer.takeBatch().events).toHaveLength(4);
+    connection.close();
+  });
+
   it("keeps the pulse ring bounded so a long-lived tab cannot grow it", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const connection = connectEvents("/api/events");
