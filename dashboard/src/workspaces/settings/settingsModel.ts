@@ -110,6 +110,77 @@ export interface SettingsModel {
   readonly activeOverrides: number;
 }
 
+export interface ProjectSettingsValues {
+  readonly include: readonly string[];
+  readonly exclude: readonly string[];
+  readonly max_file_size: string;
+  readonly extract_docstrings: boolean;
+  readonly track_call_sites: boolean;
+  readonly git_ignore: boolean;
+  readonly telemetry_timings: boolean;
+  readonly auto_track_pr_branches: boolean;
+  readonly auto_track_pr_poll_secs: string;
+}
+
+export interface UserSettingsValues {
+  readonly upload_enabled: boolean;
+  readonly watcher_debounce: string;
+  readonly extraction_timeout_secs: string;
+}
+
+export interface SettingsEditor {
+  readonly expectedRevisionId: string;
+  readonly project: ProjectSettingsValues;
+  readonly user: UserSettingsValues;
+}
+
+export interface SettingsValidationError {
+  readonly field: string;
+  readonly message: string;
+}
+
+export interface ProjectSettingsPatch {
+  include?: string[];
+  exclude?: string[];
+  max_file_size?: number;
+  extract_docstrings?: boolean;
+  track_call_sites?: boolean;
+  git_ignore?: boolean;
+  telemetry?: { timings?: boolean };
+  sync?: {
+    auto_track_pr_branches?: boolean;
+    auto_track_pr_poll_secs?: number;
+  };
+}
+
+export interface UserSettingsPatch {
+  upload_enabled?: boolean;
+  watcher_debounce?: string;
+  extraction_timeout_secs?: number;
+}
+
+export type SettingsChangePlan<T> =
+  | {
+      readonly outcome: 'ready';
+      readonly expectedRevisionId: string;
+      readonly patch: T;
+    }
+  | {
+      readonly outcome: 'unchanged';
+      readonly expectedRevisionId: string;
+    }
+  | {
+      readonly outcome: 'invalid';
+      readonly errors: readonly SettingsValidationError[];
+    };
+
+export interface SettingsRevisionConflict {
+  readonly expectedRevisionId: string;
+  readonly actualRevisionId: string | null;
+}
+
+export const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
+
 /**
  * Recognized top-level groups and how to describe them. `origin` records where
  * the group is read from — a fact the payload supports — and deliberately
@@ -186,6 +257,276 @@ export function buildSettingsModel(payload: unknown): SettingsModel {
     overrides,
     activeOverrides: overrides.filter((item) => item.active).length,
   };
+}
+
+export function buildSettingsEditor(payload: unknown): SettingsEditor | null {
+  if (!isRecord(payload)) return null;
+  const project = payload['project'];
+  const user = payload['user'];
+  if (!isRecord(project) || !isRecord(user)) return null;
+  const config = project['config'];
+  if (!isRecord(config)) return null;
+  const telemetry = config['telemetry'];
+  const sync = config['sync'];
+  const expectedRevisionId = project['configuration_revision_id'];
+  const include = stringArray(config['include']);
+  const exclude = stringArray(config['exclude']);
+  const maxFileSize = unsignedIntegerString(config['max_file_size']);
+  const pollSecs = isRecord(sync)
+    ? unsignedIntegerString(sync['auto_track_pr_poll_secs'])
+    : null;
+  const extractionTimeout = unsignedIntegerString(user['extraction_timeout_secs']);
+  if (
+    typeof expectedRevisionId !== 'string' ||
+    expectedRevisionId.length === 0 ||
+    include == null ||
+    exclude == null ||
+    maxFileSize == null ||
+    pollSecs == null ||
+    extractionTimeout == null ||
+    !isRecord(telemetry) ||
+    !isRecord(sync) ||
+    typeof config['extract_docstrings'] !== 'boolean' ||
+    typeof config['track_call_sites'] !== 'boolean' ||
+    typeof config['git_ignore'] !== 'boolean' ||
+    typeof telemetry['timings'] !== 'boolean' ||
+    typeof sync['auto_track_pr_branches'] !== 'boolean' ||
+    typeof user['upload_enabled'] !== 'boolean' ||
+    typeof user['watcher_debounce'] !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    expectedRevisionId,
+    project: {
+      include,
+      exclude,
+      max_file_size: maxFileSize,
+      extract_docstrings: config['extract_docstrings'],
+      track_call_sites: config['track_call_sites'],
+      git_ignore: config['git_ignore'],
+      telemetry_timings: telemetry['timings'],
+      auto_track_pr_branches: sync['auto_track_pr_branches'],
+      auto_track_pr_poll_secs: pollSecs,
+    },
+    user: {
+      upload_enabled: user['upload_enabled'],
+      watcher_debounce: user['watcher_debounce'],
+      extraction_timeout_secs: extractionTimeout,
+    },
+  };
+}
+
+export function planProjectSettingsChange(
+  payload: unknown,
+  values: ProjectSettingsValues,
+): SettingsChangePlan<ProjectSettingsPatch> {
+  const current = buildSettingsEditor(payload);
+  if (!current) {
+    return {
+      outcome: 'invalid',
+      errors: [
+        {
+          field: 'configuration_revision_id',
+          message: 'current editable settings and revision are unavailable',
+        },
+      ],
+    };
+  }
+  const errors = validateProjectValues(values);
+  if (errors.length > 0) return { outcome: 'invalid', errors };
+
+  const patch: ProjectSettingsPatch = {};
+  if (!sameStrings(values.include, current.project.include)) {
+    patch.include = [...values.include];
+  }
+  if (!sameStrings(values.exclude, current.project.exclude)) {
+    patch.exclude = [...values.exclude];
+  }
+  const maxFileSize = Number(values.max_file_size);
+  if (maxFileSize !== Number(current.project.max_file_size)) {
+    patch.max_file_size = maxFileSize;
+  }
+  for (const field of ['extract_docstrings', 'track_call_sites', 'git_ignore'] as const) {
+    if (values[field] !== current.project[field]) patch[field] = values[field];
+  }
+  if (values.telemetry_timings !== current.project.telemetry_timings) {
+    patch.telemetry = { timings: values.telemetry_timings };
+  }
+  const sync: NonNullable<ProjectSettingsPatch['sync']> = {};
+  if (values.auto_track_pr_branches !== current.project.auto_track_pr_branches) {
+    sync.auto_track_pr_branches = values.auto_track_pr_branches;
+  }
+  const pollSecs = Number(values.auto_track_pr_poll_secs);
+  if (pollSecs !== Number(current.project.auto_track_pr_poll_secs)) {
+    sync.auto_track_pr_poll_secs = pollSecs;
+  }
+  if (Object.keys(sync).length > 0) patch.sync = sync;
+
+  return Object.keys(patch).length === 0
+    ? { outcome: 'unchanged', expectedRevisionId: current.expectedRevisionId }
+    : { outcome: 'ready', expectedRevisionId: current.expectedRevisionId, patch };
+}
+
+export function planUserSettingsChange(
+  payload: unknown,
+  values: UserSettingsValues,
+): SettingsChangePlan<UserSettingsPatch> {
+  const current = buildSettingsEditor(payload);
+  if (!current) {
+    return {
+      outcome: 'invalid',
+      errors: [
+        {
+          field: 'configuration_revision_id',
+          message: 'current editable settings and revision are unavailable',
+        },
+      ],
+    };
+  }
+  const errors = validateUserValues(values);
+  if (errors.length > 0) return { outcome: 'invalid', errors };
+
+  const patch: UserSettingsPatch = {};
+  if (values.upload_enabled !== current.user.upload_enabled) {
+    patch.upload_enabled = values.upload_enabled;
+  }
+  if (values.watcher_debounce !== current.user.watcher_debounce) {
+    patch.watcher_debounce = values.watcher_debounce;
+  }
+  const timeout = Number(values.extraction_timeout_secs);
+  if (timeout !== Number(current.user.extraction_timeout_secs)) {
+    patch.extraction_timeout_secs = timeout;
+  }
+  return Object.keys(patch).length === 0
+    ? { outcome: 'unchanged', expectedRevisionId: current.expectedRevisionId }
+    : { outcome: 'ready', expectedRevisionId: current.expectedRevisionId, patch };
+}
+
+export function settingsRevisionConflict(
+  expectedRevisionId: string,
+  payload: unknown,
+): SettingsRevisionConflict | null {
+  const actualRevisionId = buildSettingsEditor(payload)?.expectedRevisionId ?? null;
+  return actualRevisionId === expectedRevisionId
+    ? null
+    : { expectedRevisionId, actualRevisionId };
+}
+
+function validateProjectValues(values: ProjectSettingsValues): SettingsValidationError[] {
+  const errors: SettingsValidationError[] = [];
+  validateGlobValues('include', values.include, errors);
+  validateGlobValues('exclude', values.exclude, errors);
+  if (!isPositiveInteger(values.max_file_size)) {
+    errors.push({
+      field: 'max_file_size',
+      message: 'max_file_size must be at least 1 byte',
+    });
+  }
+  const pollSecs = unsignedInteger(values.auto_track_pr_poll_secs);
+  if (pollSecs == null || pollSecs < MIN_AUTO_TRACK_PR_POLL_SECS) {
+    errors.push({
+      field: 'auto_track_pr_poll_secs',
+      message: `auto_track_pr_poll_secs must be at least ${MIN_AUTO_TRACK_PR_POLL_SECS} seconds`,
+    });
+  }
+  return errors;
+}
+
+function validateUserValues(values: UserSettingsValues): SettingsValidationError[] {
+  const errors: SettingsValidationError[] = [];
+  if (!validDuration(values.watcher_debounce)) {
+    errors.push({
+      field: 'watcher_debounce',
+      message: 'watcher_debounce must be a duration like "2s", "15s", or "1m"',
+    });
+  }
+  if (!isPositiveInteger(values.extraction_timeout_secs)) {
+    errors.push({
+      field: 'extraction_timeout_secs',
+      message: 'extraction_timeout_secs must be at least 1 second',
+    });
+  }
+  return errors;
+}
+
+function validateGlobValues(
+  field: 'include' | 'exclude',
+  patterns: readonly string[],
+  errors: SettingsValidationError[],
+): void {
+  for (const pattern of patterns) {
+    if (pattern.trim() === '') {
+      errors.push({ field, message: `${field} patterns must not be empty` });
+    } else if (!validGlob(pattern)) {
+      errors.push({ field, message: `invalid glob pattern '${pattern}'` });
+    }
+  }
+}
+
+function validGlob(pattern: string): boolean {
+  const chars = Array.from(pattern);
+  let index = 0;
+  while (index < chars.length) {
+    if (chars[index] === '*') {
+      const start = index;
+      while (chars[index] === '*') index += 1;
+      const count = index - start;
+      if (count > 2) return false;
+      if (
+        count === 2 &&
+        !(
+          (start === 0 || chars[start - 1] === '/') &&
+          (index === chars.length || chars[index] === '/')
+        )
+      ) {
+        return false;
+      }
+      continue;
+    }
+    if (chars[index] === '[') {
+      const contentStart = chars[index + 1] === '!' ? index + 2 : index + 1;
+      let close = contentStart + 1;
+      while (close < chars.length && chars[close] !== ']') close += 1;
+      if (close >= chars.length) return false;
+      index = close + 1;
+      continue;
+    }
+    index += 1;
+  }
+  return true;
+}
+
+function validDuration(value: string): boolean {
+  return /^\s*\d+\s*[sm]?\s*$/.test(value) && unsignedInteger(value.replace(/[sm]\s*$/, '')) != null;
+}
+
+function isPositiveInteger(value: string): boolean {
+  const parsed = unsignedInteger(value);
+  return parsed != null && parsed >= 1;
+}
+
+function unsignedInteger(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function unsignedIntegerString(value: unknown): string | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? String(value)
+    : null;
+}
+
+function stringArray(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? [...value]
+    : null;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function buildSection(key: string, value: unknown): ConfigSection {
