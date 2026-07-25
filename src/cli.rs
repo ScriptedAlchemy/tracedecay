@@ -59,6 +59,27 @@ pub enum FeedbackRollbackAction {
     },
 }
 
+#[derive(Clone, Debug, Subcommand)]
+pub enum HostBundleAction {
+    /// List every host whose component-set lifecycle journal is awaiting recovery
+    Status,
+    /// Roll an interrupted host component transaction back to its pre-transaction state
+    ///
+    /// Recovery converges automatically when a second writer left the deployed
+    /// bytes equal to the pre-transaction backup or to the transaction's own
+    /// cataloged output. Genuinely foreign bytes stay fail-closed; pass
+    /// `--quarantine` to set the journal aside (backups are preserved) and
+    /// unblock the host.
+    Recover {
+        /// Recover only this agent's host journal (default: every pending host)
+        #[arg(long, value_parser = agent_value_parser())]
+        agent: Option<String>,
+        /// Set aside a journal that convergent recovery cannot resolve
+        #[arg(long)]
+        quarantine: bool,
+    },
+}
+
 /// Code intelligence for Rust codebases.
 #[derive(Parser)]
 #[command(
@@ -273,6 +294,16 @@ pub enum Commands {
     FeedbackRollback {
         #[command(subcommand)]
         action: FeedbackRollbackAction,
+    },
+    /// Inspect or recover an interrupted first-party host component transaction
+    #[command(
+        name = "host-bundle",
+        long_about = HOST_BUNDLE_LONG_ABOUT,
+        after_help = HOST_BUNDLE_AFTER_HELP
+    )]
+    HostBundle {
+        #[command(subcommand)]
+        action: HostBundleAction,
     },
     /// Extraction worker (spawned by tracedecay itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]

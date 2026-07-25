@@ -457,7 +457,8 @@ impl CommandFamily {
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
             | Commands::Uninstall { .. }
-            | Commands::FeedbackRollback { .. } => Self::Agent,
+            | Commands::FeedbackRollback { .. }
+            | Commands::HostBundle { .. } => Self::Agent,
             Commands::HookPreToolUse
             | Commands::HookPromptSubmit
             | Commands::HookStop
@@ -784,8 +785,10 @@ async fn dispatch_agent_command(
     // the requirement clap used to encode globally, now scoped to the agent
     // lifecycle commands that actually consume it. `feedback-rollback` uses its
     // own action-local flags and rejects the globals itself.
-    if !matches!(command, Commands::FeedbackRollback { .. })
-        && host_bundle.component.is_none()
+    if !matches!(
+        command,
+        Commands::FeedbackRollback { .. } | Commands::HostBundle { .. }
+    ) && host_bundle.component.is_none()
         && (host_bundle.dry_run || host_bundle.yes)
     {
         return Err(tracedecay::errors::TraceDecayError::Config {
@@ -901,6 +904,19 @@ async fn dispatch_agent_command(
                 });
             }
             agent_cmd::handle_feedback_rollback_command(action).await?;
+        }
+        Commands::HostBundle { action } => {
+            if host_bundle.component.is_some() {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "host-bundle recovery operates on the whole component set".to_string(),
+                });
+            }
+            agent_cmd::handle_host_bundle_recovery_command(
+                action,
+                host_bundle.dry_run,
+                host_bundle.yes,
+            )
+            .await?;
         }
         _ => unreachable!("non-agent command passed to agent dispatcher"),
     }
@@ -1129,6 +1145,7 @@ impl CommandStartupPolicy {
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
             | Commands::FeedbackRollback { .. }
+            | Commands::HostBundle { .. }
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::Dogfood

@@ -702,6 +702,35 @@ mod tests {
         }
     }
 
+    /// Safety premise for per-host component-set journal isolation in
+    /// `host_bundle_v2`: a transaction for host X may proceed while host Y's
+    /// journal awaits recovery only because the two hosts never mutate the same
+    /// artifact path. Pin that here so a future host which shares a deployed
+    /// path fails this test instead of silently widening the blast radius of an
+    /// interrupted install.
+    #[test]
+    fn first_party_host_artifact_paths_are_disjoint_across_hosts() {
+        let mut owner_by_path: std::collections::BTreeMap<String, HostKindV1> =
+            std::collections::BTreeMap::new();
+        for host in HostKindV1::ALL {
+            for component in default_components(host) {
+                let bundle = verified_embedded_host_bundle(host, component, 0).unwrap();
+                for artifact in &bundle.manifest.artifacts {
+                    if let Some(other) = owner_by_path.insert(artifact.relative_path.clone(), host)
+                        && other != host
+                    {
+                        panic!(
+                            "{} is deployed by both {other:?} and {host:?}; per-host lifecycle \
+                             journal isolation assumes disjoint artifact path spaces",
+                            artifact.relative_path
+                        );
+                    }
+                }
+            }
+        }
+        assert!(!owner_by_path.is_empty());
+    }
+
     #[test]
     fn opencode_catalog_assets_match_the_legacy_installer_rendering() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
