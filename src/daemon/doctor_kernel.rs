@@ -28,10 +28,17 @@
 //! the surface handlers are wired to it.
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::ApplicationContractError;
-use tracedecay_application::RequestContext;
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_application::doctor::{
     CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
@@ -42,6 +49,11 @@ use tracedecay_application::doctor::{
 };
 
 use crate::config::PinnedRuntimeConfiguration;
+
+const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
+const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
+const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
+static DOCTOR_REQUEST_NONCE: AtomicU64 = AtomicU64::new(0);
 
 // === Configuration authority (Configuration family) ==========================
 
@@ -613,6 +625,206 @@ pub async fn compose_doctor_report(
         .with_storage(&storage);
 
     composer.compose(context).await
+}
+
+/// Build the daemon-owned live Doctor reader installed into a project MCP
+/// server. Every read re-resolves exact project/worktree identity, observes the
+/// current registered runtimes, and composes through the sole application
+/// kernel. The dashboard receives no database handles or authority-bearing
+/// inputs.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::daemon) fn production_doctor_report_reader(
+    project_root: PathBuf,
+    project_id: tracedecay_domain::ProjectId,
+    layout: crate::storage::StoreLayout,
+    graph: crate::db::Database,
+    registry: Arc<crate::global_db::RegisteredGlobalDb>,
+    profile_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    profile_root: PathBuf,
+    retention: crate::config::RetentionConfig,
+    schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+) -> crate::dashboard::DoctorReportReader {
+    Arc::new(move || {
+        let project_root = project_root.clone();
+        let project_id = project_id.clone();
+        let layout = layout.clone();
+        let graph = graph.clone();
+        let registry = Arc::clone(&registry);
+        let profile_sessions = Arc::clone(&profile_sessions);
+        let profile_root = profile_root.clone();
+        let retention = retention.clone();
+        let schedulers = schedulers.clone();
+        Box::pin(async move {
+            let scope = super::project_open_owners::resolved_scope_for_project(
+                &project_root,
+                &project_id,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "daemon Doctor project scope",
+            })?;
+            let context = doctor_report_request_context(scope)?;
+            let pinned =
+                crate::config::runtime_configuration_for_layout(&project_root, &layout);
+            let quick_check_ok = graph
+                .quick_check_report()
+                .await
+                .ok()
+                .map(|problem| problem.is_none());
+            let graph_authority_current = graph.write_authority().is_ok_and(|authority| {
+                authority
+                    .require_active_write_scope("read dashboard Doctor graph authority")
+                    .is_ok()
+            });
+            let registered_authority_current = registry.writer_connection().is_ok()
+                && profile_sessions.writer_connection().is_ok();
+            let temporal =
+                crate::global_db::session_temporal::session_temporal_doctor_health_at(
+                    profile_sessions.db_path(),
+                )
+                .await;
+            let temporal_ok = match temporal.status() {
+                crate::global_db::session_temporal::SessionTemporalHealthStatus::Complete => {
+                    Some(temporal.findings().is_empty())
+                }
+                crate::global_db::session_temporal::SessionTemporalHealthStatus::Partial
+                | crate::global_db::session_temporal::SessionTemporalHealthStatus::Unavailable
+                | crate::global_db::session_temporal::SessionTemporalHealthStatus::Locked => None,
+            };
+            let retention_secs = retention
+                .orphan_store_gc_days
+                .and_then(|days| i64::try_from(days).ok())
+                .and_then(|days| days.checked_mul(24 * 60 * 60))
+                .unwrap_or(i64::MAX);
+            let now = now_secs();
+            let orphan = collect_orphan_store_findings(
+                registry.as_ref(),
+                &profile_root,
+                retention_secs,
+                now,
+            )
+            .await;
+            let unregistered = collect_unregistered_store_findings(
+                registry.as_ref(),
+                &profile_root,
+                retention_secs,
+                now,
+            )
+            .await;
+            let storage = merge_storage_reads(orphan, unregistered);
+            let inputs = DoctorKernelInputsV1 {
+                configuration: configuration_read_from_pin::<crate::errors::TraceDecayError>(
+                    &pinned,
+                ),
+                runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
+                    serving: true,
+                    startup_converged: graph_authority_current && registered_authority_current,
+                    quick_check_ok,
+                    authority_audit_ok: Some(
+                        graph_authority_current && registered_authority_current,
+                    ),
+                    temporal_ok,
+                }),
+                // Host conformance has no single project-scoped runtime owner;
+                // retain honest unknown until the profile host registry is
+                // injected rather than probing mutable paths here.
+                host: HostIntegrationReadV1::Unknown,
+                code_index: code_index_read_from_registry(&schedulers, &project_root).await,
+                storage,
+            };
+            let report = compose_doctor_report(&context, &inputs).await?;
+            Ok(crate::dashboard::AdmittedDoctorReportV1::new(report))
+        })
+    })
+}
+
+fn merge_storage_reads(
+    first: DoctorStorageFamilyReadV1,
+    second: DoctorStorageFamilyReadV1,
+) -> DoctorStorageFamilyReadV1 {
+    match (first, second) {
+        (
+            DoctorStorageFamilyReadV1::Observed {
+                findings: mut first,
+            },
+            DoctorStorageFamilyReadV1::Observed { findings: second },
+        ) => {
+            first.extend(second);
+            storage_family_read(first)
+        }
+        (DoctorStorageFamilyReadV1::Observed { findings }, DoctorStorageFamilyReadV1::Absent)
+        | (DoctorStorageFamilyReadV1::Absent, DoctorStorageFamilyReadV1::Observed { findings }) => {
+            storage_family_read(findings)
+        }
+        (DoctorStorageFamilyReadV1::Absent, DoctorStorageFamilyReadV1::Absent) => {
+            DoctorStorageFamilyReadV1::Absent
+        }
+        (DoctorStorageFamilyReadV1::Denied, _) | (_, DoctorStorageFamilyReadV1::Denied) => {
+            DoctorStorageFamilyReadV1::Denied
+        }
+        (DoctorStorageFamilyReadV1::Unsupported, _)
+        | (_, DoctorStorageFamilyReadV1::Unsupported) => DoctorStorageFamilyReadV1::Unsupported,
+        _ => DoctorStorageFamilyReadV1::Unknown,
+    }
+}
+
+fn doctor_report_request_context(
+    scope: tracedecay_application::ResolvedScope,
+) -> Result<RequestContext, ApplicationContractError> {
+    let observed_at = now_micros();
+    let expires_at =
+        tracedecay_domain::UtcMicros(observed_at.0.saturating_add(DOCTOR_CONTEXT_HORIZON_MICROS));
+    let nonce = DOCTOR_REQUEST_NONCE.fetch_add(1, Ordering::Relaxed);
+    let suffix = format!("{}.{}.{}", std::process::id(), observed_at.0.max(0), nonce);
+    let actor = tracedecay_domain::ActorId::new("actor.tracedecay-daemon")?;
+    let capability =
+        tracedecay_tool_catalog::CapabilityId::new(DOCTOR_REPORT_CAPABILITY.to_owned())?;
+    let use_case = tracedecay_tool_catalog::UseCaseId::new(DOCTOR_REPORT_USE_CASE.to_owned())?;
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!("grant.daemon.doctor.{suffix}"))?,
+        1,
+        tracedecay_domain::canonical_sha256(&(
+            "tracedecay.daemon.doctor-report-grant.v1",
+            &scope,
+            &capability,
+            &use_case,
+            expires_at,
+        ))?,
+        actor.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([capability]),
+        BTreeSet::from([use_case]),
+        DisclosureClass::Metadata,
+    )?;
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new(format!("request.daemon.doctor.{suffix}"))?,
+        Deadline::new(expires_at)?,
+        CancellationContext::active(format!("cancel.daemon.doctor.{suffix}"))?,
+    )
+}
+
+fn now_micros() -> tracedecay_domain::UtcMicros {
+    tracedecay_domain::UtcMicros(
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_micros()),
+        )
+        .unwrap_or(i64::MAX),
+    )
+}
+
+fn now_secs() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs()),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

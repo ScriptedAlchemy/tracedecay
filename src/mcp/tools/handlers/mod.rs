@@ -451,6 +451,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
+    pub doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
@@ -480,6 +481,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
             automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            doctor_report_reader: None,
             diagnostics_cache: None,
             diagnostics_lsp: None,
             application_invocation_client: None,
@@ -1197,6 +1199,7 @@ async fn dispatch_session_workflow_tools(
                 options.registered_savings_db.clone(),
                 options.automation_scheduler_reconciler.clone(),
                 options.automation_writer.clone(),
+                options.doctor_report_reader.clone(),
             )
             .await
         }

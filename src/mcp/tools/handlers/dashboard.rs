@@ -56,6 +56,7 @@ pub(super) async fn handle_dashboard(
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
+    doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -122,6 +123,7 @@ pub(super) async fn handle_dashboard(
                 registered_savings_db,
                 automation_scheduler_reconciler,
                 automation_writer,
+                doctor_report_reader,
             )
             .await?;
 

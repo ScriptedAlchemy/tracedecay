@@ -350,6 +350,7 @@ pub struct McpServer {
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
@@ -676,6 +677,7 @@ impl McpServer {
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
+            dashboard_doctor_report_reader,
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
@@ -846,6 +848,7 @@ impl McpServer {
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
+            dashboard_doctor_report_reader,
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,

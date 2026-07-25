@@ -2735,6 +2735,17 @@ impl DaemonEngine {
             code_search_project_id.clone(),
             read_admission_provider.clone(),
         );
+        let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
+            canonical_project_path.clone(),
+            code_search_project_id.clone(),
+            cg.store_layout().clone(),
+            cg.db().clone(),
+            Arc::clone(&registry_db),
+            Arc::clone(&user_session_db),
+            profile_identity.profile_root().to_path_buf(),
+            cg.get_config().sync.retention.clone(),
+            self.invocation.code_index_schedulers.clone(),
+        );
         let code_index_search_executor = code_index_search_executor(
             self.invocation.code_index_schedulers.clone(),
             code_search_project_id,
@@ -2765,6 +2776,7 @@ impl DaemonEngine {
             },
         )
         .with_automation_scheduler_reconciler(reconciler)
+        .with_dashboard_doctor_report_reader(doctor_report_reader)
         .with_code_index_hook_sink(code_index_hook_sink)
         .with_code_index_search_executor(code_index_search_executor)
         .with_git_read_executor(git_read_executor)
@@ -3743,6 +3755,17 @@ async fn portable_project_server(
         code_search_project_id.clone(),
         read_admission_provider.clone(),
     );
+    let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
+        canonical_project_path.to_path_buf(),
+        code_search_project_id.clone(),
+        cg.store_layout().clone(),
+        cg.db().clone(),
+        Arc::clone(&registry_db),
+        Arc::clone(&user_session_db),
+        profile_identity.profile_root().to_path_buf(),
+        cg.get_config().sync.retention.clone(),
+        invocation.code_index_schedulers.clone(),
+    );
     let code_index_search_executor = code_index_search_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id,
@@ -3772,6 +3795,7 @@ async fn portable_project_server(
             ),
         },
     )
+    .with_dashboard_doctor_report_reader(doctor_report_reader)
     .with_code_index_hook_sink(code_index_hook_sink)
     .with_code_index_search_executor(code_index_search_executor)
     .with_git_read_executor(git_read_executor)
