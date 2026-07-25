@@ -1,5 +1,10 @@
+import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Waypoints } from 'lucide-react';
+import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
+import type { WireEnvelope } from '../../contracts/wire.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { StateChip } from '../../ui/StateChip';
 import {
@@ -20,10 +25,14 @@ import {
   composeWeave,
   extentOf,
   threadsFrom,
-  WEFT_SOURCES,
   type PlacedThread,
 } from './weave.ts';
-import { LoomSessionsPayloadSchema, LoomTimelinePayloadSchema } from './contracts.ts';
+import {
+  LoomTemporalPayloadSchema,
+  LoomTimelinePayloadSchema,
+  type LoomSourceStatus,
+  type LoomTemporalPayload,
+} from './contracts.ts';
 
 /**
  * Loom — time and causality.
@@ -31,35 +40,31 @@ import { LoomSessionsPayloadSchema, LoomTimelinePayloadSchema } from './contract
  * The plan asks this surface for "interactive temporal and causal traces
  * linking prompts, reasoning, tools, subagents, code changes, branches,
  * commits, PRs, and outcomes". The daemon serves the first half of that
- * sentence and none of the second, so this page draws the first half properly
- * and prints the second half as an itemised absence. The reasoning, in full,
- * is in `contracts.ts` and `weave.ts`; the short version:
+ * sentence. The temporal read now serves its persisted causal half with
+ * provider-qualified rows; only Delivery-owned outcomes remain a named shared
+ * dependency. The reasoning, in full, is in `contracts.ts` and `weave.ts`:
  *
  *   - Threads are real. Every mark is one session at its real start time, as
  *     thick as its real message count, in its host's column.
- *   - Extent is honest per thread. Most sessions have no served end, so most
- *     threads are open, and they LOOK open.
- *   - Crossings are absent. Not thin, not faint — absent, with the store
- *     location of each missing relation named beside it.
+ *   - Extent is honest per thread. A recorded end wins, then a last-message
+ *     observation; otherwise the thread stays visibly open.
+ *   - Commit, edited-file and branch/worktree relations come directly from
+ *     their durable authorities and retain provider and coverage.
  *
  * Selecting a thread isolates it and pulls its chain — prompt, turns, tools —
- * from the LCM session endpoint into the rail. That chain stops at tools,
- * because that is where the wire stops.
- *
- * Note the endpoint choice: this page does NOT read
- * `/api/plugins/hermes-lcm/overview`, which is the obvious source and is
- * returning HTTP 500 on the real profile (a payload-health probe inside the
- * handler fails and takes the whole response with it). The sessions rollup
- * under `/api/plugins/savings/sessions` serves strictly more of what the weave
- * needs — start times, message counts, subagent flags, model attribution —
- * and serves it.
+ * from the LCM session endpoint into the rail, then appends the selected
+ * session's persisted edits, commit attributions and branch/worktree spans.
  */
 export function LoomPage() {
-  const sessions = useLegacy(
-    ['loom', 'sessions'],
-    '/api/plugins/savings/sessions?limit=200',
-    LoomSessionsPayloadSchema,
-  );
+  const scope = useScope((state) => state.scope);
+  const temporal = useQuery({
+    queryKey: ['loom', 'temporal', scopeKey(scope)],
+    queryFn: () =>
+      fetchEnvelope<LoomTemporalPayload>(
+        scopedUrl(scope, '/api/loom/temporal?limit=200'),
+        LoomTemporalPayloadSchema,
+      ),
+  });
   const timeline = useLegacy(
     ['loom', 'timeline'],
     '/api/plugins/hermes-lcm/timeline',
@@ -81,10 +86,11 @@ export function LoomPage() {
       <WorkspaceHeader
         path="/loom"
         title="Loom"
-        note="sessions as threads on a measured time axis · crossings unserved"
+        note="sessions and durable causal relations on a measured time axis"
       />
-      <LegacyBoundary title="Loom" pending={sessions.isPending} result={sessions.data}>
-        {(data) => {
+      <TemporalBoundary pending={temporal.isPending} result={temporal.data}>
+        {(envelope) => {
+          const data = envelope.payload;
           const rows = data.sessions ?? [];
 
           if (data.available === false) {
@@ -118,6 +124,31 @@ export function LoomPage() {
           const weave = composeWeave(rows, minGap);
           const selected =
             weave.threads.find((thread) => thread.id === selectedId) ?? null;
+          const selectedCommits = selected
+            ? data.commits.filter(
+                (commit) =>
+                  commit.provider === selected.host &&
+                  commit.session_id === selected.sessionId,
+              )
+            : [];
+          const selectedFiles = selected
+            ? data.edited_files.filter(
+                (file) =>
+                  file.provider === selected.host && file.session_id === selected.sessionId,
+              )
+            : [];
+          const selectedSpans = selected
+            ? data.branch_spans.filter(
+                (span) =>
+                  span.provider === selected.host && span.session_id === selected.sessionId,
+              )
+            : [];
+          const deliveryStatus =
+            data.source_statuses.find((source) => source.id === 'delivery_outcomes') ?? null;
+          const commitStatus =
+            data.source_statuses.find((source) => source.id === 'session_commit') ?? null;
+          const branchStatus =
+            data.source_statuses.find((source) => source.id === 'branch_worktree') ?? null;
           const measuredEnds = weave.threads.length - weave.openEndedCount;
           const messages = weave.threads.reduce(
             (sum, thread) => sum + thread.messages,
@@ -140,7 +171,7 @@ export function LoomPage() {
                   {
                     label: 'measured extent',
                     value: `${measuredEnds}/${weave.threads.length}`,
-                    note: 'sessions with a served end',
+                    note: 'recorded end or last-message observation',
                     fraction:
                       weave.threads.length > 0
                         ? measuredEnds / weave.threads.length
@@ -187,36 +218,157 @@ export function LoomPage() {
                   <Panel legend="Causal crossings">
                     <div className="flex flex-col gap-2">
                       <p className="text-2xs leading-relaxed text-text-muted">
-                        The weave has warp and no weft. Every crossing this
-                        surface is meant to draw is a relation the dashboard API
-                        does not serve, so none is drawn. Where TraceDecay does
-                        record the relation, the store is named.
+                        Counts below are the persisted causal rows returned for
+                        this exact session page. Provider, granularity and
+                        coverage come from the temporal response.
                       </p>
-                      {WEFT_SOURCES.map((source) => (
+                      {data.source_statuses.map((source) => (
                         <div key={source.id} className="flex flex-col gap-1">
                           <span className="td-legend text-text-secondary">
                             {source.label}
                           </span>
-                          <StateChip kind="unsupported" detail={source.detail} />
-                          {source.store !== '—' ? (
-                            <span className="td-value truncate text-3xs text-text-muted">
-                              {source.store}
-                            </span>
-                          ) : null}
+                          <StateChip
+                            kind={source.state}
+                            detail={sourceDetail(source)}
+                          />
+                          <span className="td-value truncate text-3xs text-text-muted">
+                            {source.granularity}
+                            {source.item_count == null ? '' : ` · ${source.item_count} rows`}
+                          </span>
                         </div>
                       ))}
                     </div>
                   </Panel>
 
-                  <ThreadChain thread={selected} />
+                  <Panel legend="Read identity">
+                    <div className="flex flex-col gap-2">
+                      <StateChip
+                        kind={freshnessKind(envelope.freshness.state)}
+                        detail={
+                          envelope.freshness.observed_at_micros == null
+                            ? 'observation time unrecorded'
+                            : `observed ${formatMoment(envelope.freshness.observed_at_micros / 1_000_000)}`
+                        }
+                      />
+                      <StateChip
+                        kind={data.temporal_refresh.state}
+                        detail={`${data.temporal_refresh.active_generations} active temporal generations · ${
+                          data.temporal_refresh.latest_activated_at_micros == null
+                            ? 'activation time unrecorded'
+                            : `latest activation ${formatMoment(data.temporal_refresh.latest_activated_at_micros / 1_000_000)}`
+                        } · ${data.temporal_refresh.authority}`}
+                      />
+                      <p className="text-3xs leading-relaxed text-text-muted">
+                        {coverageDetail(envelope)}
+                      </p>
+                      <p className="text-3xs leading-relaxed text-text-muted">
+                        {envelope.source_watermark
+                          ? `${envelope.source_watermark.source} · ${envelope.source_watermark.watermark}`
+                          : 'No temporal source watermark was recorded.'}
+                      </p>
+                    </div>
+                  </Panel>
+
+                  <ThreadChain
+                    thread={selected}
+                    relations={{
+                      commits: selectedCommits,
+                      editedFiles: selectedFiles,
+                      branchSpans: selectedSpans,
+                      commitStatus,
+                      branchStatus,
+                      deliveryStatus,
+                    }}
+                  />
                 </aside>
               </div>
             </div>
           );
         }}
-      </LegacyBoundary>
+      </TemporalBoundary>
     </div>
   );
+}
+
+function TemporalBoundary({
+  pending,
+  result,
+  children,
+}: {
+  pending: boolean;
+  result: EnvelopeResult<LoomTemporalPayload> | undefined;
+  children: (envelope: WireEnvelope<LoomTemporalPayload>) => ReactNode;
+}) {
+  if (pending) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <StateChip kind="unknown" detail="reading Loom temporal authorities" />
+      </div>
+    );
+  }
+  if (!result) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <StateChip kind="offline" detail="Loom temporal response unavailable" />
+      </div>
+    );
+  }
+  if (result.outcome === 'transport') {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <StateChip
+          kind={result.state}
+          detail={result.detail ?? 'Loom temporal response unavailable'}
+        />
+      </div>
+    );
+  }
+  return children(result.envelope);
+}
+
+function sourceDetail(source: LoomSourceStatus): string {
+  if (source.required_authority) return source.required_authority;
+  const parts = [
+    source.authority,
+    source.providers.length > 0 ? `providers: ${source.providers.join(', ')}` : null,
+    source.reason,
+    source.coverage.eligible != null &&
+    source.coverage.matched != null &&
+    source.coverage.omitted != null
+      ? `${source.coverage.matched}/${source.coverage.eligible} ${source.coverage.unit ?? 'items'} matched · ${source.coverage.omitted} omitted`
+      : null,
+    source.coverage.reason,
+  ];
+  return parts.filter((part): part is string => part != null && part.length > 0).join(' · ');
+}
+
+function coverageDetail(envelope: WireEnvelope<LoomTemporalPayload>): string {
+  const { coverage } = envelope;
+  const denominator =
+    coverage.denominator == null
+      ? 'denominator unrecorded'
+      : `${formatCount(coverage.denominator)} ${coverage.unit ?? 'items'} eligible`;
+  return `${coverage.completeness} coverage · ${formatCount(coverage.examined)} examined · ${formatCount(coverage.matched)} matched · ${denominator}`;
+}
+
+function freshnessKind(
+  state: WireEnvelope<LoomTemporalPayload>['freshness']['state'],
+): 'ready' | 'stale' | 'unknown' | 'unsupported' {
+  switch (state) {
+    case 'fresh':
+      return 'ready';
+    case 'stale':
+      return 'stale';
+    case 'unknown':
+    case 'absent':
+      return 'unknown';
+    case 'unsupported':
+      return 'unsupported';
+    default: {
+      const exhaustive: never = state;
+      return exhaustive;
+    }
+  }
 }
 
 /** The axis, printed. A reader cannot infer from the picture that width is a
@@ -244,6 +396,26 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
           </div>
         ))}
       </div>
+      <div
+        aria-label="Extent evidence legend"
+        className="flex flex-wrap gap-x-4 gap-y-1 text-3xs text-text-muted"
+      >
+        <span className="flex items-center gap-1.5">
+          <span aria-hidden className="h-0.5 w-3 bg-[var(--ev-measured)]" />
+          measured session end
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span aria-hidden className="h-0.5 w-3 bg-[var(--ev-associated)]" />
+          last-message observation
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            aria-hidden
+            className="h-0.5 w-3 border-t border-dashed border-[var(--ev-unknown)]"
+          />
+          extent unknown
+        </span>
+      </div>
       <p className="text-2xs leading-relaxed text-text-muted">
         Each thread is one session: vertical position = when it started (exact,
         on the printed axis), column = the host that ran it, width = its message
@@ -251,8 +423,8 @@ function WeaveAxis({ weave }: { weave: ReturnType<typeof composeWeave> }) {
         end time; a thread ending in a short dashed stub does not —{' '}
         <span className="text-text-secondary">
           {weave.openEndedCount} of {weave.threads.length} sessions have no
-          served end, so the stub marks unmeasured extent and its length means
-          nothing.
+          recorded end or later message observation, so the stub marks
+          unmeasured extent and its length means nothing.
         </span>{' '}
         {weave.hollowCount > 0
           ? `${weave.hollowCount} drawn hollow ${weave.hollowCount === 1 ? 'is a session the store reports' : 'are sessions the store reports'} at zero messages — a reading, not a gap. `
@@ -339,7 +511,7 @@ function ThreadTable({
                 <td className="px-2 py-1 text-text-muted">
                   {thread.end != null
                     ? formatDuration(thread.end - thread.start)
-                    : 'not served'}
+                    : 'unrecorded'}
                 </td>
               </tr>
             ))}
@@ -354,7 +526,7 @@ function weaveDescription(weave: ReturnType<typeof composeWeave>): string {
   const hosts = weave.hosts
     .map((host) => `${host.count} on ${host.label}`)
     .join(', ');
-  return `Weave: ${weave.threads.length} sessions as vertical threads, time running downward, one column per host (${hosts || 'none'}). ${weave.openEndedCount} have no served end time and are drawn open. No causal crossings are drawn because none are served. The thread table below is the accessible equivalent.`;
+  return `Weave: ${weave.threads.length} sessions as vertical threads, time running downward, one column per host (${hosts || 'none'}). ${weave.openEndedCount} have no recorded extent and are drawn open. Provider-qualified causal rows are served and listed in the selected-thread rail, but are not geometrically drawn on this weave. The thread table below is the accessible equivalent.`;
 }
 
 /** Composed empty state: the frame stays, so an empty weave reads as an

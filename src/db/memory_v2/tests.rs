@@ -1056,6 +1056,69 @@ async fn cutover_replay_preserves_first_completion_time_but_binds_frontier() {
 }
 
 #[tokio::test]
+async fn completed_cutover_reopens_for_a_project_legacy_union() {
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
+    conn.execute(
+        "INSERT INTO memory_facts(
+             fact_id, content, category, tags, trust_score, source, metadata,
+             created_at, updated_at
+         ) VALUES(1, 'original', 'project', '[]', 0.5, 'manual', '{}', 10, 10)",
+        (),
+    )
+    .await
+    .unwrap();
+    let owner = owner();
+    let source = source_store_id();
+    let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
+        .await
+        .unwrap();
+    run_to_frontier(&conn, &owner, &source, frontiers, 8).await;
+    let receipt = MemoryV2CutoverReceipt::new(
+        ProvenanceId::new("memory-v2.initial-union".to_owned()).unwrap(),
+        owner.clone(),
+        source.clone(),
+        frontiers,
+        UtcMicros(1_000),
+    )
+    .unwrap();
+    assert_eq!(
+        finalize_memory_v2_cutover(&conn, &receipt).await.unwrap(),
+        MemoryV2CutoverOutcome::Complete
+    );
+
+    conn.execute(
+        "INSERT INTO memory_facts(
+             fact_id, content, category, tags, trust_score, source, metadata,
+             created_at, updated_at
+         ) VALUES(2, 'branch exclusive', 'decision', '[]', 0.9, 'branch', '{}', 20, 20)",
+        (),
+    )
+    .await
+    .unwrap();
+    assert!(
+        reopen_memory_v2_cutover_for_legacy_union(&conn, &owner, &source)
+            .await
+            .unwrap()
+    );
+    let mut rows = conn
+        .query(
+            "SELECT phase, fact_frontier, fact_cursor, cutover_completed_at,
+                    cutover_receipt_json
+             FROM memory_v2_backfill_progress",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "feedback");
+    assert_eq!(row.get::<i64>(1).unwrap(), 2);
+    assert_eq!(row.get::<i64>(2).unwrap(), 0);
+    assert!(row.get::<Option<i64>>(3).unwrap().is_none());
+    assert!(row.get::<Option<String>>(4).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn malformed_and_secret_rows_quarantine_and_advance_without_raw_payload() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
@@ -1082,7 +1145,11 @@ async fn malformed_and_secret_rows_quarantine_and_advance_without_raw_payload() 
         scalar(&conn, "SELECT COUNT(*) FROM memory_v2_legacy_quarantine").await,
         2
     );
-    assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM memory_facts").await, 1);
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM memory_facts").await,
+        3,
+        "quarantine must preserve the raw compatibility rows for repair/export"
+    );
     assert_eq!(
         scalar(
             &conn,

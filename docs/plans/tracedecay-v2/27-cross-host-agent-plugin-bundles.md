@@ -83,9 +83,9 @@ interruption.
    surfaces. Full bodies expand only through authorized evidence reads.
 
 There is no GitHub mutation client. REST is limited to `GET`; GraphQL transport
-may use HTTP `POST` only for shipped static allowlisted `query` operations. Mutation
-documents, write-capable methods, and write-capable or indeterminate
-credential scopes fail before network access.
+may use HTTP `POST` only for the one shipped compile-time static audited
+allowlisted `query`. Mutation documents, write-capable methods, and
+write-capable or indeterminate credential scopes fail before network access.
 
 ## PR13 implementation slices
 
@@ -169,12 +169,13 @@ credential scopes fail before network access.
 
 ### Ship GitHub review ingestion
 
-- Use existing `ureq`, shared typed Serde DTOs, and static GraphQL query text
-  for the concrete GitHub path. This replaces a new provider client, dynamic
-  GraphQL parser, and source-local response models while retaining the
-  acquisition and publication contract below. `gh api` remains a manual
-  troubleshooting fallback; schema/fixture drift returns typed partial,
-  stale, or unavailable and preserves the last complete generation.
+- Use existing `ureq`, shared narrow typed Serde DTOs, and one compile-time
+  static audited GraphQL query for the concrete GitHub path. This replaces a
+  new provider client, dynamic GraphQL parser, and source-local response models
+  while retaining the acquisition and publication contract below. `gh api`
+  remains a manual troubleshooting fallback; schema/fixture drift returns
+  typed partial, stale, or unavailable and preserves the last complete
+  generation.
 - Do not add Octocrab, `backon`, or `graphql-parser`; the refresh owner keeps
   its explicit bounded retry and `Retry-After` behavior.
 - Implement the one concrete read-only GitHub review refresh needed by PR13.
@@ -273,6 +274,10 @@ the host observation replay spool.
 
 ## Direct acceptance
 
+- Provider and observation acceptance uses only checked-in real native fixtures
+  with recorded origin, native version, and digest, replayed through the real
+  Plan 03 sanitizer and consuming path. Synthetic, lookalike, or invented
+  protocol fields are non-binding and cannot establish host support.
 - On each supported host, a real install followed by a real saved edit and
   stop boundary produces the same authorized Plan 09 feedback where
   capabilities overlap.
@@ -334,8 +339,9 @@ the host observation replay spool.
   competing-extension/interruption/host-by-host rollback, feedback rollback
   switch, Kimi Code and OpenCode conformance, OpenCode duplicate-analyzer
   prevention, Cline-family route/unavailable proof, and feedback integration
-  tests together are the aggregate PR13 gate; exact file inventories, giant
-  fixture matrices, and placeholder benchmarks are not deliverables.
+  tests run together through ordinary repository checks; they do not create a
+  PR13 acceptance gate. Exact file inventories, giant fixture matrices, and
+  placeholder benchmarks are not deliverables.
 
 ## Later callable extensions
 

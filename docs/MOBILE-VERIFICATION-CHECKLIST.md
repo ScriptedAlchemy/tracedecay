@@ -1,10 +1,14 @@
-# Mobile Visual Verification Checklist — Dashboards
+# Historical Mobile Verification Checklist — Legacy Dashboards
 
-A worker-runnable checklist for visually verifying the **Code Graph**, **Holographic
-Memory**, and **LCM** dashboards (plus the shared shell that hosts them) on mobile
-viewports. It is grounded in the two component seam audits this work was derived
-from, and pins each check to the real route, component, CSS seam, or risky
-invariant it covers.
+> Superseded checklist retained for the legacy plugin UI. Do not run the
+> removed `dashboard/smoke.mjs` commands or treat the shared shell below as the
+> product dashboard. The real single-app `dashboard/app-dist` bundle is served
+> at `/`; the placeholder shell and these plugin tabs are isolated at
+> `/legacy`. Current responsive and accessibility verification uses
+> `cd dashboard && npm run visual:audit`.
+
+This checklist records how the legacy **Code Graph**, **Holographic Memory**,
+and **LCM** plugin tabs were inspected on mobile viewports.
 
 Companion docs (read these for the "why" behind the regression-risk checks):
 
