@@ -2092,12 +2092,10 @@ mod tests {
         assert_eq!(ordinals.len(), result.chunks.len());
 
         // Signature grain carries the symbol's first line.
-        let signature = result
-            .chunks
-            .iter()
-            .find(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature)
-            .expect("signature chunk");
-        assert!(signature.sanitized_text.as_str().contains("fn "));
+        assert!(result.chunks.iter().any(|chunk| {
+            chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature
+                && chunk.sanitized_text.as_str().contains("fn ")
+        }));
     }
 
     #[test]
