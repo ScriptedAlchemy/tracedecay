@@ -29,12 +29,11 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, ExactAdmissionRuleRevision,
-    FreshnessVectorDigest, FusionProfileId, ManifestDigest, PrincipalId, QueryDigest,
-    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursorKeyId, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverBatch, RetrieverOutcome, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    SourceOccurrenceId, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
-    canonical_sha256,
+    FreshnessVectorDigest, ManifestDigest, PrincipalId, QueryDigest, QueryNormalizationRevision,
+    RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalFailure,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverOutcome,
+    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId, SymbolOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -223,10 +222,8 @@ impl CodeIndexSchedulerRegistryV1 {
             let scheduler = scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let latest = scheduler.latest_complete()?;
-            (latest.generation.manifest().generation_id == generation_id
-                && Self::latest_matches_scope(&latest, &scope))
-            .then_some(latest)
+            let generation = scheduler.generation(&generation_id).ok().flatten()?;
+            Self::latest_matches_scope(&generation, &scope).then_some(generation)
         })
         .await
         .ok()
@@ -247,11 +244,18 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         request: &RequestContext,
         requested: &CodeGenerationId,
+        page: &tracedecay_application::PageRequest,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let wait = remaining_generation_resolution_wait(request)?;
         let resolution = async {
             if is_unpinned_latest(requested) {
-                self.latest_complete_fresh_for_scope(request.scope()).await
+                if let Some(cursor) = page.cursor.as_ref() {
+                    let cursor = decode_callable_code_cursor(cursor).ok()?;
+                    self.generation_for(request.scope(), &cursor.payload.generation)
+                        .await
+                } else {
+                    self.latest_complete_fresh_for_scope(request.scope()).await
+                }
             } else {
                 self.generation_for(request.scope(), requested).await
             }
@@ -343,6 +347,10 @@ fn current_utc_micros() -> Result<UtcMicros, CallableCodeCursorError> {
     i64::try_from(elapsed.as_micros())
         .map(UtcMicros)
         .map_err(|_| CallableCodeCursorError::Unavailable)
+}
+
+fn query_finished_at() -> UtcMicros {
+    current_utc_micros().unwrap_or(UtcMicros(0))
 }
 
 fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Duration> {
@@ -507,7 +515,7 @@ fn base_request(
     context: &RetrievalPortContext<'_>,
     latest: &LatestCompleteCodeIndexV1,
     temporal_mode: TemporalModeV1,
-    budget: RetrievalBudget,
+    profile: &tracedecay_domain::FusionProfile,
 ) -> Result<RetrievalRequest, String> {
     let generation = &latest.generation;
     Ok(RetrievalRequest {
@@ -534,9 +542,8 @@ fn base_request(
             .map_err(|error| error.to_string())?,
             captured_at: generation.manifest().seal.sealed_at,
         },
-        profile_id: FusionProfileId::new("profile.code-index.daemon.v1")
-            .map_err(|error| error.to_string())?,
-        budget,
+        profile_id: profile.profile_id.clone(),
+        budget: profile.retrieval_budget,
     })
 }
 
@@ -891,21 +898,16 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         context: &RetrievalPortContext<'_>,
         generation: &CodeGenerationId,
+        page: &tracedecay_application::PageRequest,
         temporal: TemporalModeV1,
     ) -> Option<PreparedCallableQueryV1> {
         let latest = self
-            .resolve_serving_generation(context.request, generation)
+            .resolve_serving_generation(context.request, generation, page)
             .await?;
         let authority = self
             .pr9_query_authority_for_scope(context.request.scope())
             .await?;
-        let base = base_request(
-            context,
-            &latest,
-            temporal,
-            authority.profile().retrieval_budget,
-        )
-        .ok()?;
+        let base = base_request(context, &latest, temporal, authority.profile()).ok()?;
         Some(PreparedCallableQueryV1 {
             latest,
             authority,
@@ -924,7 +926,7 @@ fn finish_direct_query<T: Serialize>(
     requested_page: &tracedecay_application::PageRequest,
     eligible: u64,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
-    let finished_at = prepared.latest.generation.manifest().seal.sealed_at;
+    let finished_at = query_finished_at();
     let generation = prepared.latest.generation.manifest().generation_id.clone();
     match paginate_callable_code(
         prepared.authority.as_ref(),
@@ -1104,13 +1106,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
             let Some(latest) = self
-                .resolve_serving_generation(context.request, &request.scope.generation)
+                .resolve_serving_generation(
+                    context.request,
+                    &request.scope.generation,
+                    &request.meta.page,
+                )
                 .await
             else {
-                return unavailable(tracedecay_domain::UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let served_generation = latest.generation.manifest().generation_id.clone();
-            let finished_at = latest.generation.manifest().seal.sealed_at;
+            let finished_at = query_finished_at();
             let Some(cursor_authority) = self
                 .pr9_query_authority_for_scope(context.request.scope())
                 .await
@@ -1121,7 +1127,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &context,
                 &latest,
                 request.meta.temporal,
-                cursor_authority.profile().retrieval_budget,
+                cursor_authority.profile(),
             ) else {
                 return unavailable(finished_at);
             };
@@ -1187,13 +1193,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
             let Some(latest) = self
-                .resolve_serving_generation(context.request, &request.scope.generation)
+                .resolve_serving_generation(
+                    context.request,
+                    &request.scope.generation,
+                    &request.meta.page,
+                )
                 .await
             else {
-                return unavailable(tracedecay_domain::UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let served_generation = latest.generation.manifest().generation_id.clone();
-            let finished_at = latest.generation.manifest().seal.sealed_at;
+            let finished_at = query_finished_at();
             let Some(cursor_authority) = self
                 .pr9_query_authority_for_scope(context.request.scope())
                 .await
@@ -1204,7 +1214,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &context,
                 &latest,
                 request.meta.temporal,
-                cursor_authority.profile().retrieval_budget,
+                cursor_authority.profile(),
             ) else {
                 return unavailable(finished_at);
             };
@@ -1295,13 +1305,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
             let Some(latest) = self
-                .resolve_serving_generation(context.request, &request.scope.generation)
+                .resolve_serving_generation(
+                    context.request,
+                    &request.scope.generation,
+                    &request.meta.page,
+                )
                 .await
             else {
-                return unavailable(tracedecay_domain::UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let served_generation = latest.generation.manifest().generation_id.clone();
-            let finished_at = latest.generation.manifest().seal.sealed_at;
+            let finished_at = query_finished_at();
             let Some(cursor_authority) = self
                 .pr9_query_authority_for_scope(context.request.scope())
                 .await
@@ -1312,7 +1326,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &context,
                 &latest,
                 request.meta.temporal,
-                cursor_authority.profile().retrieval_budget,
+                cursor_authority.profile(),
             ) else {
                 return unavailable(finished_at);
             };
@@ -1398,10 +1412,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let query = request.query.as_str().to_ascii_lowercase();
             let mut ranked = prepared
@@ -1452,7 +1471,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             finish_direct_query(
                 &prepared,
@@ -1473,10 +1492,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let mut items = prepared
                 .latest
@@ -1497,7 +1521,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             finish_direct_query(
                 &prepared,
@@ -1518,10 +1542,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let mut items = prepared
                 .latest
@@ -1560,7 +1589,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             finish_direct_query(
                 &prepared,
@@ -1581,10 +1610,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let selector = match &request.selector {
                 tracedecay_application::retrieval::ImplementationSelector::Trait { name }
@@ -1627,7 +1661,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
@@ -1656,17 +1690,22 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, TypeHierarchyRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             if symbol_record_by_id(&prepared.latest, &start).is_none() {
                 return unavailable_for_generation(
-                    prepared.latest.generation.manifest().seal.sealed_at,
+                    query_finished_at(),
                     prepared.latest.generation.manifest().generation_id.clone(),
                 );
             }
@@ -1696,7 +1735,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
@@ -1725,17 +1764,22 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             if symbol_record_by_id(&prepared.latest, &start).is_none() {
                 return unavailable_for_generation(
-                    prepared.latest.generation.manifest().seal.sealed_at,
+                    query_finished_at(),
                     prepared.latest.generation.manifest().generation_id.clone(),
                 );
             }
@@ -1757,7 +1801,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
@@ -1786,17 +1830,22 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             if symbol_record_by_id(&prepared.latest, &start).is_none() {
                 return unavailable_for_generation(
-                    prepared.latest.generation.manifest().seal.sealed_at,
+                    query_finished_at(),
                     prepared.latest.generation.manifest().generation_id.clone(),
                 );
             }
@@ -1829,7 +1878,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             finish_direct_query(
                 &prepared,
@@ -1850,10 +1899,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let prefix = format!("{}/", request.path.trim_end_matches('/'));
             let mut items = prepared
@@ -1888,7 +1942,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             finish_direct_query(
                 &prepared,
@@ -1909,10 +1963,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SourceMetadataRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let requested = request.files.iter().collect::<BTreeSet<_>>();
             let items = prepared
@@ -1944,7 +2003,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
@@ -1973,10 +2032,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, CodeFacetRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let mut counts = std::collections::BTreeMap::<String, u64>::new();
             match request.dimension {
@@ -2027,7 +2091,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
@@ -2056,10 +2120,15 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, CodeTimelineRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let generation = prepared.latest.generation.manifest().generation_id.clone();
             let items = vec![CodeTimelineRecord {
@@ -2089,7 +2158,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             let page = CodeQueryPage::new(generation, items, None, None, None)
                 .unwrap_or_else(|_| panic!("generation-owned timeline creates a valid page"));
@@ -2136,17 +2205,22 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
             let Some(prepared) = self
-                .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+                .prepare_callable_query(
+                    &context,
+                    &request.scope.generation,
+                    &request.meta.page,
+                    request.meta.temporal,
+                )
                 .await
             else {
-                return unavailable(UtcMicros(0));
+                return unavailable(query_finished_at());
             };
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             if symbol_record_by_id(&prepared.latest, &start).is_none() {
                 return unavailable_for_generation(
-                    prepared.latest.generation.manifest().seal.sealed_at,
+                    query_finished_at(),
                     prepared.latest.generation.manifest().generation_id.clone(),
                 );
             }
@@ -2171,7 +2245,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.meta.projection,
                 &request.meta.order,
             )) else {
-                return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+                return unavailable(query_finished_at());
             };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
@@ -2203,17 +2277,22 @@ fn navigation_symbol_query<'a>(
 ) -> PortFuture<'a, SymbolPrimitiveRecord> {
     Box::pin(async move {
         let Some(prepared) = registry
-            .prepare_callable_query(&context, &request.scope.generation, request.meta.temporal)
+            .prepare_callable_query(
+                &context,
+                &request.scope.generation,
+                &request.meta.page,
+                request.meta.temporal,
+            )
             .await
         else {
-            return unavailable(UtcMicros(0));
+            return unavailable(query_finished_at());
         };
         let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-            return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+            return unavailable(query_finished_at());
         };
         if symbol_record_by_id(&prepared.latest, &start).is_none() {
             return unavailable_for_generation(
-                prepared.latest.generation.manifest().seal.sealed_at,
+                query_finished_at(),
                 prepared.latest.generation.manifest().generation_id.clone(),
             );
         }
@@ -2249,7 +2328,7 @@ fn navigation_symbol_query<'a>(
             &request.meta.projection,
             &request.meta.order,
         )) else {
-            return unavailable(prepared.latest.generation.manifest().seal.sealed_at);
+            return unavailable(query_finished_at());
         };
         finish_direct_query(
             &prepared,

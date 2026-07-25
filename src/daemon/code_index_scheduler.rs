@@ -208,6 +208,65 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         Ok(())
     }
+
+    fn load_generation(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        if let Some(active) = self.load_active()?
+            && active.manifest().generation_id == *generation_id
+        {
+            return Ok(Some(active));
+        }
+
+        let mut paths = std::fs::read_dir(&self.generations_root)
+            .map_err(Self::unavailable)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        let mut matched = None;
+        for path in paths {
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(encoded_digest) = file_name
+                .strip_prefix("generation-")
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if encoded_digest.len() != 64
+                || !encoded_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || !path
+                    .symlink_metadata()
+                    .map_err(Self::unavailable)?
+                    .file_type()
+                    .is_file()
+            {
+                continue;
+            }
+            let bytes = std::fs::read(&path).map_err(Self::unavailable)?;
+            if Self::state_digest(&bytes) != format!("sha256:{encoded_digest}") {
+                return Err(Self::unavailable(
+                    "immutable code-generation filename does not match its sealed bytes",
+                ));
+            }
+            let generation =
+                CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::unavailable)?;
+            if generation.manifest().generation_id != *generation_id {
+                continue;
+            }
+            if matched.replace(generation).is_some() {
+                return Err(Self::unavailable(
+                    "multiple immutable code-generation files claim one generation identity",
+                ));
+            }
+        }
+        Ok(matched)
+    }
 }
 
 impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
@@ -651,6 +710,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     /// Keeps the current snapshot's interned bytes alive in the shared pool.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
+    publication: DaemonCodeIndexPublicationStoreV1,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
@@ -702,7 +762,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 privacy_key_epoch: 1,
                 max_snapshot_age_micros: None,
             },
-            publication,
+            publication.clone(),
             DaemonProjectionSinkV1,
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
@@ -739,6 +799,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             last_stat_signature: None,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
+            publication,
             owner,
             hints,
             wake,
@@ -1078,6 +1139,16 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ok()
             .flatten()
             .map(|generation| LatestCompleteCodeIndexV1 { generation })
+    }
+
+    fn generation(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        self.publication
+            .load_generation(generation_id)
+            .map(|generation| generation.map(|generation| LatestCompleteCodeIndexV1 { generation }))
+            .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
 
     fn capture_authoritative_snapshot(
