@@ -5,6 +5,8 @@ __pycache__/
 /hermes-wrapper/dist/
 # Generated visual-audit output (baselines in audit-baselines/ stay tracked).
 audit-gallery/
+# Generated interaction-state capture from stories/topography-audit.ts.
+topography-audit/
 # Playwright browser download markers / test output.
 test-results/
 playwright-report/
