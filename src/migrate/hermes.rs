@@ -164,13 +164,12 @@ pub async fn migrate_legacy_hermes_stores_to(
     user_home: &Path,
     tracedecay_profile_root: &Path,
 ) -> LegacyHermesMigrationReport {
-    migrate_legacy_hermes_stores_inner(
-        user_home,
-        tracedecay_profile_root,
-        &[user_home.join(".hermes")],
-        None,
-    )
-    .await
+    let hermes_homes = [user_home.join(".hermes")];
+    if !has_legacy_hermes_sources(&hermes_homes, tracedecay_profile_root) {
+        return LegacyHermesMigrationReport::default();
+    }
+    migrate_legacy_hermes_stores_inner(user_home, tracedecay_profile_root, &hermes_homes, None)
+        .await
 }
 
 async fn migrate_legacy_hermes_stores_inner(
@@ -392,6 +391,8 @@ async fn remove_legacy_registry_metadata(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::candidates::legacy_profile_dirs;
     use super::*;
     use crate::agents::hermes::HermesIntegration;
@@ -403,6 +404,17 @@ mod tests {
     use crate::sessions::{SessionMessageRecord, SessionRecord};
     use sha2::{Digest, Sha256};
     use tracedecay_domain::ProjectId;
+    use tracedecay_rusqlite_runtime::migration_sql::{
+        MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+    };
+
+    struct ForeignFixtureWriteAuthority;
+
+    impl MigrationSqlWriteAuthority for ForeignFixtureWriteAuthority {
+        fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+            Ok(())
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum HermesFixtureTable {
@@ -432,7 +444,16 @@ mod tests {
 
     impl HermesMigrationTestRuntime {
         async fn create(path: &Path) -> Self {
-            let connection = TestConnection::open(path);
+            if let Some(parent) = path.parent() {
+                crate::storage::PrivateStoreIo::create_dir_all(parent).unwrap();
+            }
+            let connection = TestConnection::open_with_write_authority(
+                path,
+                Arc::new(ForeignFixtureWriteAuthority),
+            );
+            crate::db::migrations::migrate_connection(&connection)
+                .await
+                .unwrap();
             crate::global_db::ensure_registered_schema(&connection)
                 .await
                 .unwrap();
@@ -1401,6 +1422,7 @@ mod tests {
             .await;
         drop(source_runtime);
 
+        crate::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
         let target_runtime = HermesMigrationTestRuntime::create(&layout.graph_db_path).await;
         let target_fact_id = target_runtime
@@ -1630,11 +1652,11 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let path_hash_layout =
+            crate::storage::default_profile_sharded_layout(&current_project, &profile_root)
+                .unwrap();
         assert!(
-            !crate::storage::resolve_layout(&current_project, &profile_root)
-                .unwrap()
-                .sessions_db_path
-                .exists(),
+            !path_hash_layout.sessions_db_path.exists(),
             "migration must not create a second path-hash shard"
         );
     }
@@ -1652,7 +1674,7 @@ mod tests {
         let legacy_alias = alias_parent.join("project-before-move");
         let legacy_physical = physical_parent.join("project-before-move");
         let current_project = physical_parent.join("project-after-move");
-        mark_real_project(&legacy_alias);
+        mark_real_project(&legacy_physical);
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(
