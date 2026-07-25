@@ -150,7 +150,7 @@ pub(crate) struct StorageTelemetryPayloadV1 {
 }
 
 /// The owner setting path that configures a store's soft byte budget.
-const BUDGET_SETTING_KEY: &str = "sync.retention.v1 store_soft_budgets_bytes";
+pub(crate) const BUDGET_SETTING_KEY: &str = "sync.retention.v1 store_soft_budgets_bytes";
 const BUDGET_UNSET_REASON: &str = "no soft size budget is configured by the owner for this store (set \
      sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)";
 const BUDGET_NOTE: &str = "budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store \
@@ -209,6 +209,18 @@ enum ResolvedStoreBudgetV1 {
     Configured(StoreSizeBudgetV1),
     Unset,
     Unknown(String),
+}
+
+/// Aggregate source coverage for the `OverBudgetStore` producer. This is not a
+/// health verdict: it records how many real store samples could be evaluated,
+/// how many owner budgets are unset, and how many reads remain undetermined.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StoreBudgetSourceSummaryV1 {
+    pub stores: usize,
+    pub evaluated: usize,
+    pub over_budget: usize,
+    pub unset: usize,
+    pub unknown: usize,
 }
 
 /// Resolve one store's owner-configured soft budget from the retention config.
@@ -286,6 +298,35 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
     }
 
     entries
+}
+
+/// Read the same real store samples and pinned owner configuration as the
+/// telemetry route, but without recording a growth watermark. The storage
+/// finding route uses this to state whether `OverBudgetStore` was evaluated,
+/// unset, or only partially observable.
+pub(crate) async fn budget_source_summary(state: &DashboardState) -> StoreBudgetSourceSummaryV1 {
+    let samples = collect_store_samples(state).await;
+    let mut summary = StoreBudgetSourceSummaryV1 {
+        stores: samples.len(),
+        ..StoreBudgetSourceSummaryV1::default()
+    };
+    for sampled in samples {
+        match budget_dimension(
+            &sampled.store,
+            sampled.sample(),
+            Some(&state.retention_config),
+        ) {
+            StoreBudgetDimensionV1::Evaluated { evaluation, .. } => {
+                summary.evaluated += 1;
+                if evaluation.is_over_budget() {
+                    summary.over_budget += 1;
+                }
+            }
+            StoreBudgetDimensionV1::Unset { .. } => summary.unset += 1,
+            StoreBudgetDimensionV1::Unknown { .. } => summary.unknown += 1,
+        }
+    }
+    summary
 }
 
 /// Upper bound on watermarks retained per store, and on distinct stores tracked

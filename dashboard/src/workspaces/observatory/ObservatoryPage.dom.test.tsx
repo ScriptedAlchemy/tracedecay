@@ -99,14 +99,14 @@ describe('ObservatoryPage store telemetry', () => {
     stubTelemetry(telemetryPayload(), storageFindingsPayload());
     renderObservatory();
 
-    expect(await screen.findByText('Over-budget stores')).toBeTruthy();
+    expect((await screen.findAllByText('Over-budget stores')).length).toBeGreaterThan(0);
     for (const label of [
       'Orphan stores',
       'Stale branch databases',
       'Incident debris',
       'Retention backlog',
     ]) {
-      expect(screen.getByText(label)).toBeTruthy();
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
     expect(document.querySelectorAll('[data-storage-finding-kind]')).toHaveLength(5);
     expect(
@@ -123,6 +123,31 @@ describe('ObservatoryPage store telemetry', () => {
       screen.getAllByText('use-case.application.storage.retention-collect'),
     ).toHaveLength(2);
     expect(screen.queryByText(/requires:/)).toBeNull();
+  });
+
+  it('renders every finding producer source state without treating unset or partial as clean', async () => {
+    stubTelemetry(telemetryPayload(), sourceStatusFindingsPayload());
+    renderObservatory();
+
+    expect(await screen.findByLabelText('Storage finding source status')).toBeTruthy();
+    const statusFor = (kind: string) =>
+      document.querySelector(`[data-storage-source-kind="${kind}"]`);
+
+    expect(statusFor('over_budget_store')?.getAttribute('data-storage-source-state')).toBe('unset');
+    expect(statusFor('over_budget_store')?.textContent).toContain(
+      'No owner budget configured · sync.retention.v1 store_soft_budgets_bytes',
+    );
+    expect(statusFor('orphan_store')?.getAttribute('data-storage-source-state')).toBe('partial');
+    expect(statusFor('stale_branch_dbs')?.getAttribute('data-storage-source-state')).toBe(
+      'unsupported',
+    );
+    expect(statusFor('incident_debris_present')?.getAttribute('data-storage-source-state')).toBe(
+      'real',
+    );
+    expect(statusFor('retention_backlog')?.getAttribute('data-storage-source-state')).toBe(
+      'partial',
+    );
+    expect(screen.queryByText(/all storage checks clean/i)).toBeNull();
   });
 });
 
@@ -174,6 +199,7 @@ function emptyStorageFindingsPayload() {
     remediations: [],
     known_families: ['storage'],
     note: 'canonical Doctor storage family contained no entries',
+    kind_statuses: sourceStatuses(),
   };
 }
 
@@ -292,7 +318,91 @@ function storageFindingsPayload() {
       'observability',
     ],
     note: 'storage retention and size authorities were consulted',
+    kind_statuses: sourceStatuses({
+      over_budget_store: {
+        state: 'partial',
+        observed_entries: 2,
+        reason: '2 stores evaluated; 1 unset; 2 undetermined',
+      },
+      orphan_store: {
+        state: 'real',
+        observed_entries: 1,
+        reason: 'canonical Doctor producer returned observed evidence',
+      },
+      stale_branch_dbs: {
+        state: 'real',
+        observed_entries: 1,
+        reason: 'canonical Doctor producer returned observed evidence',
+      },
+      incident_debris_present: {
+        state: 'real',
+        observed_entries: 1,
+        reason: 'canonical Doctor producer returned observed evidence',
+      },
+      retention_backlog: {
+        state: 'real',
+        observed_entries: 1,
+        reason: 'canonical Doctor producer returned observed evidence',
+      },
+    }),
   };
+}
+
+function sourceStatusFindingsPayload() {
+  return {
+    ...emptyStorageFindingsPayload(),
+    kind_statuses: sourceStatuses({
+      over_budget_store: {
+        state: 'unset',
+        observed_entries: 0,
+        reason:
+          'No owner budget configured · sync.retention.v1 store_soft_budgets_bytes',
+      },
+      orphan_store: {
+        state: 'partial',
+        observed_entries: 0,
+        reason: 'the canonical report did not carry per-producer completion evidence',
+      },
+      stale_branch_dbs: {
+        state: 'unsupported',
+        observed_entries: 0,
+        reason: 'no admitted Doctor report source is available for this dashboard scope',
+      },
+      incident_debris_present: {
+        state: 'real',
+        observed_entries: 1,
+        reason: 'canonical Doctor producer returned observed evidence',
+      },
+      retention_backlog: {
+        state: 'partial',
+        observed_entries: 0,
+        reason: 'retention watermark was stale',
+      },
+    }),
+  };
+}
+
+type SourceStatus = {
+  state: 'real' | 'unset' | 'partial' | 'unsupported';
+  observed_entries: number;
+  reason: string;
+};
+
+function sourceStatuses(overrides: Partial<Record<string, SourceStatus>> = {}) {
+  return [
+    'over_budget_store',
+    'orphan_store',
+    'stale_branch_dbs',
+    'incident_debris_present',
+    'retention_backlog',
+  ].map((kind) => ({
+    kind,
+    ...(overrides[kind] ?? {
+      state: 'unsupported',
+      observed_entries: 0,
+      reason: 'no admitted Doctor report source is available for this dashboard scope',
+    }),
+  }));
 }
 
 function telemetryPayload() {

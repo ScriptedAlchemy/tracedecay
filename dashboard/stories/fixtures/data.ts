@@ -1585,41 +1585,56 @@ const storageTelemetryEnvelope = {
   ],
 };
 
-/** GET /api/storage/findings — observatory doctor (StorageFindingsPayloadSchema). */
+/** GET /api/storage/findings — observatory canonical Doctor projection plus
+ * per-producer source coverage. This fixture follows the production parser
+ * path; source state is not inferred from an empty finding list. */
 const storageFindings = envelope({
-  kinds: [
+  family_filter: 'storage',
+  entries: [],
+  report_coverage: null,
+  remediations: [],
+  known_families: [
+    'advisory',
+    'configuration',
+    'storage_runtime',
+    'storage',
+    'language_server',
+    'semantic_index',
+    'observability',
+  ],
+  note: 'storage producers reported independent source coverage',
+  kind_statuses: [
     {
       kind: 'over_budget_store',
-      state: 'unsupported',
-      required_source: 'store_budget_observation',
-      reason: 'the store budget read source is not wired daemon-side yet',
+      state: 'unset',
+      observed_entries: 0,
+      reason: 'No owner budget configured · sync.retention.v1 store_soft_budgets_bytes',
     },
     {
       kind: 'orphan_store',
-      state: 'unsupported',
-      required_source: 'orphan_store_census',
-      reason: 'the orphan store census read source is not wired daemon-side yet',
+      state: 'real',
+      observed_entries: 1,
+      reason: 'canonical Doctor producer returned one observed entry with complete coverage',
     },
     {
       kind: 'stale_branch_dbs',
-      state: 'unsupported',
-      required_source: 'branch_store_inventory',
-      reason: 'the branch store inventory read source is not wired daemon-side yet',
+      state: 'partial',
+      observed_entries: 0,
+      reason: 'branch-store inventory was consulted but per-producer coverage was incomplete',
     },
     {
       kind: 'incident_debris_present',
       state: 'unsupported',
-      required_source: 'incident_debris_quarantine',
-      reason: 'the incident debris quarantine read source is not wired daemon-side yet',
+      observed_entries: 0,
+      reason: 'canonical Doctor storage source is unavailable (unsupported)',
     },
     {
       kind: 'retention_backlog',
-      state: 'unsupported',
-      required_source: 'retention_backlog_scan',
-      reason: 'the retention backlog scan read source is not wired daemon-side yet',
+      state: 'real',
+      observed_entries: 0,
+      reason: 'owner retention windows were evaluated with complete coverage',
     },
   ],
-  note: 'the five plan-38 storage finding producers are landed, but their input read sources are not yet wired daemon-side; each kind is typed unsupported until its source is available',
 });
 
 /* ==========================================================================

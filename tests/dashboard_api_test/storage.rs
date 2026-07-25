@@ -53,3 +53,62 @@ fn storage_telemetry_endpoint_reports_observed_or_typed_budget_states() {
         }
     });
 }
+
+#[test]
+fn storage_findings_endpoint_reports_every_producer_source_honestly() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let agent = http_agent();
+        let (status, envelope) = get_json(
+            &agent,
+            &format!("{}/api/storage/findings", fixture.base_url),
+        );
+
+        assert_eq!(status, 200, "{envelope}");
+        let statuses = envelope["payload"]["kind_statuses"]
+            .as_array()
+            .unwrap_or_else(|| panic!("storage producer statuses should be an array: {envelope}"));
+        assert_eq!(statuses.len(), 5, "every Plan 38 producer must be named");
+
+        let status_for = |kind: &str| {
+            statuses
+                .iter()
+                .find(|entry| entry["kind"] == kind)
+                .unwrap_or_else(|| panic!("missing storage producer status for {kind}: {envelope}"))
+        };
+        let budget = status_for("over_budget_store");
+        assert_eq!(
+            budget["state"], "unset",
+            "a readable owner config with no soft budgets is unset, never clean: {budget}"
+        );
+        assert!(
+            budget["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("store_soft_budgets_bytes")),
+            "the unset state must name its real configuration source: {budget}"
+        );
+
+        for kind in [
+            "orphan_store",
+            "stale_branch_dbs",
+            "incident_debris_present",
+            "retention_backlog",
+        ] {
+            let producer = status_for(kind);
+            assert_eq!(
+                producer["state"], "unsupported",
+                "an unadmitted Doctor source must stay explicitly unsupported: {producer}"
+            );
+            assert!(
+                producer["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty()),
+                "unsupported producer status needs a reason: {producer}"
+            );
+        }
+    });
+}
