@@ -615,15 +615,7 @@ fn provenance_capture_copies_no_git_objects() {
     );
 }
 
-// PR7 contract gap (report, then unignore): when the admitted checkout's
-// `.git` is removed but its path still exists inside an ambient ancestor
-// repository, `gix::discover` walks up and the probe returns the ambient
-// parent's HEAD as `Known` evidence bound to the defunct checkout's
-// repository/worktree identity. The contract requires a typed
-// missing/unavailable state; the probe needs to verify the discovered
-// repository against the admission-pinned identity before capturing.
 #[test]
-#[ignore = "PR7 gap: probe resolves a defunct checkout against the ambient parent HEAD instead of a typed unavailable state"]
 fn defunct_checkout_capture_never_falls_back_to_an_ambient_parent_repository() {
     let parent = GitFixture::new();
     parent.commit("ambient parent");
