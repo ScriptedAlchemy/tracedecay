@@ -65,7 +65,7 @@ pub enum DiagnosticQueryCoverage {
 pub struct DiagnosticQueryCursor(String);
 
 impl DiagnosticQueryCursor {
-    fn after_anchor(anchor: &RetrievalAnchorId) -> Self {
+    pub(crate) fn after_anchor(anchor: &RetrievalAnchorId) -> Self {
         Self(format!("{CURSOR_PREFIX}{}", anchor.as_str()))
     }
 
@@ -84,7 +84,7 @@ impl DiagnosticQueryCursor {
         Ok(Self(encoded.to_owned()))
     }
 
-    fn anchor(&self) -> &str {
+    pub(crate) fn anchor(&self) -> &str {
         &self.0[CURSOR_PREFIX.len()..]
     }
 }
@@ -107,6 +107,7 @@ impl DiagnosticPageRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticPage {
     pub records: Vec<GenerationDiagnosticV1>,
+    pub total: usize,
     pub coverage: DiagnosticQueryCoverage,
     pub next_cursor: Option<DiagnosticQueryCursor>,
 }
@@ -115,6 +116,7 @@ impl DiagnosticPage {
     fn unavailable(operation: &'static str, error: impl fmt::Display) -> Self {
         Self {
             records: Vec::new(),
+            total: 0,
             coverage: DiagnosticQueryCoverage::StoreUnavailable {
                 operation,
                 reason: error.to_string(),
@@ -445,6 +447,7 @@ impl<'a> DiagnosticsQuery<'a> {
             Ok(None) => {
                 return Ok(DiagnosticPage {
                     records: Vec::new(),
+                    total: 0,
                     coverage: DiagnosticQueryCoverage::Complete,
                     next_cursor: None,
                 });
@@ -792,10 +795,12 @@ fn paginate_sorted(
     records: Vec<GenerationDiagnosticV1>,
     request: &DiagnosticPageRequest,
 ) -> DiagnosticPage {
+    let total = records.len();
     let (records, coverage, next_cursor) =
         paginate_items(records, |record| record.diagnostic_anchor.as_str(), request);
     DiagnosticPage {
         records,
+        total,
         coverage,
         next_cursor,
     }
@@ -831,6 +836,7 @@ fn paginate_chain(
     };
     Ok(DiagnosticPage {
         records: page,
+        total: chain.len(),
         coverage,
         next_cursor,
     })
@@ -987,6 +993,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(anchors(&first), vec!["anchor.diagnostic.3"]);
+        assert_eq!(first.total, 2);
         assert_eq!(first.coverage, DiagnosticQueryCoverage::Truncated);
         let cursor = first.next_cursor.clone().expect("truncated page resumes");
 
@@ -995,6 +1002,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(anchors(&second), vec!["anchor.diagnostic.4"]);
+        assert_eq!(second.total, 2);
         assert_eq!(second.coverage, DiagnosticQueryCoverage::Complete);
         assert!(second.next_cursor.is_none());
 

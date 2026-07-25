@@ -82,15 +82,11 @@ fn diagnostics_scope_schema() -> serde_json::Value {
         "oneOf": [
             {"const": "workspace"},
             closed_object_schema(
-                json!({"package": string_property("Exact package diagnostic scope.")}),
-                &["package"]
-            ),
-            closed_object_schema(
                 json!({"file": string_property("Exact file diagnostic scope.")}),
                 &["file"]
             )
         ],
-        "description": "Workspace, package, or file diagnostic scope."
+        "description": "Workspace or exact file diagnostic scope."
     })
 }
 
