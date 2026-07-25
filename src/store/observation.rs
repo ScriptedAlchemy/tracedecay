@@ -111,6 +111,14 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
             && existing
                 .as_ref()
                 .is_some_and(|existing| existing.observation().receipt() == candidate.receipt());
+        if existed_exact {
+            let existing = existing
+                .as_ref()
+                .expect("exact duplicate classification requires a stored observation");
+            return Ok(ObservationPersistOutcome::ExactDuplicate(
+                existing.commit_receipt().clone(),
+            ));
+        }
         let idempotency_key = format!(
             "observation.{}",
             canonical_runtime_digest(&runtime_observation_command(&write))?
@@ -150,11 +158,7 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
             }
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
-                if existed_exact {
-                    Ok(ObservationPersistOutcome::ExactDuplicate(receipt))
-                } else {
-                    Ok(ObservationPersistOutcome::Committed(receipt))
-                }
+                Ok(ObservationPersistOutcome::Committed(receipt))
             }
             RuntimeSubmitOutcomeV1::ExactReplay { .. } => {
                 Ok(ObservationPersistOutcome::ExactDuplicate(receipt))
