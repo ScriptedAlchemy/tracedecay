@@ -55,6 +55,7 @@ mod lcm_api;
 mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
 mod lcm_service;
+mod loom_api;
 mod memory_analysis;
 mod memory_api;
 pub mod memory_curate;
@@ -807,6 +808,7 @@ fn router_with_active_application(
         .route("/api/settings/{*tail}", any(active_api_gateway))
         .route("/api/delivery/{*tail}", any(active_api_gateway))
         .route("/api/explorer/{*tail}", any(active_api_gateway))
+        .route("/api/loom/{*tail}", any(active_api_gateway))
         // PR14 V2 read-model surfaces bound through the active-project gateway,
         // mirroring the project-scoped `/api/projects/{id}/…` gateway path.
         .route("/api/doctor/{*tail}", any(active_api_gateway))
@@ -1067,6 +1069,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/explorer/sessions/{session_id}/read-context",
             get(explorer_api::read_context),
         )
+        .route("/api/loom/temporal", get(loom_api::temporal))
         // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
