@@ -502,13 +502,29 @@ async fn run_forward_only_post_update_command(
         return Err(forward_only_failure(&spec, error));
     }
     if let Err(error) =
-        tracedecay::doctor::wait_for_daemon_startup_health(std::time::Duration::from_mins(3)).await
+        tracedecay::doctor::wait_for_daemon_startup_health(startup_health_timeout()).await
     {
         return Err(forward_only_failure(&spec, error));
     }
     tracedecay::doctor::run_doctor(None)
         .await
         .map_err(|error| forward_only_failure(&spec, error))
+}
+
+/// How long post-update Doctor validation waits for daemon schema migration and
+/// compatibility projections to converge. Large profiles legitimately take more
+/// than a few minutes on first start after a schema change (observed: a ~90 GB
+/// profile converging well past the previous 3-minute deadline while perfectly
+/// healthy), and an expired deadline here strands an otherwise-successful
+/// update with the managed daemon disabled. Overridable for constrained
+/// environments via TRACEDECAY_STARTUP_HEALTH_TIMEOUT_SECS.
+fn startup_health_timeout() -> std::time::Duration {
+    std::env::var("TRACEDECAY_STARTUP_HEALTH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_mins(30))
 }
 
 fn dogfood_forward_only_target_state(
