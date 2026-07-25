@@ -1492,9 +1492,6 @@ mod tests {
             publish_diagnostics_code_description: true,
             publish_diagnostics_data: true,
             supports_document_diagnostics: true,
-            document_diagnostics_related_information: true,
-            document_diagnostics_code_description: true,
-            document_diagnostics_data: true,
             semantic: SemanticCapability::ALL.into_iter().collect(),
             ..ClientCapabilities::default()
         };
