@@ -22,5 +22,5 @@ pub use types::{
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationPlanContext,
     ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
-    ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
+    ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation, configuration_layer_scope_digest,
 };

@@ -39,14 +39,15 @@ use tracedecay_application::{
     callable_code_operations,
 };
 use tracedecay_domain::configuration::{
-    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
-    ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, ProtectedApplyRequest,
+    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
+    ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    ManifestDigest, ProjectId, RetrievalAnchorId, UtcMicros, canonical_sha256,
+    ManifestDigest, ProjectId, RetrievalAnchorId, UserProfileId, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -79,6 +80,7 @@ use crate::application::configuration::{
     ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
     PolicyBackedConfigurationMutationAuthorization, ProjectConfigurationRuntime,
     ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
+    configuration_layer_scope_digest,
 };
 use crate::application::feedback::concrete::{
     Pr12FeedbackRuntime, Pr12FeedbackRuntimeError, ProjectFeedbackStore, open_pr12_feedback_runtime,
@@ -2619,14 +2621,11 @@ async fn execute_configuration(
                     key: request.key,
                     value: request.value,
                 };
-                let mutation_authority = issue_configuration_mutation_authority(
+                let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
-                    ConfigurationMutationOperationV1::DirectMutation,
-                    mutation.target_scope_digest()?,
+                    &mutation,
                     request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::ConfigurationStore,
-                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -2658,14 +2657,11 @@ async fn execute_configuration(
                     layer: request.layer,
                     key: request.key,
                 };
-                let mutation_authority = issue_configuration_mutation_authority(
+                let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
-                    ConfigurationMutationOperationV1::DirectMutation,
-                    mutation.target_scope_digest()?,
+                    &mutation,
                     request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::ConfigurationStore,
-                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -2709,14 +2705,11 @@ async fn execute_configuration(
                     })
                     .collect();
                 let mutation = DirectConfigurationMutation::Batch { mutations };
-                let mutation_authority = issue_configuration_mutation_authority(
+                let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
-                    ConfigurationMutationOperationV1::DirectMutation,
-                    mutation.target_scope_digest()?,
+                    &mutation,
                     request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::ConfigurationStore,
-                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -3071,6 +3064,27 @@ fn issue_configuration_mutation_authority(
             observed_at,
         )
         .map_err(|_| ConfigurationError::Unavailable)
+}
+
+fn issue_direct_configuration_mutation_authority(
+    registered: &RegisteredConfigurationRuntime,
+    request_id: &str,
+    mutation: &DirectConfigurationMutation,
+    expected_revision: ConfigurationRevisionId,
+    observed_at: UtcMicros,
+) -> Result<ConfigurationMutationAuthority, ConfigurationError> {
+    registered
+        .grants
+        .issue_direct(request_id, mutation, expected_revision, observed_at)
+        .map_err(|problem| match problem {
+            DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                ConfigurationError::MutationAuthorityRejected
+            }
+            DaemonInvocationProblem::InvalidRequest => {
+                ConfigurationError::validation_message("invalid configuration mutation target")
+            }
+            _ => ConfigurationError::Unavailable,
+        })
 }
 
 fn configuration_request_authority(
@@ -3887,10 +3901,63 @@ struct DaemonConfigurationGrantAuthority {
     policy_epoch: u64,
     policy_digest: AccessPolicyDigest,
     expires_at: UtcMicros,
+    direct_layers: Arc<BTreeMap<ManifestDigest, ConfigurationLayerIdV1>>,
     grants: Arc<RwLock<BTreeMap<ConfigurationGrantId, ConfigurationMutationGrantSnapshotV1>>>,
 }
 
 impl DaemonConfigurationGrantAuthority {
+    fn issue_direct(
+        &self,
+        request_id: &str,
+        mutation: &DirectConfigurationMutation,
+        expected_revision: ConfigurationRevisionId,
+        issued_at: UtcMicros,
+    ) -> Result<ConfigurationMutationAuthority, DaemonInvocationProblem> {
+        let layer = mutation
+            .target_layer()
+            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+        let scope_digest = mutation
+            .target_scope_digest()
+            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+        if self.direct_layers.get(&scope_digest) != Some(layer) {
+            return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
+        }
+        self.issue(
+            request_id,
+            ConfigurationMutationOperationV1::DirectMutation,
+            scope_digest,
+            expected_revision,
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            issued_at,
+        )
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        layers: impl IntoIterator<Item = ConfigurationLayerIdV1>,
+        expires_at: UtcMicros,
+    ) -> Self {
+        Self {
+            actor: ActorId::new("actor.configuration.test").expect("actor"),
+            policy_epoch: 1,
+            policy_digest: AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("policy"),
+            expires_at,
+            direct_layers: Arc::new(
+                layers
+                    .into_iter()
+                    .map(|layer| {
+                        let digest =
+                            configuration_layer_scope_digest(&layer).expect("layer digest");
+                        (digest, layer)
+                    })
+                    .collect(),
+            ),
+            grants: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
     fn issue(
         &self,
         request_id: &str,
@@ -3966,6 +4033,39 @@ impl DaemonConfigurationGrantAuthority {
             .insert(grant_id, snapshot);
         Ok(ConfigurationMutationAuthority { receipt })
     }
+}
+
+fn mounted_configuration_layers(
+    project_id: &ProjectId,
+    profile_id: &UserProfileId,
+    snapshot: &ConfigurationSnapshotV1,
+) -> Result<BTreeMap<ManifestDigest, ConfigurationLayerIdV1>, DaemonInvocationProblem> {
+    let mut layers = std::collections::BTreeSet::from([
+        ConfigurationLayerIdV1::Project {
+            project_id: project_id.clone(),
+        },
+        ConfigurationLayerIdV1::UserProfile {
+            profile_id: profile_id.clone(),
+        },
+    ]);
+    layers.extend(
+        snapshot
+            .provenance
+            .values()
+            .flatten()
+            .filter_map(|candidate| match &candidate.layer {
+                ConfigurationLayerIdV1::Collection { .. } => Some(candidate.layer.clone()),
+                _ => None,
+            }),
+    );
+    layers
+        .into_iter()
+        .map(|layer| {
+            configuration_layer_scope_digest(&layer)
+                .map(|digest| (digest, layer))
+                .map_err(|_| DaemonInvocationProblem::Unavailable)
+        })
+        .collect()
 }
 
 impl ConfigurationMutationGrantAuthority for DaemonConfigurationGrantAuthority {
@@ -4325,6 +4425,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         project_root: PathBuf,
         runtime: Arc<ProjectConfigurationRuntime>,
         scope: ResolvedScope,
+        profile_id: UserProfileId,
         actor: ActorId,
         expires_at: UtcMicros,
         membership_digest: Option<ManifestDigest>,
@@ -4349,11 +4450,28 @@ impl DaemonConfigurationRuntimeRegistrar {
             authorization_policy_digest: policy_digest.clone(),
             policy_epoch: 1,
         };
+        let current =
+            runtime
+                .client()
+                .current()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("configuration layer authority unavailable: {error}"),
+                })?;
+        let direct_layers = mounted_configuration_layers(
+            &runtime.configuration_target().project_id,
+            &profile_id,
+            &current.snapshot,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("configuration layer authority invalid: {error:?}"),
+        })?;
         let grants = DaemonConfigurationGrantAuthority {
             actor: actor.clone(),
             policy_epoch: 1,
             policy_digest,
             expires_at,
+            direct_layers: Arc::new(direct_layers),
             grants: Arc::new(RwLock::new(BTreeMap::new())),
         };
         runtime.install_authorities(
@@ -6432,6 +6550,91 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
+        let exact_project = tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+            project_id: ProjectId::new("project.configuration.exact").expect("project"),
+        };
+        let exact_profile = tracedecay_domain::configuration::ConfigurationLayerIdV1::UserProfile {
+            profile_id: tracedecay_domain::UserProfileId::new("profile.configuration.exact")
+                .expect("profile"),
+        };
+        let exact_collection =
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Collection {
+                collection_id: tracedecay_domain::QueryCollectionId::new(
+                    "collection.configuration.exact",
+                )
+                .expect("collection"),
+            };
+        let authority = DaemonConfigurationGrantAuthority::for_test(
+            [
+                exact_project.clone(),
+                exact_profile.clone(),
+                exact_collection.clone(),
+            ],
+            UtcMicros(100),
+        );
+        let expected_revision =
+            ConfigurationRevisionId::new("configuration.revision.exact").expect("revision");
+
+        for (index, layer) in [exact_project, exact_profile, exact_collection]
+            .into_iter()
+            .enumerate()
+        {
+            let mutation = DirectConfigurationMutation::Unset {
+                layer,
+                key: tracedecay_domain::configuration::SettingKey::new("sync.auto_watch")
+                    .expect("setting"),
+            };
+            assert!(
+                authority
+                    .issue_direct(
+                        &format!("request.configuration.exact.{index}"),
+                        &mutation,
+                        expected_revision.clone(),
+                        UtcMicros(1),
+                    )
+                    .is_ok()
+            );
+        }
+
+        for (index, layer) in [
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: ProjectId::new("project.configuration.foreign").expect("project"),
+            },
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::UserProfile {
+                profile_id: tracedecay_domain::UserProfileId::new(
+                    "profile.configuration.foreign",
+                )
+                .expect("profile"),
+            },
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Collection {
+                collection_id: tracedecay_domain::QueryCollectionId::new(
+                    "collection.configuration.foreign",
+                )
+                .expect("collection"),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let foreign = DirectConfigurationMutation::Unset {
+                layer,
+                key: tracedecay_domain::configuration::SettingKey::new("sync.auto_watch")
+                    .expect("setting"),
+            };
+            assert!(matches!(
+                authority.issue_direct(
+                    &format!("request.configuration.foreign.{index}"),
+                    &foreign,
+                    expected_revision.clone(),
+                    UtcMicros(1),
+                ),
+                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
+            ));
+        }
+    }
 
     #[derive(Default)]
     struct RecordingFeedbackCycleObservations(
