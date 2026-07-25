@@ -48,6 +48,70 @@ fn test_client_identity_for(profile_root: PathBuf) -> DaemonClientIdentity {
     }
 }
 
+fn prepare_test_profile_root(profile_root: &std::path::Path) {
+    std::fs::create_dir_all(profile_root).expect("create test profile root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
+            .expect("secure test profile root");
+    }
+}
+
+fn test_store_administration_for_profile(profile_root: &std::path::Path) -> StoreAdministration {
+    prepare_test_profile_root(profile_root);
+    let profile_identity = crate::daemon::profile_identity::load_or_create(profile_root)
+        .expect("load test profile identity");
+    StoreAdministration::default().with_profile_identity(profile_identity)
+}
+
+#[cfg(unix)]
+fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngine {
+    prepare_test_profile_root(profile_root);
+    let profile_identity = crate::daemon::profile_identity::load_or_create(profile_root)
+        .expect("load test profile identity");
+    DaemonEngine::default().with_profile_identity(profile_identity)
+}
+
+fn enter_test_daemon_database_scope(
+    profile_root: &std::path::Path,
+    label: &str,
+) -> crate::db::DaemonDatabaseScope {
+    crate::db::enter_daemon_database_scope(profile_root, 1, label)
+        .expect("enter test daemon database scope")
+}
+
+async fn initialize_test_project(
+    project_root: &std::path::Path,
+    client_identity: &DaemonClientIdentity,
+) -> crate::storage::StoreLayout {
+    prepare_test_profile_root(&client_identity.profile_root);
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &client_identity.profile_root,
+        "daemon test fixture initialization",
+    )
+    .expect("acquire fixture lifecycle authority");
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &client_identity.profile_root,
+        "daemon test fixture initialization",
+    )
+    .expect("enter fixture maintenance database scope");
+    let project = crate::tracedecay::TraceDecay::init_with_exclusive_maintenance(
+        project_root,
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(client_identity.profile_root.clone()),
+            global_db_path: Some(client_identity.global_db_path.clone()),
+        },
+        &lifecycle,
+    )
+    .await
+    .expect("initialize project");
+    let store_layout = project.store_layout().clone();
+    project.close();
+    store_layout
+}
+
 fn test_handshake_defaults() -> DaemonHandshake {
     DaemonHandshake {
         project_path: None,
