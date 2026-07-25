@@ -789,13 +789,6 @@ fn router_with_active_application(
     let router = Router::new()
         .route("/", get(assets::app_index))
         .route("/static/{*tail}", get(assets::app_static))
-        .route("/legacy", get(assets::index_html))
-        .route("/shell/{file}", get(assets::shell_asset))
-        .route(
-            "/dashboard-plugins/{plugin}/dist/{file}",
-            get(assets::plugin_asset),
-        )
-        .route("/api/dashboard/plugins", get(plugins_list))
         .route("/api/projects", get(projects::list))
         .route("/api/projects/{project_id}", get(projects::context))
         .route(
@@ -1270,33 +1263,8 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "host_mode": automation_host_mode,
             "availability": backend_availability,
         },
-        "dashboards": assets::DASHBOARD_PLUGINS
-            .iter()
-            .map(|plugin| plugin.name)
-            .collect::<Vec<_>>(),
+        "dashboards": ["tracedecay"],
     }))
-}
-
-/// Plugin manifest list, mirroring the Hermes `/api/dashboard/plugins`
-/// endpoint shape closely enough for the standalone shell.
-async fn plugins_list() -> Json<Value> {
-    Json(json!(
-        assets::DASHBOARD_PLUGINS
-            .iter()
-            .map(|plugin| {
-                json!({
-                    "name": plugin.name,
-                    "label": plugin.label,
-                    "description": plugin.description,
-                    "icon": plugin.icon,
-                    "entry": "dist/index.js",
-                    "css": "dist/style.css",
-                    "has_api": true,
-                    "source": "tracedecay",
-                })
-            })
-            .collect::<Vec<_>>()
-    ))
 }
 
 #[cfg(test)]
