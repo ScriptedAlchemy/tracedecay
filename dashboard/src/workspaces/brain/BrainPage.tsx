@@ -213,11 +213,16 @@ function SynapseMap({
         * underneath is reduced to a blurred glow behind opaque panels. There
         * the HUD returns to normal document flow, stacked ABOVE the canvas
         * (hence rendered first here -- position:absolute takes it out of
-        * flow at `md` and up, so the source order only matters below that),
-        * and the canvas gets a guaranteed minimum height so it always has a
-        * real field to draw the network on regardless of how tall the HUD's
-        * own content is. */}
-      <div className="pointer-events-none static mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
+        * flow at `md` and up, so the source order only matters below that).
+        * `z-10` is required, not decorative: GraphCanvas's own canvas element
+        * is `position:relative` (so its own children position correctly),
+        * which makes it a positioned, z-index:auto box just like this HUD --
+        * two such boxes stack in DOM order, and with the HUD now rendered
+        * FIRST (for the mobile flow case above) the canvas would otherwise
+        * paint over it at every width. The canvas gets a guaranteed minimum
+        * height so it always has a real field to draw the network on
+        * regardless of how tall the HUD's own content is. */}
+      <div className="pointer-events-none static z-10 mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
         <InstrumentReadout items={counts} />
         <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
       </div>

@@ -426,6 +426,19 @@ export function GraphCanvas({
       labelSize: 11,
       labelColor: { color: rgb(colors.label) },
       defaultEdgeColor: rgba(colors.edge, 0.9),
+      // Every reducer below hands back a `zIndex` (bloom=0, halo=1, body=2,
+      // selected/hot=3, travelling pulse=4) on the assumption that draw order
+      // honours it. Sigma does not, unless told to: this setting is off by
+      // default, so without it every node paints in graph insertion order
+      // regardless of its zIndex attribute. The glow companions are inserted
+      // AFTER the real body (`syncGlow` runs once the body already exists),
+      // so they were silently painting OVER it -- their own faint colour,
+      // stacked as halo then bloom on top of an opaque body, was what read as
+      // a plain white disc on the light theme's near-white field (worst on
+      // the largest, highest-degree bodies, which carry the largest glow).
+      // Enabling real z-ordering restores what the reducers already intended:
+      // bloom, then halo, then the body on top, then anything hot.
+      zIndex: true,
       nodeReducer: (node, data) => {
         if (isManaged(node)) return data;
         const isSelected = node === selectedIdRef.current;
