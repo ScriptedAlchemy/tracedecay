@@ -177,7 +177,15 @@ async fn hook_v2_context_scout_lifecycle(
     args: &Value,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
-    let session_id = hook_v2_native_session_id(args, envelope)?;
+    hook_v2_context_scout_lifecycle_for_session(envelope, hook_v2_native_session_id(args, envelope))
+        .await
+}
+
+async fn hook_v2_context_scout_lifecycle_for_session(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    session_id: Option<SessionId>,
+) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
+    let session_id = session_id?;
     crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
         envelope.project_id,
         envelope.worktree_id,
@@ -286,21 +294,101 @@ fn hook_v2_catchup_response(action: &str) -> Value {
     })
 }
 
-async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Value> {
-    let envelope = hook_v2_envelope(args, action)?;
-    let now = hook_now();
-    let snapshot = match hook_v2_binding_admission(cg, &envelope, now) {
-        HookV2BindingAdmission::Bound(snapshot) => snapshot,
-        HookV2BindingAdmission::Unavailable => {
-            return Ok(json!({
-                "action": action,
-                "status": "unavailable",
-            }));
+/// Where the daemon keeps the durable admission idempotency ledgers. One
+/// ledger per (hook data root, producing host) — the same daemon-owned hook
+/// data root that already holds the published bindings and the replay spool.
+/// No migrated database participates.
+pub(crate) fn hook_v2_admission_ledger_root(
+    data_root: &Path,
+    host: tracedecay_hooks::HookHostV1,
+) -> std::path::PathBuf {
+    data_root.join("hook-v2-admissions").join(host.as_key())
+}
+
+/// Bound on distinct ledgers held open at once. A daemon serves one profile, so
+/// this is (projects opened) x (bound hosts); beyond it admission reports
+/// backpressure and the hook spools the envelope for replay rather than
+/// admitting something it cannot deduplicate.
+const MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS: usize = 64;
+
+type HookV2AdmissionLedgers =
+    BTreeMap<(std::path::PathBuf, &'static str), tracedecay_hooks::HookAdmissionLedgerV1>;
+
+fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
+    static LEDGERS: OnceLock<StdMutex<HookV2AdmissionLedgers>> = OnceLock::new();
+    LEDGERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
+}
+
+/// Durably record one admission identity. `None` means the ledger itself is
+/// unavailable — the caller must not claim an admission it cannot deduplicate.
+pub(crate) fn record_hook_v2_admission(
+    data_root: &Path,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    now: UtcMicros,
+) -> Option<tracedecay_hooks::HookAdmissionDecisionV1> {
+    let key = (data_root.to_path_buf(), envelope.producer.as_key());
+    let mut ledgers = hook_v2_admission_ledgers().lock().ok()?;
+    if !ledgers.contains_key(&key) {
+        if ledgers.len() >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
+            return None;
         }
+        let (ledger, _report) = tracedecay_hooks::HookAdmissionLedgerV1::open(
+            hook_v2_admission_ledger_root(data_root, envelope.producer),
+            envelope.producer,
+            tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
+            now,
+        )
+        .ok()?;
+        ledgers.insert(key.clone(), ledger);
+    }
+    ledgers.get_mut(&key)?.admit(envelope, now).ok()
+}
+
+/// The daemon-side result of admitting one Hook V2 envelope, shared by the
+/// synchronous hook action and by spool replay so both converge on the same
+/// idempotency record.
+pub(crate) enum HookV2AdmissionOutcomeV1 {
+    Admitted {
+        orchestration: crate::daemon::Pr13HookOrchestrationAdmissionV1,
+        ready_guidance: Value,
+        feedback_notice: Value,
+    },
+    /// This exact envelope was already admitted; no work is repeated.
+    ExactDuplicate,
+    /// The same event identity previously carried different bytes.
+    Conflict,
+    /// The binding no longer authorizes this envelope.
+    CatchupRequired,
+    /// Idempotency could not be recorded, so nothing was admitted.
+    Backpressured,
+    Unavailable,
+}
+
+pub(crate) async fn admit_hook_v2_envelope(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    let snapshot = match hook_v2_binding_admission(cg, envelope, now) {
+        HookV2BindingAdmission::Bound(snapshot) => snapshot,
+        HookV2BindingAdmission::Unavailable => return HookV2AdmissionOutcomeV1::Unavailable,
         HookV2BindingAdmission::CatchupRequired => {
-            return Ok(hook_v2_catchup_response(action));
+            return HookV2AdmissionOutcomeV1::CatchupRequired;
         }
     };
+    // Durable idempotency is taken *after* reauthorization and *before* any
+    // effect, so at-least-once delivery converges on exactly one admission.
+    match record_hook_v2_admission(&cg.hook_store_layout().data_root, envelope, now) {
+        Some(tracedecay_hooks::HookAdmissionDecisionV1::Admitted) => {}
+        Some(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate) => {
+            return HookV2AdmissionOutcomeV1::ExactDuplicate;
+        }
+        Some(tracedecay_hooks::HookAdmissionDecisionV1::Conflict) => {
+            return HookV2AdmissionOutcomeV1::Conflict;
+        }
+        None => return HookV2AdmissionOutcomeV1::Backpressured,
+    }
     // Live-activity tap: a bound hook-v2 envelope reaching admission IS an agent
     // working in this project — the primary live hook path for every v2-bound
     // host. Publish it here, where the project scope is already resolved. Free
@@ -312,7 +400,7 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
         1,
         Some(hook_v2_family_label(envelope.event.family())),
     );
-    let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
+    let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
     let claim_authority = match (
         crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
             envelope.clone(),
@@ -328,7 +416,7 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
     };
     let ready_guidance = match (cg.context_scout_owner(), claim_authority) {
         (Some(owner), Some((address, input_watermark))) => match owner
-            .claim_ready_guidance_exact(&envelope, address, input_watermark, snapshot.revision, now)
+            .claim_ready_guidance_exact(envelope, address, input_watermark, snapshot.revision, now)
             .await
         {
             Some((guidance, claim)) => {
@@ -369,14 +457,53 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
     )
     .and_then(|notice| serde_json::to_value(notice).ok())
     .unwrap_or(Value::Null);
-    Ok(json!({
-        "action": action,
-        "status": "accepted",
-        "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
-        "orchestration": orchestration,
-        "ready_guidance": ready_guidance,
-        "feedback_notice": feedback_notice,
-    }))
+    HookV2AdmissionOutcomeV1::Admitted {
+        orchestration,
+        ready_guidance,
+        feedback_notice,
+    }
+}
+
+async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Value> {
+    let envelope = hook_v2_envelope(args, action)?;
+    let now = hook_now();
+    let native_session_id = hook_v2_native_session_id(args, &envelope);
+    Ok(
+        match admit_hook_v2_envelope(cg, &envelope, native_session_id, now).await {
+            HookV2AdmissionOutcomeV1::Admitted {
+                orchestration,
+                ready_guidance,
+                feedback_notice,
+            } => json!({
+                "action": action,
+                "status": "accepted",
+                "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+                "orchestration": orchestration,
+                "ready_guidance": ready_guidance,
+                "feedback_notice": feedback_notice,
+            }),
+            HookV2AdmissionOutcomeV1::ExactDuplicate => json!({
+                "action": action,
+                "status": "exact_duplicate",
+                "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+            }),
+            HookV2AdmissionOutcomeV1::Conflict => json!({
+                "action": action,
+                "status": "rejected",
+                "disposition": tracedecay_hooks::HookTransportDispositionV1::CatchupRequired,
+                "reason": "admission_identity_conflict",
+            }),
+            HookV2AdmissionOutcomeV1::CatchupRequired => hook_v2_catchup_response(action),
+            HookV2AdmissionOutcomeV1::Backpressured => json!({
+                "action": action,
+                "status": "backpressured",
+            }),
+            HookV2AdmissionOutcomeV1::Unavailable => json!({
+                "action": action,
+                "status": "unavailable",
+            }),
+        },
+    )
 }
 
 /// Short, stable label for the dashboard's activity payload. Kept here rather
@@ -1653,6 +1780,56 @@ mod tests {
     };
 
     static RETAINED_CLAIM_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn admission_test_envelope(event_id: u8, epoch: u64) -> tracedecay_hooks::HookEventEnvelopeV2 {
+        tracedecay_hooks::HookEventEnvelopeV2 {
+            schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+            event_id: [event_id; 16],
+            producer: tracedecay_hooks::HookHostV1::ClaudeCode,
+            protected_session_id: [5; 32],
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: epoch,
+            binding_token: [4; 32],
+            ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+            observed_at: UtcMicros(11),
+            event: tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::TurnComplete,
+            },
+        }
+    }
+
+    #[test]
+    fn daemon_admission_is_idempotent_per_identity_and_conflicts_on_different_bytes() {
+        let data_root = tempfile::tempdir().unwrap();
+        let now = UtcMicros(1_000);
+
+        assert_eq!(
+            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 7), now),
+            Some(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)
+        );
+        assert_eq!(
+            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 7), now),
+            Some(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)
+        );
+        assert_eq!(
+            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 8), now),
+            Some(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)
+        );
+        assert_eq!(
+            record_hook_v2_admission(data_root.path(), &admission_test_envelope(10, 7), now),
+            Some(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)
+        );
+        assert!(
+            hook_v2_admission_ledger_root(
+                data_root.path(),
+                tracedecay_hooks::HookHostV1::ClaudeCode
+            )
+            .join("admissions.v1.bin")
+            .is_file()
+        );
+    }
 
     fn retained_claim(id: u8) -> crate::agents::context_scout_v2::ContextScoutDurableClaimV1 {
         use crate::agents::context_scout_v2::{

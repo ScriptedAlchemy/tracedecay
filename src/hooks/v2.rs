@@ -25,7 +25,7 @@ pub(crate) enum HookV2Dispatch {
     },
 }
 
-const HOOK_V2_BOUND_HOSTS: &[HookHostV1] = &[
+pub(crate) const HOOK_V2_BOUND_HOSTS: &[HookHostV1] = &[
     HookHostV1::ClaudeCode,
     HookHostV1::Codex,
     HookHostV1::CursorDesktop,
