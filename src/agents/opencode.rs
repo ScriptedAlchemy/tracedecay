@@ -25,6 +25,8 @@ pub struct OpenCodeIntegration;
 
 const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../plugin/opencode/tracedecay.ts");
 const OPENCODE_PLUGIN_MARKER: &str = "TraceDecayPlugin";
+/// Deployed path of the managed plugin relative to the `OpenCode` config dir.
+pub(crate) const OPENCODE_PLUGIN_RELATIVE: &str = "plugins/tracedecay.ts";
 
 impl AgentIntegration for OpenCodeIntegration {
     fn name(&self) -> &'static str {
@@ -293,10 +295,28 @@ fn opencode_plugin_path(home: &Path) -> std::path::PathBuf {
         .join("plugins/tracedecay.ts")
 }
 
-fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
+/// Rendered inventory of the managed `OpenCode` plugin files. This installer and
+/// the receipt-backed first-party host-bundle catalog must produce
+/// byte-identical files: the component-set transaction verifies installed
+/// artifact digests after the compatibility registration adapter re-runs this
+/// installer, so any rendering drift between the two writers fails installs
+/// with `ArtifactContentMismatch` — and, before the convergent rollback rules,
+/// wedged the shared component-set journal.
+pub(crate) fn rendered_plugin_files(
+    tracedecay_bin: &str,
+) -> Result<Vec<(&'static str, String)>> {
     let encoded = serde_json::to_string(tracedecay_bin)?;
-    let rendered = OPENCODE_PLUGIN_SOURCE.replace("\"__TRACEDECAY_BIN__\"", &encoded);
-    safe_write_text_file(path, &rendered, None)
+    Ok(vec![(
+        OPENCODE_PLUGIN_RELATIVE,
+        OPENCODE_PLUGIN_SOURCE.replace("\"__TRACEDECAY_BIN__\"", &encoded),
+    )])
+}
+
+fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
+    for (_, rendered) in rendered_plugin_files(tracedecay_bin)? {
+        safe_write_text_file(path, &rendered, None)?;
+    }
+    Ok(())
 }
 
 fn remove_opencode_plugin(path: &Path) -> Result<()> {
