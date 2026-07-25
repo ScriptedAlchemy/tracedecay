@@ -64,7 +64,6 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
-    pub(crate) git_read_executor: Option<super::GitReadExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
     #[cfg(any(test, feature = "test-transport"))]
@@ -144,7 +143,6 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
-            git_read_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             #[cfg(any(test, feature = "test-transport"))]
@@ -215,7 +213,6 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
-            git_read_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             #[cfg(any(test, feature = "test-transport"))]
@@ -245,11 +242,6 @@ impl McpServerConstructionContext {
         executor: super::CodeIndexSearchExecutor,
     ) -> Self {
         self.code_index_search_executor = Some(executor);
-        self
-    }
-
-    pub(crate) fn with_git_read_executor(mut self, executor: super::GitReadExecutor) -> Self {
-        self.git_read_executor = Some(executor);
         self
     }
 

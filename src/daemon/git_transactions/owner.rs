@@ -48,10 +48,19 @@ pub(crate) struct DaemonGitAuthorityStateV1 {
 }
 
 pub(crate) trait DaemonGitAuthoritySource: Send + Sync {
+    fn current_capability(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError>;
+
     fn current(
         &self,
         operation: GitIndexTransactionOperationV1,
-    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError>;
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        let binding = GitIndexOperationBindingV1::for_operation(operation)
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        self.current_capability(&binding.capability_id)
+    }
 }
 
 struct ProductionDaemonGitAuthoritySource {
@@ -61,9 +70,9 @@ struct ProductionDaemonGitAuthoritySource {
 }
 
 impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
-    fn current(
+    fn current_capability(
         &self,
-        operation: GitIndexTransactionOperationV1,
+        capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let evaluated_at = current_micros();
         if evaluated_at >= self.access.grant_expires_at {
@@ -77,9 +86,6 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
 
-        let binding = GitIndexOperationBindingV1::for_operation(operation)
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        let capability_id = binding.capability_id;
         let bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let Some(ConfigurationValueV1::SourceBindings(bindings)) =
@@ -138,13 +144,13 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
             .map(|capability| CapabilityId::new(capability.as_str().to_owned()))
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(|_| GitIndexTransactionPortError::PolicyDenied)?;
-        if !effective_capabilities.contains(&capability_id) {
+        if !effective_capabilities.contains(capability_id) {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
         let catalog = build_application_catalog_snapshot()
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let manifest = catalog
-            .capability(&capability_id)
+            .capability(capability_id)
             .ok_or(GitIndexTransactionPortError::PolicyDenied)?;
         let catalog_digest = ManifestDigest::new(catalog.digest().to_string())
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
@@ -204,9 +210,9 @@ impl DaemonGitAuthoritySlot {
 }
 
 impl DaemonGitAuthoritySource for DaemonGitAuthoritySlot {
-    fn current(
+    fn current_capability(
         &self,
-        operation: GitIndexTransactionOperationV1,
+        capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let source = self
             .source
@@ -215,7 +221,7 @@ impl DaemonGitAuthoritySource for DaemonGitAuthoritySlot {
             .as_ref()
             .ok_or(GitIndexTransactionPortError::PolicyDenied)?
             .clone();
-        source.current(operation)
+        source.current_capability(capability_id)
     }
 }
 
@@ -323,6 +329,15 @@ impl DaemonGitInvocationOwner {
         operation: GitIndexTransactionOperationV1,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         self.authority.current(operation)
+    }
+
+    pub(crate) fn current_read_authority(
+        &self,
+        request: &crate::application::git_reads::GitReadRequestV1,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        let capability = CapabilityId::new(request.capability_id().to_owned())
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        self.authority.current_capability(&capability)
     }
 }
 

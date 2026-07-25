@@ -476,9 +476,9 @@ struct MutableDaemonGitAuthority {
 }
 
 impl DaemonGitAuthoritySource for MutableDaemonGitAuthority {
-    fn current(
+    fn current_capability(
         &self,
-        _operation: GitIndexTransactionOperationV1,
+        _capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         Ok(self.current.lock().expect("authority state").clone())
     }
