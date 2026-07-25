@@ -85,7 +85,9 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-use crate::application_surface::http_application_router;
+use crate::application_surface::{
+    dashboard_configuration_application_router, http_application_router,
+};
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
@@ -721,7 +723,11 @@ pub(crate) fn validate_dashboard_host(host: &str) -> Result<&str> {
 /// daemon. They are not part of the selected-project dashboard gateway; PR14
 /// must add explicit selected-project and Hermes adapters before that scope
 /// can change.
-struct ActiveProjectApplicationRoutes(Router);
+struct ActiveProjectApplicationRoutes {
+    http_router: Router,
+    dashboard_configuration_router: Router,
+    client: Option<DaemonInvocationClient>,
+}
 
 impl ActiveProjectApplicationRoutes {
     fn for_active_project(cg: &TraceDecay) -> Result<Self> {
@@ -740,15 +746,25 @@ impl ActiveProjectApplicationRoutes {
                 ));
             }
         };
-        let router = http_application_router(
-            client,
+        let http_router = http_application_router(
+            client.clone(),
             daemon_operation_event_authority(),
             active_project_id,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("could not mount application HTTP routes: {error}"),
         })?;
-        Ok(Self(router))
+        let dashboard_configuration_router =
+            dashboard_configuration_application_router(client.clone()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("could not mount dashboard configuration routes: {error}"),
+                }
+            })?;
+        Ok(Self {
+            http_router,
+            dashboard_configuration_router,
+            client: Some(client),
+        })
     }
 }
 
@@ -826,7 +842,12 @@ fn router_with_active_application(
         .fallback(get(assets::app_spa_fallback))
         .with_state(runtime);
     match application {
-        Some(application) => router.nest("/api/application", application.0),
+        Some(application) => router
+            .nest("/api/application", application.http_router)
+            .nest(
+                "/api/dashboard/application",
+                application.dashboard_configuration_router,
+            ),
         None => router,
     }
 }
@@ -1481,9 +1502,12 @@ mod authority_tests {
             .expect("project init");
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
-        let application = ActiveProjectApplicationRoutes(
-            Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
-        );
+        let application = ActiveProjectApplicationRoutes {
+            http_router: Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
+            dashboard_configuration_router: Router::new()
+                .route("/probe", get(|| async { StatusCode::ACCEPTED })),
+            client: None,
+        };
         let app = router_with_active_application(state, Some(application));
 
         let active = app
@@ -1497,6 +1521,18 @@ mod authority_tests {
             .await
             .expect("active application response");
         assert_eq!(active.status(), StatusCode::NO_CONTENT);
+
+        let dashboard_configuration = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboard/application/probe")
+                    .body(Body::empty())
+                    .expect("dashboard application request"),
+            )
+            .await
+            .expect("dashboard application response");
+        assert_eq!(dashboard_configuration.status(), StatusCode::ACCEPTED);
 
         let selected = app
             .oneshot(
