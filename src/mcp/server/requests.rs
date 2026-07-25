@@ -385,6 +385,20 @@ impl McpServer {
         };
         let cg = self.reopen_if_branch_drifted().await;
         let root = cg.project_root().to_path_buf();
+        // Live-activity tap: a host hook arriving here IS an agent working in
+        // this project, so publish it at the observation point carrying this
+        // project's own registered id. Free when no dashboard is connected; the
+        // dashboard coalesces the burst.
+        let activity_project_id = crate::dashboard::activity_bus::enabled()
+            .then(|| cg.store_layout().identity.project_id.clone())
+            .flatten();
+        crate::dashboard::activity_bus::publish(
+            crate::dashboard::activity_bus::ActivityFamilyV1::Hook,
+            &root,
+            activity_project_id.as_deref(),
+            1,
+            Some(event.kind.as_key()),
+        );
         // Primary incremental-index hint: deliver the exact touched paths into
         // the daemon-owned code-index scheduler queue as soon as the routing
         // event is observed. Independent of host-admission durability so an
@@ -393,7 +407,18 @@ impl McpServer {
         if !event.rel_paths.is_empty()
             && let Some(sink) = &self.code_index_hook_sink
         {
-            let _ = sink(root.clone(), event.rel_paths.clone()).await;
+            // A `true` return means the paths really entered a mounted
+            // worktree's incremental queue — the exact moment indexing work is
+            // created for this project, and the only condition worth lighting.
+            if sink(root.clone(), event.rel_paths.clone()).await {
+                crate::dashboard::activity_bus::publish(
+                    crate::dashboard::activity_bus::ActivityFamilyV1::CodeIndex,
+                    &root,
+                    activity_project_id.as_deref(),
+                    event.rel_paths.len() as u64,
+                    Some(event.kind.as_key()),
+                );
+            }
         }
         let current_branch = crate::branch::current_branch(&root);
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
@@ -1514,6 +1539,20 @@ impl McpServer {
             Ok(call) => call,
             Err(response) => return response,
         };
+
+        // Live-activity tap: one pulse per dispatched tool call, scoped to the
+        // project this server serves. Gated so an unwatched daemon never pays
+        // the snapshot read.
+        if crate::dashboard::activity_bus::enabled() {
+            let cg = self.cg_snapshot().await;
+            crate::dashboard::activity_bus::publish(
+                crate::dashboard::activity_bus::ActivityFamilyV1::ToolCall,
+                cg.project_root(),
+                cg.store_layout().identity.project_id.as_deref(),
+                1,
+                Some(&tool_name),
+            );
+        }
 
         let dispatch = self
             .dispatch_tool_call(

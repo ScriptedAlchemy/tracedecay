@@ -6,6 +6,12 @@ const DASHBOARD_EVENT_NAMES = [
   'project_registry',
   'storage_telemetry',
   'code_index',
+  // Live agent activity, coalesced server-side to at most 2/s per family per
+  // project. Named events are opt-in, so a new family must be listed here.
+  'hook_activity',
+  'session_ingest',
+  'code_index_activity',
+  'tool_call',
 ] as const;
 
 export type SseConnectionState = 'connecting' | 'live' | 'offline';
