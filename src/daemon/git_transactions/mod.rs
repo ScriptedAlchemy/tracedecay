@@ -69,11 +69,22 @@ where
     }
 }
 
-#[cfg(test)]
 impl<S, N, C, A> DaemonGitIndexTransactionService<S, N, C, A>
 where
     S: GitIndexTransactionStore,
+    N: GitIndexNativeExecutor + GitIndexRecoveryExecutor,
+    C: GitEffectClassifier,
+    A: GitIndexPolicyRecheckPort,
 {
+    pub(crate) fn apply_cancellable(
+        &self,
+        request: &GitIndexApplyRequestV1,
+        cancellation_requested: impl Fn() -> Option<UtcMicros>,
+    ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+        self.port.apply_cancellable(request, cancellation_requested)
+    }
+
+    #[cfg(test)]
     #[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
     pub(crate) fn quarantine_preview_for_test(
         &self,
