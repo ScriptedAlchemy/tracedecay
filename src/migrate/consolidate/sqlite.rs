@@ -262,7 +262,7 @@ pub(in crate::migrate) async fn rebuild_branch_cutover_memory_banks(
         .rebuild_all_banks()
         .await;
     match result {
-        Ok(()) => transaction
+        Ok(_) => transaction
             .commit()
             .await
             .map_err(|error| db_error("rebuild_branch_cutover_memory_banks", error)),

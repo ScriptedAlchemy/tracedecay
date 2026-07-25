@@ -285,10 +285,12 @@ pub(in crate::db) async fn finalize_memory_v2_cutover(
     finish_transaction(transaction, result, "memory_v2_cutover").await
 }
 
-/// Reopens a completed legacy cutover after an offline branch-memory union
-/// extends the canonical V1 frontiers. The existing cursors are retained for
-/// feedback/oplog tails; facts replay from zero because content-deduplication
-/// may have remapped branch-local numeric ids.
+/// Restarts legacy projection after an offline branch-memory union.
+///
+/// Feedback/oplog cursors remain valid because unioned rows receive ids above
+/// the existing project maxima. Facts always replay from zero: an all-duplicate
+/// union may update trust, counters, metadata, or vectors without increasing
+/// the fact frontier, and branch-local numeric ids may have been remapped.
 pub(in crate::db) async fn reopen_memory_v2_cutover_for_legacy_union(
     conn: &engine::Connection,
     owner: &FactOwnerV1,
@@ -303,7 +305,7 @@ pub(in crate::db) async fn reopen_memory_v2_cutover_for_legacy_union(
         async {
             let mut rows = conn
                 .query(
-                    "SELECT phase, feedback_frontier, oplog_frontier, fact_frontier
+                    "SELECT phase
                      FROM memory_v2_backfill_progress
                      WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
                     params![
@@ -324,20 +326,15 @@ pub(in crate::db) async fn reopen_memory_v2_cutover_for_legacy_union(
             let phase: String = row
                 .get(0)
                 .map_err(|error| db_error("memory_v2_reopen_cutover", error))?;
-            let stored = CapturedMemoryV2Frontiers {
-                feedback: row
-                    .get(1)
-                    .map_err(|error| db_error("memory_v2_reopen_cutover", error))?,
-                oplog: row
-                    .get(2)
-                    .map_err(|error| db_error("memory_v2_reopen_cutover", error))?,
-                facts: row
-                    .get(3)
-                    .map_err(|error| db_error("memory_v2_reopen_cutover", error))?,
-            };
             drop(rows);
-            if phase != "cutover_complete" {
-                return Ok(false);
+            if !matches!(
+                phase.as_str(),
+                "feedback" | "oplog" | "facts" | "awaiting_cutover" | "cutover_complete"
+            ) {
+                return Err(db_message(
+                    "memory_v2_reopen_cutover",
+                    "stored backfill phase is invalid",
+                ));
             }
             let tail = CapturedMemoryV2Frontiers {
                 feedback: scalar_i64(
@@ -349,12 +346,6 @@ pub(in crate::db) async fn reopen_memory_v2_cutover_for_legacy_union(
                 facts: scalar_i64(conn, "SELECT COALESCE(MAX(fact_id), 0) FROM memory_facts")
                     .await?,
             };
-            if tail.feedback <= stored.feedback
-                && tail.oplog <= stored.oplog
-                && tail.facts <= stored.facts
-            {
-                return Ok(false);
-            }
             conn.execute(
                 "UPDATE memory_v2_backfill_progress SET
                     phase = 'feedback',
@@ -365,8 +356,7 @@ pub(in crate::db) async fn reopen_memory_v2_cutover_for_legacy_union(
                     cutover_completed_at = NULL,
                     cutover_receipt_json = NULL,
                     updated_at = ?4
-                 WHERE owner_kind = ?5 AND project_id = ?6 AND source_store_id = ?7
-                   AND phase = 'cutover_complete'",
+                 WHERE owner_kind = ?5 AND project_id = ?6 AND source_store_id = ?7",
                 params![
                     tail.feedback,
                     tail.oplog,

@@ -16,6 +16,7 @@ use tracedecay::migrate::manifest::{
     MigrationPlanOptions, apply_migration_manifest, build_plan_manifest, finalize_migration_apply,
     verify_migration_manifest,
 };
+use tracedecay::migrate::memory_cutover::MemoryCutoverOptions;
 use tracedecay::migrate::registry::{
     RegistryReconstructionReport, RegistryReconstructionStatus,
     reconstruct_registry_from_store_manifest, scan_profile_store_manifests,
@@ -31,6 +32,157 @@ use tracedecay_domain::ProjectId;
 
 use crate::common::EnvVarGuard;
 use crate::support::{HOME_ENV_LOCK, ephemeral_safe_fixture_base};
+
+#[tokio::test]
+async fn project_memory_cutover_unions_all_branches_and_accepts_v18() {
+    let _lock = HOME_ENV_LOCK.lock().await;
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn cutover_fixture() {}\n").unwrap();
+    run_git(&project, &["init", "-b", "main"]);
+    run_git(&project, &["config", "user.email", "test@example.com"]);
+    run_git(&project, &["config", "user.name", "TraceDecay Test"]);
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-m", "initial"]);
+    let options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    let initialized = init_with_maintenance(&project, &profile_root, options.clone())
+        .await
+        .unwrap();
+    let data_root = initialized.store_layout().data_root.clone();
+    let project_graph = initialized.store_layout().graph_db_path.clone();
+    initialized.checkpoint().await.unwrap();
+    initialized.close();
+
+    let branches = data_root.join("branches");
+    fs::create_dir_all(&branches).unwrap();
+    let stale = branches.join("stale-v18.db");
+    let current = branches.join("current.db");
+    fs::copy(&project_graph, &stale).unwrap();
+    fs::copy(&project_graph, &current).unwrap();
+    let stale_db = rusqlite::Connection::open(&stale).unwrap();
+    stale_db
+        .execute_batch(
+            "PRAGMA user_version = 18;
+             INSERT INTO memory_facts(
+                 fact_id, content, category, tags, trust_score, access_count,
+                 created_at, updated_at, source, metadata
+             ) VALUES
+                 (1, 'shared cutover fact', 'project', '[\"stale\"]', 0.5, 1,
+                  10, 10, 'stale-v18', '{}'),
+                 (2, 'stale branch exclusive', 'decision', '[]', 0.8, 2,
+                  10, 10, 'stale-v18', '{}');
+             INSERT INTO memory_feedback_events(
+                 event_id, fact_id, action, trust_delta, old_trust, new_trust,
+                 created_at, source, note
+             ) VALUES(1, 1, 'helpful', 0.1, 0.4, 0.5, 10, 'fixture', 'kept');",
+        )
+        .unwrap();
+    drop(stale_db);
+    let current_db = rusqlite::Connection::open(&current).unwrap();
+    current_db
+        .execute_batch(
+            "INSERT INTO memory_facts(
+                 fact_id, content, category, tags, trust_score, access_count,
+                 created_at, updated_at, source, metadata, hrr_precision
+             ) VALUES
+                 (1, 'shared cutover fact', 'project', '[\"current\"]', 0.9, 7,
+                  5, 20, 'current', '{\"winner\":\"current\"}', 'f32'),
+                 (3, 'current branch exclusive', 'tool', '[]', 0.7, 3,
+                  20, 20, 'current', '{}', 'f32');
+             INSERT INTO memory_oplog(id, ts, op, fact_id, detail_json)
+             VALUES(1, 20, 'add', 3, '{}');",
+        )
+        .unwrap();
+    drop(current_db);
+    let mut meta = branch_meta::load_branch_meta(&data_root).unwrap();
+    meta.add_branch("stale-v18", "branches/stale-v18.db", "main");
+    meta.add_branch("current", "branches/current.db", "main");
+    branch_meta::save_branch_meta(&data_root, &meta).unwrap();
+
+    let cutover = MemoryCutoverOptions {
+        project_root: project.clone(),
+        profile_root: profile_root.clone(),
+    };
+    let planned = tracedecay::migrate::memory_cutover::plan(&cutover)
+        .await
+        .unwrap();
+    assert_eq!(planned.sources.len(), 2);
+    assert!(
+        planned
+            .sources
+            .iter()
+            .any(|source| source.user_version == 18)
+    );
+    let applied = tracedecay::migrate::memory_cutover::apply(&cutover, &planned.confirmation_token)
+        .await
+        .unwrap();
+    assert!(applied.applied);
+    assert!(data_root.join("memory-branch-cutover.json").is_file());
+
+    let target = rusqlite::Connection::open_with_flags(
+        &project_graph,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let shared: (f64, i64, String, String) = target
+        .query_row(
+            "SELECT trust_score, access_count, tags, metadata
+             FROM memory_facts WHERE content = 'shared cutover fact'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(shared.0, 0.9);
+    assert_eq!(shared.1, 7);
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&shared.2).unwrap(),
+        vec!["current", "stale"]
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&shared.3).unwrap()["winner"],
+        "current"
+    );
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM memory_facts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM memory_feedback_events", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM memory_oplog", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT phase FROM memory_v2_backfill_progress
+                 WHERE owner_kind='project' AND source_store_id='legacy-memory-v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "cutover_complete"
+    );
+}
 
 struct HomeEnvGuard {
     previous_home: Option<OsString>,
