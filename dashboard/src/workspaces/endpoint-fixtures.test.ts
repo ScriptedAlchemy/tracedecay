@@ -32,8 +32,22 @@ import {
   ScopedMemoryStatusSchema,
   ScopedSubgraphPayloadSchema,
 } from './brain/contracts.ts';
+import {
+  ANALYTICS_EVENT_LIMIT,
+  describeWindow,
+  familiesSummary,
+  familyVerdict,
+  summarizeDominance,
+  type FamilyRow,
+} from './agents/usage.ts';
 import { columnIndexFor, indexedMass } from './brain/field.ts';
 import { DeliveryProjectsPayloadSchema } from './delivery/contracts.ts';
+import { composeDeliveryField } from './delivery/field.ts';
+import {
+  LoomChainPayloadSchema,
+  LoomSessionsPayloadSchema,
+} from './loom/contracts.ts';
+import { composeWeave, summarizeChain } from './loom/weave.ts';
 import {
   GraphOverviewPayloadSchema,
   GraphSearchPayloadSchema,
@@ -105,6 +119,32 @@ const HintsPayload = z
   .object({
     available: z.boolean().optional(),
     families: z.array(AnyObject).optional(),
+  })
+  .passthrough();
+
+// AgentsPage.tsx: DiagnosticsPayload.
+const DiagnosticsPayload = z
+  .object({
+    available: z.boolean().optional(),
+    event_count: z.number().optional(),
+    events_per_hour: z.number().optional(),
+    hook_call_count: z.number().optional(),
+    mcp_tool_call_count: z.number().optional(),
+    by_event_kind: z.array(AnyObject).optional(),
+    by_outcome: z.array(AnyObject).optional(),
+    by_mcp_tool: z.array(AnyObject).optional(),
+    recent_events: z
+      .array(
+        z
+          .object({
+            timestamp: z.number(),
+            event_kind: z.string().optional(),
+            tool_name: z.string().optional(),
+            outcome: z.string().optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
   })
   .passthrough();
 
@@ -335,12 +375,64 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   it('GET /api/plugins/analytics/usage — agents (UsagePayload)', () => {
     const data = parse(UsagePayload, '/api/plugins/analytics/usage');
     expect(data.available).toBe(true);
-    expect((data.by_category ?? []).length).toBeGreaterThanOrEqual(10);
+    const rows = data.by_category ?? [];
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    // The density spec for this endpoint is NOT "many categories" — the real
+    // payload has four. It is that the distribution is DEGENERATE, because
+    // that is the property the plate is built to survive. A fixture that
+    // spreads its events evenly lets a linear rail pass the audit while the
+    // live surface renders slivers.
+    const summary = summarizeDominance(rows);
+    expect(summary.dominant).toBe(true);
+    expect(summary.spread ?? 0).toBeGreaterThan(1000);
+    // ...and that the count is the endpoint's own cap, not a true total, so
+    // the caption that says so is always exercised.
+    expect(data.event_count).toBe(ANALYTICS_EVENT_LIMIT);
+    expect(summary.total).toBeLessThan(data.event_count!);
   });
 
   it('GET /api/plugins/analytics/hints — agents (HintsPayload)', () => {
     const data = parse(HintsPayload, '/api/plugins/analytics/hints');
     expect(data.available).toBe(true);
+  });
+
+  it('GET /api/plugins/analytics/underused — agents (HintsPayload)', () => {
+    const data = parse(HintsPayload, '/api/plugins/analytics/underused');
+    const families = (data.families ?? []) as unknown as FamilyRow[];
+    expect(families.length).toBe(4);
+    // One shot has to exercise the row vocabulary, so the fixture carries a
+    // genuinely flagged family alongside the two that have no substitute
+    // detector and therefore can never be flagged.
+    const states = families.map((row) => familyVerdict(row).state);
+    expect(states).toContain('underused');
+    expect(states).toContain('covered');
+    expect(states.filter((state) => state === 'unmeasurable')).toHaveLength(2);
+    // With a family flagged, the one-line summary correctly yields to the rows.
+    expect(familiesSummary(families)).toBeNull();
+  });
+
+  it('GET /api/plugins/analytics/diagnostics — agents (DiagnosticsPayload)', () => {
+    const data = parse(DiagnosticsPayload, '/api/plugins/analytics/diagnostics');
+    expect(data.available).toBe(true);
+    const window = describeWindow(data.event_count, data.events_per_hour);
+    expect(window.capped).toBe(true);
+    expect(window.spanHours).toBeGreaterThan(1);
+    // The tool ranking is the second degenerate distribution on this page; it
+    // has to span orders of magnitude or the log rail is untested.
+    const tools = (data.by_mcp_tool ?? []).map((row) => Number(row['count'] ?? 0));
+    expect(tools.length).toBeGreaterThanOrEqual(12);
+    expect(Math.max(...tools) / Math.min(...tools)).toBeGreaterThan(100);
+    // The window's own kinds must account for MORE than the categorized total,
+    // which is what the reconciliation plate exists to explain.
+    const kinds = (data.by_event_kind ?? []).reduce(
+      (sum, row) => sum + Number(row['count'] ?? 0),
+      0,
+    );
+    expect(kinds).toBe(data.event_count);
+    // Newest-first, with real second-resolution stamps.
+    const stamps = (data.recent_events ?? []).map((row) => row.timestamp);
+    expect(stamps.length).toBe(20);
+    expect([...stamps].sort((a, b) => b - a)).toEqual(stamps);
   });
 
   it('GET /api/automation/scheduler/status — automations (SchedulerStatusSchema)', () => {
