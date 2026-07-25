@@ -17,6 +17,7 @@ pub mod feedback;
 pub mod framed_log;
 pub mod git;
 pub mod handlers;
+pub mod observability;
 pub mod policy;
 pub mod result;
 pub mod retained_surfaces;
@@ -101,6 +102,7 @@ pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
 };
+pub use observability::*;
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,
