@@ -753,9 +753,12 @@ mod authority_tests {
     #[test]
     fn automation_retrieval_contains_no_path_open_fallback() {
         let source = include_str!("retrieval.rs");
-        assert!(!source.contains("open_read_only_at"));
-        assert!(!source.contains("open_project_automation_retrieval"));
-        assert!(!source.contains("open_user_automation_retrieval"));
-        assert!(!source.contains("\"profile.primary\""));
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(production, _)| production);
+        assert!(!production.contains("open_read_only_at"));
+        assert!(!production.contains("open_project_automation_retrieval"));
+        assert!(!production.contains("open_user_automation_retrieval"));
+        assert!(!production.contains("\"profile.primary\""));
     }
 }
