@@ -1,8 +1,12 @@
 # tracedecay vs lean-ctx
 
+> Historical comparison snapshot. The ranked import list records ideas at the
+> time of review; several items have since shipped and it is not a current gap
+> list.
+
 Both projects compress context for AI coding agents but with different centers of gravity:
 
-- **tracedecay** — code-graph engine (libSQL + tree-sitter, 50+ languages). 70+ MCP tools focused on symbol-level intelligence (callers/callees, impact, complexity, DSM, test_risk, code-health composite, branch diffs, atomic edit primitives). Cost tracking, on-demand index freshness, monitor TUI.
+- **tracedecay** — code-graph engine (SQLite via the `rusqlite` runtime + tree-sitter, 50+ languages). 70+ MCP tools focused on symbol-level intelligence (callers/callees, impact, complexity, DSM, test_risk, code-health composite, branch diffs, atomic edit primitives). Cost tracking, on-demand index freshness, monitor TUI.
 - **lean-ctx** — context runtime that *also* compresses arbitrary file reads and shell output. ~56 MCP tools plus 95+ shell-hook patterns, multi-mode file reads, hybrid search with embeddings, portable `.lctxpkg` bundles, persistent knowledge facts.
 
 The two overlap in graph/impact analysis but diverge on read modes, shell-output compression, and persistent knowledge. TraceDecay is deeper on graph quality metrics; lean-ctx is broader on the I/O surface.

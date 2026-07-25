@@ -92,7 +92,8 @@ attributed only this way carry `attribution_method: "public_api"` and a lower co
 calls, so they are separable in the report.
 
 **Expected delta.** Lifts the `Database::*` / `TraceDecay::*` wrapper families reachable from
-`dashboard_api_test.rs` etc. **Risk:** import-without-exercise → mitigated by the dual requirement.
+the `dashboard_api_test/` suite, among others. **Risk:** import-without-exercise
+→ mitigated by the dual requirement.
 
 ### H4 — CLI / binary entry attribution  *(Phase 3, opt-in by default)*
 
@@ -257,7 +258,7 @@ a Python reimplementation of the algorithm that already matched the tool to the 
    `ExtractionState::node_text` families must flip to attributed with `attribution_method:
    "trait_resolved"`. Negative spot-check: an unrelated `Display` impl must **not** gain attribution.
 3. **Public-API (H3).** `Database::get_all_nodes` and `TraceDecay::get_all_nodes` resolve to
-   attributed via `dashboard_api_test.rs`; `attribution_method` populated.
+   attributed via the `dashboard_api_test/` suite; `attribution_method` populated.
 4. **CLI entry (H4).** `src/main.rs::run` becomes attributed with `attribution_method: "cli_entry"`
    only when the opt-in path fires; `--version`-only test does not over-attribute unrelated fns.
 5. **Bucket invariants (H5).** `attributed + reachable_unattributed + orphan_entry == src fn count`;

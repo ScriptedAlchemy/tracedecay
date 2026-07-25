@@ -10,6 +10,7 @@ use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
+use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
 use tracedecay_domain::ProjectId;
@@ -184,11 +185,64 @@ async fn seed_graph_fixture(cg: &TraceDecay) {
     }
 }
 
-async fn start_dashboard_fixture() -> DashboardFixture {
-    start_dashboard_fixture_with(false).await
+async fn seed_structure_fixture(cg: &TraceDecay) {
+    let db = cg.db();
+    let test_node = make_node(
+        "n-route-test",
+        NodeKind::Function,
+        "route_graph_test",
+        "tests/dashboard_graph.rs",
+        12,
+    );
+    if let Err(err) = db.insert_nodes(std::slice::from_ref(&test_node)).await {
+        panic!("failed to seed covering test node: {err}");
+    }
+    if let Err(err) = db
+        .insert_edge(&Edge {
+            source: test_node.id.clone(),
+            target: "n-route".to_string(),
+            kind: EdgeKind::Calls,
+            line: Some(13),
+        })
+        .await
+    {
+        panic!("failed to seed covering test edge: {err}");
+    }
+    if let Err(err) = db
+        .upsert_files(&[FileRecord {
+            path: "tests/dashboard_graph.rs".to_string(),
+            content_hash: "hash-test".to_string(),
+            size: 64,
+            modified_at: 1_700_000_000,
+            indexed_at: 1_700_000_010,
+            node_count: 1,
+        }])
+        .await
+    {
+        panic!("failed to seed covering test file: {err}");
+    }
+
+    cg.add_fact(AddFactRequest {
+        content: "route_graph must preserve directed call semantics".to_string(),
+        category: MemoryCategory::CodeArea,
+        source: Some("dashboard-graph-fixture".to_string()),
+        tags: vec!["graph".to_string()],
+        entities: vec!["route_graph".to_string()],
+        trust: Some(0.9),
+        metadata: serde_json::json!({}),
+    })
+    .await
+    .unwrap_or_else(|error| panic!("failed to seed graph fact: {error}"));
 }
 
-async fn start_dashboard_fixture_with(with_orphan: bool) -> DashboardFixture {
+async fn start_dashboard_fixture() -> DashboardFixture {
+    start_dashboard_fixture_with(false, false).await
+}
+
+async fn start_dashboard_fixture_with(
+    with_orphan: bool,
+    with_structure_fixture: bool,
+) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
@@ -204,6 +258,9 @@ async fn start_dashboard_fixture_with(with_orphan: bool) -> DashboardFixture {
     seed_graph_fixture(&cg).await;
     if with_orphan {
         seed_orphan_node(&cg).await;
+    }
+    if with_structure_fixture {
+        seed_structure_fixture(&cg).await;
     }
 
     let port = pick_free_port();
@@ -247,11 +304,9 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(capabilities["features"]["graph"], true);
-        assert!(
-            capabilities["dashboards"]
-                .as_array()
-                .is_some_and(|dashboards| dashboards.iter().any(|name| name == "graph")),
-            "capabilities should advertise the graph dashboard"
+        assert_eq!(
+            capabilities["dashboards"],
+            serde_json::json!(["tracedecay"])
         );
 
         let (status, overview) = get_json(
@@ -457,7 +512,7 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
     let runtime = create_runtime();
     runtime.block_on(async {
         // 4 interconnected nodes + 1 orphan with no edges.
-        let fixture = start_dashboard_fixture_with(true).await;
+        let fixture = start_dashboard_fixture_with(true, false).await;
         let agent = http_agent();
 
         // No seed at all: the default overview slice. Everything fits under
@@ -557,5 +612,100 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
         assert_eq!(no_hit["seed_id"], Value::Null);
         assert_eq!(no_hit["nodes"].as_array().map_or(1, |rows| rows.len()), 0);
         assert_eq!(no_hit["edges"].as_array().map_or(1, |rows| rows.len()), 0);
+    });
+}
+
+#[test]
+fn structure_visualization_endpoints_report_measured_data() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_with(false, true).await;
+        let agent = http_agent();
+
+        let (status, chain) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/call-chain?from=n-dashboard&to=n-render&max_depth=20",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{chain}");
+        assert_eq!(chain["domain_state"], "ready");
+        assert_eq!(chain["payload"]["status"], "measured");
+        assert_eq!(chain["payload"]["measurement"]["directed"], true);
+        assert_eq!(chain["payload"]["measurement"]["edge_kind"], "calls");
+        assert_eq!(
+            chain["payload"]["measurement"]["selection"],
+            "single_shortest_path"
+        );
+        assert_eq!(chain["payload"]["measurement"]["hop_count"], 2);
+
+        let (status, strata) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/strata", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{strata}");
+        assert_eq!(strata["payload"]["status"], "measured");
+        assert_eq!(strata["payload"]["measurement"]["granularity"], "file");
+        assert_eq!(
+            strata["payload"]["measurement"]["dependency_edge_kinds"],
+            serde_json::json!(["calls", "uses"])
+        );
+        assert_eq!(
+            strata["payload"]["measurement"]["scan"]["cache_scope"],
+            "graph_generation"
+        );
+        assert!(
+            strata["payload"]["measurement"]["files"]
+                .as_array()
+                .is_some_and(|files| files
+                    .iter()
+                    .any(|file| file["path"] == "src/dashboard/view.tsx")),
+            "strata should carry per-file depth rows: {strata}"
+        );
+
+        let (status, facts) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/node/n-route/facts", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{facts}");
+        assert_eq!(facts["payload"]["status"], "measured");
+        assert_eq!(facts["payload"]["measurement"]["granularity"], "name_match");
+        assert_eq!(
+            facts["payload"]["measurement"]["identity_semantics"],
+            "not_symbol_identity"
+        );
+        assert_eq!(
+            facts["payload"]["measurement"]["caption"],
+            "citing this name"
+        );
+        assert!(
+            facts["payload"]["measurement"]["entity_matches"]
+                .as_array()
+                .is_some_and(|matches| matches.iter().any(|fact| {
+                    fact["content"] == "route_graph must preserve directed call semantics"
+                })),
+            "facts should include the exact normalized-name match: {facts}"
+        );
+
+        let (status, tests) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/node/n-route/tests", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{tests}");
+        assert_eq!(tests["payload"]["status"], "measured");
+        assert_eq!(tests["payload"]["measurement"]["granularity"], "symbol");
+        assert_eq!(tests["payload"]["measurement"]["caller_depth"], 3);
+        assert!(
+            tests["payload"]["measurement"]["tests"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|test| {
+                    test["id"] == "n-route-test" && test["file_path"] == "tests/dashboard_graph.rs"
+                })),
+            "test map should report the covering test: {tests}"
+        );
     });
 }

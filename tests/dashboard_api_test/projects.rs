@@ -130,6 +130,31 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
 }
 
 #[test]
+fn dashboard_projects_endpoint_does_not_launder_registry_read_failure() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
+        rusqlite::Connection::open(fixture._tmp.path().join("global/global.db"))
+            .expect("open dashboard registry fixture")
+            .execute_batch("DROP TABLE code_projects")
+            .expect("break dashboard registry project reads");
+
+        let (status, projects) = get_json(&agent, &format!("{}/api/projects", fixture.base_url));
+
+        assert_eq!(status, 503, "{projects}");
+        assert_eq!(projects["status"], "registry_unavailable");
+        assert_eq!(projects["summary"], serde_json::Value::Null);
+        assert_eq!(projects["projects"], serde_json::Value::Null);
+        assert_eq!(projects["project_tree"], serde_json::Value::Null);
+        assert_eq!(projects["truncated"], serde_json::Value::Null);
+    });
+}
+
+#[test]
 fn project_scoped_plugin_routes_read_selected_project_store() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()

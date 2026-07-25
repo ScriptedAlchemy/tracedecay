@@ -45,13 +45,11 @@ readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
 # Explicit whitelist so `cargo package`/`cargo publish` ship everything the
-# build needs — including the dashboard dist bundles. The dashboard frontend is
-# being rewritten; until it lands these ship committed placeholder bundles
-# (dashboard/*/dist/**, a minimal "rebuild in progress" shell). The frontend
-# sources are deliberately NOT packaged: build.rs detects their absence and
-# embeds the committed dist as-is rather than shelling out to npm, so a
-# registry install never needs Node. Keep that check in build.rs in sync if the
-# dashboard entries below change.
+# build needs, including the prebuilt canonical dashboard/app-dist. Frontend
+# sources are deliberately not packaged: build.rs detects their absence and
+# embeds app-dist as-is, so a registry install never needs Node. Keep that
+# packaged-asset check in build.rs in sync if the dashboard entries below
+# change.
 include = [
     "/CHANGELOG.md",
     "/LICENSE",
@@ -93,13 +91,6 @@ include = [
     "/plugin/cursor-native-extension/dist/extension.js",
     "/vendor/**",
     "/dashboard/app-dist/**",
-    "/dashboard/shell/dist/**",
-    "/dashboard/holographic/dist/**",
-    "/dashboard/lcm/dist/**",
-    "/dashboard/graph/dist/**",
-    "/dashboard/code-diagnostics/dist/**",
-    "/dashboard/savings/dist/**",
-    "/dashboard/settings/dist/**",
     "/dashboard/hermes-wrapper/manifest.json",
     "/dashboard/hermes-wrapper/plugin_api.py",
     "/dashboard/hermes-wrapper/src/**",

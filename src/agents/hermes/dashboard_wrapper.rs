@@ -1,18 +1,16 @@
 //! Hermes dashboard wrapper deployment.
 //!
-//! Deploys the canonical `dashboard/hermes-wrapper/` plugin (manifest,
-//! `plugin_api.py` reverse proxy, and the UI bundles) into a generated Hermes
-//! plugin's `dashboard/` subdirectory, where the Hermes web server's
-//! dashboard-plugin discovery picks it up
+//! Deploys the canonical `dashboard/hermes-wrapper/` host adapter (manifest,
+//! `plugin_api.py`, and one mount entry) into a generated Hermes plugin's
+//! `dashboard/` subdirectory, where the Hermes web server's dashboard-plugin
+//! discovery picks it up
 //! (`<hermes_home>/plugins/<name>/dashboard/manifest.json` — both stock and
 //! forked Hermes scan user plugins this way).
 //!
 //! Everything is embedded at compile time so installs need no source
-//! checkout: the wrapper entry/manifest/api come straight from
-//! `dashboard/hermes-wrapper/`, and the child UI bundles reuse the exact
-//! same embedded dist data the standalone `tracedecay dashboard` server
-//! serves (`crate::dashboard::assets`), so the deployed copies are
-//! byte-identical to the standalone UI by construction.
+//! checkout. The adapter starts the standalone `tracedecay dashboard` server
+//! and mounts its root in Hermes; all UI assets come from the one
+//! `dashboard/app-dist` build embedded by `crate::dashboard::assets`.
 //!
 //! On hosts whose Hermes predates dashboard-plugin discovery the deployed
 //! directory is inert: the agent-plugin loader only reads `plugin.yaml` and
@@ -28,8 +26,6 @@ const MANIFEST_JSON: &str = include_str!("../../../dashboard/hermes-wrapper/mani
 const PLUGIN_API_PY: &str = include_str!("../../../dashboard/hermes-wrapper/plugin_api.py");
 /// Wrapper entry bundle (deployed as `dist/index.js`; plain JS, no build step).
 const WRAPPER_ENTRY_JS: &str = include_str!("../../../dashboard/hermes-wrapper/src/entry.js");
-/// Wrapper-chrome stylesheet (concatenated ahead of the child stylesheets).
-const WRAPPER_CSS: &str = include_str!("../../../dashboard/hermes-wrapper/src/wrapper.css");
 
 /// Placeholder line in `plugin_api.py` rewritten with the installed binary.
 const BIN_PLACEHOLDER: &str = "DEPLOYED_TRACEDECAY_BIN = None";
@@ -88,20 +84,15 @@ fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
         &plugin_api(tracedecay_bin)?,
     )?;
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
-    super::write_text_file(
-        &dist_dir.join("holographic.js"),
-        crate::dashboard::assets::HOLOGRAPHIC_JS,
-    )?;
-    super::write_text_file(&dist_dir.join("lcm.js"), crate::dashboard::assets::LCM_JS)?;
-    super::write_text_file(
-        &dist_dir.join("graph.js"),
-        crate::dashboard::assets::GRAPH_JS,
-    )?;
-    super::write_text_file(
-        &dist_dir.join("savings.js"),
-        crate::dashboard::assets::SAVINGS_JS,
-    )?;
-    super::write_text_file(&dist_dir.join("style.css"), &wrapper_style_css())?;
+    for retired in [
+        "holographic.js",
+        "lcm.js",
+        "graph.js",
+        "savings.js",
+        "style.css",
+    ] {
+        super::remove_generated_file(&dist_dir.join(retired))?;
+    }
 
     tracing::debug!(
         dashboard_dir = %dashboard_dir.display(),
@@ -186,19 +177,6 @@ fn plugin_api(tracedecay_bin: &str) -> Result<String> {
     ))
 }
 
-/// Wrapper stylesheet: wrapper chrome + the child stylesheets, concatenated
-/// exactly like `dashboard/build.mjs` builds `hermes-wrapper/dist/style.css`.
-fn wrapper_style_css() -> String {
-    [
-        WRAPPER_CSS,
-        crate::dashboard::assets::HOLOGRAPHIC_CSS,
-        crate::dashboard::assets::LCM_CSS,
-        crate::dashboard::assets::GRAPH_CSS,
-        crate::dashboard::assets::SAVINGS_CSS,
-    ]
-    .join("\n")
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -235,6 +213,19 @@ mod tests {
         out
     }
 
+    fn assert_mountable_dashboard_entry(entry: &str) {
+        assert!(
+            entry.len() > 512,
+            "dashboard entry must contain a real Hermes mount adapter"
+        );
+        assert!(entry.contains("__HERMES_PLUGINS__"));
+        assert!(entry.contains(".register("));
+        assert!(entry.contains("iframe"));
+        assert!(entry.contains("/api/plugins/tracedecay/dashboard-url"));
+        assert!(!entry.contains("placeholder"));
+        assert!(!entry.contains("rewrite in progress"));
+    }
+
     #[test]
     fn manifest_is_stamped_with_crate_version() {
         let manifest = manifest_json().unwrap();
@@ -246,6 +237,27 @@ mod tests {
         // The provider link must match the memory provider name the installer
         // writes into config.yaml (`memory.provider: tracedecay`).
         assert_eq!(parsed["provider"]["name"], "tracedecay");
+        let description = parsed["description"].as_str().unwrap();
+        for workspace in [
+            "Brain",
+            "Explorer",
+            "Loom",
+            "Sessions",
+            "Agents",
+            "Code",
+            "Knowledge",
+            "Delivery",
+            "Automations",
+            "Observatory",
+            "Costs",
+            "Settings",
+        ] {
+            assert!(
+                description.contains(workspace),
+                "manifest omits the {workspace} workspace"
+            );
+        }
+        assert!(!description.split_whitespace().any(|word| word == "Work"));
     }
 
     #[test]
@@ -275,35 +287,36 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_css_concatenates_all_child_sheets() {
-        let css = wrapper_style_css();
-        assert!(css.starts_with(WRAPPER_CSS));
-        for child in [
-            crate::dashboard::assets::HOLOGRAPHIC_CSS,
-            crate::dashboard::assets::LCM_CSS,
-            crate::dashboard::assets::GRAPH_CSS,
-            crate::dashboard::assets::SAVINGS_CSS,
-        ] {
-            assert!(css.contains(child));
-        }
+    fn wrapper_entry_mounts_the_daemon_dashboard() {
+        assert_mountable_dashboard_entry(WRAPPER_ENTRY_JS);
     }
 
     #[test]
-    fn first_install_deploys_wrapper_files() {
+    fn first_install_deploys_real_dashboard_mount() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
 
         apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
 
         assert!(is_deployed(&plugin_dir));
-        assert!(plugin_dir.join("dashboard/dist/index.js").is_file());
-        assert!(plugin_dir.join("dashboard/dist/holographic.js").is_file());
-        assert!(plugin_dir.join("dashboard/dist/lcm.js").is_file());
-        assert!(plugin_dir.join("dashboard/dist/graph.js").is_file());
-        assert!(plugin_dir.join("dashboard/dist/savings.js").is_file());
+        let dist_dir = plugin_dir.join("dashboard/dist");
+        assert_mountable_dashboard_entry(&text(&dist_dir.join("index.js")));
+        for retired in [
+            "holographic.js",
+            "lcm.js",
+            "graph.js",
+            "savings.js",
+            "style.css",
+        ] {
+            assert!(
+                !dist_dir.join(retired).exists(),
+                "retired Hermes UI asset was deployed: {retired}"
+            );
+        }
         let api = text(&plugin_dir.join("dashboard/plugin_api.py"));
         assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/bin/tracedecay""#));
         assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
+        assert!(api.contains(r#"@router.get("/dashboard-url")"#));
     }
 
     #[test]
@@ -314,7 +327,7 @@ mod tests {
         apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
 
         assert!(plugin_dir.join("dashboard/manifest.json").is_file());
-        assert!(plugin_dir.join("dashboard/dist/style.css").is_file());
+        assert!(plugin_dir.join("dashboard/dist/index.js").is_file());
     }
 
     #[test]
@@ -322,6 +335,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
         apply_install_policy(&plugin_dir, "/old/bin/tracedecay", true).unwrap();
+        let retired = plugin_dir.join("dashboard/dist/holographic.js");
+        std::fs::write(&retired, "retired generated asset").unwrap();
 
         apply_install_policy(&plugin_dir, "/new/bin/tracedecay", true).unwrap();
 
@@ -329,6 +344,7 @@ mod tests {
         assert!(api.contains("/new/bin/tracedecay"));
         assert!(!api.contains("/old/bin/tracedecay"));
         assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
+        assert!(!retired.exists());
     }
 
     #[test]

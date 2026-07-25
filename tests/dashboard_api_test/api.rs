@@ -1,7 +1,7 @@
 use crate::dashboard_api_support::*;
 
 #[test]
-fn dashboard_plugin_manifest_assets_are_served() {
+fn retired_dashboard_routes_cannot_serve_placeholder_bundles() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -10,33 +10,27 @@ fn dashboard_plugin_manifest_assets_are_served() {
         let fixture = start_dashboard_fixture_without_memory().await;
         let agent = http_agent();
 
-        let (status, plugins) = get_json(
-            &agent,
-            &format!("{}/api/dashboard/plugins", fixture.base_url),
-        );
-        assert_eq!(status, 200);
-        for plugin in plugins
-            .as_array()
-            .unwrap_or_else(|| panic!("expected plugin manifest array"))
-        {
-            let name = plugin["name"]
-                .as_str()
-                .unwrap_or_else(|| panic!("plugin name should be a string: {plugin}"));
-            for key in ["entry", "css"] {
-                let Some(asset) = plugin[key].as_str() else {
-                    continue;
-                };
-                let url = format!("{}/dashboard-plugins/{name}/{asset}", fixture.base_url);
-                let response = agent
-                    .get(&url)
-                    .call()
-                    .unwrap_or_else(|err| panic!("GET {url} failed: {err}"));
-                assert_eq!(
-                    response.status().as_u16(),
-                    200,
-                    "advertised plugin asset should be served: {name} {asset}"
-                );
-            }
+        for path in [
+            "/legacy",
+            "/shell/shell.js",
+            "/dashboard-plugins/savings/dist/index.js",
+        ] {
+            let mut response = agent
+                .get(format!("{}{path}", fixture.base_url))
+                .call()
+                .unwrap_or_else(|err| panic!("GET {path} failed: {err}"));
+            assert_eq!(response.status().as_u16(), 200);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/html; charset=utf-8"),
+                "retired path must fall through to the canonical SPA, never a legacy asset"
+            );
+            let body = response.body_mut().read_to_string().unwrap();
+            assert!(body.contains("<title>TraceDecay</title>"));
+            assert!(!body.contains("rewrite in progress"));
         }
     });
 }
@@ -201,6 +195,18 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
         assert_eq!(overview["holographic"]["overview"]["banks"], 3);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
+        assert_eq!(overview["holographic"]["reads"]["facts"]["state"], "ready");
+        assert_eq!(overview["holographic"]["reads"]["entities"]["state"], "ready");
+        assert_eq!(overview["holographic"]["reads"]["graph"]["state"], "ready");
+        assert_eq!(
+            overview["holographic"]["facts_coverage"]["completeness"],
+            "bounded"
+        );
+        assert_eq!(overview["holographic"]["facts_coverage"]["limit"], 5);
+        assert_eq!(
+            overview["holographic"]["facts_coverage"]["query_applied_after_limit"],
+            true
+        );
         // Bank list counts must be live (consistent with the header fact
         // count). The stored bundle snapshot still stays exposed as
         // bundled_fact_count, but startup backfill rebuilds now refresh the

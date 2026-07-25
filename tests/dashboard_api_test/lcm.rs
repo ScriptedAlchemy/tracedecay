@@ -363,6 +363,21 @@ fn lcm_overview_and_search_preserve_shapes() {
             .iter()
             .any(|row| row["node_id"] == fixture.child_node_id));
 
+        let (status, timeline) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/timeline?limit=1",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(timeline["coverage"]["ordering"], "most_recent");
+        assert_eq!(timeline["coverage"]["limit"], 1);
+        assert_eq!(timeline["coverage"]["returned_buckets"], 1);
+        assert_eq!(timeline["coverage"]["total_dated_buckets"], 1);
+        assert_eq!(timeline["coverage"]["truncated"], false);
+        assert_eq!(timeline["undated"]["count"], 0);
+
         let (status, search) = get_json(
             &agent,
             &format!(

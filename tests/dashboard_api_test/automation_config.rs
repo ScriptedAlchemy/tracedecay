@@ -110,14 +110,33 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         assert_eq!(scheduler["status"], "configured");
         assert_eq!(scheduler["paused"], false);
         assert_eq!(scheduler["scheduler_tick_secs"], 15);
-        assert!(
-            scheduler["pending_fact_proposals"].is_u64(),
-            "scheduler status should expose the pending fact-proposal count: {scheduler}"
-        );
-        assert!(
-            scheduler["pending_skills"].is_u64(),
-            "scheduler status should expose the pending skill count: {scheduler}"
-        );
+        // Each review queue reports either a real count or the reason it could
+        // not be read. A failed read must surface as `unreadable` with a null
+        // count, never as a zero that reads like an empty approval queue.
+        for queue in ["fact_proposals", "skills"] {
+            let reading = &scheduler["pending_review"][queue];
+            let legacy = &scheduler[format!("pending_{queue}")];
+            match reading["state"].as_str() {
+                Some("measured") => {
+                    assert!(
+                        reading["count"].is_u64() && legacy.is_u64(),
+                        "a measured {queue} queue must carry a count: {scheduler}"
+                    );
+                    assert_eq!(reading["count"], *legacy);
+                }
+                Some("unreadable") => {
+                    assert!(
+                        reading["count"].is_null() && legacy.is_null(),
+                        "an unreadable {queue} queue must not report a count: {scheduler}"
+                    );
+                    assert!(
+                        reading["reason"].as_str().is_some_and(|r| !r.is_empty()),
+                        "an unreadable {queue} queue must state why: {scheduler}"
+                    );
+                }
+                _ => panic!("scheduler status should report the {queue} queue: {scheduler}"),
+            }
+        }
         assert!(
             scheduler["tasks"]
                 .as_array()

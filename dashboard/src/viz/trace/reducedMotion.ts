@@ -33,6 +33,31 @@ function systemPrefersReduced(): boolean {
 /** Listeners for cross-component sync inside one document. */
 const listeners = new Set<() => void>();
 
+/**
+ * Publish the preference to the document so the stylesheet can act on it.
+ *
+ * CSS can read the OS media query but not our persisted control, so without
+ * this the two disagree: pinning "Reduced" on a machine that reports no
+ * preference left every transition, entrance, and flash in the design system
+ * running, and pinning "Full" on a machine set to reduce could not restore them.
+ * `theme/tokens.css` keys its stillness block on this attribute and treats it as
+ * authoritative over the media query for exactly that reason.
+ *
+ * The attribute is the resolved three-state preference, not the resolved
+ * boolean, because "full" has to be distinguishable from "system" to override a
+ * system that asks for reduction.
+ */
+function publish(preference: MotionPreference): void {
+  const root = globalThis.document?.documentElement;
+  if (!root) return;
+  if (preference === 'system') delete root.dataset['motion'];
+  else root.dataset['motion'] = preference;
+}
+
+// Published at module load, before the first paint of anything that imports
+// this, so a stored preference is never briefly ignored on a cold start.
+publish(readStored());
+
 export function setMotionPreference(next: MotionPreference): void {
   try {
     if (next === 'system') globalThis.localStorage?.removeItem(STORAGE_KEY);
@@ -40,6 +65,7 @@ export function setMotionPreference(next: MotionPreference): void {
   } catch {
     // Preference is still applied for this session even if it cannot persist.
   }
+  publish(next);
   for (const listener of listeners) listener();
 }
 
@@ -70,7 +96,12 @@ export function useReducedMotion(): {
   const [systemReduced, setSystemReduced] = useState<boolean>(systemPrefersReduced);
 
   useEffect(() => {
-    const sync = () => setPreferenceState(readStored());
+    const sync = () => {
+      const stored = readStored();
+      // Another tab's change reaches us as storage, never through `publish`.
+      publish(stored);
+      setPreferenceState(stored);
+    };
     listeners.add(sync);
     // Another tab changing the preference is the same event as this one doing it.
     window.addEventListener('storage', sync);
