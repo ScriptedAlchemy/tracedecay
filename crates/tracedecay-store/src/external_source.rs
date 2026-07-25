@@ -859,6 +859,14 @@ impl SourceStoreStateV1 {
         &self.source_frontier
     }
 
+    pub fn definition(&self) -> &SourceDefinitionV1 {
+        &self.definition
+    }
+
+    pub fn binding(&self) -> &SourceBindingV1 {
+        &self.binding
+    }
+
     pub fn projected_objects(
         &self,
     ) -> &BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1> {

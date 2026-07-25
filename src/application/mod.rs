@@ -9,6 +9,7 @@ pub mod context;
 pub mod edit;
 pub(crate) mod event_lane;
 pub mod evidence_assembly;
+pub(crate) mod external_source_store;
 pub mod feedback;
 pub mod git_reads;
 pub mod host_admission;
