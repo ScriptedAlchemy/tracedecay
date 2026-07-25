@@ -29,7 +29,7 @@ fn soft_budget_alone_never_enables_destructive_maintenance() {
         .insert("sessions.db".to_string(), 1);
 
     assert!(
-        !retention_maintenance_enabled(&retention, false),
+        !retention_maintenance_enabled(&retention),
         "soft budgets are Doctor findings, never a retention trigger"
     );
 }
