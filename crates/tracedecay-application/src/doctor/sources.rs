@@ -202,7 +202,7 @@ pub fn configuration_finding(
 }
 
 /// Narrow source port for configuration resolve/pin health (Plan 20).
-pub trait ConfigurationAuthorityDoctorPort {
+pub trait ConfigurationAuthorityDoctorPort: Send + Sync {
     /// Read the current configuration authority resolve/pin health.
     fn configuration_health<'a>(
         &'a self,
@@ -315,7 +315,7 @@ pub fn runtime_health_finding(
 }
 
 /// Narrow source port for a daemon/runtime health snapshot.
-pub trait RuntimeHealthDoctorPort {
+pub trait RuntimeHealthDoctorPort: Send + Sync {
     /// Read the current daemon/runtime health snapshot.
     fn runtime_health<'a>(
         &'a self,
@@ -438,7 +438,7 @@ pub fn host_integration_finding(
 }
 
 /// Narrow source port for host/agent integration conformance (Plan 27).
-pub trait HostIntegrationDoctorPort {
+pub trait HostIntegrationDoctorPort: Send + Sync {
     /// Read the current host/agent integration conformance.
     fn host_conformance<'a>(
         &'a self,
@@ -558,7 +558,7 @@ pub fn code_index_finding(
 }
 
 /// Narrow source port for code/semantic index mount state.
-pub trait CodeIndexMountDoctorPort {
+pub trait CodeIndexMountDoctorPort: Send + Sync {
     /// Read the current code/semantic index mount state.
     fn code_index_mount<'a>(
         &'a self,
@@ -596,7 +596,7 @@ pub enum DoctorStorageFamilyReadV1 {
 /// landed producer in [`crate::storage::findings`]. Rather than re-derive those,
 /// the runtime adapter runs the producers and returns their typed
 /// [`DoctorStorageFindingV1`] values through this port.
-pub trait StorageDoctorPort {
+pub trait StorageDoctorPort: Send + Sync {
     /// Read the current storage retention/size findings.
     fn storage_findings<'a>(
         &'a self,
