@@ -115,17 +115,9 @@ async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
+    let layout = initialize_test_project(&project, &client_identity).await;
     save_project_config(
-        &cg.store_layout().dashboard_root,
+        &layout.dashboard_root,
         &AutomationConfigPatch {
             scheduler_tick_secs: Some(17),
             ..AutomationConfigPatch::default()
@@ -138,6 +130,18 @@ async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
         client_identity,
         ..test_handshake_defaults()
     };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "scheduler-tick-config-test",
+    );
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open scheduler tick fixture through daemon authority");
 
     let tick_secs = Box::pin(super::super::automation_scheduler_tick_secs_for_project(
         &cg, &handshake,
@@ -160,10 +164,19 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
-        .await
-        .expect("project init");
-    let engine = super::super::DaemonEngine::default();
+    initialize_test_project(&project, &handshake.client_identity).await;
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "scheduler-unconfigured-test",
+    );
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open scheduler fixture through daemon authority");
     let key =
         super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 
@@ -192,12 +205,21 @@ async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate()
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = Arc::new(
-        crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
-            .await
-            .expect("project init"),
+    initialize_test_project(&project, &handshake.client_identity).await;
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "scheduler-discovery-writer-gate-test",
     );
-    let engine = super::super::DaemonEngine::default();
+    let cg = Arc::new(
+        super::super::open_project_for_handshake(
+            &project,
+            &handshake,
+            &engine.store_administration,
+        )
+        .await
+        .expect("open scheduler discovery fixture through daemon authority"),
+    );
     let key =
         super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 
@@ -234,23 +256,26 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let project_graph = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
-    let server = crate::mcp::McpServer::new_with_global_db(project_graph, None, None).await;
-    let cg = server.cg().await;
+    initialize_test_project(&project, &client_identity).await;
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
         ..test_handshake_defaults()
     };
-    let engine = super::super::DaemonEngine::default();
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "scheduler-stale-owner-test",
+    );
+    let project_graph = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open stale-owner fixture through daemon authority");
+    let server = crate::mcp::McpServer::new_with_global_db(project_graph, None, None).await;
+    let cg = server.cg().await;
     let stale_key = super::super::ProjectServerKey::from_open_project(&cg, &handshake)
         .expect("stale owner key");
 
@@ -303,22 +328,33 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
     let client_identity = test_client_identity_for(profile_root);
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let layout = initialize_test_project(&project, &client_identity).await;
+    let dashboard_root = layout.dashboard_root;
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
         ..test_handshake_defaults()
     };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "scheduler-reenable-test",
+    );
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open scheduler re-enable fixture through daemon authority");
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
+    engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .insert(key.clone(), server);
     save_scheduled_automation(&dashboard_root, false).await;
     let finished = tokio::spawn(async {});
     wait_for_finished_task(
@@ -328,7 +364,6 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
     )
     .await;
     assert!(finished.is_finished());
-    let engine = DaemonEngine::default();
     engine
         .store_administration
         .automation_schedulers()
@@ -368,29 +403,32 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     let client_identity = test_client_identity_for(profile_root);
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let layout = initialize_test_project(&project, &client_identity).await;
+    let dashboard_root = layout.dashboard_root;
     save_scheduled_automation(&dashboard_root, true).await;
-    let _database_scope = crate::db::enter_daemon_database_scope(
-        &client_identity.profile_root,
-        1,
-        "concurrent-reenable-test",
-    )
-    .expect("daemon database scope");
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "concurrent-reenable-test");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
         ..test_handshake_defaults()
     };
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open concurrent re-enable fixture through daemon authority");
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
+    engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .insert(key.clone(), server);
     let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
     let finished = tokio::spawn(async move {
         let _ = finished_tx.send(());
@@ -399,7 +437,6 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
         .await
         .expect("finished owner barrier timed out")
         .expect("finished owner barrier sender dropped");
-    let engine = DaemonEngine::default();
     engine
         .automation_configured_override
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -545,11 +582,27 @@ async fn daemon_memory_repair_scheduler_starts_without_automation_configuration(
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
-        .await
-        .expect("project init");
+    initialize_test_project(&project, &handshake.client_identity).await;
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "memory-repair-scheduler-test",
+    );
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open memory repair scheduler fixture through daemon authority");
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let engine = DaemonEngine::default();
+    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
+    engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .insert(key.clone(), server);
 
     engine
         .ensure_memory_repair_scheduler(key.clone(), project.clone(), handshake.clone())
@@ -582,9 +635,19 @@ async fn daemon_memory_repair_tick_runs_without_automation_configuration() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
-        .await
-        .expect("project init");
+    initialize_test_project(&project, &handshake.client_identity).await;
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "memory-repair-tick-test",
+    );
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open memory repair tick fixture through daemon authority");
     let decision = super::super::run_memory_repair_scheduler_tick(&project, &cg)
         .await
         .expect("memory repair tick must not depend on automation configuration");
@@ -603,17 +666,8 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
-    let session_db_path = cg.store_layout().sessions_db_path.clone();
-    drop(cg);
+    let layout = initialize_test_project(&project, &client_identity).await;
+    let session_db_path = layout.sessions_db_path;
     let spool_path = session_db_path.parent().unwrap().join(format!(
         ".{}.host-admission",
         session_db_path.file_name().unwrap().to_string_lossy()
@@ -624,13 +678,11 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
         client_identity: client_identity.clone(),
         ..test_handshake_defaults()
     };
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
         &client_identity.profile_root,
-        1,
         "unavailable-host-admission-test",
-    )
-    .expect("daemon database scope");
-    let engine = super::super::DaemonEngine::default();
+    );
 
     engine
         .project_server(&handshake)
@@ -653,16 +705,7 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     }
     let client_identity = test_client_identity_for(profile_root.clone());
     for project in [&first_project, &second_project, &uncached_project] {
-        let initialized = crate::tracedecay::TraceDecay::init_with_options(
-            project,
-            crate::tracedecay::TraceDecayOpenOptions {
-                profile_root: Some(profile_root.clone()),
-                global_db_path: Some(client_identity.global_db_path.clone()),
-            },
-        )
-        .await
-        .expect("project init");
-        drop(initialized);
+        initialize_test_project(project, &client_identity).await;
     }
     let first_handshake = DaemonHandshake {
         project_path: Some(first_project.clone()),
@@ -674,15 +717,51 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
         client_identity: client_identity.clone(),
         ..test_handshake_defaults()
     };
-    let engine = DaemonEngine::default();
-    let first_server = engine
-        .project_server(&first_handshake)
-        .await
-        .expect("cache first project");
-    let second_server = engine
-        .project_server(&second_handshake)
-        .await
-        .expect("cache second project");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "profile-reconcile-test");
+    let first_cg = super::super::open_project_for_handshake(
+        &first_project,
+        &first_handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open first cached project through daemon authority");
+    let first_key = ProjectServerKey::from_open_project(&first_cg, &first_handshake)
+        .expect("first cached owner key");
+    let first_server = crate::mcp::McpServer::new_with_global_db(first_cg, None, None).await;
+    let first_cg = first_server.cg().await;
+    let second_cg = super::super::open_project_for_handshake(
+        &second_project,
+        &second_handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open second cached project through daemon authority");
+    let second_key = ProjectServerKey::from_open_project(&second_cg, &second_handshake)
+        .expect("second cached owner key");
+    let second_server = crate::mcp::McpServer::new_with_global_db(second_cg, None, None).await;
+    let second_cg = second_server.cg().await;
+    {
+        let mut owners = engine.store_administration.project_servers().lock().await;
+        owners.insert(first_key.clone(), first_server);
+        owners.insert(second_key.clone(), second_server);
+    }
+    engine
+        .activate_automation_scheduler_for_open_project(
+            first_key,
+            first_project.clone(),
+            first_handshake.clone(),
+            first_cg,
+        )
+        .await;
+    engine
+        .activate_automation_scheduler_for_open_project(
+            second_key,
+            second_project.clone(),
+            second_handshake.clone(),
+            second_cg,
+        )
+        .await;
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while engine
             .automation_config_probe_attempts
@@ -777,8 +856,6 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     )
     .await;
 
-    drop(first_server);
-    drop(second_server);
     engine.shutdown_all().await;
 }
 
@@ -794,28 +871,25 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
+    initialize_test_project(&project, &client_identity).await;
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
         ..test_handshake_defaults()
     };
-    let engine = super::super::DaemonEngine::default();
-    let key =
-        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "cached-project-reconcile-test",
+    );
 
     let server = engine
         .project_server(&handshake)
         .await
         .expect("cache unconfigured project");
+    let cg = server.cg().await;
+    let key =
+        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while engine
             .automation_config_probe_attempts
@@ -946,15 +1020,8 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
+    let layout = initialize_test_project(&project, &client_identity).await;
+    let dashboard_root = layout.dashboard_root;
     let scheduled = AutomationConfigPatch {
         enabled: Some(true),
         backend: Some(AutomationBackend::CodexAppServer),
@@ -965,23 +1032,40 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         },
         ..AutomationConfigPatch::default()
     };
-    save_project_config(&cg.store_layout().dashboard_root, &scheduled)
+    save_project_config(&dashboard_root, &scheduled)
         .await
         .expect("enable automation");
     save_scheduler_control(
-        &cg.store_layout().dashboard_root,
+        &dashboard_root,
         &AutomationSchedulerControl { paused: true },
     )
     .await
     .expect("pause scheduler work");
-
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
         ..test_handshake_defaults()
     };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "scheduler-exit-reconcile-test",
+    );
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open scheduler exit fixture through daemon authority");
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let engine = DaemonEngine::default();
+    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
+    engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .insert(key.clone(), server);
     let barrier = Arc::new(AutomationSchedulerExitBarrier::new());
     let barrier_release = AutomationExitBarrierRelease(Arc::clone(&barrier));
     *engine.automation_scheduler_exit_barrier.lock().await = Some(Arc::clone(&barrier));
@@ -1013,7 +1097,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     .expect("scheduler start timed out");
 
     save_project_config(
-        &cg.store_layout().dashboard_root,
+        &dashboard_root,
         &AutomationConfigPatch {
             enabled: Some(false),
             ..AutomationConfigPatch::default()
@@ -1038,7 +1122,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     .await
     .expect("scheduler did not reach disabled-read barrier");
 
-    save_project_config(&cg.store_layout().dashboard_root, &scheduled)
+    save_project_config(&dashboard_root, &scheduled)
         .await
         .expect("re-enable automation");
     let reconcile = tokio::time::timeout(
@@ -1096,16 +1180,8 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let layout = initialize_test_project(&project, &client_identity).await;
+    let dashboard_root = layout.dashboard_root;
     save_project_config(
         &dashboard_root,
         &AutomationConfigPatch {
@@ -1132,12 +1208,21 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
         client_identity,
         ..test_handshake_defaults()
     };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "paused-scheduler-tick-test",
+    );
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open paused scheduler fixture through daemon authority");
 
     Box::pin(super::super::run_automation_scheduler_tick(
-        &project,
-        &cg,
-        &handshake,
-        &super::super::DaemonEngine::default(),
+        &project, &cg, &handshake, &engine,
     ))
     .await
     .expect("paused scheduler tick should exit cleanly");
