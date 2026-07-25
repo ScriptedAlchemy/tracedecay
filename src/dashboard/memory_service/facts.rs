@@ -172,7 +172,11 @@ fn trust_histogram(overview: &CompatibilityDashboardMemoryOverviewV1) -> Vec<Val
         })
         .collect();
     for row in &overview.trust_histogram {
-        let Ok(idx) = row.name.parse::<usize>() else {
+        // The store emits bucket rows named "trust-<n>" (see
+        // dashboard_compatibility_named_counts_tx); a bare-number parse fails
+        // on every real row and left this histogram permanently zero.
+        let name = row.name.strip_prefix("trust-").unwrap_or(&row.name);
+        let Ok(idx) = name.parse::<usize>() else {
             continue;
         };
         let Some(bucket) = buckets.get_mut(idx.min(9)) else {
