@@ -474,11 +474,7 @@ fn default_incident_debris_retention_days() -> Option<u64> {
 }
 
 fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
-    Some(CompactionThresholdConfig {
-        free_page_ratio_threshold: 0.25,
-        minimum_reclaimable_bytes: 64 * 1024 * 1024,
-        max_pages_per_tick: default_compaction_max_pages_per_tick(),
-    })
+    Some(CompactionThresholdConfig::default())
 }
 
 /// Incremental-vacuum compaction trigger for the daemon background lane
@@ -506,8 +502,8 @@ fn default_compaction_max_pages_per_tick() -> u32 {
 impl Default for CompactionThresholdConfig {
     fn default() -> Self {
         Self {
-            free_page_ratio_threshold: 0.0,
-            minimum_reclaimable_bytes: 0,
+            free_page_ratio_threshold: 0.25,
+            minimum_reclaimable_bytes: 64 * 1024 * 1024,
             max_pages_per_tick: default_compaction_max_pages_per_tick(),
         }
     }
