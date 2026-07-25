@@ -32,9 +32,9 @@ use tracedecay_domain::feedback::{
     FeedbackFindingV1, FeedbackImpactStateV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ContentDigest, DiagnosticRecordStateV1, DiagnosticSeverityV1,
-    ManifestDigest, UtcMicros,
+    CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, ManifestDigest, UtcMicros,
 };
+use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
 use tracedecay_store::DiagnosticStore as _;
 use url::Url;
 
@@ -599,26 +599,30 @@ pub fn classify_feedback_diagnostic_admission(
     let Some(target_file) = impact_target_file else {
         return Err(FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent);
     };
-    if target_file != &record.file_occurrence_id {
-        return Err(FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch);
+    match curate_diagnostic(
+        record,
+        target_file,
+        code_generation_id,
+        document_content_digest,
+        head_commit_id,
+    ) {
+        DiagnosticCurationDecisionV1::Admit => Ok(()),
+        DiagnosticCurationDecisionV1::TargetFileMismatch => {
+            Err(FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch)
+        }
+        DiagnosticCurationDecisionV1::GenerationMismatch => {
+            Err(FeedbackDiagnosticProjectionSkipV1::GenerationMismatch)
+        }
+        DiagnosticCurationDecisionV1::ContentDigestMismatch => {
+            Err(FeedbackDiagnosticProjectionSkipV1::ContentDigestMismatch)
+        }
+        DiagnosticCurationDecisionV1::RecordNotCurrent => {
+            Err(FeedbackDiagnosticProjectionSkipV1::RecordNotCurrent)
+        }
+        DiagnosticCurationDecisionV1::SourceRevisionDrift => {
+            Err(FeedbackDiagnosticProjectionSkipV1::SourceRevisionDrift)
+        }
     }
-    if record.generation_id != *code_generation_id {
-        return Err(FeedbackDiagnosticProjectionSkipV1::GenerationMismatch);
-    }
-    if record.content_digest != *document_content_digest {
-        return Err(FeedbackDiagnosticProjectionSkipV1::ContentDigestMismatch);
-    }
-    if !matches!(record.state, DiagnosticRecordStateV1::Current) {
-        return Err(FeedbackDiagnosticProjectionSkipV1::RecordNotCurrent);
-    }
-    if record
-        .source_revision
-        .as_ref()
-        .is_some_and(|revision| revision != head_commit_id)
-    {
-        return Err(FeedbackDiagnosticProjectionSkipV1::SourceRevisionDrift);
-    }
-    Ok(())
 }
 
 fn gateway_diagnostic_data(
