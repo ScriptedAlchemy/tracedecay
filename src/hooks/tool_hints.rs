@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub use tracedecay_domain::HostIntegrationIdV1 as HintAgent;
+use tracedecay_policy::hint_delivery::{
+    HintDeliveryDecisionV1, HintDeliveryInputV1, decide_hint_delivery,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HintCategory {
@@ -485,34 +488,39 @@ impl ToolHintDedupe {
         category: HintCategory,
     ) -> HintDecision {
         let session_id = session_id.into();
+        let delivered_in_session = *self.emitted.get(&session_id).unwrap_or(&0);
         let state = self
             .categories
             .entry((session_id.clone(), category))
             .or_default();
 
-        if !state.hinted {
-            // First time this category fires. Gate on the session budget.
-            let emitted = self.emitted.entry(session_id).or_default();
-            if *emitted >= MAX_HINTS_PER_SESSION {
-                return HintDecision::SuppressedBudget;
+        let decision = decide_hint_delivery(HintDeliveryInputV1 {
+            category_was_delivered: state.hinted,
+            escalation_was_delivered: state.escalated,
+            triggers_after_delivery: state.triggers_after_hint,
+            delivered_in_session,
+            session_limit: MAX_HINTS_PER_SESSION,
+            escalation_threshold: ESCALATION_TRIGGER_THRESHOLD,
+        });
+        match decision {
+            HintDeliveryDecisionV1::Deliver => {
+                *self.emitted.entry(session_id).or_default() += 1;
+                state.hinted = true;
+                HintDecision::Emit
             }
-            *emitted += 1;
-            state.hinted = true;
-            return HintDecision::Emit;
+            HintDeliveryDecisionV1::DeliverEscalation => {
+                state.triggers_after_hint = state.triggers_after_hint.saturating_add(1);
+                state.escalated = true;
+                HintDecision::Escalate
+            }
+            HintDeliveryDecisionV1::SuppressDuplicate => {
+                if state.hinted && !state.escalated {
+                    state.triggers_after_hint = state.triggers_after_hint.saturating_add(1);
+                }
+                HintDecision::SuppressedDuplicate
+            }
+            HintDeliveryDecisionV1::SuppressBudget => HintDecision::SuppressedBudget,
         }
-
-        if state.escalated {
-            // Already spent the single escalation allowance for this category.
-            return HintDecision::SuppressedDuplicate;
-        }
-
-        state.triggers_after_hint += 1;
-        if state.triggers_after_hint >= ESCALATION_TRIGGER_THRESHOLD {
-            state.escalated = true;
-            return HintDecision::Escalate;
-        }
-
-        HintDecision::SuppressedDuplicate
     }
 
     /// Loads the dedupe state from `path`, tolerating a missing file (empty
