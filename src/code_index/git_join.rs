@@ -20,6 +20,10 @@ use tracedecay_domain::{
 };
 
 use super::capabilities::expected_seal_digest;
+use super::diagnostics::{GenerationDiagnosticDispositionV1, GenerationDiagnosticJoinV1};
+use super::impact_join::GenerationImpactJoinV1;
+use super::provider::GenerationProviderReadV1;
+use super::test_attribution::{GenerationTestJoinDispositionV1, GenerationTestJoinV1};
 
 const GIT_JOIN_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-evidence.v1";
 const GIT_HISTORY_EVIDENCE_SEPARATOR: &str = "tracedecay.generation-git-history.v1";
@@ -303,7 +307,27 @@ pub struct GenerationGitFileJoinV1 {
     pub binary: bool,
     pub submodule: bool,
     pub hunks: Vec<GitHunkV1>,
+    /// Exact generation-local context for each text hunk, in `hunks` order.
+    /// Binary and submodule files never carry hunk context.
+    #[serde(default)]
+    pub hunk_contexts: Vec<GenerationGitHunkContextV1>,
     pub join_state: GenerationGitFileJoinStateV1,
+}
+
+/// Graph/test context for one exact native-Git hunk.
+///
+/// Git proves only the changed line range. Symbol identity comes from the code
+/// occurrence authority, while callers, hazard anchors, and affected tests
+/// retain the graph/test provider state embedded in each impact read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationGitHunkContextV1 {
+    pub patch_digest: ManifestDigest,
+    pub symbol_occurrence_ids: Vec<SymbolOccurrenceId>,
+    pub impacts: Vec<GenerationProviderReadV1<GenerationImpactJoinV1>>,
+    pub diagnostic_anchors: Vec<tracedecay_domain::RetrievalAnchorId>,
+    pub hazard_anchors: Vec<tracedecay_domain::RetrievalAnchorId>,
+    pub affected_tests: Vec<SymbolOccurrenceId>,
 }
 
 /// Generation-bound view of one read-only Git diff.
@@ -318,7 +342,27 @@ pub struct GenerationGitJoinV1 {
     pub git_watermark: GenerationGitWatermarkV1,
     pub scope: GitDiffScopeV1,
     pub files: Vec<GenerationGitFileJoinV1>,
+    /// Plan-35 evidence is independently evaluated and never inherits Git
+    /// freshness or completeness.
+    #[serde(default)]
+    pub diagnostics: Option<GenerationProviderReadV1<GenerationDiagnosticJoinV1>>,
+    /// Test-map evidence is independently evaluated and never upgrades a hunk
+    /// match to executed-test proof.
+    #[serde(default)]
+    pub test_attribution: Option<GenerationProviderReadV1<GenerationTestJoinV1>>,
     pub coverage: GenerationGitJoinCoverageV1,
+}
+
+/// Independently sourced context used to enrich an exact Git diff.
+#[derive(Clone, Debug)]
+pub struct GenerationGitContextProvidersV1 {
+    pub symbol_bindings: Vec<GitSymbolLineBindingV1>,
+    pub impacts: Vec<(
+        SymbolOccurrenceId,
+        GenerationProviderReadV1<GenerationImpactJoinV1>,
+    )>,
+    pub diagnostics: GenerationProviderReadV1<GenerationDiagnosticJoinV1>,
+    pub test_attribution: GenerationProviderReadV1<GenerationTestJoinV1>,
 }
 
 /// Typed refusal to combine stale, mixed, or non-exact evidence.
@@ -342,6 +386,8 @@ pub enum GenerationGitJoinErrorV1 {
     BlamePathMismatch,
     #[error("duplicate Git symbol line binding for {0}")]
     DuplicateSymbolBinding(SymbolOccurrenceId),
+    #[error("duplicate impact evidence for {0}")]
+    DuplicateImpact(SymbolOccurrenceId),
     #[error("Git symbol line binding {0} belongs to another generation")]
     StaleSymbolGeneration(SymbolOccurrenceId),
     #[error("Git symbol line binding {0} names another file")]
@@ -532,6 +578,44 @@ impl GenerationGitJoinV1 {
         git_watermark: &GenerationGitWatermarkV1,
         file_contents: &[GitFileContentIdentityV1],
     ) -> Result<Self, GenerationGitJoinErrorV1> {
+        Self::join_internal(
+            generation,
+            snapshot,
+            diff,
+            git_watermark,
+            file_contents,
+            None,
+        )
+    }
+
+    /// Bind a typed Git diff and independently sourced graph, diagnostic, and
+    /// test evidence to one immutable generation.
+    pub fn join_with_context(
+        generation: &CodeGenerationManifestV1,
+        snapshot: &ValidatedCodeSnapshotV1,
+        diff: &GitDiffV1,
+        git_watermark: &GenerationGitWatermarkV1,
+        file_contents: &[GitFileContentIdentityV1],
+        context: &GenerationGitContextProvidersV1,
+    ) -> Result<Self, GenerationGitJoinErrorV1> {
+        Self::join_internal(
+            generation,
+            snapshot,
+            diff,
+            git_watermark,
+            file_contents,
+            Some(context),
+        )
+    }
+
+    fn join_internal(
+        generation: &CodeGenerationManifestV1,
+        snapshot: &ValidatedCodeSnapshotV1,
+        diff: &GitDiffV1,
+        git_watermark: &GenerationGitWatermarkV1,
+        file_contents: &[GitFileContentIdentityV1],
+        context: Option<&GenerationGitContextProvidersV1>,
+    ) -> Result<Self, GenerationGitJoinErrorV1> {
         validate_generation_snapshot(generation, snapshot)?;
         diff.validate()
             .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
@@ -545,6 +629,9 @@ impl GenerationGitJoinV1 {
             .map(|file| (file.logical_path.as_str(), file))
             .collect();
 
+        let context_index = context
+            .map(|context| validate_context(generation, snapshot, context))
+            .transpose()?;
         let mut files = Vec::with_capacity(diff.files.len());
         let mut partial_reasons: Vec<GenerationGitPartialReasonV1> = diff
             .coverage
@@ -593,6 +680,23 @@ impl GenerationGitJoinV1 {
             } else {
                 GenerationGitFileJoinStateV1::Exact
             };
+            let hunk_contexts = if matches!(join_state, GenerationGitFileJoinStateV1::Exact) {
+                context_index
+                    .as_ref()
+                    .map(|index| {
+                        git_file
+                            .hunks
+                            .iter()
+                            .map(|hunk| {
+                                hunk_context(generation, git_file, hunk, snapshot_file, index)
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
 
             files.push(GenerationGitFileJoinV1 {
                 path: git_file.path.clone(),
@@ -607,6 +711,7 @@ impl GenerationGitJoinV1 {
                 binary: git_file.binary,
                 submodule: git_file.submodule,
                 hunks: git_file.hunks.clone(),
+                hunk_contexts,
                 join_state,
             });
         }
@@ -628,9 +733,225 @@ impl GenerationGitJoinV1 {
             git_watermark: git_watermark.clone(),
             scope: diff.scope.clone(),
             files,
+            diagnostics: context.map(|context| context.diagnostics.clone()),
+            test_attribution: context.map(|context| context.test_attribution.clone()),
             coverage,
         })
     }
+}
+
+struct GenerationGitContextIndexV1<'a> {
+    symbols_by_file: BTreeMap<&'a FileOccurrenceId, Vec<&'a GitSymbolLineBindingV1>>,
+    impacts: BTreeMap<&'a SymbolOccurrenceId, &'a GenerationProviderReadV1<GenerationImpactJoinV1>>,
+    diagnostics: Option<&'a GenerationDiagnosticJoinV1>,
+    test_attribution: Option<&'a GenerationTestJoinV1>,
+}
+
+fn validate_context<'a>(
+    generation: &CodeGenerationManifestV1,
+    snapshot: &ValidatedCodeSnapshotV1,
+    context: &'a GenerationGitContextProvidersV1,
+) -> Result<GenerationGitContextIndexV1<'a>, GenerationGitJoinErrorV1> {
+    context
+        .diagnostics
+        .validate()
+        .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+    context
+        .test_attribution
+        .validate()
+        .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+    let diagnostics = context.diagnostics.evidence.as_ref();
+    let test_attribution = context.test_attribution.evidence.as_ref();
+    for (generation_id, snapshot_digest, content_identity) in diagnostics
+        .map(|join| {
+            (
+                &join.generation_id,
+                &join.code_snapshot_digest,
+                &join.code_content_identity,
+            )
+        })
+        .into_iter()
+        .chain(test_attribution.map(|join| {
+            (
+                &join.generation_id,
+                &join.code_snapshot_digest,
+                &join.code_content_identity,
+            )
+        }))
+    {
+        if generation_id != &generation.generation_id
+            || snapshot_digest != &generation.snapshot_digest
+            || content_identity != &snapshot.snapshot.content_identity
+        {
+            return Err(GenerationGitJoinErrorV1::StaleGenerationWatermark);
+        }
+    }
+
+    let content_by_file: BTreeMap<&FileOccurrenceId, &ContentDigest> = snapshot
+        .snapshot
+        .files
+        .iter()
+        .map(|file| (&file.file_occurrence_id, &file.content_digest))
+        .collect();
+    let mut symbols_by_file: BTreeMap<&FileOccurrenceId, Vec<&GitSymbolLineBindingV1>> =
+        BTreeMap::new();
+    let mut seen_symbols = BTreeSet::new();
+    for binding in &context.symbol_bindings {
+        if !seen_symbols.insert(&binding.symbol_occurrence_id) {
+            return Err(GenerationGitJoinErrorV1::DuplicateSymbolBinding(
+                binding.symbol_occurrence_id.clone(),
+            ));
+        }
+        if binding.generation_id != generation.generation_id {
+            return Err(GenerationGitJoinErrorV1::StaleSymbolGeneration(
+                binding.symbol_occurrence_id.clone(),
+            ));
+        }
+        let Some(content) = content_by_file.get(&binding.file_occurrence_id) else {
+            return Err(GenerationGitJoinErrorV1::StaleSymbolFile(
+                binding.symbol_occurrence_id.clone(),
+            ));
+        };
+        if *content != &binding.content_digest {
+            return Err(GenerationGitJoinErrorV1::StaleSymbolContent(
+                binding.symbol_occurrence_id.clone(),
+            ));
+        }
+        if binding.start_line == 0 || binding.end_line == 0 || binding.start_line > binding.end_line
+        {
+            return Err(GenerationGitJoinErrorV1::InvalidSymbolLineRange(
+                binding.symbol_occurrence_id.clone(),
+            ));
+        }
+        symbols_by_file
+            .entry(&binding.file_occurrence_id)
+            .or_default()
+            .push(binding);
+    }
+    for bindings in symbols_by_file.values_mut() {
+        bindings.sort_by(|left, right| {
+            left.start_line
+                .cmp(&right.start_line)
+                .then(left.end_line.cmp(&right.end_line))
+                .then(left.symbol_occurrence_id.cmp(&right.symbol_occurrence_id))
+        });
+    }
+
+    let mut impacts = BTreeMap::new();
+    for (symbol, read) in &context.impacts {
+        read.validate()
+            .map_err(|error| GenerationGitJoinErrorV1::Contract(error.to_string()))?;
+        if impacts.insert(symbol, read).is_some() {
+            return Err(GenerationGitJoinErrorV1::DuplicateImpact(symbol.clone()));
+        }
+        if let Some(impact) = &read.evidence
+            && (impact.generation_id != generation.generation_id
+                || impact.code_snapshot_digest != generation.snapshot_digest
+                || impact.code_content_identity != snapshot.snapshot.content_identity)
+        {
+            return Err(GenerationGitJoinErrorV1::StaleGenerationWatermark);
+        }
+    }
+    Ok(GenerationGitContextIndexV1 {
+        symbols_by_file,
+        impacts,
+        diagnostics,
+        test_attribution,
+    })
+}
+
+fn hunk_context(
+    generation: &CodeGenerationManifestV1,
+    git_file: &tracedecay_domain::GitFileDiffV1,
+    hunk: &GitHunkV1,
+    snapshot_file: &SanitizedCodeFileV1,
+    context: &GenerationGitContextIndexV1<'_>,
+) -> Result<GenerationGitHunkContextV1, GenerationGitJoinErrorV1> {
+    let (start, lines) = if git_file.change == GitChangeKindV1::Deleted || hunk.new_lines == 0 {
+        (hunk.old_start, hunk.old_lines)
+    } else {
+        (hunk.new_start, hunk.new_lines)
+    };
+    let end = start.saturating_add(lines.saturating_sub(1));
+    let symbol_occurrence_ids = context
+        .symbols_by_file
+        .get(&snapshot_file.file_occurrence_id)
+        .into_iter()
+        .flatten()
+        .filter(|binding| lines > 0 && binding.start_line <= end && binding.end_line >= start)
+        .map(|binding| binding.symbol_occurrence_id.clone())
+        .collect::<Vec<_>>();
+
+    let impacts = symbol_occurrence_ids
+        .iter()
+        .filter_map(|symbol| context.impacts.get(symbol).copied().cloned())
+        .collect::<Vec<_>>();
+    let symbol_set = symbol_occurrence_ids.iter().collect::<BTreeSet<_>>();
+    let mut diagnostic_anchors = context
+        .diagnostics
+        .into_iter()
+        .flat_map(|diagnostics| &diagnostics.records)
+        .filter_map(|record| match &record.disposition {
+            GenerationDiagnosticDispositionV1::Current { attachment }
+                if attachment.generation_id == generation.generation_id
+                    && attachment.file_occurrence_id == snapshot_file.file_occurrence_id
+                    && attachment
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .is_some_and(|symbol| symbol_set.contains(symbol)) =>
+            {
+                Some(attachment.diagnostic_anchor.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    diagnostic_anchors.sort();
+    diagnostic_anchors.dedup();
+
+    let mut hazard_anchors = Vec::new();
+    let mut affected_tests = Vec::new();
+    for read in &impacts {
+        if let Some(impact) = &read.evidence {
+            if let Some(graph) = &impact.graph_provider.evidence {
+                hazard_anchors.extend(graph.evidence_anchors.iter().cloned());
+            }
+            affected_tests.extend(
+                impact
+                    .affected_tests
+                    .iter()
+                    .map(|binding| binding.symbol_occurrence_id.clone()),
+            );
+        }
+    }
+    for record in context
+        .test_attribution
+        .into_iter()
+        .flat_map(|test_attribution| &test_attribution.records)
+    {
+        if matches!(
+            record.disposition,
+            GenerationTestJoinDispositionV1::Current { .. }
+        ) && record
+            .attribution
+            .covered_occurrences
+            .iter()
+            .any(|covered| symbol_set.contains(covered))
+        {
+            affected_tests.push(record.attribution.test_occurrence.clone());
+        }
+    }
+    hazard_anchors.sort();
+    hazard_anchors.dedup();
+    affected_tests.sort();
+    affected_tests.dedup();
+    Ok(GenerationGitHunkContextV1 {
+        patch_digest: hunk.patch_digest.clone(),
+        symbol_occurrence_ids,
+        impacts,
+        diagnostic_anchors,
+        hazard_anchors,
+        affected_tests,
+    })
 }
 
 fn validate_generation_snapshot(
