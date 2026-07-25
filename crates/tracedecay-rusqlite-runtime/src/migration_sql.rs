@@ -1886,7 +1886,7 @@ mod tests {
         channel
             .execute_batch(
                 "CREATE TEMP TABLE scratch (value INTEGER NOT NULL);
-                 CREATE TEMP INDEX scratch_value ON scratch(value);
+                 CREATE INDEX temp.scratch_value ON scratch(value);
                  INSERT INTO temp.scratch(value) VALUES (1);
                  DELETE FROM temp.scratch;
                  DROP INDEX temp.scratch_value;
