@@ -942,11 +942,10 @@ impl FeedbackDiagnosticProjectionV1 {
                 field: "feedback diagnostic projection message",
             });
         }
-        if self
-            .code_description_uri
-            .as_ref()
-            .is_some_and(|value| !safe_diagnostic_code_description_uri(value))
-        {
+        if !safe_diagnostic_code_description_uri(
+            self.producer,
+            self.code_description_uri.as_deref(),
+        ) {
             return Err(DomainError::UnsafeText {
                 field: "feedback diagnostic code description URI",
             });
@@ -955,7 +954,16 @@ impl FeedbackDiagnosticProjectionV1 {
     }
 }
 
-fn safe_diagnostic_code_description_uri(value: &str) -> bool {
+fn safe_diagnostic_code_description_uri(
+    producer: FeedbackDiagnosticProducerV1,
+    value: Option<&str>,
+) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    if producer != FeedbackDiagnosticProducerV1::GitHubReview {
+        return false;
+    }
     if value.len() > 2_048 {
         return false;
     }
@@ -963,7 +971,7 @@ fn safe_diagnostic_code_description_uri(value: &str) -> bool {
         return false;
     };
     url.scheme() == "https"
-        && url.host_str().is_some()
+        && url.host_str() == Some("github.com")
         && url.username().is_empty()
         && url.password().is_none()
         && url.port().is_none()
@@ -1587,6 +1595,27 @@ mod tests {
             state: FeedbackImpactStateV1::Complete,
             affected_tests_state: FeedbackImpactStateV1::Complete,
         }
+    }
+
+    #[test]
+    fn diagnostic_links_are_github_review_only() {
+        let github = Some("https://github.com/owner/repository/pull/13#discussion_r1");
+        assert!(safe_diagnostic_code_description_uri(
+            FeedbackDiagnosticProducerV1::GitHubReview,
+            github,
+        ));
+        assert!(!safe_diagnostic_code_description_uri(
+            FeedbackDiagnosticProducerV1::CiLocalization,
+            github,
+        ));
+        assert!(!safe_diagnostic_code_description_uri(
+            FeedbackDiagnosticProducerV1::GitHubReview,
+            Some("https://example.com/owner/repository/pull/13#discussion_r1"),
+        ));
+        assert!(safe_diagnostic_code_description_uri(
+            FeedbackDiagnosticProducerV1::Proximity,
+            None,
+        ));
     }
 
     #[test]
