@@ -54,8 +54,10 @@ struct HealthSnapshot {
     /// Raw signals retained for `details=true` (#82).
     gini: f64,
     edges_in_cycles: usize,
+    total_edges: usize,
     max_chain: usize,
     ideal_chain: usize,
+    complexity_files: usize,
     modularity_components: usize,
     dead_count: usize,
     total_fns: usize,
@@ -453,6 +455,7 @@ async fn compute_health_snapshot(
         .build_file_adjacency(path_prefix)
         .await?;
     let files_analyzed = adj.len();
+    let total_edges = adj.values().map(Vec::len).sum();
 
     let (acyclicity, edges_in_cycles) = acyclicity_score(&adj);
     let depth_result = dependency_depth(&adj, 1);
@@ -475,6 +478,7 @@ async fn compute_health_snapshot(
             .or_insert(0.0) += c;
     }
     let complexity_values: Vec<f64> = per_file_complexity.values().copied().collect();
+    let complexity_files = complexity_values.len();
     let gini = gini_coefficient(&complexity_values);
     let equality = (1.0 - gini).clamp(0.0, 1.0);
 
@@ -532,8 +536,10 @@ async fn compute_health_snapshot(
         coverage_discipline,
         gini,
         edges_in_cycles,
+        total_edges,
         max_chain: depth_result.max_depth,
         ideal_chain: depth_result.ideal_depth,
+        complexity_files,
         modularity_components,
         dead_count,
         total_fns,

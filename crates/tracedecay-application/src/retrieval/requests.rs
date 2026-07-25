@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, Pr9FallbackSubpayload,
     RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
-    TestAttributionEvidenceClassV1,
+    ManifestDigest, TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use crate::error::ApplicationContractError;
@@ -225,4 +227,81 @@ pub struct HealthReadRequest {
 #[serde(deny_unknown_fields)]
 pub struct HealthReadResult {
     pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDeltaRequest {
+    pub before_cursor: Option<String>,
+    pub path_prefix: Option<String>,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDeltaScopeV1 {
+    pub project_id: Option<String>,
+    pub scope_digest: ManifestDigest,
+    pub path_prefix: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDimensionPointV1 {
+    pub score_ppm: u64,
+    pub denominator: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDeltaPointV1 {
+    pub watermark: ManifestDigest,
+    pub observed_at: UtcMicros,
+    pub quality_signal: u32,
+    pub files_analyzed: u64,
+    pub function_denominator: u64,
+    pub dimensions: BTreeMap<String, HealthDimensionPointV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDimensionDeltaV1 {
+    pub before_ppm: u64,
+    pub after_ppm: u64,
+    pub delta_ppm: i64,
+    pub before_denominator: Option<u64>,
+    pub after_denominator: Option<u64>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDeltaCoverageV1 {
+    pub eligible: Option<u64>,
+    pub visited: Option<u64>,
+    pub denominator: Option<u64>,
+    pub completeness: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDeltaCurrentnessV1 {
+    pub state: String,
+    pub observed_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HealthDeltaResult {
+    pub schema_version: u32,
+    pub scope: HealthDeltaScopeV1,
+    pub before: HealthDeltaPointV1,
+    pub after: HealthDeltaPointV1,
+    pub before_cursor: String,
+    pub after_cursor: String,
+    pub pass: bool,
+    pub delta: i64,
+    pub dimensions: BTreeMap<String, HealthDimensionDeltaV1>,
+    pub coverage: HealthDeltaCoverageV1,
+    pub currentness: HealthDeltaCurrentnessV1,
 }

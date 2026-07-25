@@ -19,14 +19,14 @@ use tracedecay_application::retrieval::grep_analysis::{
 };
 use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, ExactSymbolRequest,
-    GraphImpactPrimitiveRequest, GraphRelationRequest, HealthReadRequest, ImplementationsRequest,
-    OperationalRetrievalPort, RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest,
-    SignatureSearchRequest, SourceLinesRequest, SourceReadPortContext, SourceReadPortOutcome,
-    SourceReadPrimitivePort, SourceReadPrimitiveRequest, SourceRetrievalPort, SymbolGraphPage,
-    SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
-    SymbolSearchPrimitiveRequest, TemporalRetrievalPort, TestMapPrimitiveRequest,
-    TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
-    TestPrimitivePortOutcome, TypeHierarchyRequest,
+    GraphImpactPrimitiveRequest, GraphRelationRequest, HealthDeltaRequest, HealthDeltaResult,
+    HealthReadRequest, ImplementationsRequest, OperationalRetrievalPort, RetrievalPortContext,
+    RetrievalPortOutcome, SessionLookupRequest, SignatureSearchRequest, SourceLinesRequest,
+    SourceReadPortContext, SourceReadPortOutcome, SourceReadPrimitivePort,
+    SourceReadPrimitiveRequest, SourceRetrievalPort, SymbolGraphPage, SymbolGraphPortContext,
+    SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolSearchPrimitiveRequest,
+    TemporalRetrievalPort, TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort,
+    TestPrimitivePortContext, TestPrimitivePortOutcome, TypeHierarchyRequest,
 };
 use tracedecay_application::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationOutcome,
@@ -370,6 +370,12 @@ pub trait Pr12ExtendedPrimitivePort: Send + Sync {
         request: &'a FileMetadataPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult>;
 
+    fn health_delta<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a HealthDeltaRequest,
+    ) -> Pr12ExtendedPrimitiveFuture<'a, HealthDeltaResult>;
+
     fn storage_status<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
@@ -414,6 +420,7 @@ pub enum Pr12PrimitiveRequest {
     ModuleApi(ModuleApiPrimitiveRequest),
     FileMetadata(FileMetadataPrimitiveRequest),
     HealthRead(HealthReadRequest),
+    HealthDelta(HealthDeltaRequest),
     StorageStatus(StorageStatusPrimitiveRequest),
     DiagnosticsRead(DiagnosticsPrimitiveRequest),
     Operational(Pr12OperationalPrimitiveRequest),
@@ -1171,6 +1178,14 @@ async fn dispatch_admitted(
                 .project_runtime
                 .health
                 .health_read(&retrieval_context(&context, &operation), &request);
+            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
+        }
+        Pr12PrimitiveRequest::HealthDelta(request) => {
+            let outcome = runtime
+                .project_runtime
+                .extended
+                .health_delta(retrieval_context(&context, &operation), &request)
+                .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
         Pr12PrimitiveRequest::StorageStatus(request) => {
