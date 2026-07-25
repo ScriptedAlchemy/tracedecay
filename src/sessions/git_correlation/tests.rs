@@ -556,6 +556,264 @@ async fn coalescing_bridged_spans_repoints_commit_attributions() {
     );
 }
 
+/// A store carrying the current tables but still recorded at schema v3, so the
+/// next `ensure_git_correlation_schema` runs the v4 span compaction over
+/// whatever legacy rows the test inserted.
+async fn legacy_v3_conn() -> GitCorrelationTestDb {
+    let conn = test_conn().await;
+    conn.execute(
+        "UPDATE session_schema_migrations SET version = 3 WHERE name = ?1",
+        params![MIGRATION_NAME],
+    )
+    .await
+    .unwrap();
+    conn
+}
+
+/// Writes one raw span row the way the superseded newest-span-only rule did,
+/// bypassing the merge in `record_span_observation_in_transaction`.
+async fn insert_raw_span(
+    conn: &GitCorrelationTestDb,
+    session_id: &str,
+    branch: Option<&str>,
+    worktree: &str,
+    first_ts: i64,
+    last_ts: i64,
+) -> i64 {
+    conn.execute(
+        "INSERT INTO session_git_spans (
+            provider, session_id, branch, worktree, first_ts, last_ts, event_count, source
+         ) VALUES ('claude', ?1, ?2, ?3, ?4, ?5, 1, 'ingest')",
+        params![
+            session_id,
+            branch.map_or(Value::Null, |branch| Value::Text(branch.to_string())),
+            worktree,
+            first_ts,
+            last_ts
+        ],
+    )
+    .await
+    .unwrap();
+    // `last_insert_rowid()` belongs to the writing connection; the test helper
+    // reads back the id the row actually got instead.
+    let mut rows = conn
+        .query(
+            "SELECT MAX(span_id) FROM session_git_spans WHERE session_id = ?1",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn count_rows(conn: &GitCorrelationTestDb, sql: &str) -> i64 {
+    let mut rows = conn.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+/// `(provider, session_id, branch, worktree, min(first_ts), max(last_ts), sum(event_count))`
+/// — the activity windows `sessions_for` reports per key. Compaction must fold
+/// rows without moving any of these.
+async fn key_windows(
+    conn: &GitCorrelationTestDb,
+) -> Vec<(String, String, Option<String>, String, i64, i64, i64)> {
+    let mut rows = conn
+        .query(
+            "SELECT provider, session_id, branch, worktree,
+                    MIN(first_ts), MAX(last_ts), SUM(event_count)
+             FROM session_git_spans
+             GROUP BY provider, session_id, branch, worktree
+             ORDER BY provider, session_id, branch, worktree",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        out.push((
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+            row.get(3).unwrap(),
+            row.get(4).unwrap(),
+            row.get(5).unwrap(),
+            row.get(6).unwrap(),
+        ));
+    }
+    out
+}
+
+#[tokio::test]
+async fn v4_migration_folds_legacy_instant_spans_and_repoints_attributions() {
+    let conn = legacy_v3_conn().await;
+    let gap = DEFAULT_SPAN_MERGE_GAP_SECS;
+    // One real working stretch recorded as a wide span plus the instant spans
+    // the old rule inserted per replayed message...
+    let survivor = insert_raw_span(&conn, "s1", Some("main"), "/repo", 0, gap).await;
+    let mut absorbed = Vec::new();
+    for ts in [0, gap / 3, gap / 2, gap] {
+        absorbed.push(insert_raw_span(&conn, "s1", Some("main"), "/repo", ts, ts).await);
+    }
+    // ...a genuinely separate stretch, a detached-HEAD observation, and another
+    // worktree: none of these may be folded into the `main` span.
+    let distant = insert_raw_span(&conn, "s1", Some("main"), "/repo", 1_000_000, 1_000_000).await;
+    let detached = insert_raw_span(&conn, "s1", None, "/repo", gap / 2, gap / 2).await;
+    let elsewhere = insert_raw_span(&conn, "s1", Some("main"), "/other", gap / 2, gap / 2).await;
+    let sha = "abcdef1234567890abcdef1234567890abcdef12";
+    upsert_commit_session(
+        &conn,
+        &CommitSessionRecord {
+            commit_sha: sha.to_string(),
+            provider: "claude".to_string(),
+            session_id: "s1".to_string(),
+            branch: Some("main".to_string()),
+            worktree: Some("/repo".to_string()),
+            committed_at: gap,
+            span_overlap_kind: SpanOverlapKind::WithinSpan,
+            span_id: Some(absorbed[3]),
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::TimeOverlap,
+            confidence: 20,
+            evidence_message_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let before = key_windows(&conn).await;
+    assert_eq!(
+        count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await,
+        8
+    );
+
+    ensure_git_correlation_schema(&conn).await.unwrap();
+
+    assert_eq!(schema_version(&conn).await.unwrap(), Some(4));
+    let spans = span_rows(&conn, "s1").await;
+    let ids: Vec<i64> = spans.iter().map(|(id, ..)| *id).collect();
+    assert_eq!(
+        ids.len(),
+        4,
+        "one span per real stretch, branch and worktree: {spans:?}"
+    );
+    assert!(
+        ids.contains(&survivor) && ids.contains(&distant),
+        "both real working stretches must survive: {spans:?}"
+    );
+    assert!(ids.contains(&detached) && ids.contains(&elsewhere));
+    for id in &absorbed {
+        assert!(!ids.contains(id), "contained instant spans must be folded");
+    }
+    let merged = spans
+        .iter()
+        .find(|(id, ..)| *id == survivor)
+        .expect("survivor keeps the widest bounds");
+    assert_eq!((merged.2, merged.3), (0, gap));
+    assert_eq!(
+        before,
+        key_windows(&conn).await,
+        "per-key activity windows and event totals must survive the fold"
+    );
+
+    let mut rows = conn
+        .query(
+            "SELECT span_id FROM commit_sessions WHERE commit_sha = ?1",
+            params![sha],
+        )
+        .await
+        .unwrap();
+    let attributed: Option<i64> = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(attributed, Some(survivor));
+    assert_eq!(
+        count_rows(
+            &conn,
+            "SELECT COUNT(*) FROM commit_sessions c
+             WHERE c.span_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM session_git_spans s WHERE s.span_id = c.span_id)"
+        )
+        .await,
+        0,
+        "no attribution may point at a folded-away span"
+    );
+}
+
+#[tokio::test]
+async fn v4_migration_is_a_no_op_on_already_compact_history() {
+    let conn = legacy_v3_conn().await;
+    let gap = DEFAULT_SPAN_MERGE_GAP_SECS;
+    for session in ["s1", "s2"] {
+        for step in 0..40i64 {
+            let ts = step * (gap / 4) + i64::from(session == "s2") * 7;
+            let branch = if step % 3 == 0 { Some("main") } else { None };
+            insert_raw_span(&conn, session, branch, "/repo", ts, ts).await;
+        }
+        // A far-away stretch, so folding cannot collapse a key to one span.
+        insert_raw_span(&conn, session, Some("main"), "/repo", 5_000_000, 5_000_001).await;
+    }
+    let before_windows = key_windows(&conn).await;
+    let before_count = count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await;
+
+    ensure_git_correlation_schema(&conn).await.unwrap();
+    let compacted = span_rows(&conn, "s1").await;
+    let after_count = count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await;
+    assert!(
+        after_count < before_count,
+        "compaction must remove contained spans ({before_count} -> {after_count})"
+    );
+    assert_eq!(before_windows, key_windows(&conn).await);
+
+    // Re-arming the migration must leave an already-folded table untouched.
+    conn.execute(
+        "UPDATE session_schema_migrations SET version = 3 WHERE name = ?1",
+        params![MIGRATION_NAME],
+    )
+    .await
+    .unwrap();
+    ensure_git_correlation_schema(&conn).await.unwrap();
+    assert_eq!(
+        count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await,
+        after_count
+    );
+    assert_eq!(span_rows(&conn, "s1").await, compacted);
+    assert_eq!(before_windows, key_windows(&conn).await);
+}
+
+#[tokio::test]
+async fn v4_migration_keeps_v3_producer_evidence() {
+    let conn = legacy_v3_conn().await;
+    let produced = CommitSessionRecord {
+        commit_sha: "1111111111111111111111111111111111111111".to_string(),
+        provider: "codex".to_string(),
+        session_id: "producer-session".to_string(),
+        branch: Some("main".to_string()),
+        worktree: Some("/repo".to_string()),
+        committed_at: 1_200,
+        span_overlap_kind: SpanOverlapKind::Direct,
+        span_id: None,
+        relation: CommitRelation::Produced,
+        evidence: CommitEvidence::ToolResult,
+        confidence: 100,
+        evidence_message_id: Some("m1".to_string()),
+    };
+    assert!(upsert_commit_session(&conn, &produced).await.unwrap());
+
+    ensure_git_correlation_schema(&conn).await.unwrap();
+
+    let hits = sessions_for(
+        &conn,
+        &SessionsForQuery {
+            git_ref: GitRefFilter::Commit("11111111".to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].relation, Some(CommitRelation::Produced));
+    assert_eq!(hits[0].confidence, Some(100));
+}
+
 #[tokio::test]
 async fn sweep_holds_watermark_when_a_target_cannot_be_scanned() {
     let conn = test_conn().await;
@@ -1578,4 +1836,30 @@ async fn correlation_index_health_without_tables_is_empty() {
     assert_eq!(health.span_count, 0);
     assert_eq!(health.commit_count, 0);
     assert_eq!(health.backfill_watermark, None);
+}
+
+#[tokio::test]
+#[ignore = "scratch: runs the migration against a copy of a live store"]
+async fn scratch_compact_live_copy() {
+    let path = std::env::var("TRACEDECAY_SCRATCH_DB").expect("TRACEDECAY_SCRATCH_DB");
+    let conn = GitCorrelationTestDb {
+        _directory: tempfile::tempdir().unwrap(),
+        connection: TestConnection::open(std::path::Path::new(&path)),
+    };
+    let before = count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await;
+    let started = std::time::Instant::now();
+    ensure_git_correlation_schema(&conn).await.unwrap();
+    let elapsed = started.elapsed();
+    let after = count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await;
+    println!("SCRATCH spans before={before} after={after} elapsed={elapsed:?}");
+    println!(
+        "SCRATCH version={:?} dangling={}",
+        schema_version(&conn).await.unwrap(),
+        count_rows(
+            &conn,
+            "SELECT COUNT(*) FROM commit_sessions c WHERE c.span_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM session_git_spans s WHERE s.span_id = c.span_id)"
+        )
+        .await
+    );
 }

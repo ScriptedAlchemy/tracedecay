@@ -611,12 +611,11 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     }
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted =
-        git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
-            super::project::git_scan_commits(target, gap)
-        })
-        .await
-        .unwrap();
+    let inserted = git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
+        super::project::git_scan_commits(target, gap)
+    })
+    .await
+    .unwrap();
     assert!(
         inserted >= 1,
         "a commit made during a live session must be attributed"
@@ -634,7 +633,11 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     )
     .await
     .unwrap();
-    assert_eq!(hits.len(), 1, "the live session must be correlated: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "the live session must be correlated: {hits:?}"
+    );
     assert_eq!(hits[0].session_id, "live");
     assert_eq!(
         hits[0].span_overlap_kind,
