@@ -4,6 +4,7 @@ import {
   codeHits,
   facetCounts,
   knowledgeHits,
+  plannerLaneState,
   relativeTime,
   sessionHits,
 } from './model.ts';
@@ -163,6 +164,87 @@ describe('facetCounts', () => {
       { id: 'project', label: 'project', count: 2 },
       { id: 'decision', label: 'decision', count: 1 },
     ]);
+  });
+});
+
+describe('plannerLaneState', () => {
+  it('retains pending and unknown-total source states without inventing rows or zero totals', () => {
+    expect(
+      plannerLaneState(
+        {
+          source_id: 'code_graph',
+          source_label: 'Code graph',
+          phase: 'reading',
+          outcome: 'pending',
+          completed_units: null,
+          total_units: null,
+          coverage: {
+            completeness: 'unknown',
+            eligible: null,
+            examined: null,
+            matched: null,
+            excluded: null,
+            omitted: null,
+            unknown: null,
+            denominator: null,
+            unit: null,
+            omission_reasons: [],
+          },
+          freshness: 'unknown',
+          watermark: null,
+          error_code: null,
+          message: null,
+          page: null,
+        },
+        'code_graph',
+      ),
+    ).toEqual({
+      pending: true,
+      outcome: 'pending',
+      rows: [],
+    });
+
+    expect(
+      plannerLaneState(
+        {
+          source_id: 'knowledge',
+          source_label: 'Knowledge',
+          phase: 'completed',
+          outcome: 'ready',
+          completed_units: 2,
+          total_units: null,
+          coverage: {
+            completeness: 'unknown',
+            eligible: null,
+            examined: 2,
+            matched: null,
+            excluded: null,
+            omitted: null,
+            unknown: null,
+            denominator: null,
+            unit: 'facts',
+            omission_reasons: ['matching fact total is not exposed'],
+          },
+          freshness: 'unknown',
+          watermark: null,
+          error_code: null,
+          message: null,
+          page: {
+            offset: 0,
+            limit: 25,
+            total: null,
+            next_offset: null,
+            rows: [{ fact_id: 7, content: 'real fact' }],
+            metadata: {},
+          },
+        },
+        'knowledge',
+      ),
+    ).toEqual({
+      pending: false,
+      outcome: 'ok',
+      rows: [{ fact_id: 7, content: 'real fact' }],
+    });
   });
 });
 
