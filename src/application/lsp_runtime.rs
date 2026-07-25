@@ -758,8 +758,10 @@ where
                         range: crate::daemon::lsp_gateway::LspRange { start, end },
                         severity: Some(gateway_severity(projection.severity)),
                         code: Some(projection.code.clone()),
+                        code_description_uri: None,
                         message: projection.safe_bounded_message.clone(),
                         source: advisory_diagnostic_source(projection.producer),
+                        related_information: Vec::new(),
                         data: gateway_diagnostic_data(
                             finding,
                             anchor,
@@ -806,10 +808,12 @@ where
                     range: crate::daemon::lsp_gateway::LspRange { start, end },
                     severity: Some(gateway_severity(record.severity)),
                     code: Some(record.code),
+                    code_description_uri: None,
                     message: record.message,
                     // Name the real producer instead of an anonymous
                     // `tracedecay` lane (Plan 35).
                     source: DiagnosticSource::from_producer(record.provenance.producer.as_str()),
+                    related_information: Vec::new(),
                     data,
                 });
             }
