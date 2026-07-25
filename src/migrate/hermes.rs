@@ -81,12 +81,15 @@ pub async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigra
             ..LegacyHermesMigrationReport::default()
         };
     };
+    let hermes_homes = [user_home.join(".hermes")];
+    if !has_legacy_hermes_sources(&hermes_homes, &profile_root) {
+        return LegacyHermesMigrationReport::default();
+    }
     let lifecycle =
         match crate::daemon::QuiescedDaemonLifecycle::acquire("legacy Hermes store migration") {
             Ok(lifecycle) => lifecycle,
             Err(error) => return migration_authority_failure(&profile_root, error.to_string()),
         };
-    let hermes_homes = [user_home.join(".hermes")];
     let lifecycle_lease = match lifecycle.lifecycle_lease() {
         Ok(lifecycle_lease) => lifecycle_lease,
         Err(error) => return migration_authority_failure(&profile_root, error.to_string()),
@@ -129,6 +132,9 @@ pub async fn migrate_legacy_hermes_stores_under_lease(
         };
     };
     let hermes_homes = [user_home.join(".hermes")];
+    if !has_legacy_hermes_sources(&hermes_homes, &profile_root) {
+        return LegacyHermesMigrationReport::default();
+    }
     migrate_legacy_hermes_stores_with_lease(
         user_home,
         &profile_root,
@@ -137,6 +143,18 @@ pub async fn migrate_legacy_hermes_stores_under_lease(
         None,
     )
     .await
+}
+
+fn has_legacy_hermes_sources(hermes_homes: &[PathBuf], profile_root: &Path) -> bool {
+    let profile_dirs = legacy_profile_dirs_for_homes(hermes_homes);
+    !legacy_store_candidates(&profile_dirs, profile_root).is_empty()
+        || profile_dirs.iter().any(|profile_dir| {
+            profile_dir.join("state.db").is_file()
+                && crate::agents::hermes::read_config_pinned_project_root(
+                    &profile_dir.join("config.yaml"),
+                )
+                .is_some()
+        })
 }
 
 /// Explicit `TraceDecay` profile-root seam used by migration tests. The source
