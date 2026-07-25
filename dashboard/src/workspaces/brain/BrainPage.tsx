@@ -262,6 +262,13 @@ function RegistryFieldView({
         selectedId={null}
         onSelect={handleSelect}
         ariaLabel={fieldDescription(field)}
+        encoding={{
+          body: 'project / repo hub',
+          size: 'mass / checkouts',
+          hue: 'project kind',
+          signal: 'recency / activation',
+          relation: 'shared checkout',
+        }}
         caption={<FieldAxis field={field} />}
       />
     </>
@@ -297,23 +304,14 @@ function FieldAxis({ field }: { field: RegistryField }) {
         ))}
       </div>
       <p className="text-2xs leading-relaxed text-text-muted">
-        Each body is one project: column = when TraceDecay last saw it, height =
-        indexed mass (stores + scopes + artifacts, log scale), size = the same
-        mass, brightness = the same recency.{' '}
-        {/* Both continuous channels are anchored to what this registry actually
-          * contains rather than to fixed bounds, and both say so. A brightness
-          * scale fixed at ninety days spent its whole lower half on ages no
-          * project here has, which left today and this-week fifteen percent
-          * apart — indistinguishable on a dark field. */}
-        Brightness runs full at this moment to out at{' '}
-        {formatHorizon(field.vitalityHorizonDays)} — the age nine in ten projects
-        here are younger than; anything older rests at the floor.{' '}
+        Recency glow spans now to {formatHorizon(field.vitalityHorizonDays)}, the
+        age nine in ten projects here are younger than.{' '}
         {field.mass.total > 0 && field.mass.lowerHalfCount > field.mass.total / 2
-          ? `The mass axis is lopsided and that is the reading, not a fault: ${field.mass.lowerHalfCount} of ${field.mass.total} projects hold ${field.mass.floor}–${field.mass.median} units against a single heaviest at ${field.mass.ceiling}, which sets the top of the scale.`
+          ? `Mass is lopsided: ${field.mass.lowerHalfCount} of ${field.mass.total} projects hold ${field.mass.floor}–${field.mass.median} indexed units; the heaviest at ${field.mass.ceiling} sets the top.`
           : ''}{' '}
         {field.sharedRepoCount > 0
-          ? `${field.sharedRepoCount} ${field.sharedRepoCount === 1 ? 'repository has' : 'repositories have'} more than one checkout and ${field.sharedRepoCount === 1 ? 'is' : 'are'} drawn wired to theirs — every other project stands alone because it genuinely is.`
-          : 'No repository here has a second checkout, so nothing is wired to anything: these projects share no relation for a line to state.'}
+          ? `${field.sharedRepoCount} shared ${field.sharedRepoCount === 1 ? 'repository is' : 'repositories are'} wired to their checkouts; all other projects stand alone.`
+          : 'No repository has multiple checkouts, so the wire returned no relation to draw.'}
       </p>
     </div>
   );

@@ -62,7 +62,7 @@ export function CodePage() {
       id: node.id,
       label: node.name ?? node.qualified_name ?? node.id,
       kind: node.kind,
-      degree: node.degree ?? 1,
+      degree: node.degree,
     }));
   }, [subgraph.data]);
   const canvasEdges = useMemo(() => {
@@ -193,7 +193,15 @@ export function CodePage() {
                   selectedId={selected?.id ?? null}
                   onSelect={selectFromCanvas}
                   height={300}
+                  canvasClassName="md:min-h-[400px]"
                   activation={activationRef.current}
+                  encoding={{
+                    body: 'symbol',
+                    size: 'connectedness',
+                    hue: 'symbol kind',
+                    signal: 'search or click activation',
+                    relation: 'relation; activation thickens',
+                  }}
                 />
                 {/* Eighty nodes out of a hundred and eighteen thousand is not a
                   * reading until the rule that picked them is stated: "the

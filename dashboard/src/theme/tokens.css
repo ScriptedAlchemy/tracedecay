@@ -85,13 +85,20 @@
    * tokens are scoped to the canvas on purpose — atmosphere anywhere else
    * would turn the instrument into a poster.
    *
-   * Both stops sit below surface-0, so nothing legible is ever drawn on them:
-   * the canvas paints its own lit nodes and its labels live in the symbol list
-   * beside it.
+   * This is an analytical instrument, so it stays a dark optical field inside
+   * either shell theme. Its rendering palette is therefore explicit instead
+   * of borrowing shell text and surface tokens.
    */
+  --raw-graph-substrate: oklch(0.105 0.018 268);
+  --raw-graph-text: oklch(0.84 0.035 248);
+  --raw-graph-edge: oklch(0.43 0.075 245);
+  --raw-graph-accent: oklch(0.82 0.16 205);
+  --raw-graph-dim: oklch(0.28 0.035 252);
   --raw-graph-field:
-    radial-gradient(85% 70% at 50% 42%, oklch(0.245 0.035 262 / 0.75) 0%, transparent 62%),
-    radial-gradient(140% 120% at 50% 45%, oklch(0.165 0.014 264) 0%, oklch(0.105 0.012 268) 100%);
+    radial-gradient(62% 72% at 50% 46%, oklch(0.25 0.07 246 / 0.62) 0%, transparent 66%),
+    radial-gradient(52% 60% at 12% 18%, oklch(0.19 0.07 292 / 0.28) 0%, transparent 74%),
+    radial-gradient(50% 58% at 88% 82%, oklch(0.2 0.065 215 / 0.24) 0%, transparent 72%),
+    linear-gradient(145deg, oklch(0.13 0.025 270) 0%, var(--raw-graph-substrate) 55%, oklch(0.075 0.018 272) 100%);
   /* A hairline of light along a lit body's top edge, and the shadow it casts.
    * One inset highlight plus one soft shadow is the whole recipe: no bevels,
    * no drop-shadow stacks. */
@@ -186,10 +193,17 @@
   --raw-sev-high: oklch(0.5 0.17 35);
   --raw-sev-critical: oklch(0.45 0.2 25);
 
-  /* Light graph field: the same two-source lighting, inverted. */
+  /* The light shell frames the same dark analytical field deliberately. */
+  --raw-graph-substrate: oklch(0.105 0.018 268);
+  --raw-graph-text: oklch(0.86 0.035 248);
+  --raw-graph-edge: oklch(0.47 0.075 245);
+  --raw-graph-accent: oklch(0.84 0.16 205);
+  --raw-graph-dim: oklch(0.3 0.035 252);
   --raw-graph-field:
-    radial-gradient(85% 70% at 50% 42%, oklch(0.995 0.008 250 / 0.9) 0%, transparent 62%),
-    radial-gradient(140% 120% at 50% 45%, oklch(0.965 0.008 264) 0%, oklch(0.918 0.012 268) 100%);
+    radial-gradient(62% 72% at 50% 46%, oklch(0.25 0.07 246 / 0.66) 0%, transparent 66%),
+    radial-gradient(52% 60% at 12% 18%, oklch(0.19 0.07 292 / 0.3) 0%, transparent 74%),
+    radial-gradient(50% 58% at 88% 82%, oklch(0.2 0.065 215 / 0.26) 0%, transparent 72%),
+    linear-gradient(145deg, oklch(0.13 0.025 270) 0%, var(--raw-graph-substrate) 55%, oklch(0.075 0.018 272) 100%);
   --raw-membrane-lift: oklch(1 0 0 / 0.9);
   --raw-depth: oklch(0.52 0.03 262 / 0.16);
   /* Light: a well is a shallow tray cut into paper, so it goes DOWN in
@@ -206,6 +220,11 @@
   /* Atmosphere is the first thing to go when the user asks for contrast: the
    * graph window flattens to a single plate and loses its lift. */
   --raw-graph-field: var(--raw-surface-0);
+  --raw-graph-substrate: var(--raw-surface-0);
+  --raw-graph-text: var(--raw-text-primary);
+  --raw-graph-edge: var(--raw-edge-strong);
+  --raw-graph-accent: var(--raw-accent);
+  --raw-graph-dim: var(--raw-surface-3);
   --raw-membrane-lift: transparent;
   --raw-depth: transparent;
   /* With atmosphere gone, the three planes stop being lit and become ruled:
@@ -245,6 +264,12 @@
   background-position: center center;
 }
 
+/** Static optical depth behind the data. This is only a continuous light
+ * field: it draws no points or lines that could be read as graph entities. */
+.td-graph-field {
+  background: var(--raw-graph-field);
+}
+
 /** Bezel screen ruling: the faint horizontal discipline of a CRT face, used
  * only on the graph field so the canvas reads as an instrument screen.
  *
@@ -261,7 +286,7 @@
   pointer-events: none;
   background-image: repeating-linear-gradient(
     to bottom,
-    color-mix(in oklab, var(--raw-surface-0) 55%, transparent) 0 1px,
+    color-mix(in oklab, var(--raw-graph-text) 18%, transparent) 0 1px,
     transparent 1px 4px
   );
   opacity: 0.13;

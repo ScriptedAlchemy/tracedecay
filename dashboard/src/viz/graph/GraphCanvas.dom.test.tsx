@@ -1,4 +1,5 @@
 import { render, waitFor } from '@testing-library/react';
+import type Graph from 'graphology';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphCanvas } from './GraphCanvas.tsx';
 import { ActivationField } from './activation.ts';
@@ -7,6 +8,7 @@ type NodeAttributes = Record<string, unknown>;
 type NodeReducer = (node: string, data: NodeAttributes) => NodeAttributes;
 
 const sigmaState = vi.hoisted(() => ({
+  graph: undefined as Graph | undefined,
   nodeReducer: undefined as NodeReducer | undefined,
   refreshCount: 0,
   strikeListeners: new Set<() => void>(),
@@ -38,6 +40,7 @@ vi.mock('./activation.ts', () => ({
   cssColorToRgb: () => [128, 128, 128],
   lerpRgb: () => 'rgb(128, 128, 128)',
   lerpRgbTuple: () => [128, 128, 128],
+  restingNodeTint: () => [128, 128, 128],
   approach: (_current: number, target: number) => target,
   settled: () => true,
 }));
@@ -52,10 +55,11 @@ vi.mock('graphology-layout-forceatlas2', () => ({
 vi.mock('sigma', () => ({
   default: class MockSigma {
     constructor(
-      _graph: unknown,
+      graph: Graph,
       _container: unknown,
       settings: { nodeReducer?: NodeReducer },
     ) {
+      sigmaState.graph = graph;
       sigmaState.nodeReducer = settings.nodeReducer;
     }
 
@@ -82,6 +86,7 @@ function stubWebGl(available: boolean) {
 
 describe('GraphCanvas', () => {
   beforeEach(() => {
+    sigmaState.graph = undefined;
     sigmaState.nodeReducer = undefined;
     sigmaState.refreshCount = 0;
     sigmaState.strikeListeners.clear();
@@ -94,6 +99,67 @@ describe('GraphCanvas', () => {
       configurable: true,
       value: vi.fn().mockReturnValue({ matches: false }),
     });
+  });
+
+  it('prints the visual grammar instead of leaving circles unexplained', () => {
+    const { getByLabelText } = render(
+      <GraphCanvas
+        nodes={[{ id: 'node', label: 'Node', kind: 'function', degree: 1 }]}
+        edges={[]}
+        encoding={{
+          body: 'one symbol',
+          size: 'connectedness',
+          hue: 'symbol kind',
+          signal: 'activation or supplied vitality',
+          relation: 'one real graph edge',
+        }}
+      />,
+    );
+
+    const key = getByLabelText('Graph visual key').textContent ?? '';
+    expect(key).toMatch(/disc\s*·\s*one symbol/i);
+    expect(key).toMatch(/size\s*·\s*connectedness/i);
+    expect(key).toMatch(/hue\s*·\s*symbol kind/i);
+    expect(key).toMatch(/glow\s*·\s*activation or supplied vitality/i);
+    expect(key).toMatch(/line\s*·\s*one real graph edge/i);
+  });
+
+  it('clamps dense connected fields before their bodies can fuse', async () => {
+    const nodes = Array.from({ length: 40 }, (_, index) => ({
+      id: `node-${index}`,
+      label: `Node ${index}`,
+      kind: index % 2 === 0 ? 'function' : 'struct',
+      degree: index === 0 ? 39 : 1,
+    }));
+    const edges = nodes.slice(1).map((node) => ({
+      source: nodes[0]!.id,
+      target: node.id,
+    }));
+
+    render(<GraphCanvas nodes={nodes} edges={edges} />);
+    await waitFor(() => expect(sigmaState.graph).toBeDefined());
+
+    const realSizes = sigmaState
+      .graph!.nodes()
+      .filter((id) => !id.startsWith('__'))
+      .map((id) => sigmaState.graph!.getNodeAttribute(id, 'size') as number);
+    expect(Math.max(...realSizes)).toBeLessThanOrEqual(7.5);
+  });
+
+  it('keeps absent connectedness unknown instead of coercing it to a healthy value', async () => {
+    const { getByText } = render(
+      <GraphCanvas
+        nodes={[{ id: 'unknown', label: 'Unknown degree', kind: 'function' }]}
+        edges={[]}
+      />,
+    );
+    await waitFor(() => expect(sigmaState.graph).toBeDefined());
+
+    expect(sigmaState.graph!.getNodeAttribute('unknown', 'degree')).toBeUndefined();
+    expect(sigmaState.graph!.getNodeAttribute('unknown', 'size')).toBeGreaterThan(0);
+    expect(getByText(/connectedness is absent for 1 symbol/i).textContent).toMatch(
+      /minimum marker, not zero/i,
+    );
   });
 
   it('preserves low-alpha rendering attributes for companion nodes', async () => {

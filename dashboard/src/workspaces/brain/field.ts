@@ -294,7 +294,7 @@ export function composeRegistryField(
         id: project.project_id,
         label: project.label,
         kind: project.kind,
-        degree: Math.max(mass, 1),
+        degree: mass,
         vitality: recencyVitality(project.last_seen_at, nowSeconds, horizonDays),
         x,
         y,
@@ -325,7 +325,7 @@ export function composeRegistryField(
       kind: 'repository',
       // A hub carries no mass of its own; it is sized by how many working
       // copies it actually binds together.
-      degree: Math.max(group.projects.length, 1),
+      degree: group.projects.length,
       // Lit by its most recently seen checkout — the repository is exactly as
       // live as the liveliest copy of it.
       vitality: group.projects.reduce(
