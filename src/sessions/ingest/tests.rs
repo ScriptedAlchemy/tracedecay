@@ -36,7 +36,7 @@ use super::startup::{
 use super::user::{
     ingest_user_global_sources_for_provider_with_roots_bounded,
     ingest_user_global_sources_for_provider_with_roots_without_registered_authority,
-    provider_selected, registered_project_roots_from,
+    provider_selected,
 };
 use super::user_provider::try_ingest_file_source_bounded;
 
@@ -284,10 +284,16 @@ async fn registered_project_roots_include_modern_registry_aliases() {
         .upsert_project_alias(&worktree, "project-1")
         .await
         .unwrap();
-    let roots = runtime.registered_project_paths_for_test().await.unwrap();
+    let roots = runtime.registered_project_roots_for_test().await.unwrap();
 
-    assert!(roots.contains(&canonical));
-    assert!(roots.contains(&worktree));
+    assert!(
+        roots.contains(&canonical),
+        "missing {canonical:?} from {roots:?}"
+    );
+    assert!(
+        roots.contains(&worktree),
+        "missing {worktree:?} from {roots:?}"
+    );
 }
 
 // macOS filesystems reject invalid UTF-8 path components with EILSEQ.

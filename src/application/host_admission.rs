@@ -1528,6 +1528,16 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    pub async fn registered_project_roots_for_test(&self) -> crate::errors::Result<Vec<PathBuf>> {
+        crate::sessions::registered_project_roots_from(self.profile_database.as_ref())
+            .await
+            .ok_or_else(|| crate::errors::TraceDecayError::Database {
+                operation: "list registered project roots for test".to_string(),
+                message: "project registry unavailable".to_string(),
+            })
+    }
+
+    #[doc(hidden)]
     pub fn profile_relative_path_for_test(&self, path: &Path) -> crate::errors::Result<PathBuf> {
         let profile_root = self.profile_database.db_path().parent().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
