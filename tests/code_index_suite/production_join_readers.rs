@@ -12,11 +12,11 @@ use tracedecay::code_index::impact_join::{GenerationImpactJoinV1, GenerationOccu
 use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay::code_index::production_joins::{
     GenerationDiagnosticEvidenceAuthorityV1, GenerationDiagnosticEvidenceV1,
-    GenerationGitBlameEvidenceV1, GenerationGitDiffEvidenceV1, GenerationGitEvidenceAuthorityV1,
-    GenerationGitHistoryEvidenceV1, GenerationJoinCodeAuthorityV1,
-    GenerationTestAttributionEvidenceAuthorityV1, GenerationTestAttributionEvidenceV1,
-    ProductionGenerationDiagnosticJoinReaderV1, ProductionGenerationGitJoinReaderV1,
-    ProductionGenerationTestAttributionJoinReaderV1,
+    GenerationGitBlameEvidenceV1, GenerationGitContextAuthorityV1, GenerationGitDiffEvidenceV1,
+    GenerationGitEvidenceAuthorityV1, GenerationGitHistoryEvidenceV1,
+    GenerationJoinCodeAuthorityV1, GenerationTestAttributionEvidenceAuthorityV1,
+    GenerationTestAttributionEvidenceV1, ProductionGenerationDiagnosticJoinReaderV1,
+    ProductionGenerationGitJoinReaderV1, ProductionGenerationTestAttributionJoinReaderV1,
 };
 use tracedecay::code_index::provider::{
     GenerationDiagnosticJoinReadPort, GenerationGitJoinReadPort, GenerationProviderCoverageV1,
@@ -251,6 +251,17 @@ impl GenerationGitEvidenceAuthorityV1 for GitAuthority {
     }
 }
 
+struct ContextAuthority(GenerationGitContextProvidersV1);
+
+impl GenerationGitContextAuthorityV1 for ContextAuthority {
+    fn read_context(
+        &self,
+        _: &tracedecay_domain::CodeGenerationId,
+    ) -> GenerationGitContextProvidersV1 {
+        self.0.clone()
+    }
+}
+
 #[test]
 fn production_readers_join_exact_authorities_and_reject_foreign_generation() {
     let (snapshot, manifest) = generation();
@@ -366,19 +377,19 @@ fn production_readers_join_exact_authorities_and_reject_foreign_generation() {
                 path: "src/lib.rs".to_owned(),
                 content_digest: content('a'),
             }],
-            context: GenerationGitContextProvidersV1 {
-                symbol_bindings: vec![GitSymbolLineBindingV1 {
-                    generation_id: manifest.generation_id.clone(),
-                    file_occurrence_id: id("file.source"),
-                    symbol_occurrence_id: id("symbol.source"),
-                    content_digest: content('a'),
-                    start_line: 2,
-                    end_line: 5,
-                }],
-                impacts: vec![(id("symbol.source"), complete(impact))],
-                diagnostics: diagnostics.clone(),
-                test_attribution: attribution.clone(),
-            },
+        })),
+        Arc::new(ContextAuthority(GenerationGitContextProvidersV1 {
+            symbol_bindings: vec![GitSymbolLineBindingV1 {
+                generation_id: manifest.generation_id.clone(),
+                file_occurrence_id: id("file.source"),
+                symbol_occurrence_id: id("symbol.source"),
+                content_digest: content('a'),
+                start_line: 2,
+                end_line: 5,
+            }],
+            impacts: vec![(id("symbol.source"), complete(impact))],
+            diagnostics: diagnostics.clone(),
+            test_attribution: attribution.clone(),
         })),
     );
 
