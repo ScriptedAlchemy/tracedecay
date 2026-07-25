@@ -38,3 +38,31 @@ d05e52a5db8d39c40ed2f52689e6a8aee4141fb3 # refactor(observation): report anchor 
 ddee57411e12653ce6d8679ce260c12af0f8aaee # fix(global-db): stop swallowing storage errors as row skips in registry listing
 e0efef8d24823ce04356adf118de8189a80459f4 # refactor(memory): unify project-memory DB handles into one store-owned authority
 f81d399d6302674788fec5ce217e70c60f5410cd # fix(memory): public explicit-repair entry; align status tests and docs with pure reads
+# PR #421 commits published by concurrent worktree integrations before the
+# branch-wide lint observed their subjects.
+64d38f21623bccb8e85ef66322c2b64db02fa908 # fix(dashboard): clear the instrument chrome's AA contrast and list defects
+ed5bfa60555908b10e13086bddf7c3992d0a73bf # feat(dashboard): give the chassis a display tier and three elevation planes
+c2edee7f41853fef93706931ec880fadc65b18d4 # wip: fix narrow-column text collapse and weak empty states
+3098625f562a19b9939e691e0e0060f45e1ec632 # wip: full-width settings tree + path-aware line breaks
+d1957e6d04be625f633473254b7e2c52d7060d4e # fix(dashboard): give narrow viewports a column priority and unfuse dense graphs
+ceebd01a83f79137120dec1fabb72eab443429ae # wip: stack KeyValueTree label/value below sm to stop depth starvation
+f32bc519b556d3398fed8e97e41eebf18572a2ef # fix(dashboard): let state chips wrap as blocks and stop clipping stat labels
+f1d2911ae6933a421c42920af6a233c23300d4d6 # wip: cap KeyValueTree column reservation to a single depth level
+163ad4ebd0b51ef1316d07c29ff6b25823f836a0 # fix(migrate): classify store durability so upgrades never block on derived data
+11109a9ed8ddd109238827e93a791dc566cad910 # feat(dashboard): fit the Loom weave to its viewport and band long spans by month
+890688ffefd83947d42074c1bebd29dbd73c302c # wip(settings): origin-aware provenance surface on trunk chrome
+409134d46e02d45727f9be761c0ba88e9d430adf # fix(migrate): classify the measured session tables, not just the famous ones
+bec72992c3d47be005af39a900134c5c3b9089f1 # fix(agents): plumb cataloged ownership markers through feedback observation
+09dab569f93acea9c470c6381bccfd2d0fc1405b # wip(dashboard): wake canvas on external strikes, propagate along real edges, honest signal panel
+aee3ab6f394de0dd958c956d5a368c5f1375a5ab # feat(dashboard): honest live-signal panel and real-edge activation propagation
+9850a7496f854e8b53f6953ca12b2bda5a8e790c # docs(plans): PR17 Work workspace design — projections inherit the PR14 grammar
+cc7fbf8afdc44034491f636bcd637f889d9c19e6 # fix(dashboard): put actual spend at the top of Costs and stop re-plotting it
+45feaed5ed22aa7d0c9e3517e04e5f018964f389 # feat(dashboard): read Delivery as a measured field instead of scrolling it
+67225519364a7f6b50a95028a2fdbe35ec5e18bd # fix(dashboard): let the weave's width channel and host headers survive 320px
+3154cc68e9181459910f45329450a5e04b521b0e # fix(dashboard): widen Brain's two compressed channels and drop the rail's echo
+45aac0ad08522c7298c2d931241a3abacbe1e1dd # fix(dashboard): clear the Agents and Knowledge status-word contrast failures
+39a911d21f833b507204308087db877e13367f36 # fix(dashboard): degrade the overview payload-health probe instead of 500ing
+f47e24e88bb2661bb12b74d38c7fabc298db8b34 # fix(dashboard): drop Code's module column where the card has no room for it
+4eb052a8bac25d44dd3bfba86ebf39d465f5bf61 # feat(dashboard-api): wire storage telemetry budget, growth, and store identity
+355f6ebaf0353703da2fdbd55afff163b725b155 # docs(diagnostics): record the code-index identity gap at the compiler wiring site
+c6d4304ea01e1297c4c756b9a822e3292bf69199 # Revert "docs: drop the thermo review scratch document"
