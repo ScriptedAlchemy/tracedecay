@@ -468,6 +468,26 @@ where
         .with_state(owners)
 }
 
+/// Build only the canonical configuration routes for an adapter that does not
+/// advertise the complete HTTP application surface.
+///
+/// Dashboard mounts this router with a Dashboard-bound application invoker.
+/// Keeping the extraction path shared preserves body limits, pagination,
+/// cancellation, and canonical response semantics without falsely exposing
+/// unrelated HTTP bindings as Dashboard operations.
+pub fn configuration_application_router<O>(owners: O) -> Router
+where
+    O: HttpApplicationOwners,
+{
+    Router::new()
+        .route(
+            "/configuration/{operation}",
+            post(configuration_operation::<O>),
+        )
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
+        .with_state(owners)
+}
+
 fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
     match operation {
         "status" => Some(HttpApplicationOperation::GitStatus),

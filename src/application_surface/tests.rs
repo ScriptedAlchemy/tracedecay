@@ -21,13 +21,13 @@ use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 use super::{
     APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceAdapterError,
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
-    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
-    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, FeedbackSurfaceRequest,
-    HttpCancellationRegistry, HttpDisconnectCancellation, HttpOperationEventState,
-    PrimitiveCodeSurfaceRequest, application_negotiated_features,
-    application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    http_operation_event_router, normalize_application_tool_args,
-    parse_application_surface_request, plan26_sse_stream_event,
+    ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
+    HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
+    application_negotiated_features, application_surface_dispatch_input_with_controls,
+    current_micros, execute_application_surface, http_operation_event_router,
+    normalize_application_tool_args, parse_application_surface_request, plan26_sse_stream_event,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
     surface_rejection_metadata,
 };
@@ -157,6 +157,47 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
             serde_json::json!({}),
         )
         .is_ok()
+    );
+}
+
+#[test]
+fn dashboard_configuration_dispatch_preserves_http_application_semantics() {
+    let operation = ApplicationSurfaceOperation::ConfigurationList;
+    let request = || {
+        ApplicationSurfaceRequest::Configuration(ConfigurationSurfaceRequest::List(
+            ConfigurationListSurfaceRequest::default(),
+        ))
+    };
+    let http = resolve_application_surface_dispatch(
+        tracedecay_tool_catalog::BindingSurface::Http,
+        operation,
+        RequestId::new("request.configuration.http").expect("HTTP request"),
+        request(),
+        RequestedOutputFormat::Json,
+    )
+    .expect("HTTP configuration dispatch");
+    let dashboard = resolve_application_surface_dispatch(
+        tracedecay_tool_catalog::BindingSurface::Dashboard,
+        operation,
+        RequestId::new("request.configuration.dashboard").expect("Dashboard request"),
+        request(),
+        RequestedOutputFormat::Json,
+    )
+    .expect("Dashboard configuration dispatch");
+
+    assert_eq!(
+        http.invocation.request_schema,
+        dashboard.invocation.request_schema
+    );
+    assert_eq!(
+        http.invocation.result_schema,
+        dashboard.invocation.result_schema
+    );
+    assert_ne!(http.invocation.binding_id, dashboard.invocation.binding_id);
+    assert_eq!(
+        serde_json::to_value(&http.invocation.invocation.request).expect("HTTP request value"),
+        serde_json::to_value(&dashboard.invocation.invocation.request)
+            .expect("Dashboard request value")
     );
 }
 

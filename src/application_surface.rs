@@ -1002,6 +1002,7 @@ struct HttpApplicationCatalogDispatcher {
 struct CatalogBoundHttpApplicationRequest {
     capability_id: CapabilityId,
     use_case_id: UseCaseId,
+    surface: BindingSurface,
     request: HttpApplicationRequest,
 }
 
@@ -1020,13 +1021,16 @@ impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
         let client = self.client.clone();
         let catalog = self.catalog.clone();
         Box::pin(async move {
-            invoke_http_application_request(request.request, &client, &catalog).await
+            invoke_application_adapter_request(request.request, request.surface, &client, &catalog)
+                .await
         })
     }
 }
 
-pub fn http_application_invoker(
+fn application_invoker_for_surface(
     client: crate::daemon_client::DaemonInvocationClient,
+    surface: BindingSurface,
+    required_operations: &[ApplicationSurfaceOperation],
 ) -> Result<
     impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
     ApplicationSurfaceAdapterError,
@@ -1038,12 +1042,54 @@ pub fn http_application_invoker(
         }
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());
-    for operation in APPLICATION_SURFACE_OPERATIONS {
-        if resolve_application_binding(&resolver, BindingSurface::Http, operation).is_none() {
+    for operation in required_operations {
+        if resolve_application_binding(&resolver, surface, *operation).is_none() {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }
     }
-    Ok(move |request| invoke_catalog_bound_http_application_request(request, &composition))
+    Ok(move |request| invoke_catalog_bound_application_request(request, surface, &composition))
+}
+
+pub fn http_application_invoker(
+    client: crate::daemon_client::DaemonInvocationClient,
+) -> Result<
+    impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
+    ApplicationSurfaceAdapterError,
+> {
+    application_invoker_for_surface(
+        client,
+        BindingSurface::Http,
+        &APPLICATION_SURFACE_OPERATIONS,
+    )
+}
+
+const DASHBOARD_CONFIGURATION_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
+    ApplicationSurfaceOperation::ConfigurationList,
+    ApplicationSurfaceOperation::ConfigurationExplain,
+    ApplicationSurfaceOperation::ConfigurationGet,
+    ApplicationSurfaceOperation::ConfigurationSet,
+    ApplicationSurfaceOperation::ConfigurationUnset,
+    ApplicationSurfaceOperation::ConfigurationBatch,
+    ApplicationSurfaceOperation::ConfigurationWriteCredential,
+    ApplicationSurfaceOperation::ConfigurationObservedState,
+    ApplicationSurfaceOperation::ConfigurationProtectedPreview,
+    ApplicationSurfaceOperation::ConfigurationProtectedApply,
+    ApplicationSurfaceOperation::ConfigurationRollbackPreview,
+    ApplicationSurfaceOperation::ConfigurationRollbackApply,
+    ApplicationSurfaceOperation::ConfigurationAudit,
+];
+
+pub fn dashboard_configuration_application_invoker(
+    client: crate::daemon_client::DaemonInvocationClient,
+) -> Result<
+    impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
+    ApplicationSurfaceAdapterError,
+> {
+    application_invoker_for_surface(
+        client,
+        BindingSurface::Dashboard,
+        &DASHBOARD_CONFIGURATION_OPERATIONS,
+    )
 }
 
 pub fn http_application_router(
@@ -1066,6 +1112,19 @@ pub fn http_application_router(
                 Some(event_client),
             )),
     )
+}
+
+pub fn dashboard_configuration_application_router(
+    client: crate::daemon_client::DaemonInvocationClient,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
+    Ok(tracedecay_api::configuration_application_router(
+        dashboard_configuration_application_invoker(client)?,
+    )
+    .layer(axum::middleware::from_fn_with_state(
+        cancellations,
+        application_http_context,
+    )))
 }
 
 type HttpCancellationRegistry = Arc<Mutex<BTreeMap<RequestId, CancellationSignal>>>;
@@ -3061,8 +3120,9 @@ pub fn resolve_application_surface_dispatch_with_controls(
     Ok(dispatched)
 }
 
-fn invoke_catalog_bound_http_application_request(
+fn invoke_catalog_bound_application_request(
     request: HttpApplicationRequest,
+    surface: BindingSurface,
     composition: &ApplicationCatalogComposition<HttpApplicationCatalogDispatcher>,
 ) -> HttpApplicationInvocationFuture {
     let surface_operation = application_operation_for_http(request.operation);
@@ -3072,15 +3132,9 @@ fn invoke_catalog_bound_http_application_request(
         .unwrap_or_else(|_| panic!("the application operation name is static"));
     let capability = composition
         .snapshot()
-        .resolve_binding(
-            &profile_id,
-            BindingSurface::Http,
-            &operation_name,
-            1,
-            &BTreeSet::new(),
-        )
+        .resolve_binding(&profile_id, surface, &operation_name, 1, &BTreeSet::new())
         .unwrap_or_else(|| {
-            panic!("HTTP bindings are validated before the application router is mounted")
+            panic!("surface bindings are validated before the application router is mounted")
         });
     let handler = composition
         .handler(capability.use_case_id())
@@ -3088,21 +3142,22 @@ fn invoke_catalog_bound_http_application_request(
     handler.invoke(CatalogBoundHttpApplicationRequest {
         capability_id: capability.capability_id().clone(),
         use_case_id: capability.use_case_id().clone(),
+        surface,
         request,
     })
 }
 
-async fn invoke_http_application_request(
+async fn invoke_application_adapter_request(
     request: HttpApplicationRequest,
+    surface: BindingSurface,
     client: &crate::daemon_client::DaemonInvocationClient,
     catalog: &CatalogSnapshotV1,
 ) -> CanonicalInvocationResult<Value> {
     let operation = application_operation_for_http(request.operation);
     let resolver = CatalogBindingResolver::new(catalog);
-    let binding = resolve_application_binding(&resolver, BindingSurface::Http, operation)
-        .unwrap_or_else(|| {
-            panic!("HTTP bindings are validated before the application router is mounted")
-        });
+    let binding = resolve_application_binding(&resolver, surface, operation).unwrap_or_else(|| {
+        panic!("surface bindings are validated before the application router is mounted")
+    });
     let binding_id = binding.binding_id;
     let result_contract = ResultContractRef::from_schema(&binding.result_schema);
     let request_id = request.request_id;
@@ -3112,7 +3167,7 @@ async fn invoke_http_application_request(
         Err(error) => {
             observe_surface_argument_rejection(
                 Some(client),
-                BindingSurface::Http,
+                surface,
                 operation,
                 &request_id,
                 &error,
@@ -3137,7 +3192,7 @@ async fn invoke_http_application_request(
         Err(error) => {
             observe_surface_argument_rejection(
                 Some(client),
-                BindingSurface::Http,
+                surface,
                 operation,
                 &request_id,
                 &error,
@@ -3149,13 +3204,13 @@ async fn invoke_http_application_request(
             );
         }
     };
-    let dispatched = match resolve_dispatch(&resolver, BindingSurface::Http, input) {
+    let dispatched = match resolve_dispatch(&resolver, surface, input) {
         Ok(dispatched) => dispatched,
         Err(error) => {
             let error = map_dispatch_error(error);
             observe_surface_argument_rejection(
                 Some(client),
-                BindingSurface::Http,
+                surface,
                 operation,
                 &request_id,
                 &error,
