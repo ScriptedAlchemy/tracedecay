@@ -44,16 +44,17 @@ export const SessionModelSchema = z
 
 /** One session row from `GET /api/plugins/savings/sessions`.
  *
- * `last_message_at` is nullable and, on the real profile, null for the large
- * majority of rows — a session's END is an unserved quantity for most of the
- * store. That nullability is load-bearing: it is what the weave draws as an
- * open thread rather than inventing a duration for. */
+ * `started_at` is nullable because the all-range backend deliberately includes
+ * sessions with no usable timestamp. `last_message_at` is also nullable and,
+ * on the real profile, null for the large majority of rows. Both distinctions
+ * are load-bearing: undated rows are counted but not placed, while a dated row
+ * without an end is drawn open rather than assigned an invented duration. */
 export const LoomSessionSchema = z
   .object({
     session_id: z.string(),
     provider: z.string(),
     title: z.string().nullable().optional(),
-    started_at: z.number(),
+    started_at: z.number().nullable(),
     last_message_at: z.number().nullable().optional(),
     messages: z.number(),
     is_subagent: z.boolean().optional(),

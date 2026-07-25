@@ -216,4 +216,9 @@ describe('formatDuration', () => {
     expect(formatDuration(2 * HOUR + 30 * 60)).toBe('2h 30m');
     expect(formatDuration(5 * DAY)).toBe('5d');
   });
+
+  it('does not round across a unit boundary into 60 minutes', () => {
+    expect(formatDuration(HOUR - 1)).toBe('59m');
+    expect(formatDuration(2 * HOUR - 1)).toBe('1h 59m');
+  });
 });
