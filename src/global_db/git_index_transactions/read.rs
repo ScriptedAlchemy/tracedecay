@@ -1,9 +1,3 @@
-#![allow(dead_code)]
-// staged S11 read-port surface: the daemon read-port
-// dispatcher that will route `RepositoryReadOperationV1::Code` here is not yet
-// wired (the runtime executor rejects Code by design), so this executor is
-// exercised by its module tests until that dispatcher lands.
-
 //! Daemon-side typed read executor for the code family of the S11 repository
 //! read port.
 //!
