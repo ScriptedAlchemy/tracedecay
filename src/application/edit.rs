@@ -2301,6 +2301,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::ops::Deref;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::tempdir;
     use tracedecay_application::{
@@ -2409,6 +2410,7 @@ mod tests {
 
     fn fixture_request() -> SourceEditEffectRequestV1 {
         let operation = source_edit_operation(SourceEditKind::StrReplace).unwrap();
+        let reconciliation_operation = source_edit_reconciliation_operation().unwrap();
         let scope = ResolvedScope::new(
             ProjectId::new("project.edit.fixture").unwrap(),
             RepositoryId::new("repository.edit.fixture").unwrap(),
@@ -2424,8 +2426,14 @@ mod tests {
             UtcMicros(1),
             UtcMicros(1_000),
             scope.clone(),
-            BTreeSet::from([operation.capability_id().clone()]),
-            BTreeSet::from([operation.use_case_id().clone()]),
+            BTreeSet::from([
+                operation.capability_id().clone(),
+                reconciliation_operation.capability_id().clone(),
+            ]),
+            BTreeSet::from([
+                operation.use_case_id().clone(),
+                reconciliation_operation.use_case_id().clone(),
+            ]),
             DisclosureClass::Sensitive,
         )
         .unwrap();
@@ -2573,6 +2581,38 @@ mod tests {
         }
     }
 
+    struct CancelBeforeEffectAuthorization {
+        admission: tracedecay_application::SourceEditAuthorizationAdmissionV1,
+        cancellation: CancellationSignal,
+        rechecks: AtomicUsize,
+    }
+
+    impl SourceEditAuthorizationPort for CancelBeforeEffectAuthorization {
+        fn admit<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _operation: &'a ApplicationOperation,
+            _observed_at: UtcMicros,
+        ) -> SourceEditAuthorizationFuture<'a> {
+            Box::pin(async move { Ok(self.admission.clone()) })
+        }
+
+        fn recheck_effect<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _operation: &'a ApplicationOperation,
+            _admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
+            _observed_at: UtcMicros,
+        ) -> SourceEditAuthorizationFuture<'a> {
+            Box::pin(async move {
+                if self.rechecks.fetch_add(1, Ordering::AcqRel) == 1 {
+                    assert!(self.cancellation.cancel(UtcMicros(4)));
+                }
+                Ok(self.admission.clone())
+            })
+        }
+    }
+
     #[tokio::test]
     async fn preview_apply_replay_and_expected_state_cas_preserve_exact_bytes() {
         let project = tempdir().unwrap();
@@ -2598,6 +2638,7 @@ mod tests {
         );
 
         let mut apply_request = request;
+        apply_request.idempotency_key = IdempotencyKey::new("source-edit.apply-fixture").unwrap();
         apply_request.expected_state = preview.expected_state.clone();
         let applied_result =
             execute_source_edit(&graph, &operation, apply_request.clone(), &authorization)
@@ -2683,9 +2724,12 @@ mod tests {
             .await
             .unwrap();
         let operation = source_edit_operation(request.edit.kind()).unwrap();
-        let authorization = fixture_authorization(&request);
         let cancellation = CancellationSignal::active("cancel.edit.live").unwrap();
-        assert!(cancellation.cancel(UtcMicros(4)));
+        let authorization = CancelBeforeEffectAuthorization {
+            admission: fixture_authorization(&request).0,
+            cancellation: cancellation.clone(),
+            rechecks: AtomicUsize::new(0),
+        };
         let control = SourceEditEffectControlV1::new(
             Deadline::new(UtcMicros(i64::MAX)).unwrap(),
             cancellation,
