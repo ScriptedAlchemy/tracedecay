@@ -598,7 +598,8 @@ pub fn observability_read_from_model(
         Ok(model)
             if model.total_count == 0
                 && model.denominators.eligible == 0
-                && model.denominators.incomplete_boots == 0 =>
+                && model.denominators.incomplete_boots == 0
+                && model.watermark.producer_boot_id.is_none() =>
         {
             ObservabilityReadV1::Absent
         }
