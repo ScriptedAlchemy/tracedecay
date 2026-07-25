@@ -53,7 +53,8 @@ import {
   GraphSearchPayloadSchema,
   SubgraphPayloadSchema,
 } from './code/contracts.ts';
-import { MemoryOverviewPayloadSchema } from './knowledge/contracts.ts';
+import { MemoryOverviewPayloadSchema, MemoryStatusSchema } from './knowledge/contracts.ts';
+import { composeTrustDistribution } from './knowledge/trust.ts';
 import { SavingsOverviewPayloadSchema } from './costs/contracts.ts';
 
 /** Parse a resolved fixture, surfacing zod issues on failure. */
@@ -241,6 +242,20 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.exists).toBe(true);
     expect(data.memory?.fact_count).toBeGreaterThan(0);
     expect(data.memory?.entity_count).toBeGreaterThan(0);
+  });
+
+  it('GET /api/plugins/holographic/status — knowledge trust fallback (MemoryStatusSchema)', () => {
+    const data = parse(MemoryStatusSchema, '/api/plugins/holographic/status');
+    // These four bands are the ONLY trust distribution a real store serves
+    // correctly, and KnowledgePage falls back to them when the overview's
+    // ten-bucket histogram comes back all-zero (which it always does live).
+    // They have to be present and to carry mass in more than one band, or the
+    // fallback is untested.
+    const distribution = composeTrustDistribution(undefined, data.memory, []);
+    expect(distribution.source).toBe('status_bands');
+    expect(distribution.total).toBe(data.memory?.fact_count);
+    expect(distribution.occupied).toBeGreaterThanOrEqual(2);
+    expect(distribution.degenerate).toBe(false);
   });
 
   it('GET /api/plugins/analytics/overview — scoped brain (ScopedAnalyticsOverviewSchema)', () => {

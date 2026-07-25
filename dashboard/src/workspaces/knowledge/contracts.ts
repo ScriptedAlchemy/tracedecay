@@ -103,3 +103,42 @@ export const MemoryOverviewPayloadSchema = z
   })
   .passthrough();
 export type MemoryOverviewPayload = z.infer<typeof MemoryOverviewPayloadSchema>;
+
+/**
+ * GET /api/plugins/holographic/status (src/dashboard/memory_api.rs `status`).
+ *
+ * Read here for one reason: `memory.trust_*_count` is the only trust
+ * distribution a real store currently reports correctly. The overview's
+ * `trust_histogram` is produced with row names of the form `trust-<n>` and
+ * consumed with `parse::<usize>()`, so every bucket comes back zero.
+ */
+export const MemoryStatusSchema = z
+  .object({
+    exists: z.boolean().optional(),
+    error: z.string().optional(),
+    memory: z
+      .object({
+        fact_count: z.number().optional(),
+        entity_count: z.number().optional(),
+        bank_count: z.number().optional(),
+        helpful_count: z.number().optional(),
+        unhelpful_count: z.number().optional(),
+        trust_0_025_count: z.number().optional(),
+        trust_025_050_count: z.number().optional(),
+        trust_050_075_count: z.number().optional(),
+        trust_075_100_count: z.number().optional(),
+        feedback_funnel: z
+          .object({
+            rated_fact_count: z.number().optional(),
+            feedback_total: z.number().optional(),
+            retrieved_fact_count: z.number().optional(),
+            retrieval_count_total: z.number().optional(),
+          })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type MemoryStatusPayload = z.infer<typeof MemoryStatusSchema>;
