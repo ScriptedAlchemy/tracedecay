@@ -32,7 +32,7 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::owner::{DaemonGitAuthoritySource, DaemonGitIndexPolicyRecheck};
+use super::owner::{DaemonGitAuthoritySource, DaemonGitIndexPolicyRecheck, preview_conflict_risk};
 use super::queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
 use super::recovery::{GitIndexRecoveryError, GitIndexRecoveryExecutor};
 use super::service::{
@@ -188,6 +188,26 @@ fn preview_with_expiry(expires_at: UtcMicros) -> GitIndexPreviewV1 {
         expires_at,
     )
     .expect("preview")
+}
+
+#[test]
+fn policy_recheck_uses_previewed_conflict_evidence() {
+    let clean = preview();
+    assert_eq!(preview_conflict_risk(&clean), GitConflictRiskV1::NoneKnown);
+
+    let mut possible = clean.clone();
+    possible.repository_snapshot.operation_state = GitOperationStateV1::Merge;
+    assert_eq!(
+        preview_conflict_risk(&possible),
+        GitConflictRiskV1::Possible
+    );
+
+    let mut confirmed = clean;
+    confirmed.repository_snapshot.index.state = RepositoryIndexStateV1::Unmerged;
+    assert_eq!(
+        preview_conflict_risk(&confirmed),
+        GitConflictRiskV1::Confirmed
+    );
 }
 
 fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexApplyRequestV1 {
