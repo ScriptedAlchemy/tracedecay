@@ -132,6 +132,7 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
         },
         state: CiFailureLocalizationStateV1::Complete,
         coverage: CiFailureCoverageV1::Complete,
+        source_degradation: None,
         failure_kind: CiFailureKindV1::TestFailure,
         failure_anchor: ci_anchor.clone(),
         branch: CiFailureBranchEvidenceV1 {

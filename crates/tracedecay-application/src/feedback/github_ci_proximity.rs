@@ -7,7 +7,8 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::feedback::{
-    CiFailureLocalizationResultV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubPullRequestIdV1,
+    CiFailureLocalizationResultV1, CiFailureRateLimitCheckpointV1, CiFailureRunIdentityV1,
+    CiFailureSourceFailureV1, FeedbackScopeV1, GitHubPullRequestIdV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
     GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1, ProximityContributionV1,
     ProximityInclusionV1,
@@ -136,6 +137,8 @@ impl CiFailureLocalizationRequestV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CiFailureLocalizationPortOutcomeV1 {
     Localized(Box<CiFailureLocalizationResultV1>),
+    RateLimited(CiFailureRateLimitCheckpointV1),
+    Failed(CiFailureSourceFailureV1),
     Denied,
     Unavailable,
 }
@@ -146,13 +149,17 @@ impl CiFailureLocalizationPortOutcomeV1 {
         request: &CiFailureLocalizationRequestV1,
     ) -> Result<(), ApplicationContractError> {
         request.validate()?;
-        if let Self::Localized(result) = self {
-            result.validate()?;
-            if result.branch.scope != request.scope || result.run != request.run {
-                return Err(ApplicationContractError::Inconsistent {
-                    field: "ci failure localization response",
-                });
+        match self {
+            Self::Localized(result) => {
+                result.validate()?;
+                if result.branch.scope != request.scope || result.run != request.run {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "ci failure localization response",
+                    });
+                }
             }
+            Self::RateLimited(checkpoint) => checkpoint.validate()?,
+            Self::Failed(_) | Self::Denied | Self::Unavailable => {}
         }
         Ok(())
     }
