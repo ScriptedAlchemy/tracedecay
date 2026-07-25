@@ -18,6 +18,7 @@ mod automation_config;
 mod automation_jobs;
 mod automation_skills;
 mod code_diagnostics;
+mod explorer;
 mod graph;
 mod lcm;
 mod memory_curation;

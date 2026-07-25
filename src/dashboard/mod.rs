@@ -44,6 +44,7 @@ pub(crate) use doctor_remediation_api::{
     DoctorRemediationDispatcherV1, DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1,
 };
 mod events_api;
+mod explorer_api;
 mod graph_api;
 mod graph_queries;
 mod graph_service;
@@ -803,6 +804,7 @@ fn router_with_active_application(
         .route("/api/automation/{*tail}", any(active_api_gateway))
         .route("/api/settings", any(active_api_gateway))
         .route("/api/settings/{*tail}", any(active_api_gateway))
+        .route("/api/explorer/{*tail}", any(active_api_gateway))
         // PR14 V2 read-model surfaces bound through the active-project gateway,
         // mirroring the project-scoped `/api/projects/{id}/…` gateway path.
         .route("/api/doctor/{*tail}", any(active_api_gateway))
@@ -1049,6 +1051,19 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/settings/user",
             patch(settings_api::patch_user_settings),
+        )
+        .route("/api/explorer/queries", post(explorer_api::create_query))
+        .route(
+            "/api/explorer/queries/{run_id}",
+            get(explorer_api::query_status).delete(explorer_api::cancel_query),
+        )
+        .route(
+            "/api/explorer/sessions/{session_id}/size",
+            get(explorer_api::session_size),
+        )
+        .route(
+            "/api/explorer/sessions/{session_id}/read-context",
+            get(explorer_api::read_context),
         )
         // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and

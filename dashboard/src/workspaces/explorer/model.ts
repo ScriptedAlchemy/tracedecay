@@ -12,6 +12,10 @@
  *  - Missing is missing: absent fields become `undefined`, not placeholders.
  */
 import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
+import type {
+  ExplorerSourceId,
+  ExplorerSourceProgress,
+} from './contracts.ts';
 
 export type LaneId = 'code' | 'sessions' | 'knowledge';
 
@@ -272,6 +276,44 @@ export interface FacetCount {
   readonly id: string;
   readonly label: string;
   readonly count: number;
+}
+
+export interface PlannerLaneState {
+  readonly pending: boolean;
+  readonly outcome: 'ok' | 'offline' | 'error' | 'pending';
+  readonly rows: readonly Record<string, unknown>[];
+  readonly reportedTotal?: number;
+}
+
+/** Converts one coordinator-owned source state without manufacturing rows,
+ * totals, or cross-source rank. */
+export function plannerLaneState(
+  source: ExplorerSourceProgress,
+  expectedSource: ExplorerSourceId,
+): PlannerLaneState {
+  if (source.source_id !== expectedSource) {
+    return { pending: false, outcome: 'error', rows: [] };
+  }
+  switch (source.outcome) {
+    case 'pending':
+      return { pending: true, outcome: 'pending', rows: [] };
+    case 'ready':
+      return {
+        pending: false,
+        outcome: 'ok',
+        rows: source.page.rows,
+        ...(source.page.total !== null ? { reportedTotal: source.page.total } : {}),
+      };
+    case 'unavailable':
+      return { pending: false, outcome: 'offline', rows: [] };
+    case 'error':
+    case 'cancelled':
+      return { pending: false, outcome: 'error', rows: [] };
+    default: {
+      const exhaustive: never = source;
+      return exhaustive;
+    }
+  }
 }
 
 /** Pivot counts over the rows actually loaded — never over the whole index. */
