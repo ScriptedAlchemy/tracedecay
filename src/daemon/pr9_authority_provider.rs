@@ -684,7 +684,7 @@ pub(crate) mod tests {
             artifact_manifest_digest: artifact,
             runtime_compatibility_digest: digest('e'),
             calibration: SemanticCalibrationProfileV1 {
-                calibration_profile_id: id("calibration.semantic.pr9-activation-test"),
+                calibration_profile_id: id("calibration.semantic.semantic-active"),
                 cohort_digest: digest('f'),
                 projection_key: projection.projection_key().clone(),
                 vector_generation: vector_generation_id.clone(),

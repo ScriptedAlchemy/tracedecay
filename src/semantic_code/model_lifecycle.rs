@@ -1504,13 +1504,14 @@ pub fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
         .clone()
 }
 
-/// Apply config selection without ambient discovery or startup download.
+/// Apply config selection and queue explicitly enabled background acquisition.
 pub fn apply_config_and_queue_startup(
     selected_model: Option<&str>,
     auto_download: bool,
 ) -> Option<SemanticModelLifecycleStatusV1> {
     let owner = shared_lifecycle_owner()?;
     let _ = owner.select_model(selected_model, auto_download);
+    let _ = owner.enqueue_startup_acquisition_if_needed();
     Some(owner.status())
 }
 
