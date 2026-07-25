@@ -103,6 +103,9 @@ run_smoke() {
     json_assert "$call_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.includes("Search Results") && c.text.includes("main"))'; then
     ok "tools/call tracedecay_search finds main()"
   else
+    if [[ -s "$call_out" ]]; then
+      cat "$call_out" >&2
+    fi
     fail "tools/call tracedecay_search finds main()"
   fi
 
