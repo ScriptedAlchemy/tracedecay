@@ -395,8 +395,9 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
     }
 
     /// `HunkRef` enumeration for a working-tree or staged diff, entry-bounded
-    /// at the reference level. Range diffs and unmintable kinds fail
-    /// truthfully through the adapter error, never silently.
+    /// at the reference level. Range diffs fail truthfully; per-file
+    /// read-only kinds remain visible through the paired typed diff and do
+    /// not suppress safe text refs.
     pub fn hunk_refs(
         &self,
         bounds: &GitQueryBounds,
