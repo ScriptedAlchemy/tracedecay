@@ -868,6 +868,22 @@ pub(crate) async fn register_project_open_production_owners(
         .filter_map(AdmittedLspProvider::mounted)
         .collect::<Vec<_>>();
 
+    let feedback_cycle = register_production_feedback_cycle(
+        invocation,
+        project_root,
+        database.clone(),
+        Arc::clone(&session_db),
+        Arc::clone(&graph),
+        scope.clone(),
+        configuration,
+        requester,
+        mounted_providers.clone(),
+    )
+    .await?;
+
+    // The LSP gateway can immediately emit post-edit feedback. Publish the
+    // corresponding feedback cycle first so no admitted request observes a
+    // gateway whose downstream owner is still absent.
     let lsp_session_factory = register_production_lsp_owner(
         invocation,
         project_root,
@@ -878,20 +894,12 @@ pub(crate) async fn register_project_open_production_owners(
     )
     .await?;
 
-    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) =
-        register_production_feedback_cycle(
-            invocation,
-            project_root,
-            database.clone(),
-            Arc::clone(&session_db),
-            Arc::clone(&graph),
-            scope.clone(),
-            configuration,
-            requester,
-            mounted_providers.clone(),
-        )
-        .await?
-    else {
+    // Hook V2 envelopes that missed their synchronous budget are durable in
+    // the per-host transport spool. Replay is project-scoped, not Git-scoped:
+    // non-Git and unborn projects must drain their admitted envelopes too.
+    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(Arc::clone(&graph));
+
+    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle else {
         // Feedback and advisory evidence requires an exact Git branch, HEAD,
         // and current saved document identity. Non-Git, unborn, and empty
         // projects retain the observing unavailable cycle installed above; no
@@ -916,11 +924,6 @@ pub(crate) async fn register_project_open_production_owners(
         indexed_files,
     )
     .await?;
-
-    // Hook V2 envelopes that missed their synchronous budget are durable in the
-    // per-host transport spool. Nothing drains them until this consumer runs,
-    // so start it once the bindings and admission owners above are mounted.
-    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(graph);
 
     Ok(())
 }

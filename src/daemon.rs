@@ -3633,6 +3633,10 @@ async fn shutdown_project_servers(store_administration: &StoreAdministration) {
         })
         .await;
     for server in servers {
+        let graph = server.cg().await;
+        hook_v2_replay::shutdown_hook_v2_replay_consumer(&graph.hook_store_layout().data_root)
+            .await;
+        drop(graph);
         server.shutdown().await;
     }
 }
