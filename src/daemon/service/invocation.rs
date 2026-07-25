@@ -4998,6 +4998,16 @@ struct RuntimeLspSession {
     actor: RuntimeLspActor,
 }
 
+impl Drop for RuntimeLspSession {
+    fn drop(&mut self) {
+        // Every removal path (explicit detach, transport loss, TTL expiry, and
+        // daemon shutdown) must cancel provider work and release overlays,
+        // subscriptions, publications, and queued frames before the actor is
+        // discarded.
+        self.actor.expire();
+    }
+}
+
 type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
@@ -6735,20 +6745,35 @@ impl DaemonInvocationService {
             let mut registry = lsp_registry.lock().await;
             registry.detach(&access, now_ms).is_ok()
         };
-        let mut sessions = self.lsp_sessions.lock().await;
-        let Some(session) = sessions.get_mut(access.session_id()) else {
+        let Some(mut session) = self.lsp_sessions.lock().await.remove(access.session_id()) else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if !endpoint_detached || session.actor.detach().is_err() {
+        if !endpoint_detached {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         }
+        let _ = session.actor.detach();
         DaemonInvocationResponse::with_outcome(request_id, DaemonInvocationOutcome::LspDetached)
+    }
+
+    pub(crate) async fn disconnect_lsp_session(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        session: DaemonLspSessionAccess,
+    ) {
+        let Ok(access) = session.into_access() else {
+            return;
+        };
+        let _ = lsp_registry.lock().await.detach(&access, now_millis());
+        // This capability came from the connection-owned map populated by the
+        // daemon's own open response. Remove the actor even if its registry
+        // entry expired while the disconnected bridge was idle.
+        self.lsp_sessions.lock().await.remove(access.session_id());
     }
 
     async fn authenticate(
@@ -8192,6 +8217,88 @@ mod tests {
             serde_json::from_str(&frame).expect("initialize success must be JSON-RPC");
         assert_eq!(response["id"], 2);
         assert!(response["result"]["capabilities"].is_object());
+    }
+
+    #[tokio::test]
+    async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
+        let service = DaemonInvocationService::default();
+        let project_root = PathBuf::from("/authoritative");
+        DaemonLspOwnerRegistrar::new(&service)
+            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .await;
+        let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+        let response = service
+            .invoke(
+                &registry,
+                Some(&project_root),
+                Some(AdmittedRoot::new("file:///authoritative")),
+                None,
+                DaemonInvocationRequest::lsp_open("request.revision", "3.17", None, Vec::new()),
+            )
+            .await;
+
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::LspOpened { .. }
+        ));
+        assert_eq!(registry.lock().await.active_sessions(), 1);
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lsp_detach_and_disconnect_release_actor_and_registry_capacity() {
+        let service = DaemonInvocationService::default();
+        let project_root = PathBuf::from("/authoritative");
+        DaemonLspOwnerRegistrar::new(&service)
+            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .await;
+        let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+        let open = |request_id: &'static str| {
+            service.invoke(
+                &registry,
+                Some(&project_root),
+                Some(AdmittedRoot::new("file:///authoritative")),
+                None,
+                DaemonInvocationRequest::lsp_open(
+                    request_id,
+                    env!("CARGO_PKG_VERSION"),
+                    None,
+                    Vec::new(),
+                ),
+            )
+        };
+
+        let DaemonInvocationOutcome::LspOpened { session, .. } =
+            open("request.open.1").await.outcome
+        else {
+            panic!("expected first session");
+        };
+        let detached = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_detach("request.detach", session),
+            )
+            .await;
+        assert!(matches!(
+            detached.outcome,
+            DaemonInvocationOutcome::LspDetached
+        ));
+        assert_eq!(registry.lock().await.active_sessions(), 0);
+        assert!(service.lsp_sessions.lock().await.is_empty());
+
+        let DaemonInvocationOutcome::LspOpened { session, .. } =
+            open("request.open.2").await.outcome
+        else {
+            panic!("released capacity must admit a replacement");
+        };
+        assert_eq!(registry.lock().await.expire_at(u64::MAX), 1);
+        service.disconnect_lsp_session(&registry, session).await;
+        assert_eq!(registry.lock().await.active_sessions(), 0);
+        assert!(service.lsp_sessions.lock().await.is_empty());
     }
 
     #[tokio::test]
