@@ -41,10 +41,27 @@ fn collect_files(
                 .strip_prefix(root)
                 .map_err(|error| config_error(error.to_string()))?
                 .to_path_buf();
+            #[cfg(test)]
+            if is_test_runtime_profile_database(&relative) {
+                continue;
+            }
             files.insert(relative, path);
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn is_test_runtime_profile_database(relative: &Path) -> bool {
+    relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            value.starts_with(".tracedecay-test-profile-")
+                && (value.ends_with(".db")
+                    || value.ends_with(".db-wal")
+                    || value.ends_with(".db-shm"))
+        })
 }
 
 pub(super) fn tree_stats(root: &Path) -> Result<(usize, u64)> {
@@ -237,4 +254,30 @@ pub(super) fn file_digest(path: &Path) -> Result<[u8; 32]> {
         hash.update(&buffer[..read]);
     }
     Ok(hash.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_runtime_profile_databases_are_not_migration_inputs() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("graph.db"), b"graph").unwrap();
+        for suffix in [".db", ".db-wal", ".db-shm"] {
+            fs::write(
+                temp.path()
+                    .join(format!(".tracedecay-test-profile-fixture{suffix}")),
+                b"runtime",
+            )
+            .unwrap();
+        }
+
+        let files = relative_file_map(temp.path()).unwrap();
+        assert_eq!(
+            files.keys().cloned().collect::<Vec<_>>(),
+            vec![PathBuf::from("graph.db")]
+        );
+    }
 }
