@@ -94,7 +94,10 @@ export function StatTile({
 }: {
   label: string;
   value: ReactNode;
-  hint?: string;
+  /** Annotation under the value. `ReactNode` because a tile whose value is a
+   * reading rather than a plain number annotates itself with an evidence
+   * pattern, not a sentence. `Readout`'s `note` already accepts this. */
+  hint?: ReactNode;
   /** Narrow-rail variant: smaller numerals that never clip. */
   dense?: boolean;
 }) {

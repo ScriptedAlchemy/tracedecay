@@ -15,7 +15,10 @@ import {
 } from 'lucide-react';
 import { NavLink } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { StorageFindingsPayloadSchema } from '../../contracts/wire.ts';
+import {
+  ObservatoryStorageFindingsPayloadSchema,
+  type StorageFindingSourceStatus,
+} from '../../workspaces/observatory/contracts.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
@@ -38,17 +41,78 @@ const ICONS: Record<string, LucideIcon> = {
 
 const MAIN = CHANNELS.filter((channel) => channel.path !== 'settings');
 
+/**
+ * What the app-wide Doctor dot is allowed to say.
+ *
+ * Three states, not two. `unknown` exists because a storage-findings read that
+ * never resolved is not a clean bill of health, and rendering it as one turns
+ * a broken health check into an all-clear on the app's most global indicator.
+ */
+type DoctorHealth = 'healthy' | 'attention' | 'unknown';
+
+/**
+ * Presentation on the shared evidence axis: the PATTERN says what kind of
+ * evidence this is (solid = measured, dashed = none), the token says what the
+ * reading means, and the label says both in words. `unknown` is therefore
+ * distinguishable from `healthy` without seeing colour at all.
+ */
+const DOCTOR_HEALTH: Record<
+  DoctorHealth,
+  { pattern: string; ink: string; label: string }
+> = {
+  healthy: {
+    pattern: 'var(--ev-measured)',
+    ink: 'text-state-ready',
+    label: 'Doctor storage findings: measured healthy',
+  },
+  attention: {
+    pattern: 'var(--ev-measured)',
+    ink: 'text-state-partial',
+    label: 'Doctor storage findings: measured findings need attention',
+  },
+  unknown: {
+    pattern: 'var(--ev-unknown)',
+    ink: 'text-state-unknown',
+    label: 'Doctor storage findings: could not be read, health unknown',
+  },
+};
+
+/**
+ * How one storage-finding producer reads for the global dot.
+ *
+ * A producer only counts as health when it actually looked (`real`) and found
+ * nothing. Anything it did observe is a finding. Everything else — a source the
+ * owner never configured, a partial sweep, a producer unsupported on this store
+ * — established nothing either way, and reporting "no evidence" as a clean bill
+ * of health is the whole defect this dot exists to avoid.
+ */
+function kindHealth(status: StorageFindingSourceStatus): DoctorHealth {
+  if (status.observed_entries > 0) return 'attention';
+  switch (status.state) {
+    case 'real':
+      return 'healthy';
+    case 'partial':
+    case 'unset':
+    case 'unsupported':
+      return 'unknown';
+    default: {
+      const unhandled: never = status.state;
+      return unhandled;
+    }
+  }
+}
+
 /** A channel selector, not a menu: numbered, letterspaced, hairline-divided.
  * The active channel is marked by a solid signal bar in the gutter — colour
  * used as position, not decoration. */
 function RailLink({
   path,
   label,
-  attention,
+  health,
 }: {
   path: string;
   label: string;
-  attention?: boolean;
+  health?: DoctorHealth;
 }) {
   const Icon = ICONS[path] ?? Boxes;
   return (
@@ -86,40 +150,76 @@ function RailLink({
           <span className="truncate text-3xs font-medium uppercase tracking-[0.14em] max-md:hidden">
             {label}
           </span>
-          {attention ? (
-            <span
-              className="ml-auto size-1.5 shrink-0 bg-state-partial max-md:absolute max-md:right-1 max-md:top-1 max-md:ml-0"
-              role="status"
-              aria-label="Doctor has findings needing attention"
-            />
-          ) : null}
+          {health ? <DoctorDot health={health} /> : null}
         </>
       )}
     </NavLink>
   );
 }
 
-/** The single Doctor attention dot (plan 11a): lit only when the findings
- * report carries a non-healthy finding; never a count, never another badge. */
-function useDoctorAttention(): boolean {
+/** The single Doctor dot (plan 11a): one mark, never a count, never another
+ * badge — but it reports its own reading rather than only its worst one. */
+function DoctorDot({ health }: { health: DoctorHealth }) {
+  const presentation = DOCTOR_HEALTH[health];
+  return (
+    <span
+      role="status"
+      aria-label={presentation.label}
+      data-doctor-health={health}
+      className={cn(
+        'ml-auto size-2 shrink-0 border border-current',
+        'max-md:absolute max-md:right-1 max-md:top-1 max-md:ml-0',
+        presentation.ink,
+      )}
+      // The evidence patterns are drawn in `currentColor`, so the ink token
+      // above colours the fill and the pattern carries the evidence class.
+      style={{ backgroundImage: presentation.pattern }}
+    />
+  );
+}
+
+/**
+ * The global Doctor reading.
+ *
+ * Every transport outcome used to return `false` here, so "the storage-findings
+ * read is broken" and "the system is verified healthy" rendered as the same
+ * pixels on the app-wide indicator. A read that failed, has not landed, or came
+ * back with nothing to read is `unknown`; only a resolved report whose every
+ * producer looked and found nothing is `healthy`.
+ *
+ * Parsed with Observatory's route contract, not the generated
+ * `StorageFindingsPayloadSchema`. That generated shape describes a `{ kinds }`
+ * payload this route does not serve — `storage_findings_api.rs` sets
+ * `payload.kind_statuses` — so validating against it fails on every real
+ * response and pins the dot to `unknown` forever. Wrong in the safe direction,
+ * but it makes `healthy` unreachable and the indicator meaningless.
+ */
+function useDoctorHealth(): DoctorHealth {
   const scope = useScope((s) => s.scope);
   const findings = useQuery({
     queryKey: ['storage', 'findings', scopeKey(scope)],
     queryFn: () =>
-      fetchEnvelope(scopedUrl(scope, '/api/storage/findings'), StorageFindingsPayloadSchema),
+      fetchEnvelope(
+        scopedUrl(scope, '/api/storage/findings'),
+        ObservatoryStorageFindingsPayloadSchema,
+      ),
     refetchInterval: 60_000,
   });
   const result = findings.data;
-  if (!result || result.outcome === 'transport') return false;
-  return result.envelope.payload.kinds.some(
-    (kind) => kind.state !== 'healthy_complete_coverage' && kind.state !== 'unsupported',
-  );
+  if (!result || result.outcome === 'transport') return 'unknown';
+  const statuses = result.envelope.payload.kind_statuses;
+  // A report naming no producers has established nothing about this store.
+  if (statuses.length === 0) return 'unknown';
+  const readings = statuses.map(kindHealth);
+  if (readings.includes('attention')) return 'attention';
+  if (readings.includes('unknown')) return 'unknown';
+  return 'healthy';
 }
 
-/** Navigation only: no status, no badges except the single Doctor attention
+/** Navigation only: no status, no badges except the single Doctor health
  * dot. */
 export function NavRail() {
-  const attention = useDoctorAttention();
+  const health = useDoctorHealth();
   return (
     <nav
       aria-label="Workspaces"
@@ -142,7 +242,7 @@ export function NavRail() {
             key={channel.path}
             path={channel.path}
             label={channel.label}
-            attention={channel.path === 'observatory' && attention}
+            health={channel.path === 'observatory' ? health : undefined}
           />
         ))}
       </div>
