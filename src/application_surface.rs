@@ -1848,19 +1848,36 @@ fn parse_git_read_surface_request(
     let object = value
         .as_object()
         .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-    let max_entries = object
-        .get("max_entries")
-        .and_then(Value::as_u64)
-        .unwrap_or(u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES))
-        .clamp(
-            1,
-            u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
-        ) as u32;
-    let max_bytes = object
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES)
-        .clamp(1, crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES);
+    let bounded_u64 = |name: &str, default: u64, maximum: u64| match object.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=maximum).contains(value))
+            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    let boolean = |name: &str, default: bool| match object.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_bool()
+            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    let optional_string = |name: &str| match object.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|value| Some(value.to_owned()))
+            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    let max_entries = bounded_u64(
+        "max_entries",
+        u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
+        u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
+    )? as u32;
+    let max_bytes = bounded_u64(
+        "max_bytes",
+        crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
+        crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
+    )?;
     let string = |name: &str| {
         object
             .get(name)
@@ -1869,11 +1886,13 @@ fn parse_git_read_surface_request(
             .map(str::to_owned)
             .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
     };
-    let scope = |allow_commit_range: bool| match object
-        .get("scope")
-        .and_then(Value::as_str)
-        .unwrap_or("working_tree")
-    {
+    let scope_name = match object.get("scope") {
+        None => "working_tree",
+        Some(value) => value
+            .as_str()
+            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+    };
+    let scope = |allow_commit_range: bool| match scope_name {
         "working_tree" => Ok(GitDiffScopeV1::WorkingTree),
         "staged" => Ok(GitDiffScopeV1::Staged),
         "commit_range" if allow_commit_range => Ok(GitDiffScopeV1::CommitRange {
@@ -1895,32 +1914,16 @@ fn parse_git_read_surface_request(
         }
         ApplicationSurfaceOperation::GitHistory => {
             crate::application::git_reads::GitReadRequestV1::History {
-                max_count: object
-                    .get("count")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(100)
-                    .clamp(1, 1_000) as u32,
-                path: object
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                follow: object
-                    .get("follow")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                first_parent: object
-                    .get("first_parent")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                max_count: bounded_u64("count", 100, 1_000)? as u32,
+                path: optional_string("path")?,
+                follow: boolean("follow", false)?,
+                first_parent: boolean("first_parent", false)?,
             }
         }
         ApplicationSurfaceOperation::GitBlame => {
             crate::application::git_reads::GitReadRequestV1::Blame {
                 path: string("path")?,
-                follow_renames: object
-                    .get("follow_renames")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                follow_renames: boolean("follow_renames", false)?,
             }
         }
         ApplicationSurfaceOperation::GitHunks => {

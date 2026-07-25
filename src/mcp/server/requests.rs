@@ -839,9 +839,7 @@ impl McpServer {
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
                 doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
-                doctor_remediation_dispatcher: self
-                    .dashboard_doctor_remediation_dispatcher
-                    .clone(),
+                doctor_remediation_dispatcher: self.dashboard_doctor_remediation_dispatcher.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(self.diagnostics_lsp.as_ref()),
                 application_invocation_client,
@@ -1595,15 +1593,26 @@ mod git_read_control_tests {
             "tracedecay_git_blame",
             "tracedecay_git_hunks",
         ] {
-            assert!(is_mcp_git_read(tool_name));
             assert!(tool_supports_live_cancellation(tool_name));
+            let application_surface =
+                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
             assert!(
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
-                    .is_none(),
-                "Git reads must remain MCP-only rather than entering the shared transport surface"
+                application_surface.is_some(),
+                "Git reads must enter the catalog-owned application surface",
             );
+            let controlled_read = matches!(
+                application_surface,
+                Some(
+                    crate::application_surface::ApplicationSurfaceOperation::GitStatus
+                        | crate::application_surface::ApplicationSurfaceOperation::GitDiff
+                        | crate::application_surface::ApplicationSurfaceOperation::GitHistory
+                        | crate::application_surface::ApplicationSurfaceOperation::GitBlame
+                        | crate::application_surface::ApplicationSurfaceOperation::GitHunks
+                )
+            );
+            assert!(controlled_read);
             assert_eq!(
-                dispatch_deadline_horizon_micros(false, is_mcp_git_read(tool_name)),
+                dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read),
                 Some(30_000_000)
             );
         }
