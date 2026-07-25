@@ -23,6 +23,8 @@ use super::code_index_scheduler::pr9_runtime::{
 use crate::application::semantic_runtime::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
     RetrievalProfileActivationObserverV1, SemanticRuntimeFuture,
+    register_project_semantic_redundancy_authority,
+    unregister_project_semantic_redundancy_authority,
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
@@ -172,6 +174,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
         Box::pin(async move {
             let scope = committed.scope.clone();
             let semantic_enabled = committed.state.active().compatibility().semantic.is_some();
+            unregister_project_semantic_redundancy_authority(&project_root);
             provider
                 .update_after_successful_activation(scope.clone(), committed.state.clone())
                 .map_err(map_update_observer_error)?;
@@ -193,9 +196,17 @@ impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
             .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?;
             if semantic_enabled {
                 registry
-                    .mount_semantic_query_authority_from_committed(&project_root, &scope, committed)
+                    .mount_semantic_query_authority_from_committed(
+                        &project_root,
+                        &scope,
+                        committed.clone(),
+                    )
                     .await
                     .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                let _ = register_project_semantic_redundancy_authority(
+                    project_root.clone(),
+                    &committed,
+                );
             }
             Ok(())
         })
@@ -673,7 +684,7 @@ pub(crate) mod tests {
             artifact_manifest_digest: artifact,
             runtime_compatibility_digest: digest('e'),
             calibration: SemanticCalibrationProfileV1 {
-                calibration_profile_id: id("calibration.semantic.pr9-activation-test"),
+                calibration_profile_id: id("calibration.semantic.semantic-active"),
                 cohort_digest: digest('f'),
                 projection_key: projection.projection_key().clone(),
                 vector_generation: vector_generation_id.clone(),

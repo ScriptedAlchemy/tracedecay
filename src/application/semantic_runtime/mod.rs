@@ -67,13 +67,15 @@ pub(crate) use production::current_query_factory;
 pub(crate) use production::{
     PreparedSemanticEvaluationGenerationV1, ProductionSemanticRuntimeV1,
     SavedCodeGenerationScheduleHookV1, production_saved_generation_schedule_hook,
-    project_semantic_application_status, project_semantic_production_runtime,
-    project_semantic_source_generation, register_project_semantic_runtime,
-    unregister_project_semantic_runtime,
+    project_semantic_application_status, project_semantic_generation_pointer,
+    project_semantic_production_runtime, project_semantic_source_generation,
+    register_project_semantic_runtime, unregister_project_semantic_runtime,
 };
 pub(crate) use redundancy::{
-    SemanticRedundancyGenerationV1, SemanticRedundancyVectorV1,
-    project_semantic_redundancy_generation, register_project_semantic_redundancy_generation,
+    SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
+    project_semantic_redundancy_generation, register_project_semantic_redundancy_authority,
+    register_project_semantic_redundancy_generation,
+    unregister_project_semantic_redundancy_authority,
     unregister_project_semantic_redundancy_generation,
 };
 

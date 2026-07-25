@@ -867,16 +867,12 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn retention_maintenance_enabled(
-    retention: &crate::config::RetentionConfig,
-    semantic_lifecycle_present: bool,
-) -> bool {
+fn retention_maintenance_enabled(retention: &crate::config::RetentionConfig) -> bool {
     retention.session_lcm.enabled
         || retention.observation.enabled
         || retention.orphan_store_gc_days.is_some()
         || retention.incident_debris_retention_days.is_some()
         || retention.compaction.is_some()
-        || semantic_lifecycle_present
 }
 
 /// Backstop scheduler (design D5): a single daemon timer covering projects whose
@@ -997,10 +993,7 @@ mod backstop {
         // mounted profile/session/project handles participate; unopened stores
         // are skipped rather than rediscovered.
         let retention = &watcher.inner.config.retention;
-        let semantic_lifecycle =
-            crate::semantic_code::SemanticModelLifecycleOwnerV1::mounted_shared();
-        let maintenance_enabled =
-            super::retention_maintenance_enabled(retention, semantic_lifecycle.is_some());
+        let maintenance_enabled = super::retention_maintenance_enabled(retention);
         let run_maintenance_now =
             last_maintenance.is_none_or(|t| t.elapsed() >= maintenance_period);
         if run_maintenance_now && maintenance_enabled {
@@ -1064,14 +1057,10 @@ mod backstop {
                                 .await;
                         }
                     }
-                    let semantic_succeeded = semantic_lifecycle.as_ref().is_none_or(|owner| {
-                        owner.run_daemon_artifact_gc(super::now_secs()).is_ok()
-                    });
                     session_succeeded
                         && orphan_succeeded
                         && debris_succeeded
                         && compaction_succeeded
-                        && semantic_succeeded
                 })
                 .await;
             if succeeded {
