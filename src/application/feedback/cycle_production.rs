@@ -1065,7 +1065,7 @@ mod tests {
             ProjectId::new("project.cycle-production").expect("project"),
             RepositoryId::new("repository.cycle-production").expect("repository"),
             WorktreeId::new("worktree.cycle-production").expect("worktree"),
-            None,
+            Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
         )
         .expect("scope")
     }
@@ -1525,11 +1525,12 @@ mod tests {
     fn daemon_cycle_grant_authorizes_the_exact_proximity_scope() {
         let scope = scope();
         let feedback_scope = feedback_scope(&scope);
+        let observed_at = now_micros();
         let context = daemon_request_context(
             &scope,
             &ActorId::new("actor.cycle-production").expect("actor"),
-            UtcMicros(3),
-            UtcMicros(1),
+            UtcMicros(observed_at.0.saturating_add(60_000_000)),
+            observed_at,
         )
         .expect("request context");
 
