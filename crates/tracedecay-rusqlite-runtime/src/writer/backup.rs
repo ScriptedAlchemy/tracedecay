@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     error::Error,
     fmt,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
     sync::{
@@ -10,6 +10,9 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
+
+#[cfg(unix)]
+use std::fs::File;
 
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -541,17 +544,20 @@ fn hash_staging(
     Ok((bytes, Sha256Digest(hasher.finalize().into())))
 }
 
+#[cfg(unix)]
 fn sync_parent(destination: &Path) -> Result<(), WriterOnlineBackupError> {
-    #[cfg(unix)]
-    {
-        File::open(
-            destination
-                .parent()
-                .ok_or(WriterOnlineBackupError::DestinationParentUnavailable)?,
-        )
-        .and_then(|parent| parent.sync_all())
-        .map_err(|error| WriterOnlineBackupError::Io(error.to_string()))?;
-    }
+    File::open(
+        destination
+            .parent()
+            .ok_or(WriterOnlineBackupError::DestinationParentUnavailable)?,
+    )
+    .and_then(|parent| parent.sync_all())
+    .map_err(|error| WriterOnlineBackupError::Io(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_destination: &Path) -> Result<(), WriterOnlineBackupError> {
     Ok(())
 }
 

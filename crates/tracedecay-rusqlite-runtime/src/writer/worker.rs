@@ -55,6 +55,7 @@ const HARD_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(super) struct Worker {
     pub(super) path: PathBuf,
+    #[cfg(unix)]
     pub(super) canonical_path: PathBuf,
     pub(super) expected_file_identity: Option<u64>,
     pub(super) _opened_database: Option<Arc<OpenedDatabaseFile>>,
