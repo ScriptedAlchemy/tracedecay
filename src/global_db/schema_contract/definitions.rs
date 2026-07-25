@@ -323,6 +323,14 @@ pub(super) const TABLES: &[Table] = &[
         []
     ),
     table!(
+        "observation_backfill_watermarks",
+        [
+            column("migration", "TEXT", true, None, 1),
+            column("backfilled_through", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
         "projection_queue",
         [
             column("observation_id", "TEXT", false, None, 1),

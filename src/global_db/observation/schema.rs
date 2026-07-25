@@ -1,21 +1,15 @@
 use std::collections::BTreeSet;
 
-use tracedecay_domain::{ProjectionGenerationId, SanitizationReceiptV1, UtcMicros};
-use tracedecay_store::{
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
-};
-
 use crate::db::engine::{Executor, QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
-use super::persist::persist_observation_retrieval_anchor;
-use super::provenance_backfill::backfill_observation_repository_provenance;
 
 const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
 
-const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
+pub(crate) const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
 
-const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str = "projection.legacy-observation-import.v1";
+pub(super) const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str =
+    "projection.legacy-observation-import.v1";
 
 pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
 
@@ -52,7 +46,7 @@ async fn observation_columns(conn: &impl QueryExecutor) -> crate::errors::Result
     Ok(columns)
 }
 
-async fn migration_recorded(
+pub(super) async fn migration_recorded(
     conn: &impl QueryExecutor,
     migration: &str,
 ) -> crate::errors::Result<bool> {
@@ -243,97 +237,6 @@ async fn migrate_source_cursor_advances_schema(
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-pub(in crate::global_db) async fn backfill_observation_retrieval_anchors(
-    conn: &(impl Executor + QueryExecutor),
-) -> crate::errors::Result<()> {
-    let mut rows = conn
-        .query(
-            "SELECT observation.observation_json, observation.receipt_id,
-                    receipt.receipt_json
-             FROM observations AS observation
-             LEFT JOIN sanitization_receipts AS receipt
-               ON receipt.receipt_id = observation.receipt_id
-             LEFT JOIN observation_retrieval_anchors AS anchor
-               ON anchor.observation_id = observation.observation_id
-             WHERE anchor.observation_id IS NULL
-             ORDER BY observation.sequence",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    let mut legacy_rows = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
-    {
-        legacy_rows.push((
-            row.get::<String>(0)
-                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
-            row.get::<String>(1)
-                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
-            row.get::<Option<String>>(2)
-                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
-        ));
-    }
-    drop(rows);
-
-    for (observation_json, receipt_id, receipt_json) in legacy_rows {
-        let receipt_json = receipt_json.ok_or_else(|| {
-            global_db_operation_message(
-                OBSERVATION_SCHEMA_OPERATION,
-                "legacy observation receipt is unavailable for anchor backfill",
-            )
-        })?;
-        let observation: tracedecay_domain::DurableObservationV1 =
-            serde_json::from_str(&observation_json)
-                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        let receipt: SanitizationReceiptV1 = serde_json::from_str(&receipt_json)
-            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        if observation.receipt() != &receipt
-            || observation.receipt().receipt().receipt_id().as_str() != receipt_id
-        {
-            return Err(global_db_operation_message(
-                OBSERVATION_SCHEMA_OPERATION,
-                "legacy observation receipt does not validate for anchor backfill",
-            ));
-        }
-        let projection_generation =
-            ProjectionGenerationId::new(LEGACY_OBSERVATION_PROJECTION_GENERATION)
-                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        let authorization = build_observation_resolution_authorization_v1(
-            &observation,
-            "legacy-observation-import.v1",
-        )
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        let anchor = build_observation_retrieval_anchor_v2(
-            &observation,
-            projection_generation,
-            UtcMicros(0),
-            authorization,
-        )
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        let (_, _, alias_collisions) =
-            persist_observation_retrieval_anchor(conn, observation.observation_id(), &anchor)
-                .await
-                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        for collision in alias_collisions {
-            tracing::warn!(
-                existing_anchor_id = collision.existing_anchor_id.as_str(),
-                candidate_anchor_id = collision.candidate_anchor_id.as_str(),
-                "anchor backfill preserved alias binding; candidate stays reachable by id only"
-            );
-        }
-    }
-    conn.execute(
-        "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
-        params![OBSERVATION_ANCHOR_SCHEMA_MIGRATION],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
-}
-
 pub(in crate::global_db) async fn ensure_observation_schema(
     conn: &(impl Executor + QueryExecutor + Sync),
 ) -> crate::errors::Result<()> {
@@ -411,6 +314,10 @@ pub(in crate::global_db) async fn ensure_observation_schema(
             PRIMARY KEY(source_json, scope_json, coverage_json),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
+        CREATE TABLE IF NOT EXISTS observation_backfill_watermarks (
+            migration TEXT NOT NULL PRIMARY KEY,
+            backfilled_through INTEGER NOT NULL CHECK(backfilled_through >= 0)
+        );
         CREATE TABLE IF NOT EXISTS projection_queue (
             observation_id TEXT PRIMARY KEY,
             observation_sequence INTEGER NOT NULL UNIQUE,
@@ -432,6 +339,11 @@ pub(in crate::global_db) async fn ensure_observation_schema(
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     migrate_source_cursor_advances_schema(conn).await?;
     migrate_observation_schema(conn, table_preexisted).await?;
-    backfill_observation_retrieval_anchors(conn).await?;
-    backfill_observation_repository_provenance(conn).await
+    // The retrieval-anchor and repository-provenance backfills deliberately do
+    // NOT run here: this function executes inside the schema-upgrade
+    // mega-transaction, where a cancelled open (the warmup deadline interrupts
+    // in-flight statements) would roll every row of a large-store backfill back
+    // and re-arm the same full scan on the next open. `super::backfill` runs
+    // both after that transaction commits and pages their progress durably.
+    Ok(())
 }

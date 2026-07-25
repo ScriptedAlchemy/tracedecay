@@ -211,6 +211,9 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "session_turns" => Some("merged"),
         "authority_audit_checkpoints"
         | "global_schema_migrations"
+        // Resumable-backfill watermarks scoped to one store's own sequences; a
+        // consolidated target re-derives its own from the merged observations.
+        | "observation_backfill_watermarks"
         | "session_temporal_schema_migrations" => Some("target-local schema ledger"),
         name if name == "session_occurrences_fts"
             || name.starts_with("session_occurrences_fts_")

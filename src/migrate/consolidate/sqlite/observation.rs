@@ -83,6 +83,23 @@ pub(super) async fn merge_observation_authority(conn: &impl Executor) -> Result<
     .await
     .map_err(|error| db_error("merge_observation_authority", error))?;
 
+    // Merged observations arrive above the target's frontier, and a source
+    // whose own backfills had not converged brings no anchor or provenance
+    // attachment for some of them. Clearing the completion markers re-arms the
+    // target's resumable backfills, which continue from their retained
+    // watermarks and so cover exactly the merged tail.
+    for migration in [
+        crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+        crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+    ] {
+        conn.execute(
+            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            params![migration],
+        )
+        .await
+        .map_err(|error| db_error("merge_observation_authority", error))?;
+    }
+
     merge_source_cursors(conn).await?;
     merge_source_cursor_advances(conn).await?;
     projection::merge(conn).await
