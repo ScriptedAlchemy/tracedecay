@@ -66,13 +66,9 @@ async fn overlapping_facts_merge_tags_metadata_and_feedback_without_duplication(
 #[tokio::test]
 async fn summary_raw_sources_follow_remapped_store_ids() {
     let fixture = fixture().await;
-    let source_runtime = HostAdmissionTestRuntimeV1::project(
-        &fixture.profile,
-        &fixture.project,
-        ProjectId::new(fixture.source_id.clone()).unwrap(),
-    )
-    .await
-    .unwrap();
+    let source_runtime =
+        open_historical_project_runtime(&fixture.profile, &fixture.project, &fixture.source_id)
+            .await;
     let source = source_runtime
         .registered_database(HostAdmissionScope::Project)
         .unwrap();
@@ -99,13 +95,12 @@ async fn summary_raw_sources_follow_remapped_store_ids() {
     let options = fixture.options();
     let planned = plan(&options).await.unwrap();
     let applied = apply(&options, &planned.confirmation_token).await.unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::project(
+    let runtime = open_historical_project_runtime(
         &fixture.profile,
         &fixture.project,
-        ProjectId::new(applied.destination_project_id.clone()).unwrap(),
+        &applied.destination_project_id,
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         runtime.database_path(HostAdmissionScope::Project).unwrap(),
         applied

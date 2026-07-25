@@ -1201,6 +1201,17 @@ async fn a_third_matching_shard_is_left_for_its_own_pass() {
     // source->target pass; it is simply left untouched for its own explicit
     // consolidation later.
     let fixture = fixture().await;
+    let current_enrollment = storage::read_enrollment_marker(&fixture.project)
+        .unwrap()
+        .expect("fixture must retain the current project enrollment");
+    storage::write_enrollment_marker(
+        &fixture.project,
+        &EnrollmentMarker {
+            project_id: "proj_third".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
     create_shard(
         &fixture.profile,
         &fixture.project,
@@ -1210,6 +1221,7 @@ async fn a_third_matching_shard_is_left_for_its_own_pass() {
         false,
     )
     .await;
+    storage::write_enrollment_marker(&fixture.project, &current_enrollment).unwrap();
     let third_layout = layout_for_id(&fixture.project, &fixture.profile, "proj_third").unwrap();
     let third_manifest_path = third_layout.manifest_path.clone().unwrap();
     let third_graph_before = file_digest(&third_layout.graph_db_path).unwrap();

@@ -4,13 +4,8 @@
 use super::*;
 
 async fn session_runtime(fixture: &Fixture, project_id: &str) -> HostAdmissionTestRuntimeV1 {
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        &fixture.profile,
-        &fixture.project,
-        ProjectId::new(project_id.to_string()).unwrap(),
-    )
-    .await
-    .unwrap();
+    let runtime =
+        open_historical_project_runtime(&fixture.profile, &fixture.project, project_id).await;
     let expected = layout_for_id(&fixture.project, &fixture.profile, project_id)
         .unwrap()
         .sessions_db_path;
