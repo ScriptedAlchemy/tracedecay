@@ -426,7 +426,7 @@ fn confirmation_token(
         hasher.update(b"\0");
         hasher.update(source.generation.as_bytes());
     }
-    format!("confirm-memory-cutover-{:x}", hasher.finalize())
+    format!("confirm-memory-cutover-{}", hex::encode(hasher.finalize()))
 }
 
 fn source_generation(path: &Path) -> Result<String> {
@@ -465,7 +465,7 @@ fn source_generation(path: &Path) -> Result<String> {
             Err(error) => return Err(migration_error(error.to_string())),
         }
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 fn write_cutover_receipt(
