@@ -779,6 +779,7 @@ mod core_lifecycle;
 mod core_logging;
 mod core_proxy;
 pub(crate) mod doctor_kernel;
+pub(crate) mod hook_v2_replay;
 pub(crate) mod pr9_authority_provider;
 pub(crate) mod project_open_owners;
 mod semantic_evaluation;

@@ -8,11 +8,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admission_ledger;
 pub mod config;
 pub mod native;
 pub mod runtime;
 pub mod spool;
 
+pub use admission_ledger::{
+    HookAdmissionDecisionV1, HookAdmissionLedgerError, HookAdmissionLedgerLimitsV1,
+    HookAdmissionLedgerOpenReportV1, HookAdmissionLedgerV1, hook_admission_digest,
+};
 pub use config::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,
     HookConfigurationFileWriterV1, HookConfigurationPublicationError,

@@ -907,6 +907,11 @@ pub(crate) async fn register_project_open_production_owners(
     )
     .await?;
 
+    // Hook V2 envelopes that missed their synchronous budget are durable in the
+    // per-host transport spool. Nothing drains them until this consumer runs,
+    // so start it once the bindings and admission owners above are mounted.
+    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(graph);
+
     Ok(())
 }
 

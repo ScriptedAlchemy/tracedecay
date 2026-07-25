@@ -7,7 +7,8 @@
 mod admin_cli;
 pub(crate) use admin_cli::handle_projectless_admin_cli;
 pub(crate) use hook_runtime::{
-    handle_projectless_hook_runtime, replay_projectless_hermes_host_admission,
+    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, handle_projectless_hook_runtime,
+    replay_projectless_hermes_host_admission,
 };
 mod admin_project;
 pub mod analysis;
