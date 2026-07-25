@@ -68,12 +68,12 @@ pub(in crate::daemon) fn unpinned_latest_generation() -> CodeGenerationId {
 }
 
 pub(in crate::daemon) fn callable_query_sanitizer_revision() -> SanitizerRevision {
-    SanitizerRevision::new("query-sanitizer.daemon.v1")
+    SanitizerRevision::new(crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)
         .unwrap_or_else(|_| panic!("static sanitizer revision"))
 }
 
 pub(in crate::daemon) fn callable_query_normalization_revision() -> QueryNormalizationRevision {
-    QueryNormalizationRevision::new("query-normalization.daemon.v1")
+    QueryNormalizationRevision::new(crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1)
         .unwrap_or_else(|_| panic!("static normalization revision"))
 }
 
@@ -192,7 +192,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    pub(super) async fn generation_for(
+    pub(in crate::daemon) async fn generation_for(
         &self,
         scope: &tracedecay_application::ResolvedScope,
         generation_id: &CodeGenerationId,
@@ -989,8 +989,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 return unavailable(finished_at);
             };
             let authority = CentralExactAdmissionAuthorityV1::new(
-                ExactAdmissionRuleRevision::new("exact-rules.daemon.v1")
-                    .unwrap_or_else(|_| panic!("static exact rule revision")),
+                ExactAdmissionRuleRevision::new(
+                    crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                )
+                .unwrap_or_else(|_| panic!("static exact rule revision")),
             );
             let lane_request = ExactLaneRequest {
                 literals: authority.parse_literals(&query_view, &base),
@@ -1079,10 +1081,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 phrases: request.phrases.clone(),
                 field_filters: Vec::new(),
                 fuzzy_budget: MAX_FUZZY_TERM_EXPANSIONS_V1,
-                lexical_profile_revision: ComponentRevision::new("lexical-profile.daemon.v1")
-                    .unwrap_or_else(|_| panic!("static lexical profile")),
-                score_domain: ScoreDomainId::new("score.lexical.daemon.v1")
-                    .unwrap_or_else(|_| panic!("static lexical score domain")),
+                lexical_profile_revision: ComponentRevision::new(
+                    crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                )
+                .unwrap_or_else(|_| panic!("static lexical profile")),
+                score_domain: ScoreDomainId::new(
+                    crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                )
+                .unwrap_or_else(|_| panic!("static lexical score domain")),
                 budget: base.budget,
                 base: base.clone(),
             };

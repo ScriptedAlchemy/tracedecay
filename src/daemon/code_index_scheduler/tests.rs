@@ -13,10 +13,11 @@ use tracedecay_application::{
     RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
 };
 use tracedecay_domain::{
-    ActorId, CalibrationProfileId, CommitId, ComponentRevision, DiversityPolicy,
-    EphemeralSanitizedQueryViewV1, FusionProfile, ManifestDigest, PrivacyDomainId, ProjectId,
-    QueryNormalizationRevision, RefId, RepositoryId, RetrievalBudget, RetrievalCursorKeyId,
-    RetrieverKind, SanitizerRevision, UtcMicros, WorktreeId,
+    ActorId, AuthorizationRevision, CalibrationProfileId, CommitId, ComponentRevision,
+    DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, FusionProfile,
+    ManifestDigest, PrincipalId, PrivacyDomainId, ProjectId, QueryNormalizationRevision, RefId,
+    RelationEdgeKindV1, RepositoryId, RetrievalBudget, RetrievalCursorKeyId, RetrieverKind,
+    SanitizerRevision, ScoreDomainId, UtcMicros, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -492,6 +493,97 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
             && std::mem::size_of_val(&owners.graph) > 0,
         "exact/lexical/graph production owners must be concrete lane values"
     );
+}
+
+#[tokio::test]
+async fn bundled_pr9_profile_composes_live_code_index_lanes() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let latest = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("live generation");
+    let snapshot = latest.generation.snapshot();
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.bundled-pr9.fixture").expect("project id"),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let (_, accepted, _) =
+        crate::application::semantic_runtime::bundled_pr9_authority().expect("bundled authority");
+    let keyring = RetrievalCursorKeyringV1::new(
+        latest.generation.manifest().privacy_domain.clone(),
+        RetrievalCursorKeyId::new("retrieval-key.bundled-pr9.fixture").expect("cursor key id"),
+        1,
+        vec![7_u8; 32],
+        1_000_000,
+    )
+    .expect("cursor keyring");
+    let authority = Arc::new(
+        Pr9QueryAuthorityV1::new(
+            accepted.profile().clone(),
+            accepted.diversity().clone(),
+            ComponentRevision::new(crate::query::retrieval::PR9_RANKING_REVISION_V1)
+                .expect("ranking revision"),
+            keyring,
+        )
+        .expect("query authority"),
+    );
+    registry
+        .mount_pr9_query_authority(fixture.path(), &scope, authority)
+        .await
+        .expect("mount bundled authority");
+
+    let request = super::pr9_runtime::Pr9SearchExecutionRequestV1::new(
+        "main",
+        super::pr9_runtime::Pr9SearchExecutionPolicyV1 {
+            principal: PrincipalId::new("principal.bundled-pr9.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new("authorization.bundled-pr9.fixture")
+                .expect("authorization revision"),
+            sanitizer_revision: SanitizerRevision::new(
+                crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
+            )
+            .expect("sanitizer revision"),
+            normalization_revision: QueryNormalizationRevision::new(
+                crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+            )
+            .expect("normalization revision"),
+            exact_rule_revision: ExactAdmissionRuleRevision::new(
+                crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+            )
+            .expect("exact rules revision"),
+            lexical_profile_revision: ComponentRevision::new(
+                crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+            )
+            .expect("lexical profile revision"),
+            lexical_score_domain: ScoreDomainId::new(
+                crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+            )
+            .expect("lexical score domain"),
+            fuzzy_budget: crate::query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+            graph_edge_kinds: vec![RelationEdgeKindV1::Calls],
+            graph_max_depth: 1,
+            page_size: 10,
+            cursor: None,
+        },
+    );
+    let executed = registry
+        .execute_pr9_search(&scope, request)
+        .await
+        .expect("bundled PR9 composes live lanes");
+    assert!(
+        !executed.authorized.fallback.ordered_candidates.is_empty(),
+        "live main symbol is returned"
+    );
+    registry.shutdown().await;
 }
 
 #[test]

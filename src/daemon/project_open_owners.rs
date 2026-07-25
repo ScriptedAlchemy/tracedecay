@@ -657,18 +657,6 @@ pub(crate) async fn register_project_open_production_owners(
             message: format!("project-open resolved scope denied: {error}"),
         }
     })?;
-    if let Err(error) = invocation
-        .mount_pr9_authority_for_project(project_root, &scope)
-        .await
-    {
-        tracing::debug!(
-            event = "pr9_authority_mount",
-            outcome = "unavailable",
-            project_id = %project_id,
-            reason = %error,
-            "PR9 search authority unavailable; non-search project surfaces remain mounted"
-        );
-    }
     let configuration = graph
         .configuration_runtime()
         .client()
@@ -681,48 +669,6 @@ pub(crate) async fn register_project_open_production_owners(
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
     };
-    if let Ok(configuration_pin) =
-        crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(
-            &scout_configuration,
-        )
-    {
-        match crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
-            Arc::clone(&session_db),
-            scope.clone(),
-        )
-        .await
-        {
-            Ok(store) => {
-                if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
-                    mount_current_semantic_query_authority_on_project_open(
-                        &invocation.code_index_schedulers,
-                        project_root,
-                        &scope,
-                        &store,
-                        &configuration_pin,
-                    )
-                    .await
-                {
-                    tracing::debug!(
-                        event = "semantic_query_authority_mount",
-                        outcome = "unavailable",
-                        project_id = %project_id,
-                        reason = %error,
-                        "semantic query authority unavailable; canonical PR9 remains mounted"
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    event = "semantic_configuration_store_open",
-                    outcome = "unavailable",
-                    project_id = %project_id,
-                    reason = ?error,
-                    "semantic configuration unavailable; canonical PR9 remains mounted"
-                );
-            }
-        }
-    }
     let scout_registry = match invocation
         .context_scout_runtime_registrar()
         .open_and_register(database.clone(), project_id.clone())
@@ -793,7 +739,14 @@ pub(crate) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
-    register_semantic_activation_owner(invocation, project_root, &graph, scope.clone()).await?;
+    register_semantic_activation_owner(
+        invocation,
+        project_root,
+        &graph,
+        scope.clone(),
+        &scout_configuration,
+    )
+    .await?;
 
     match invocation
         .feedback_runtime_registrar()
@@ -920,29 +873,98 @@ async fn register_semantic_activation_owner(
     project_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,
     scope: ResolvedScope,
+    configuration: &crate::application::configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
-    let Some(inspector) =
-        crate::application::semantic_runtime::project_semantic_production_runtime(project_root)
-    else {
-        return Ok(());
-    };
+    let configuration_pin =
+        crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(
+            configuration,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("semantic retrieval configuration pin failed: {error}"),
+        })?;
     let configuration_store =
         crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
             graph.configuration_runtime().registered_database(),
-            scope,
+            scope.clone(),
         )
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("semantic retrieval configuration store unavailable: {error}"),
         })?;
-    let observer = invocation.pr9_activation_registrar(project_root);
-    if let Some(committed) = configuration_store
-        .current_committed_state()
+    let accepted_profiles = Arc::new(
+        crate::application::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::open(
+            graph.configuration_runtime().registered_database(),
+        )
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic retrieval committed state unavailable: {error}"),
-        })?
-    {
+            message: format!("semantic accepted-profile authority unavailable: {error}"),
+        })?,
+    );
+    let current_state = match configuration_store
+        .current_state_if_present()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("semantic retrieval current state unavailable: {error}"),
+        })? {
+        Some(state) => state,
+        None => {
+            let (report, accepted_profile, runtime) =
+                crate::application::semantic_runtime::bundled_pr9_authority().map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!("bundled PR9 authority rejected: {error}"),
+                    }
+                })?;
+            let evaluation_corpus_digest = tracedecay_domain::ManifestDigest::new(
+                report.corpus_digest.clone(),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("bundled PR9 corpus digest rejected: {error}"),
+            })?;
+            accepted_profiles
+                .publish(
+                    report,
+                    accepted_profile.clone(),
+                    runtime.clone(),
+                    evaluation_corpus_digest,
+                )
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("bundled PR9 authority publication failed: {error}"),
+                })?;
+            let state = crate::config::retrieval::RetrievalProfileStateV1::new(
+                configuration.revision_id.clone(),
+                accepted_profile,
+                &runtime,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("bundled PR9 initial state rejected: {error}"),
+            })?;
+            configuration_store
+                .install_initial_state(&configuration_pin, &state)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("bundled PR9 initial state publication failed: {error}"),
+                })?;
+            state
+        }
+    };
+    let observer = invocation.pr9_activation_registrar(project_root);
+    if current_state.audit().is_empty() {
+        invocation
+            .restore_initial_pr9_authority_for_project(scope.clone(), current_state)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("bundled PR9 initial authority restore failed: {error}"),
+            })?;
+    } else {
+        let committed = configuration_store
+            .current_committed_state()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("semantic retrieval committed state unavailable: {error}"),
+            })?
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "semantic retrieval state has no current committed transition".to_owned(),
+            })?;
         observer
             .activation_committed(committed)
             .await
@@ -950,6 +972,41 @@ async fn register_semantic_activation_owner(
                 message: format!("semantic retrieval activation restore failed: {error}"),
             })?;
     }
+    if let Err(error) = invocation
+        .mount_pr9_authority_for_project(project_root, &scope)
+        .await
+    {
+        tracing::debug!(
+            event = "pr9_authority_mount",
+            outcome = "unavailable",
+            project_id = %scope.project_id,
+            reason = %error,
+            "PR9 search authority unavailable; non-search project surfaces remain mounted"
+        );
+    }
+    if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
+        mount_current_semantic_query_authority_on_project_open(
+            &invocation.code_index_schedulers,
+            project_root,
+            &scope,
+            &configuration_store,
+            &configuration_pin,
+        )
+        .await
+    {
+        tracing::debug!(
+            event = "semantic_query_authority_mount",
+            outcome = "unavailable",
+            project_id = %scope.project_id,
+            reason = %error,
+            "semantic query authority unavailable; canonical PR9 remains mounted"
+        );
+    }
+    let Some(inspector) =
+        crate::application::semantic_runtime::project_semantic_production_runtime(project_root)
+    else {
+        return Ok(());
+    };
     let owner = Arc::new(
         crate::application::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
             configuration_store,
@@ -961,15 +1018,6 @@ async fn register_semantic_activation_owner(
     graph
         .configuration_runtime()
         .install_semantic_runtime(owner)?;
-    let accepted_profiles = Arc::new(
-        crate::application::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::open(
-            graph.configuration_runtime().registered_database(),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic accepted-profile authority unavailable: {error}"),
-        })?,
-    );
     let operation = Arc::new(
         crate::application::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
             Arc::clone(graph.configuration_runtime()),

@@ -148,6 +148,20 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         }))
     }
 
+    pub(crate) async fn current_state_if_present(
+        &self,
+    ) -> Result<Option<RetrievalProfileStateV1>, SemanticConfigurationBackendErrorV1> {
+        self.ensure_schema().await?;
+        let snapshot = self
+            .database
+            .read_snapshot()
+            .await
+            .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
+        Ok(load_latest(&snapshot, &self.scope.scope_digest)
+            .await?
+            .map(|stored| stored.state))
+    }
+
     pub async fn current_profile_state(
         &self,
     ) -> Result<RetrievalProfileStateSnapshotV1, SemanticConfigurationBackendErrorV1> {

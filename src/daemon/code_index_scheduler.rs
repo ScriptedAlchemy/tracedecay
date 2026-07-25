@@ -452,7 +452,7 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 }
 
 #[derive(Clone)]
-pub(super) struct LatestCompleteCodeIndexV1 {
+pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: CodeIndexPublishedGenerationV1,
 }
 
@@ -477,6 +477,10 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 }
 
 impl LatestCompleteCodeIndexV1 {
+    pub(in crate::daemon) fn generation(&self) -> &CodeIndexPublishedGenerationV1 {
+        &self.generation
+    }
+
     fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
         SemanticEvaluationCodeSnapshotV1 {
             source_generation: self.generation.manifest().generation_id.clone(),
@@ -550,12 +554,18 @@ impl LatestCompleteCodeIndexV1 {
                 .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
                 .collect(),
             freshness: freshness.clone(),
-            exact_retriever_revision: ComponentRevision::new("retriever.exact.daemon.v1")
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            lexical_retriever_revision: ComponentRevision::new("retriever.lexical.daemon.v1")
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            exact_score_domain: ScoreDomainId::new("score.exact.daemon.v1")
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            exact_retriever_revision: ComponentRevision::new(
+                crate::query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            lexical_retriever_revision: ComponentRevision::new(
+                crate::query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            exact_score_domain: ScoreDomainId::new(
+                crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         };
         let admitted = self
             .generation
@@ -563,7 +573,7 @@ impl LatestCompleteCodeIndexV1 {
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
         let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
         let authority = CentralExactAdmissionAuthorityV1::new(
-            ExactAdmissionRuleRevision::new("exact-rules.daemon.v1")
+            ExactAdmissionRuleRevision::new(crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1)
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         );
         let exact = ExactLane::new(

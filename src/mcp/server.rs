@@ -182,6 +182,13 @@ impl CodeIndexSearchUnavailableReasonV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeIndexSearchDisplayV1 {
+    pub(crate) name: String,
+    pub(crate) qualified_name: String,
+    pub(crate) kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexSearchCompletedV1 {
     pub(crate) code_generation: String,
     /// Visible result page: PR9 bytes when semantic abstains, separately
@@ -190,6 +197,10 @@ pub(crate) struct CodeIndexSearchCompletedV1 {
     /// Exact canonical PR9 object produced under the mounted query authority.
     /// Optional semantic work may report status but cannot mutate these bytes.
     pub(crate) pr9_fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
+    /// Authorized generation-bound display metadata, kept outside the
+    /// canonical PR9 bytes so presentation cannot mutate ranking identity.
+    pub(crate) display_by_anchor:
+        HashMap<tracedecay_domain::RetrievalAnchorId, CodeIndexSearchDisplayV1>,
     pub(crate) semantic: CodeIndexSemanticStatusV1,
 }
 
