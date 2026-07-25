@@ -21,10 +21,10 @@ use tracedecay_domain::{
 use super::super::context_allows_feedback_operation;
 use super::super::github_runtime::{
     GitHubActionsCheckRunV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
-    GitHubActionsWorkflowJobV1, GitHubActionsWorkflowRunV1, GitHubCheckAnnotationV1,
-    GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubProviderLifecycleV1,
-    GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1, GitHubRepositoryTargetV1,
-    GitHubSourceAccessAuthorityV1,
+    GitHubActionsWorkflowJobV1, GitHubActionsWorkflowRunV1, GitHubActionsWorkflowStepV1,
+    GitHubCheckAnnotationV1, GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1,
+    GitHubProviderLifecycleV1, GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1,
+    GitHubRepositoryTargetV1, GitHubSourceAccessAuthorityV1,
 };
 use super::{
     CiExactEvidenceAuthorityV1, CiProviderReadResultV1, CiReadOnlyProviderArchiveV1,
@@ -566,7 +566,7 @@ fn select_production_ci_failure_request_v1(
             && job.head_branch == feedback_branch_name(scope)
             && job.status == GitHubActionsStatusV1::Completed
             && job.conclusion == Some(GitHubActionsConclusionV1::Failure)
-            && job.steps.iter().any(|step| step.is_failed())
+            && job.steps.iter().any(GitHubActionsWorkflowStepV1::is_failed)
     })) {
         Ok(job) => job,
         Err(ProductionCiFailureDiscoveryOutcomeV1::NotFound) => {
