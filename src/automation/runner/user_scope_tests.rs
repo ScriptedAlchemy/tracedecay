@@ -480,7 +480,7 @@ async fn projectless_memory_curator_grooms_profile_memory() {
                 "op": "normalize_tags",
                 "fact_id": seeded.winner_id,
                 "tags": ["memory", "projectless"],
-                "evidence_fact_ids": [seeded.winner_id, seeded.loser_id],
+                "evidence_fact_ids": [seeded.loser_id],
                 "confidence": 0.99,
                 "reason": "Normalize the reviewed preference tags"
             }]
