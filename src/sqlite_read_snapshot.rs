@@ -771,7 +771,7 @@ fn ensure_private_root(root: &Path, expected_uid: Option<u32>) -> io::Result<()>
             )));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            create_private_directory(root)?;
+            create_private_directory_all(root)?;
         }
         Err(error) => return Err(error),
     }
@@ -807,6 +807,66 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
         builder.mode(0o700);
     }
     builder.create(path)
+}
+
+fn create_private_directory_all(path: &Path) -> io::Result<()> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut missing = Vec::new();
+    let mut current = path.as_path();
+    let mut collect_missing = true;
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(io::Error::other(format!(
+                    "SQLite scratch path component '{}' is not a regular directory",
+                    current.display()
+                )));
+            }
+            Ok(_) => collect_missing = false,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && collect_missing => {
+                missing.push(current.to_path_buf());
+            }
+            Err(error) => return Err(error),
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+
+    for directory in missing.into_iter().rev() {
+        match create_private_directory(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&directory)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(io::Error::other(format!(
+                        "SQLite scratch path component '{}' is not a regular directory",
+                        directory.display()
+                    )));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    if metadata.permissions().mode() & 0o077 != 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "concurrently created SQLite scratch directory '{}' is not private",
+                                directory.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn open_private_lock(path: &Path, create: bool) -> io::Result<File> {
@@ -1163,6 +1223,64 @@ mod tests {
         assert_eq!(family_fingerprint(&path).unwrap(), before);
         fs::write(with_suffix(&path, "-wal"), b"logical frame").unwrap();
         assert_ne!(family_fingerprint(&path).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_missing_scratch_root_is_created_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let first = temp.path().join("missing");
+        let second = first.join("nested");
+        let scratch_root = second.join("sqlite-read");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        let snapshots = SnapshotSet::capture_in(&[path], &scratch_root)
+            .await
+            .unwrap();
+
+        for directory in [&first, &second, &scratch_root, &snapshots.scratch.path] {
+            assert_eq!(
+                fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{} must be owner-only",
+                directory.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_scratch_root_rejects_a_symlinked_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let real = temp.path().join("real");
+        let linked = temp.path().join("linked");
+        fs::create_dir(&real).unwrap();
+        fs::create_dir(real.join("existing")).unwrap();
+        symlink(&real, &linked).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        let error =
+            match SnapshotSet::capture_in(&[path], &linked.join("existing/sqlite-read")).await {
+                Ok(_) => panic!("symlinked scratch ancestry must be rejected"),
+                Err(error) => error,
+            };
+
+        assert!(
+            error.to_string().contains("not a regular directory"),
+            "unexpected error: {error}"
+        );
     }
 
     #[cfg(unix)]
