@@ -76,6 +76,8 @@ use crate::mcp::response_handles::{
 };
 
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
+const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
+const LSP_TEST_RUN_EXPANSION_TTL_MICROS: i64 = 15 * 60 * 1_000_000;
 
 /// Current canonical Git/graph address for an admitted LSP root.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -217,6 +219,29 @@ struct StoredLspContextExpansionV1 {
     expires_at: UtcMicros,
     canonical_operation: FeedbackReadOperationV1,
     canonical_handle: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredLspTestRunExpansionV1 {
+    schema_version: u16,
+    revision: u32,
+    root_uri: String,
+    document_uri: Option<String>,
+    stable_id: String,
+    scope_digest: String,
+    identity: ContextProjectionIdentity,
+    generation: u64,
+    operation_id: String,
+    operation_generation: u64,
+    operation_completed: u64,
+    operation_total: Option<u64>,
+    operation_termination: Option<OperationTermination>,
+    available_results: usize,
+    issued_at: UtcMicros,
+    expires_at: UtcMicros,
+    result_offset: usize,
+    page_size: u32,
 }
 
 /// Exact current immutable code-index identity resolved by the daemon-owned
@@ -804,6 +829,14 @@ pub trait LspTestRunProjectionPort: Send + Sync {
         document_content_digest: Option<ContentDigest>,
     ) -> LspRuntimeFuture<ContextProjectionOutcome>;
 
+    fn expand(
+        &self,
+        _root: AdmittedRoot,
+        _stored_record: String,
+    ) -> LspRuntimeFuture<ContextExpansionOutcome> {
+        Box::pin(async { ContextExpansionOutcome::Denied })
+    }
+
     fn poll_changes(
         &self,
         _root: &AdmittedRoot,
@@ -840,6 +873,63 @@ impl OperationEventTestRunProjection {
             observed_revisions: Arc::new(StdMutex::new(BTreeMap::new())),
             changes: ProjectionChangeQueue::default(),
         }
+    }
+
+    fn store_expansion(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: Option<&str>,
+        scope: &LspFeedbackProjectionScope,
+        stable_id: String,
+        operation_id: String,
+        operation_generation: u64,
+        operation_completed: u64,
+        operation_total: Option<u64>,
+        operation_termination: Option<OperationTermination>,
+        available_results: usize,
+        result_offset: usize,
+        page_size: u32,
+    ) -> Result<String, LspRuntimeFailure> {
+        let issued_at = now_micros();
+        let record = StoredLspTestRunExpansionV1 {
+            schema_version: LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION,
+            revision: TRACEDECAY_CONTEXT_REVISION,
+            root_uri: root.uri().to_owned(),
+            document_uri: document_uri.map(str::to_owned),
+            stable_id,
+            scope_digest: self
+                .project
+                .feedback
+                .scope()
+                .scope_digest
+                .as_str()
+                .to_owned(),
+            identity: scope.projection_identity(),
+            generation: scope.generation,
+            operation_id,
+            operation_generation,
+            operation_completed,
+            operation_total,
+            operation_termination,
+            available_results,
+            issued_at,
+            expires_at: UtcMicros(
+                issued_at
+                    .0
+                    .saturating_add(LSP_TEST_RUN_EXPANSION_TTL_MICROS),
+            ),
+            result_offset,
+            page_size,
+        };
+        let content = serde_json::to_string(&record)
+            .map_err(|_| LspRuntimeFailure::new("test-run-expansion-handle-invalid"))?;
+        store_response_handle(
+            &self.project.project_root,
+            &content,
+            micros_to_seconds(issued_at),
+        )
+        .map(|stored| stored.handle)
+        .map_err(|_| LspRuntimeFailure::new("test-run-expansion-handle-store-failed"))
     }
 }
 
@@ -897,7 +987,15 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                         projection: scope.clone(),
                     },
                 );
-            match projection.reader.latest_current(&current).await {
+            let page = match PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32) {
+                Ok(page) => page,
+                Err(_) => {
+                    return ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-page-invalid".to_owned(),
+                    };
+                }
+            };
+            match projection.reader.latest_current_page(&current, &page).await {
                 ManagedTestRunReadOutcome::Current(snapshot) => {
                     projection
                         .observed_revisions
@@ -907,7 +1005,69 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                             current_scope_key(&current),
                             test_run_source_revision(&snapshot),
                         );
-                    test_run_projection(root, document_uri, scope, snapshot)
+                    let operation_id = snapshot.operation_id.to_string();
+                    let operation_generation = snapshot.generation;
+                    let operation_completed = snapshot.completed;
+                    let operation_total = snapshot.total;
+                    let operation_termination = snapshot.termination;
+                    let available_results = snapshot.available_results;
+                    let first_offset = snapshot.result_offset;
+                    let has_bounded_results = snapshot.next_cursor.is_some();
+                    let mut outcome = test_run_projection(
+                        root.clone(),
+                        document_uri.clone(),
+                        scope.clone(),
+                        snapshot,
+                    );
+                    if let ContextProjectionOutcome::Ready(envelope) = &mut outcome {
+                        for (index, item) in envelope.items.iter_mut().enumerate() {
+                            item.retrieval_handle = match projection.store_expansion(
+                                &root,
+                                document_uri.as_deref(),
+                                &scope,
+                                item.stable_id.clone(),
+                                operation_id.clone(),
+                                operation_generation,
+                                operation_completed,
+                                operation_total,
+                                operation_termination,
+                                available_results,
+                                first_offset.saturating_add(index),
+                                1,
+                            ) {
+                                Ok(handle) => Some(handle),
+                                Err(error) => {
+                                    return ContextProjectionOutcome::Deferred {
+                                        reason: error.class().to_owned(),
+                                    };
+                                }
+                            };
+                        }
+                        if has_bounded_results && !envelope.items.is_empty() {
+                            envelope.retrieval_handle = match projection.store_expansion(
+                                &root,
+                                document_uri.as_deref(),
+                                &scope,
+                                format!("{operation_id}.__remaining__"),
+                                operation_id,
+                                operation_generation,
+                                operation_completed,
+                                operation_total,
+                                operation_termination,
+                                available_results,
+                                first_offset.saturating_add(envelope.items.len()),
+                                MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                            ) {
+                                Ok(handle) => Some(handle),
+                                Err(error) => {
+                                    return ContextProjectionOutcome::Deferred {
+                                        reason: error.class().to_owned(),
+                                    };
+                                }
+                            };
+                        }
+                    }
+                    outcome
                 }
                 ManagedTestRunReadOutcome::Unavailable(
                     ManagedTestRunUnavailableReason::FrontierExpired,
@@ -953,6 +1113,14 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                 },
             }
         })
+    }
+
+    fn expand(
+        &self,
+        root: AdmittedRoot,
+        stored_record: String,
+    ) -> LspRuntimeFuture<ContextExpansionOutcome> {
+        self.expand_stored(root, stored_record)
     }
 
     fn poll_changes(
@@ -1053,6 +1221,138 @@ fn bind_test_run_document_content(
     }
     scope.document_content_digest = Some(overlay_digest);
     Ok(())
+}
+
+impl OperationEventTestRunProjection {
+    fn expand_stored(
+        &self,
+        root: AdmittedRoot,
+        stored_record: String,
+    ) -> LspRuntimeFuture<ContextExpansionOutcome> {
+        let projection = self.clone();
+        Box::pin(async move {
+            let Ok(record) = serde_json::from_str::<StoredLspTestRunExpansionV1>(&stored_record)
+            else {
+                return ContextExpansionOutcome::Denied;
+            };
+            let observed_at = now_micros();
+            if record.schema_version != LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION
+                || record.revision != TRACEDECAY_CONTEXT_REVISION
+                || record.root_uri != root.uri()
+                || record.issued_at >= record.expires_at
+                || observed_at < record.issued_at
+                || observed_at >= record.expires_at
+                || record.page_size == 0
+                || record.page_size > MAX_CONTEXT_PROJECTION_ITEMS as u32
+            {
+                return ContextExpansionOutcome::Denied;
+            }
+            let scope = match projection
+                .project
+                .resolve(root.clone(), record.document_uri.clone())
+                .await
+            {
+                Ok(scope) => scope,
+                Err(_) => return ContextExpansionOutcome::Denied,
+            };
+            if projection.project.feedback.scope().scope_digest.as_str() != record.scope_digest {
+                return ContextExpansionOutcome::Denied;
+            }
+            if scope.generation != record.generation
+                || scope.projection_identity() != record.identity
+            {
+                return ContextExpansionOutcome::Ready(context_expansion_envelope_for_test_run(
+                    record,
+                    ContextCoverage::Partial,
+                    None,
+                    Some("stale-generation".to_owned()),
+                ));
+            }
+            let current = ManagedTestRunCurrentScope {
+                root_uri: root.uri().to_owned(),
+                head_commit_id: Some(scope.head_commit_id.clone()),
+                code_generation_id: Some(scope.code_generation_id.clone()),
+                document_uri: record.document_uri.clone(),
+                document_content_digest: scope.document_content_digest.clone(),
+            };
+            let ManagedTestRunReadOutcome::Current(snapshot) =
+                projection.reader.latest_current(&current).await
+            else {
+                return ContextExpansionOutcome::Denied;
+            };
+            if snapshot.operation_id.to_string() != record.operation_id
+                || snapshot.generation != record.operation_generation
+                || snapshot.completed != record.operation_completed
+                || snapshot.total != record.operation_total
+                || snapshot.termination != record.operation_termination
+                || snapshot.results.len() != record.available_results
+            {
+                return ContextExpansionOutcome::Ready(context_expansion_envelope_for_test_run(
+                    record,
+                    ContextCoverage::Partial,
+                    None,
+                    Some("stale-generation".to_owned()),
+                ));
+            }
+            let end = record
+                .result_offset
+                .saturating_add(record.page_size as usize)
+                .min(snapshot.results.len());
+            if record.result_offset >= snapshot.results.len() {
+                return ContextExpansionOutcome::Denied;
+            }
+            let results = snapshot.results[record.result_offset..end]
+                .iter()
+                .map(|result| {
+                    serde_json::json!({
+                        "test": result.test,
+                        "passed": result.passed,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let result_offset = record.result_offset;
+            let next_retrieval_handle = if end < snapshot.results.len() {
+                match projection.store_expansion(
+                    &root,
+                    record.document_uri.as_deref(),
+                    &scope,
+                    record.stable_id.clone(),
+                    record.operation_id.clone(),
+                    record.operation_generation,
+                    record.operation_completed,
+                    record.operation_total,
+                    record.operation_termination,
+                    record.available_results,
+                    end,
+                    MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                ) {
+                    Ok(handle) => Some(handle),
+                    Err(_) => return ContextExpansionOutcome::Denied,
+                }
+            } else {
+                None
+            };
+            let coverage = if next_retrieval_handle.is_some() {
+                ContextCoverage::Partial
+            } else {
+                ContextCoverage::Complete
+            };
+            let omission_reason = next_retrieval_handle
+                .as_ref()
+                .map(|_| "bounded-projection-items".to_owned());
+            ContextExpansionOutcome::Ready(context_expansion_envelope_for_test_run(
+                record,
+                coverage,
+                Some(serde_json::json!({
+                    "results": results,
+                    "result_offset": result_offset,
+                    "available_results": snapshot.results.len(),
+                    "next_retrieval_handle": next_retrieval_handle,
+                })),
+                omission_reason,
+            ))
+        })
+    }
 }
 
 /// Shared feedback source mounted as both `FeedbackCyclePort` and the managed
@@ -1318,17 +1618,12 @@ impl ConcretePr12FeedbackLspSource {
         request: ContextExpansionRequest,
     ) -> ContextExpansionOutcome {
         let observed_at = now_micros();
-        let record = match retrieve_response_handle(
+        let content = match retrieve_response_handle(
             self.runtime.project_root(),
             &request.retrieval_handle,
             micros_to_seconds(observed_at),
         ) {
-            Ok(ResponseHandleLookup::Found(record)) => {
-                match serde_json::from_str::<StoredLspContextExpansionV1>(&record.content) {
-                    Ok(record) => record,
-                    Err(_) => return ContextExpansionOutcome::Denied,
-                }
-            }
+            Ok(ResponseHandleLookup::Found(record)) => record.content,
             Ok(ResponseHandleLookup::Missing | ResponseHandleLookup::Expired { .. }) => {
                 return ContextExpansionOutcome::Denied;
             }
@@ -1336,6 +1631,12 @@ impl ConcretePr12FeedbackLspSource {
                 return ContextExpansionOutcome::Failed {
                     reason: "context-expansion-handle-unavailable".to_owned(),
                 };
+            }
+        };
+        let record = match serde_json::from_str::<StoredLspContextExpansionV1>(&content) {
+            Ok(record) => record,
+            Err(_) => {
+                return self.test_runs.expand(root, content).await;
             }
         };
         if self.runtime.request_expiry_at(record.issued_at).ok() != Some(record.expires_at) {
@@ -1750,6 +2051,30 @@ fn context_expansion_envelope(
     }
 }
 
+fn context_expansion_envelope_for_test_run(
+    record: StoredLspTestRunExpansionV1,
+    coverage: ContextCoverage,
+    evidence: Option<serde_json::Value>,
+    omission_reason: Option<String>,
+) -> ContextExpansionEnvelope {
+    ContextExpansionEnvelope {
+        root_uri: record.root_uri,
+        document_uri: record.document_uri,
+        kind: ContextProjectionKind::test_run_results(),
+        stable_id: record.stable_id,
+        generation: record.generation,
+        scope: ContextExpansionScope {
+            scope_digest: record.scope_digest,
+            identity: record.identity,
+        },
+        expires_at: record.expires_at.0,
+        coverage,
+        revision: record.revision,
+        evidence,
+        omission_reason,
+    }
+}
+
 fn valid_projection_identity(identity: &ContextProjectionIdentity) -> bool {
     CommitId::new(identity.head_commit_id.clone()).is_ok()
         && CodeGenerationId::new(identity.code_generation_id.clone()).is_ok()
@@ -1889,11 +2214,12 @@ fn test_run_projection(
     }
     let missing_results = snapshot
         .completed
-        .saturating_sub(snapshot.results.len() as u64);
-    let bounded_omissions = snapshot
-        .results
-        .len()
-        .saturating_sub(MAX_CONTEXT_PROJECTION_ITEMS) as u64;
+        .saturating_sub(snapshot.available_results as u64);
+    let bounded_omissions = snapshot.available_results.saturating_sub(
+        snapshot
+            .result_offset
+            .saturating_add(snapshot.results.len()),
+    ) as u64;
     let mut omitted_count =
         usize::try_from(missing_results.saturating_add(bounded_omissions)).unwrap_or(usize::MAX);
     let completed_with_full_results = snapshot.total == Some(snapshot.completed)
@@ -1934,10 +2260,12 @@ fn test_run_projection(
         snapshot
             .results
             .into_iter()
-            .take(MAX_CONTEXT_PROJECTION_ITEMS)
             .enumerate()
             .map(|(index, result)| ContextProjectionItem {
-                stable_id: format!("{operation_id}.{index}"),
+                stable_id: format!(
+                    "{operation_id}.{}",
+                    snapshot.result_offset.saturating_add(index)
+                ),
                 summary: bounded_test_run_summary(&result.test, result.passed),
                 retrieval_handle: None,
             })
@@ -2619,7 +2947,7 @@ mod projection_tests {
     use crate::daemon::lsp_gateway::{
         AdmittedRoot, ContextCoverage, ContextFreshness, ContextProducerState,
         ContextProjectionChange, ContextProjectionKind, ContextProjectionOutcome,
-        ContextProjectionRegistration, TRACEDECAY_CONTEXT_REVISION,
+        ContextProjectionRegistration, MAX_CONTEXT_PROJECTION_ITEMS, TRACEDECAY_CONTEXT_REVISION,
     };
     use tracedecay_application::{Deadline, OperationTermination, RequestId};
     use tracedecay_domain::feedback::{
@@ -2802,6 +3130,9 @@ mod projection_tests {
             document_content_digests: BTreeMap::new(),
             deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
             results: Vec::new(),
+            result_offset: 0,
+            available_results: 0,
+            next_cursor: None,
             completed: 0,
             total: Some(0),
             termination: Some(OperationTermination::Completed),
@@ -2832,6 +3163,9 @@ mod projection_tests {
                 test: "suite::passes".to_owned(),
                 passed: true,
             }],
+            result_offset: 0,
+            available_results: 1,
+            next_cursor: None,
             completed: 1,
             total: Some(1),
             termination: Some(OperationTermination::Completed),
@@ -2862,6 +3196,47 @@ mod projection_tests {
         assert_eq!(
             bind_test_run_document_content(&mut scope, Some(overlay_digest)),
             Err("managed-test-run-document-content-stale")
+        );
+    }
+
+    #[test]
+    fn current_test_run_projection_reports_the_canonical_page_boundary() {
+        let scope = projection_scope();
+        let operation_id =
+            OperationId::from_request(RequestId::new("request.test-run.bounded").expect("request"));
+        let snapshot = ManagedTestRunSnapshot {
+            operation_id: operation_id.clone(),
+            generation: 7,
+            source_revision: 1,
+            head_commit_id: Some(scope.head_commit_id.clone()),
+            code_generation_id: Some(scope.code_generation_id.clone()),
+            document_content_digests: BTreeMap::new(),
+            deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            results: (0..MAX_CONTEXT_PROJECTION_ITEMS)
+                .map(|index| ManagedTestRunResult {
+                    test: format!("suite::test_{index}"),
+                    passed: true,
+                })
+                .collect(),
+            result_offset: 0,
+            available_results: MAX_CONTEXT_PROJECTION_ITEMS + 1,
+            next_cursor: None,
+            completed: (MAX_CONTEXT_PROJECTION_ITEMS + 1) as u64,
+            total: Some((MAX_CONTEXT_PROJECTION_ITEMS + 1) as u64),
+            termination: Some(OperationTermination::Completed),
+        };
+
+        let ContextProjectionOutcome::Ready(envelope) =
+            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
+        else {
+            panic!("bounded current run must be ready");
+        };
+        assert_eq!(envelope.coverage, ContextCoverage::Partial);
+        assert_eq!(envelope.items.len(), MAX_CONTEXT_PROJECTION_ITEMS);
+        assert_eq!(envelope.omitted_count, 1);
+        assert_eq!(
+            envelope.items[MAX_CONTEXT_PROJECTION_ITEMS - 1].stable_id,
+            format!("{operation_id}.{}", MAX_CONTEXT_PROJECTION_ITEMS - 1)
         );
     }
 
@@ -2909,6 +3284,9 @@ mod projection_tests {
             document_content_digests: BTreeMap::from([(document_uri.to_owned(), stale_digest)]),
             deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
             results: Vec::new(),
+            result_offset: 0,
+            available_results: 0,
+            next_cursor: None,
             completed: 0,
             total: Some(0),
             termination: Some(OperationTermination::Completed),
@@ -2947,6 +3325,9 @@ mod projection_tests {
             document_content_digests: BTreeMap::new(),
             deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
             results: Vec::new(),
+            result_offset: 0,
+            available_results: 0,
+            next_cursor: None,
             completed: 0,
             total: Some(0),
             termination: Some(OperationTermination::Completed),
@@ -2979,6 +3360,9 @@ mod projection_tests {
             document_content_digests: BTreeMap::new(),
             deadline: Deadline::new(UtcMicros(1)).expect("deadline"),
             results: Vec::new(),
+            result_offset: 0,
+            available_results: 0,
+            next_cursor: None,
             completed: 0,
             total: Some(1),
             termination: None,
@@ -3025,6 +3409,9 @@ mod projection_tests {
                 document_content_digests: BTreeMap::new(),
                 deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
                 results: Vec::new(),
+                result_offset: 0,
+                available_results: 0,
+                next_cursor: None,
                 completed: 0,
                 total: Some(1),
                 termination: Some(termination),

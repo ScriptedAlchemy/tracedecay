@@ -2318,7 +2318,9 @@ pub async fn execute_application_surface(
             crate::daemon::DaemonInvocationRequest::primitive(
                 request_id.as_str(),
                 operation,
-                crate::application::primitives::Pr12PrimitiveRequest::RecentTestResults,
+                crate::application::primitives::Pr12PrimitiveRequest::RecentTestResults(
+                    invocation.page,
+                ),
                 observed_at,
                 deadline,
                 cancellation_context,
