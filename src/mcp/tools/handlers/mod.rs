@@ -466,7 +466,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
     pub code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
-    pub git_read_executor: Option<crate::mcp::server::GitReadExecutor>,
     pub source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
     pub source_edit_reconciliation_executor:
         Option<crate::mcp::server::SourceEditReconciliationExecutor>,
@@ -497,7 +496,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_cancellation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
-            git_read_executor: None,
             source_edit_executor: None,
             source_edit_reconciliation_executor: None,
             code_index_search_authority: None,
@@ -962,59 +960,9 @@ async fn dispatch_git_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
-    options: &ToolCallRegistryOptions<'_>,
+    _options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
-        "tracedecay_git_status" => {
-            git::handle_git_status(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_diff" => {
-            git::handle_git_diff(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_history" => {
-            git::handle_git_history(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_blame" => {
-            git::handle_git_blame(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_hunks" => {
-            git::handle_git_hunks(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args.clone()).await,
         "tracedecay_affected" => git::handle_affected(cg, args.clone()).await,
         "tracedecay_diff_context" => git::handle_diff_context(cg, args.clone()).await,
