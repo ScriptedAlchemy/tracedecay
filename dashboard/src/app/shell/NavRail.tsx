@@ -134,7 +134,6 @@ export function NavRail() {
           <span className="block truncate text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
             TraceDecay
           </span>
-          <span className="td-legend mt-0.5 block truncate">Local daemon</span>
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
