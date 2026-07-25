@@ -11,6 +11,7 @@ import {
   restingNodeTint,
   settled,
 } from './activation.ts';
+import { kindColor } from './kindColor.ts';
 import { cn } from '../../ui/cn';
 
 export interface GraphCanvasNode {
@@ -33,36 +34,6 @@ export interface GraphCanvasEdge {
   source: string;
   target: string;
   kind?: string;
-}
-
-/**
- * Deep-space plasma palette: a node's kind picks a hue on the cyan → violet
- * arc at fixed lightness. One rule instead of a hardcoded map, so every graph
- * in the app harmonizes — repositories and checkouts here, symbol kinds in
- * Code — and an unseen kind still lands somewhere deliberate rather than
- * defaulting to grey. The arc is bounded so colour never wanders into muddy
- * yellows that read as "warning" against the dark field; chroma varies a
- * little across the arc so neighbouring hues stay tellable apart.
- */
-function kindColor(kind: string, light: boolean): string {
-  let hash = 0;
-  for (let index = 0; index < kind.length; index += 1) {
-    hash = (hash * 31 + kind.charCodeAt(index)) >>> 0;
-  }
-  // A body is lit against its medium, so which side of the substrate it sits
-  // on has to flip with the theme. Pinned at L 0.78 the kind hues were tuned
-  // for a dark field; on the light field they landed ABOVE the background and
-  // forty overlapping translucent discs accumulated into a white cloud with no
-  // structure in it at all. On paper a node is saturated ink: darker than its
-  // medium, with a little more chroma to hold its hue at the lower lightness.
-  // Chroma is what survives overlap. At the old 0.112 the dark hues were
-  // pastels sitting near the top of the lightness range, so a dense cluster of
-  // them accumulated into an undifferentiated pale mass -- the graph lost its
-  // colour exactly where it had the most structure to show. Saturated bodies a
-  // little further down the range stay tellable apart when they pile up.
-  const chroma = (light ? 0.135 : 0.152) + ((hash >>> 9) % 6) * 0.012;
-  const lightness = light ? 0.55 : 0.72;
-  return `oklch(${lightness} ${chroma.toFixed(3)} ${186 + (hash % 148)})`;
 }
 
 /** Samples the resolved theme tokens Sigma needs; canvas renderers cannot
