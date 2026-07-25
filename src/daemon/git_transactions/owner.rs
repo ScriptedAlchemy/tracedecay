@@ -13,8 +13,9 @@ use tracedecay_domain::configuration::{
     SOURCE_BINDINGS_SETTING_KEY, SettingKey, resolve_restrictive_capabilities,
 };
 use tracedecay_domain::{
-    ActorId, CapabilityId as DomainCapabilityId, GitHeadStateV1, GitIndexPreviewV1,
-    GitIndexTransactionOperationV1, ManifestDigest, ProjectId, UtcMicros, canonical_sha256,
+    ActorId, CapabilityId as DomainCapabilityId, GitHeadStateV1, GitIndexPreviewDispositionV1,
+    GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexUnsupportedStateV1, ManifestDigest,
+    ProjectId, RepositoryIndexStateV1, RepositoryWorkingTreeStateV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
 use tracedecay_tool_catalog::CapabilityId;
@@ -272,12 +273,49 @@ impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
                 capability_granted,
                 owner_scope_matches,
             },
-            conflict_risk: GitConflictRiskV1::NoneKnown,
+            conflict_risk: preview_conflict_risk(preview),
             policy_revision: current.policy_revision,
             policy_digest: current.policy_digest,
             configuration_digest: current.configuration_digest,
             evaluated_at: current.evaluated_at,
         })
+    }
+}
+
+pub(super) fn preview_conflict_risk(preview: &GitIndexPreviewV1) -> GitConflictRiskV1 {
+    let snapshot = &preview.repository_snapshot;
+    if snapshot.index.state == RepositoryIndexStateV1::Unmerged
+        || snapshot.working_tree.state == RepositoryWorkingTreeStateV1::Conflicted
+        || matches!(
+            preview.disposition,
+            GitIndexPreviewDispositionV1::Unsupported(
+                GitIndexUnsupportedStateV1::UnmergedIndex
+                    | GitIndexUnsupportedStateV1::ConflictedWorkingTree
+            )
+        )
+    {
+        return GitConflictRiskV1::Confirmed;
+    }
+    if !snapshot.coverage.is_complete()
+        || !matches!(
+            snapshot.index.state,
+            RepositoryIndexStateV1::Clean | RepositoryIndexStateV1::Staged
+        )
+        || snapshot.operation_state != tracedecay_domain::GitOperationStateV1::None
+        || matches!(
+            preview.disposition,
+            GitIndexPreviewDispositionV1::Unsupported(
+                GitIndexUnsupportedStateV1::UnreadableIndex
+                    | GitIndexUnsupportedStateV1::UnreadableWorkingTree
+                    | GitIndexUnsupportedStateV1::InProgressOperation
+                    | GitIndexUnsupportedStateV1::SparseIndex
+                    | GitIndexUnsupportedStateV1::SplitIndex
+            )
+        )
+    {
+        GitConflictRiskV1::Possible
+    } else {
+        GitConflictRiskV1::NoneKnown
     }
 }
 
