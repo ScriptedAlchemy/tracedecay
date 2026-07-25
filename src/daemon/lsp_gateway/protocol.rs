@@ -151,6 +151,14 @@ struct NativeDiagnosticSnapshot {
     diagnostics: Vec<GatewayDiagnostic>,
 }
 
+fn bind_context_document_digest(request: &mut ContextProjectionRequest, overlays: &OverlayStore) {
+    request.document_content_digest = request
+        .document_uri
+        .as_deref()
+        .and_then(|uri| overlays.snapshot(uri))
+        .map(|snapshot| crate::code_index::intake::content_digest(snapshot.text.as_bytes()));
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeDiagnosticsNotification {
@@ -1257,7 +1265,7 @@ where
         let request = serde_json::from_value::<ContextProjectionRequest>(params.clone())
             .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/context parameters"));
         match request {
-            Ok(request) if request.kind.is_valid() => {
+            Ok(mut request) if request.kind.is_valid() => {
                 let Some(context_request_id) = request_id(&id) else {
                     let _ = self.enqueue_value(error_response(
                         Value::Null,
@@ -1273,6 +1281,7 @@ where
                     let _ = self.enqueue_value(error_response(id, error));
                     return;
                 }
+                bind_context_document_digest(&mut request, &self.overlays);
                 let document = request
                     .document_uri
                     .as_ref()
@@ -2028,7 +2037,13 @@ where
                 (true, Some(digest)) => !digest.is_empty(),
                 (false, None) => true,
                 _ => false,
-            };
+            }
+            && request
+                .document_content_digest
+                .as_ref()
+                .is_none_or(|expected| {
+                    envelope.identity.document_content_digest.as_deref() == Some(expected.as_str())
+                });
         let valid_items = envelope.items.len() <= MAX_CONTEXT_PROJECTION_ITEMS
             && envelope.items.iter().all(|item| {
                 !item.stable_id.is_empty()
@@ -2976,8 +2991,10 @@ mod tests {
     use super::super::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
     use super::super::provider::GenerationDiagnostics;
     use super::*;
+    use crate::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
     use crate::lsp_bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
     use std::cell::RefCell;
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct Feedback(RefCell<Vec<FeedbackCycleRequest>>);
@@ -3048,6 +3065,35 @@ mod tests {
                     tracedecay: Vec::new(),
                 },
                 completed_operation_id: None,
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingContext {
+        document_content_digest: Arc<Mutex<Option<ContentDigest>>>,
+    }
+
+    impl ContextProjectionPort for CapturingContext {
+        fn registrations(&self) -> Vec<ContextProjectionRegistration> {
+            vec![ContextProjectionRegistration {
+                kind: ContextProjectionKind::test_run_results(),
+                revision: TRACEDECAY_CONTEXT_REVISION,
+            }]
+        }
+
+        fn snapshot(
+            &self,
+            _root: &AdmittedRoot,
+            _request_id: &LspRequestId,
+            request: &ContextProjectionRequest,
+        ) -> ContextProjectionOutcome {
+            *self
+                .document_content_digest
+                .lock()
+                .expect("capture context request") = request.document_content_digest.clone();
+            ContextProjectionOutcome::Deferred {
+                reason: "captured".to_owned(),
             }
         }
     }
@@ -3186,6 +3232,105 @@ mod tests {
         assert!(session.overlays().snapshot("file:///root/a.rs").is_none());
 
         initialize(&mut session);
+    }
+
+    #[test]
+    fn context_request_binds_exact_session_overlay_digest() {
+        let document_uri = "file:///root/a.rs";
+        let mut overlays = OverlayStore::default();
+        overlays
+            .open(document_uri, "rust", 1, "fn dirty() {}")
+            .expect("open overlay");
+        let mut request = ContextProjectionRequest {
+            kind: ContextProjectionKind::test_run_results(),
+            document_uri: Some(document_uri.to_owned()),
+            document_content_digest: None,
+        };
+
+        bind_context_document_digest(&mut request, &overlays);
+
+        assert_eq!(
+            request.document_content_digest,
+            Some(crate::code_index::intake::content_digest(b"fn dirty() {}"))
+        );
+        assert!(
+            serde_json::from_value::<ContextProjectionRequest>(json!({
+                "kind": "testRunResults",
+                "documentUri": document_uri,
+                "documentContentDigest": format!("sha256:{}", "a".repeat(64)),
+            }))
+            .is_err(),
+            "clients cannot supply the trusted overlay digest"
+        );
+    }
+
+    #[test]
+    fn context_dispatch_supplies_session_overlay_digest_to_canonical_reader() {
+        let captured = CapturingContext::default();
+        let observed = Arc::clone(&captured.document_content_digest);
+        let mut capabilities = GatewayCapabilities::default();
+        capabilities.context_projections.insert(
+            ContextProjectionKind::test_run_results(),
+            TRACEDECAY_CONTEXT_REVISION,
+        );
+        let upstream = UpstreamCapabilities::default();
+        let effective =
+            negotiate_capabilities(&ClientCapabilities::default(), &capabilities, &upstream);
+        let mut session = DaemonLspProtocolSession::new(
+            DaemonLspGateway::with_semantic_provider(
+                AdmittedRoot::new("file:///root"),
+                effective,
+                Feedback::default(),
+                Semantics,
+            ),
+            capabilities,
+            upstream,
+            Diagnostics,
+        )
+        .with_context_projection_port(captured);
+        session.handle_payload(
+            &serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "rootUri": "file:///root",
+                    "capabilities": {
+                        "general": { "positionEncodings": ["utf-16"] },
+                        "experimental": {
+                            "tracedecay": {
+                                "revision": TRACEDECAY_CONTEXT_REVISION,
+                                "projections": [{
+                                    "kind": "testRunResults",
+                                    "revision": TRACEDECAY_CONTEXT_REVISION
+                                }],
+                                "opaqueExpansion": false
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("initialize request"),
+            0,
+        );
+        session.drain_outbound();
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+            1,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":1,"text":"fn dirty() {}"}}}"#,
+            2,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","id":2,"method":"tracedecay/context","params":{"kind":"testRunResults","documentUri":"file:///root/a.rs"}}"#,
+            3,
+        );
+
+        assert_eq!(
+            *observed.lock().expect("read captured context request"),
+            Some(crate::code_index::intake::content_digest(b"fn dirty() {}"))
+        );
     }
 
     #[test]
