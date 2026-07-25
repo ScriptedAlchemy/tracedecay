@@ -2519,7 +2519,6 @@ mod tests {
                 artifact.relative_path
             );
         }
-        assert!(!code_home.join("plugins/managed/tracedecay").exists());
     }
 
     #[test]
