@@ -941,6 +941,23 @@ impl DaemonLspSessionClient {
         }
     }
 
+    pub async fn reconnect(&mut self) -> crate::errors::Result<()> {
+        let request_id = self.next_request_id();
+        let response = self
+            .invoke(crate::daemon::DaemonInvocationRequest::lsp_reconnect(
+                request_id,
+                self.session.clone(),
+            ))
+            .await?;
+        match response.outcome {
+            crate::daemon::DaemonInvocationOutcome::LspReconnected { session } => {
+                self.session = session;
+                Ok(())
+            }
+            outcome => Err(invocation_outcome_error(outcome)),
+        }
+    }
+
     pub async fn detach(&mut self) -> crate::errors::Result<()> {
         let request_id = self.next_request_id();
         let response = self

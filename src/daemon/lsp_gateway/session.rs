@@ -198,7 +198,10 @@ impl LspSessionControl {
     pub fn detach(&mut self) -> Result<(), LifecycleError> {
         if !matches!(
             self.lifecycle,
-            SessionLifecycle::Ready | SessionLifecycle::Shutdown
+            SessionLifecycle::AwaitingInitialize
+                | SessionLifecycle::AwaitingInitialized
+                | SessionLifecycle::Ready
+                | SessionLifecycle::Shutdown
         ) {
             return Err(LifecycleError::InvalidTransition {
                 from: self.lifecycle,

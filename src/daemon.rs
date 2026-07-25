@@ -4424,17 +4424,17 @@ async fn serve_broker_socket_client(
         let mut owned_lsp_sessions = HashMap::new();
         let result = async {
             loop {
-                let detached_session = invocation
+                let session_transition = invocation
                     .as_ref()
                     .ok()
-                    .and_then(invocation_detached_lsp_session);
+                    .and_then(invocation_lsp_session_transition);
                 let response = match invocation {
                     Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
                     Err(response) => response,
                 };
                 update_connection_lsp_sessions(
                     &mut owned_lsp_sessions,
-                    detached_session.as_ref(),
+                    session_transition.as_ref(),
                     &response,
                 );
                 write_daemon_invocation_response(&mut transport, &response).await?;
@@ -4733,10 +4733,10 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         let mut owned_lsp_sessions = HashMap::new();
         let result = async {
             loop {
-                let detached_session = invocation_request
+                let session_transition = invocation_request
                     .as_ref()
                     .ok()
-                    .and_then(invocation_detached_lsp_session);
+                    .and_then(invocation_lsp_session_transition);
                 let response = match invocation_request {
                     Ok(request) => {
                         execute_portable_daemon_invocation(
@@ -4756,7 +4756,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                 };
                 update_connection_lsp_sessions(
                     &mut owned_lsp_sessions,
-                    detached_session.as_ref(),
+                    session_transition.as_ref(),
                     &response,
                 );
                 write_daemon_invocation_response(&mut transport, &response).await?;
@@ -5242,11 +5242,12 @@ async fn write_daemon_invocation_response(
     Ok(())
 }
 
-fn invocation_detached_lsp_session(
+fn invocation_lsp_session_transition(
     request: &DaemonInvocationRequest,
 ) -> Option<service::invocation::DaemonLspSessionAccess> {
     match &request.payload {
-        service::invocation::DaemonInvocationPayload::LspDetach { session } => {
+        service::invocation::DaemonInvocationPayload::LspReconnect { session }
+        | service::invocation::DaemonInvocationPayload::LspDetach { session } => {
             Some(session.clone())
         }
         _ => None,
@@ -5255,15 +5256,18 @@ fn invocation_detached_lsp_session(
 
 fn update_connection_lsp_sessions(
     sessions: &mut HashMap<String, service::invocation::DaemonLspSessionAccess>,
-    detached: Option<&service::invocation::DaemonLspSessionAccess>,
+    transitioned: Option<&service::invocation::DaemonLspSessionAccess>,
     response: &DaemonInvocationResponse,
 ) {
     match &response.outcome {
         service::invocation::DaemonInvocationOutcome::LspOpened { session, .. } => {
             sessions.insert(session.session_id.clone(), session.clone());
         }
+        service::invocation::DaemonInvocationOutcome::LspReconnected { session } => {
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
         service::invocation::DaemonInvocationOutcome::LspDetached => {
-            if let Some(detached) = detached {
+            if let Some(detached) = transitioned {
                 sessions.remove(&detached.session_id);
             }
         }
