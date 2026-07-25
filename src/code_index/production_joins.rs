@@ -50,7 +50,6 @@ pub struct GenerationGitDiffEvidenceV1 {
     pub diff: GitDiffV1,
     pub watermark: GenerationGitWatermarkV1,
     pub file_contents: Vec<GitFileContentIdentityV1>,
-    pub context: GenerationGitContextProvidersV1,
 }
 
 #[derive(Clone, Debug)]
@@ -87,17 +86,26 @@ pub trait GenerationGitEvidenceAuthorityV1: Send + Sync {
     ) -> GenerationProviderReadV1<GenerationGitBlameEvidenceV1>;
 }
 
+/// Canonical occurrence/graph/diagnostic/test composition for one Git read.
+/// This remains separate from [`GenerationGitEvidenceAuthorityV1`] so native
+/// Git never becomes the authority for derived impact evidence.
+pub trait GenerationGitContextAuthorityV1: Send + Sync {
+    fn read_context(&self, generation: &CodeGenerationId) -> GenerationGitContextProvidersV1;
+}
+
 pub struct ProductionGenerationGitJoinReaderV1 {
     code: GenerationJoinCodeAuthorityV1,
     git: Arc<dyn GenerationGitEvidenceAuthorityV1>,
+    context: Arc<dyn GenerationGitContextAuthorityV1>,
 }
 
 impl ProductionGenerationGitJoinReaderV1 {
     pub fn new(
         code: GenerationJoinCodeAuthorityV1,
         git: Arc<dyn GenerationGitEvidenceAuthorityV1>,
+        context: Arc<dyn GenerationGitContextAuthorityV1>,
     ) -> Self {
-        Self { code, git }
+        Self { code, git, context }
     }
 }
 
@@ -112,13 +120,14 @@ impl GenerationGitJoinReadPort for ProductionGenerationGitJoinReaderV1 {
         map_join(
             self.git.read_diff(generation),
             |evidence| {
+                let context = self.context.read_context(generation);
                 GenerationGitJoinV1::join_with_context(
                     &self.code.manifest,
                     &self.code.snapshot,
                     &evidence.diff,
                     &evidence.watermark,
                     &evidence.file_contents,
-                    &evidence.context,
+                    &context,
                 )
             },
             |join| matches!(join.coverage, GenerationGitJoinCoverageV1::Complete),
