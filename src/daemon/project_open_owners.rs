@@ -16,10 +16,13 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_GET_CAPABILITY_ID_V1,
-    FEEDBACK_LIST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-    GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1, ProximityEvaluationRequestV1,
+    FEEDBACK_LIST_CAPABILITY_ID_V1, FeedbackDiagnosticsReadRequestV1,
+    GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1,
+    ProximityEvaluationRequestV1,
 };
-use tracedecay_application::{ApplicationContractError, ResolvedScope};
+use tracedecay_application::{
+    ApplicationContractError, ApplicationProblem, ResolvedScope, SafeDiagnostic,
+};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
     SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
@@ -39,7 +42,9 @@ use tracedecay_tool_catalog::CapabilityId;
 use super::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrationError,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, Pr13HookOrchestrationRequestV1,
+    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
+    Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationPortV1,
+    Pr13AdvisoryCycleInvocationRequestV1, Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1,
 };
 use crate::agents::context_scout_ports::{
@@ -70,15 +75,15 @@ use crate::application::advisory::{
 };
 use crate::application::configuration::ConfigurationControlStore;
 use crate::application::context::{CancellationToken, MonotonicDeadline};
+use crate::application::feedback::observations::{
+    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
+    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+};
 use crate::application::feedback::{
     Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
     ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
     ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
     resolve_production_feedback_cycle_parts,
-};
-use crate::application::feedback::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
 };
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
@@ -107,12 +112,97 @@ const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
     registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
     lsp_input: Pr12FeedbackCycleLspInput,
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
+    root_uri: String,
+    feedback_runtime: Arc<crate::application::feedback::concrete::Pr12FeedbackRuntime>,
+}
+
+impl ProjectOpenAdvisoryFeedbackCycleV1 {
+    async fn run_cycle(
+        &self,
+        request: FeedbackCycleRequest,
+        deadline: MonotonicDeadline,
+    ) -> std::result::Result<
+        crate::application::advisory::Pr13AdvisoryCycleOutcomeV1,
+        LspRuntimeFailure,
+    > {
+        let registration = Arc::clone(&self.registration);
+        let lsp_input = Arc::clone(&self.lsp_input);
+        let feedback_scope = self.feedback_scope.clone();
+        let github_pull_request_id = self.github_pull_request_id.clone();
+        let ci_discovery_config = self.ci_discovery_config.clone();
+        let terminal_request = request.clone();
+        let invocation = match lsp_input(request).await {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                observe_accepted_feedback_cycle_terminal(
+                    &registration.host_delivery.source_observations,
+                    &feedback_scope.project_id,
+                    &terminal_request,
+                    Plan26FeedbackOutcomeV1::Unavailable,
+                );
+                return Err(error);
+            }
+        };
+        let observed_at = invocation.request.input.observed_at;
+        let ci = match ci_discovery_config.as_ref() {
+            Some(config) => {
+                discover_production_ci_failure_request_v1(
+                    &invocation.context,
+                    config,
+                    &feedback_scope,
+                )
+                .await
+            }
+            None => {
+                crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
+            }
+        };
+        let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
+        let operation = daemon_operation_event_authority()
+            .begin(
+                &invocation.context,
+                OperationKind::FeedbackDiagnostics,
+                observed_at,
+            )
+            .await
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-operation"))?;
+        let advisory = Pr13AdvisoryCycleRequestV1 {
+            feedback: invocation.request,
+            github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
+                operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                scope: feedback_scope.clone(),
+                pull_request_id,
+            }),
+            ci,
+            proximity: Some(ProximityEvaluationRequestV1 {
+                scope: feedback_scope,
+                observed_at,
+            }),
+            validity: tracedecay_application::AdvisoryFindingValidityWindowV1 {
+                valid_at: observed_at,
+                expires_at,
+            },
+        };
+        registration
+            .runtime()
+            .run_once(
+                &invocation.context,
+                Pr13AdvisoryCycleControlV1 {
+                    operation,
+                    deadline,
+                },
+                advisory,
+            )
+            .await
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))
+    }
 }
 
 impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
@@ -120,80 +210,72 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
         &self,
         request: FeedbackCycleRequest,
     ) -> LspRuntimeFuture<std::result::Result<(), LspRuntimeFailure>> {
-        let registration = Arc::clone(&self.registration);
-        let lsp_input = Arc::clone(&self.lsp_input);
-        let feedback_scope = self.feedback_scope.clone();
-        let github_pull_request_id = self.github_pull_request_id.clone();
-        let ci_discovery_config = self.ci_discovery_config.clone();
+        let owner = self.clone();
         Box::pin(async move {
-            let terminal_request = request.clone();
-            let invocation = match lsp_input(request).await {
-                Ok(invocation) => invocation,
-                Err(error) => {
-                    observe_accepted_feedback_cycle_terminal(
-                        &registration.host_delivery.source_observations,
-                        &feedback_scope.project_id,
-                        &terminal_request,
-                        Plan26FeedbackOutcomeV1::Unavailable,
-                    );
-                    return Err(error);
-                }
-            };
-            let observed_at = invocation.request.input.observed_at;
-            let ci = match ci_discovery_config.as_ref() {
-                Some(config) => {
-                    discover_production_ci_failure_request_v1(
-                        &invocation.context,
-                        config,
-                        &feedback_scope,
-                    )
-                    .await
-                }
-                None => {
-                    crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
-                }
-            };
-            let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
-            let operation = daemon_operation_event_authority()
-                .begin(
-                    &invocation.context,
-                    OperationKind::FeedbackDiagnostics,
-                    observed_at,
+            owner
+                .run_cycle(
+                    request,
+                    MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
                 )
-                .await
-                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-operation"))?;
-            let advisory = Pr13AdvisoryCycleRequestV1 {
-                feedback: invocation.request,
-                github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
-                    operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-                    scope: feedback_scope.clone(),
-                    pull_request_id,
-                }),
-                ci,
-                proximity: Some(ProximityEvaluationRequestV1 {
-                    scope: feedback_scope,
-                    observed_at,
-                }),
-                validity: tracedecay_application::AdvisoryFindingValidityWindowV1 {
-                    valid_at: observed_at,
-                    expires_at,
-                },
-            };
-            registration
-                .runtime()
-                .run_once(
-                    &invocation.context,
-                    Pr13AdvisoryCycleControlV1 {
-                        operation,
-                        deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-                    },
-                    advisory,
-                )
-                .await
-                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))?;
+                .await?;
             Ok(())
         })
     }
+}
+
+impl Pr13AdvisoryCycleInvocationPortV1 for ProjectOpenAdvisoryFeedbackCycleV1 {
+    fn invoke(
+        &self,
+        request: Pr13AdvisoryCycleInvocationRequestV1,
+    ) -> Pr13AdvisoryCycleInvocationFutureV1<'_> {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(ApplicationProblem::cancelled_before_admission());
+            }
+            if request.deadline.is_elapsed_at(request.observed_at) {
+                return Err(ApplicationProblem::timed_out_before_admission());
+            }
+            let remaining_micros = request
+                .deadline
+                .expires_at
+                .0
+                .saturating_sub(request.observed_at.0)
+                .clamp(1, 5 * 1_000_000);
+            let outcome = self
+                .run_cycle(
+                    FeedbackCycleRequest {
+                        root_uri: self.root_uri.clone(),
+                        document_uri: request.document_uri,
+                        trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
+                    },
+                    MonotonicDeadline::at(
+                        Instant::now()
+                            + Duration::from_micros(
+                                remaining_micros.try_into().unwrap_or(u64::MAX),
+                            ),
+                    ),
+                )
+                .await
+                .map_err(|_| advisory_cycle_problem())?;
+            let publication = outcome.publication().ok_or_else(advisory_cycle_problem)?;
+            self.feedback_runtime
+                .mint_diagnostics(
+                    format!("{}.diagnostics", request.request_id),
+                    FeedbackDiagnosticsReadRequestV1 {
+                        head_commit_id: publication.result.scope.head_commit_id.clone(),
+                    },
+                    request.observed_at,
+                )
+                .map_err(|_| advisory_cycle_problem())
+        })
+    }
+}
+
+fn advisory_cycle_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "feedback.advisory_cycle_unavailable".to_owned(),
+        message: "The advisory feedback cycle did not publish a canonical result".to_owned(),
+    })
 }
 
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
@@ -1385,21 +1467,28 @@ async fn register_production_advisory_owner(
             });
         }
     };
+    let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
+        registration: Arc::clone(&registration),
+        lsp_input: Arc::clone(&feedback_lsp_input),
+        feedback_scope: feedback_scope_for_work.clone(),
+        github_pull_request_id: github_pull_request_id.clone(),
+        ci_discovery_config: ci_discovery_config.clone(),
+        root_uri: root_uri.clone(),
+        feedback_runtime: Arc::clone(&feedback_runtime),
+    });
     invocation
         .feedback_runtime_registrar()
-        .install_advisory_cycle_input(
-            project_root,
-            Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
-                registration: Arc::clone(&registration),
-                lsp_input: Arc::clone(&feedback_lsp_input),
-                feedback_scope: feedback_scope_for_work.clone(),
-                github_pull_request_id: github_pull_request_id.clone(),
-                ci_discovery_config: ci_discovery_config.clone(),
-            }),
-        )
+        .install_advisory_cycle_input(project_root, advisory_cycle.clone())
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory LSP cycle registration failed: {error}"),
+        })?;
+    invocation
+        .advisory_runtime_registrar()
+        .register_cycle_invoker(project_root.to_path_buf(), advisory_cycle)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open advisory surface registration failed: {error}"),
         })?;
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();
@@ -1524,7 +1613,7 @@ async fn run_production_pr13_hook_cycle(
             OperationKind::FeedbackDiagnostics,
             observed_at,
         )
-    .await
+        .await
     else {
         observe_hook_feedback_cycle_terminal(
             &registration.host_delivery.source_observations,
@@ -2398,9 +2487,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingHookCycleObservations(
-        std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>,
-    );
+    struct RecordingHookCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
 
     impl Plan26FeedbackObservationEmitterV1 for RecordingHookCycleObservations {
         fn observe_source_event(

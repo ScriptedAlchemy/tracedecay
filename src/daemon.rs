@@ -1124,10 +1124,11 @@ pub(crate) use service::invocation::{
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationService,
     DaemonLspOwnerRegistrar, DaemonLspSessionAccess, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrationError, Pr13HookOrchestrationAdmissionV1,
-    Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
-    admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
-    parse_daemon_invocation_request,
+    DaemonSemanticRuntimeRegistrationError, Pr13AdvisoryCycleInvocationFutureV1,
+    Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
+    Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
+    Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
+    daemon_operation_event_authority, parse_daemon_invocation_request,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,

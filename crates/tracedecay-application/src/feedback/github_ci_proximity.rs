@@ -28,6 +28,8 @@ pub const CI_FAILURE_LOCALIZE_USE_CASE_ID_V1: &str =
     "use-case.application.feedback.ci-failure-localize";
 pub const PROXIMITY_CAPABILITY_ID_V1: &str = "capability.application.feedback.proximity";
 pub const PROXIMITY_USE_CASE_ID_V1: &str = "use-case.application.feedback.proximity";
+pub const ADVISORY_CYCLE_CAPABILITY_ID_V1: &str = "capability.application.feedback.advisory-cycle";
+pub const ADVISORY_CYCLE_USE_CASE_ID_V1: &str = "use-case.application.feedback.advisory-cycle";
 
 /// Immutable, read-only ingress request for one pull request at one currently
 /// resolved branch scope. There is no field for a generic endpoint, HTTP

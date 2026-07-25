@@ -176,6 +176,7 @@ pub(crate) enum DaemonInvocationOperation {
     FeedbackGet,
     FeedbackExpand,
     FeedbackList,
+    FeedbackAdvisoryCycle,
     FeedbackImpact,
     AffectedTests,
     FeedbackObserve,
@@ -211,6 +212,7 @@ impl DaemonInvocationOperation {
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
             Self::FeedbackList => "feedback_list",
+            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::FeedbackObserve => "feedback_observe",
@@ -326,6 +328,12 @@ pub(crate) enum DaemonInvocationPayload {
     },
     FeedbackList {
         request_handle: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    FeedbackAdvisoryCycle {
+        document_uri: String,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -552,6 +560,7 @@ impl DaemonInvocationRequest {
                 }
             }
             crate::application_surface::ApplicationSurfaceOperation::TestResults
+            | crate::application_surface::ApplicationSurfaceOperation::FeedbackAdvisoryCycle
             | crate::application_surface::ApplicationSurfaceOperation::SessionLookup
             | crate::application_surface::ApplicationSurfaceOperation::QualifiedName
             | crate::application_surface::ApplicationSurfaceOperation::CallChain
@@ -620,6 +629,27 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload,
+        }
+    }
+
+    pub(crate) fn feedback_advisory_cycle(
+        request_id: impl Into<String>,
+        document_uri: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            },
         }
     }
 
@@ -989,6 +1019,9 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::FeedbackExpand
             }
             DaemonInvocationPayload::FeedbackList { .. } => DaemonInvocationOperation::FeedbackList,
+            DaemonInvocationPayload::FeedbackAdvisoryCycle { .. } => {
+                DaemonInvocationOperation::FeedbackAdvisoryCycle
+            }
             DaemonInvocationPayload::FeedbackImpact { .. } => {
                 DaemonInvocationOperation::FeedbackImpact
             }
@@ -1057,6 +1090,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::FeedbackGet
                 | DaemonInvocationOperation::FeedbackExpand
                 | DaemonInvocationOperation::FeedbackList
+                | DaemonInvocationOperation::FeedbackAdvisoryCycle
                 | DaemonInvocationOperation::FeedbackImpact
                 | DaemonInvocationOperation::AffectedTests
                 | DaemonInvocationOperation::FeedbackObserve
@@ -1282,6 +1316,20 @@ impl DaemonInvocationRequest {
                 cancellation,
             } => {
                 if !valid_token(request_handle, MAX_OPAQUE_HANDLE_BYTES)
+                    || observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_printable(document_uri, MAX_ROOT_HINT_BYTES)
                     || observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
@@ -1862,6 +1910,62 @@ async fn execute_feedback(
         Ok(_) => concealed_application_problem(wire_request_id),
         Err(problem) => application_problem(wire_request_id, problem),
     }
+}
+
+async fn execute_feedback_advisory_cycle(
+    wire_request_id: String,
+    invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
+    feedback_owner: Option<DaemonFeedbackInvocationOwner>,
+    document_uri: String,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(invoker) = invoker else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "feedback.advisory_cycle_unavailable".to_owned(),
+                message: "The advisory feedback cycle is unavailable".to_owned(),
+            }),
+        );
+    };
+    let request_handle = match invoker
+        .invoke(Pr13AdvisoryCycleInvocationRequestV1 {
+            request_id: wire_request_id.clone(),
+            document_uri,
+            observed_at,
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        })
+        .await
+    {
+        Ok(handle) => handle,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let mut response = execute_feedback(
+        wire_request_id,
+        feedback_owner,
+        DaemonInvocationOperation::FeedbackDiagnostics,
+        request_handle.clone(),
+        observed_at,
+        deadline,
+        cancellation,
+    )
+    .await;
+    if let DaemonInvocationOutcome::Feedback { result, .. } = &mut response.outcome {
+        let diagnostics = result.payload.take();
+        result.payload = Some(serde_json::json!({
+            "request_handle": request_handle,
+            "diagnostics": diagnostics,
+            "producer_contributions": [
+                "github_review_ingest",
+                "ci_failure_localize",
+                "feedback_proximity"
+            ]
+        }));
+    }
+    response
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3687,6 +3791,27 @@ pub(crate) trait Pr13HookOrchestrationPortV1: Send + Sync {
     fn admit(&self, request: Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationAdmissionV1;
 }
 
+pub(crate) struct Pr13AdvisoryCycleInvocationRequestV1 {
+    pub request_id: String,
+    pub document_uri: String,
+    pub observed_at: UtcMicros,
+    pub deadline: Deadline,
+    pub cancellation: CancellationContext,
+}
+
+pub(crate) type Pr13AdvisoryCycleInvocationFutureV1<'a> =
+    Pin<Box<dyn Future<Output = Result<String, ApplicationProblem>> + Send + 'a>>;
+
+/// Authenticated explicit entry to the same project-open four-pillar owner
+/// used by LSP and Hook V2. The returned diagnostics handle is minted by that
+/// owner after a durable publication; callers never provide one.
+pub(crate) trait Pr13AdvisoryCycleInvocationPortV1: Send + Sync {
+    fn invoke(
+        &self,
+        request: Pr13AdvisoryCycleInvocationRequestV1,
+    ) -> Pr13AdvisoryCycleInvocationFutureV1<'_>;
+}
+
 type Pr13HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type Pr13HookOrchestrationWorkV1 =
     dyn Fn(Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationFutureV1 + Send + Sync;
@@ -3907,6 +4032,8 @@ pub(crate) struct DaemonInvocationService {
     configuration_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredConfigurationRuntime>>>,
     lsp_owners: Arc<Mutex<BTreeMap<PathBuf, DaemonLspInvocationOwner>>>,
     advisory_runtimes: Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Any + Send + Sync>>>>,
+    advisory_cycle_invokers:
+        Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>>>,
     advisory_hook_orchestrators:
         Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Pr13HookOrchestrationPortV1>>>>,
     semantic_runtimes:
@@ -3938,6 +4065,7 @@ impl DaemonInvocationService {
             configuration_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_owners: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
+            advisory_cycle_invokers: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_hook_orchestrators: Arc::new(Mutex::new(BTreeMap::new())),
             semantic_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             operation_events: daemon_operation_event_authority(),
@@ -4959,6 +5087,28 @@ impl DaemonAdvisoryRuntimeRegistrar {
             Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
         }
     }
+
+    pub(crate) async fn register_cycle_invoker(
+        &self,
+        project_root: PathBuf,
+        invoker: Arc<dyn Pr13AdvisoryCycleInvocationPortV1>,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        if !self
+            .service
+            .advisory_runtimes
+            .lock()
+            .await
+            .contains_key(&project_root)
+        {
+            return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
+        }
+        let mut invokers = self.service.advisory_cycle_invokers.lock().await;
+        if invokers.contains_key(&project_root) {
+            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
+        }
+        invokers.insert(project_root, invoker);
+        Ok(())
+    }
 }
 
 /// Mounts one project's semantic-runtime scheduling handle as daemon-private
@@ -5966,6 +6116,18 @@ impl DaemonInvocationService {
             .map(|registered| registered.runtime.clone())
     }
 
+    async fn advisory_cycle_invoker(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>> {
+        let project_root = project_root?;
+        self.advisory_cycle_invokers
+            .lock()
+            .await
+            .get(project_root)
+            .cloned()
+    }
+
     async fn configuration_runtime(
         &self,
         project_root: Option<&Path>,
@@ -6167,6 +6329,7 @@ impl DaemonInvocationService {
         let now_ms = now_millis();
         self.expire_sessions(now_ms).await;
         let feedback_service = self.feedback_owner(project_root).await;
+        let advisory_cycle_invoker = self.advisory_cycle_invoker(project_root).await;
         let configuration_runtime = self.configuration_runtime(project_root).await;
         let lsp_owner = self.lsp_owner(project_root).await;
 
@@ -6286,6 +6449,23 @@ impl DaemonInvocationService {
                     feedback_service,
                     DaemonInvocationOperation::FeedbackList,
                     request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback_advisory_cycle(
+                    request_id,
+                    advisory_cycle_invoker,
+                    feedback_service,
+                    document_uri,
                     observed_at,
                     deadline,
                     cancellation,
@@ -6602,6 +6782,7 @@ impl DaemonInvocationService {
         }
         self.lsp_owners.lock().await.clear();
         self.advisory_runtimes.lock().await.clear();
+        self.advisory_cycle_invokers.lock().await.clear();
         self.advisory_hook_orchestrators.lock().await.clear();
         if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
             registry.retain(|_, runtime| runtime.strong_count() > 0);
@@ -6954,6 +7135,7 @@ fn plan26_observable_operation(operation: DaemonInvocationOperation) -> bool {
             | DaemonInvocationOperation::FeedbackGet
             | DaemonInvocationOperation::FeedbackExpand
             | DaemonInvocationOperation::FeedbackList
+            | DaemonInvocationOperation::FeedbackAdvisoryCycle
             | DaemonInvocationOperation::FeedbackImpact
             | DaemonInvocationOperation::AffectedTests
             | DaemonInvocationOperation::PrimitiveImpact
@@ -6971,6 +7153,9 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         DaemonInvocationOperation::FeedbackGet => Plan26FeedbackOperationV1::FeedbackGet,
         DaemonInvocationOperation::FeedbackExpand => Plan26FeedbackOperationV1::FeedbackExpand,
         DaemonInvocationOperation::FeedbackList => Plan26FeedbackOperationV1::FeedbackList,
+        DaemonInvocationOperation::FeedbackAdvisoryCycle => {
+            Plan26FeedbackOperationV1::FeedbackCycle
+        }
         DaemonInvocationOperation::FeedbackImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::AffectedTests => {
             Plan26FeedbackOperationV1::PrimitiveAffectedTests
@@ -7253,6 +7438,85 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MintedAdvisoryCycleHandle(&'static str);
+
+    impl Pr13AdvisoryCycleInvocationPortV1 for MintedAdvisoryCycleHandle {
+        fn invoke(
+            &self,
+            _request: Pr13AdvisoryCycleInvocationRequestV1,
+        ) -> Pr13AdvisoryCycleInvocationFutureV1<'_> {
+            Box::pin(async { Ok(self.0.to_owned()) })
+        }
+    }
+
+    struct RecordingFeedbackHandle(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl DaemonFeedbackInvocationPort for RecordingFeedbackHandle {
+        fn invoke(
+            &self,
+            request: DaemonFeedbackInvocationRequest,
+        ) -> DaemonFeedbackInvocationFuture<'_> {
+            self.0
+                .lock()
+                .expect("recorded feedback handles")
+                .push(request.request_handle);
+            Box::pin(async {
+                Err(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                ))
+            })
+        }
+    }
+
+    #[test]
+    fn advisory_cycle_wire_request_has_no_client_selected_handle() {
+        let request = DaemonInvocationRequest::feedback_advisory_cycle(
+            "request.feedback-cycle",
+            "file:///project/src/lib.rs".to_owned(),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.feedback-cycle").expect("cancellation"),
+        );
+        let value = serde_json::to_value(request).expect("wire request");
+
+        assert_eq!(value["operation"], "feedback_advisory_cycle");
+        assert_eq!(value["document_uri"], "file:///project/src/lib.rs");
+        assert!(value.get("request_handle").is_none());
+    }
+
+    #[tokio::test]
+    async fn advisory_cycle_reads_diagnostics_with_daemon_minted_handle() {
+        let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let project_id = ProjectId::new("project.feedback-cycle").expect("project");
+        let response = execute_feedback_advisory_cycle(
+            "request.feedback-cycle".to_owned(),
+            Some(Arc::new(MintedAdvisoryCycleHandle("rh.daemon.minted"))),
+            Some(DaemonFeedbackInvocationOwner::new(
+                project_id,
+                Arc::new(RecordingFeedbackHandle(Arc::clone(&handles))),
+            )),
+            "file:///project/src/lib.rs".to_owned(),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.feedback-cycle").expect("cancellation"),
+        )
+        .await;
+
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::ApplicationProblem {
+                problem: ApplicationProblem::NotFoundOrNotAuthorized { .. }
+            }
+        ));
+        assert_eq!(
+            handles
+                .lock()
+                .expect("recorded feedback handles")
+                .as_slice(),
+            ["rh.daemon.minted"]
+        );
+    }
 
     #[test]
     fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
