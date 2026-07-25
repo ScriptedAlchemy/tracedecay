@@ -1,9 +1,14 @@
+mod backfill;
 mod codec;
 mod persist;
-mod provenance_backfill;
 pub mod retention;
 mod schema;
 
+pub(crate) use backfill::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION;
+pub(super) use backfill::{
+    converge_observation_repository_provenance, converge_observation_retrieval_anchors,
+};
+pub(crate) use schema::OBSERVATION_ANCHOR_SCHEMA_MIGRATION;
 pub(super) use schema::ensure_observation_schema;
 
 use tracedecay_domain::{

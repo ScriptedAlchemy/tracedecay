@@ -286,6 +286,13 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
         .await
         .map_err(|error| global_db_operation_error("commit registered global schema", error))?;
 
+    // Both of these page their own progress through individually committed
+    // transactions. They must stay outside the schema-upgrade transaction
+    // above so an interrupted open (the project warmup cancels in-flight
+    // statements once its deadline passes) keeps the pages it already
+    // committed instead of rolling a whole-table scan back and re-arming it.
+    observation::converge_observation_retrieval_anchors(conn).await?;
+    observation::converge_observation_repository_provenance(conn).await?;
     observation_projection::prepare_projection_version_migration_with_engine(conn)
         .await
         .map_err(|error| global_db_operation_error("prepare observation projection", error))?;
