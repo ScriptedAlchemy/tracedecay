@@ -91,12 +91,12 @@ impl DaemonHookEvent {
         Self::new(HookAgent::Cursor, "afterFileEdit", rel_paths, None, None)
     }
 
-    pub fn cursor_after_shell_execution(command: String, cwd: PathBuf) -> Self {
+    pub fn cursor_after_shell_execution(cwd: PathBuf) -> Self {
         Self::new(
             HookAgent::Cursor,
             "afterShellExecution",
             Vec::new(),
-            Some(command),
+            None,
             Some(cwd),
         )
     }
@@ -122,16 +122,10 @@ impl DaemonHookEvent {
         Self::new(agent, "postToolUseEdit", rel_paths, None, Some(cwd))
     }
 
-    /// A shell command finished: let the daemon classify it (branch add,
-    /// worktree add, incremental sync, or noop).
-    pub fn post_tool_use_shell(agent: HookAgent, command: String, cwd: PathBuf) -> Self {
-        Self::new(
-            agent,
-            "postToolUseShell",
-            Vec::new(),
-            Some(command),
-            Some(cwd),
-        )
+    /// A shell command finished. Command text is deliberately discarded:
+    /// native daemon state, not shell parsing, owns Git reconciliation.
+    pub fn post_tool_use_shell(agent: HookAgent, cwd: PathBuf) -> Self {
+        Self::new(agent, "postToolUseShell", Vec::new(), None, Some(cwd))
     }
 
     pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {

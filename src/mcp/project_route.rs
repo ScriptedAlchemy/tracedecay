@@ -451,7 +451,7 @@ mod tests {
             agent: HookAgent::Claude,
             kind: HookEventKind::FileEdit,
             rel_paths: Vec::new(),
-            command: None,
+            had_command: false,
             cwd: Some(PathBuf::from(cwd)),
             route: Some(HookRouteMetadata {
                 session_id: Some(session_id.to_string()),
