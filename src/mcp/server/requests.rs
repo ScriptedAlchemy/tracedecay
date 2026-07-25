@@ -851,9 +851,7 @@ impl McpServer {
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
                 doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
-                doctor_remediation_dispatcher: self
-                    .dashboard_doctor_remediation_dispatcher
-                    .clone(),
+                doctor_remediation_dispatcher: self.dashboard_doctor_remediation_dispatcher.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(self.diagnostics_lsp.as_ref()),
                 application_invocation_client,

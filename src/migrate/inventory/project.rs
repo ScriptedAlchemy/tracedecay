@@ -6,8 +6,8 @@ use super::artifacts::{
     record_sqlite_family_sidecars,
 };
 use super::model::{
-    InventoryIntegrityMode, RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory,
-    StoreRole, StoreStatus,
+    InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath,
+    SqliteIntegrityOutcome, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };
 use super::sqlite::sqlite_quick_check;
 use crate::config::{self, TRACEDECAY_DIR, db_filename};
@@ -199,15 +199,20 @@ async fn inspect_project_store(
             InventoryIntegrityMode::MetadataOnly => {
                 statuses.push(StoreStatus::IntegrityUnchecked);
             }
-            InventoryIntegrityMode::Full if !sqlite_quick_check(&db_path).await => {
-                statuses.push(StoreStatus::Corrupt);
+            InventoryIntegrityMode::Full => {
+                push_integrity_issue(
+                    &mut statuses,
+                    &db_path,
+                    InventoryStoreAuthority::Authoritative,
+                    sqlite_quick_check(&db_path).await,
+                );
             }
-            InventoryIntegrityMode::Full => {}
         }
     } else {
         statuses.push(StoreStatus::MissingDb);
     }
 
+    let sessions_db_path = data_dir.join(SESSIONS_DB_FILENAME);
     record_optional_artifact(
         data_dir,
         "sessions_db",
@@ -215,19 +220,38 @@ async fn inspect_project_store(
         &mut artifacts,
     );
     record_sqlite_family_sidecars(
-        &data_dir.join(SESSIONS_DB_FILENAME),
+        &sessions_db_path,
         "sessions_db_wal",
         "sessions_db_shm",
         &mut artifacts,
     );
+    if sessions_db_path.is_file() {
+        match options.integrity {
+            InventoryIntegrityMode::MetadataOnly => {
+                if !statuses.contains(&StoreStatus::IntegrityUnchecked) {
+                    statuses.push(StoreStatus::IntegrityUnchecked);
+                }
+            }
+            InventoryIntegrityMode::Full => {
+                push_integrity_issue(
+                    &mut statuses,
+                    &sessions_db_path,
+                    InventoryStoreAuthority::Authoritative,
+                    sqlite_quick_check(&sessions_db_path).await,
+                );
+            }
+        }
+    }
     record_optional_artifact(
         data_dir,
         "branch_meta",
         BRANCH_META_FILENAME,
         &mut artifacts,
     );
+    let current_branch_db = current_branch_database(project_root, data_dir);
     record_branch_db_artifacts(
         data_dir,
+        current_branch_db.as_deref(),
         options.follow_symlinks,
         skipped,
         &mut statuses,
@@ -309,6 +333,31 @@ async fn inspect_project_store(
         statuses,
         artifacts,
     })
+}
+
+pub(super) fn push_integrity_issue(
+    statuses: &mut Vec<StoreStatus>,
+    path: &Path,
+    authority: InventoryStoreAuthority,
+    outcome: SqliteIntegrityOutcome,
+) {
+    if matches!(
+        outcome,
+        SqliteIntegrityOutcome::NotChecked | SqliteIntegrityOutcome::Verified
+    ) {
+        return;
+    }
+    statuses.push(StoreStatus::IntegrityIssue {
+        path: path.to_path_buf(),
+        authority,
+        outcome,
+    });
+}
+
+fn current_branch_database(project_root: &Path, data_dir: &Path) -> Option<PathBuf> {
+    let branch = crate::branch::current_branch(project_root)?;
+    let metadata = crate::branch_meta::load_branch_meta(data_dir)?;
+    crate::branch::resolve_branch_db_path(data_dir, &branch, &metadata)
 }
 
 pub(super) fn missing_registered_store(project_root: &Path) -> StoreInventory {

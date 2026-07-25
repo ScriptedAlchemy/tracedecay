@@ -201,6 +201,9 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
 /// A chain entry representing a file and the longest dependency chain reaching it.
 pub struct DepthChain {
     pub file: String,
+    /// Every file in this chain entry's strongly connected component. Files in
+    /// one SCC share the same collapsed-DAG depth.
+    pub scc_files: Vec<String>,
     pub depth: usize,
     pub chain: Vec<String>,
 }
@@ -333,9 +336,12 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
             // Map SCC indices back to representative file names
             let chain: Vec<String> = chain_sccs.iter().map(|&si| sccs[si][0].clone()).collect();
 
-            let representative = sccs[scc_idx][0].clone();
+            let mut scc_files = sccs[scc_idx].clone();
+            scc_files.sort();
+            let representative = scc_files[0].clone();
             results.push(DepthChain {
                 file: representative,
+                scc_files,
                 depth,
                 chain,
             });
@@ -350,6 +356,80 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         ideal_depth,
         chains: results,
     }
+}
+
+/// One directory cluster in the Design Structure Matrix ordering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DsmCluster {
+    pub directory: String,
+    pub file_count: usize,
+    pub internal_edges: usize,
+    pub outgoing_edges: usize,
+    pub incoming_edges: usize,
+}
+
+impl DsmCluster {
+    #[must_use]
+    pub const fn boundary_edges(&self) -> usize {
+        self.outgoing_edges + self.incoming_edges
+    }
+}
+
+/// Groups the file adjacency by parent directory and orders clusters by
+/// cross-boundary coupling, then cluster size. This is the shared authority for
+/// both the MCP DSM tool and dashboard graph strata.
+pub fn dsm_clusters(adj: &HashMap<String, HashSet<String>>) -> Vec<DsmCluster> {
+    let mut dir_to_files: HashMap<String, Vec<String>> = HashMap::new();
+    for file in adj.keys() {
+        let directory = file
+            .rfind('/')
+            .map_or_else(|| ".".to_string(), |index| file[..index].to_string());
+        dir_to_files
+            .entry(directory)
+            .or_default()
+            .push(file.clone());
+    }
+
+    let mut clusters: Vec<DsmCluster> = dir_to_files
+        .into_iter()
+        .map(|(directory, files)| {
+            let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
+            let mut internal_edges = 0;
+            let mut outgoing_edges = 0;
+            let mut incoming_edges = 0;
+            for file in &files {
+                if let Some(targets) = adj.get(file) {
+                    for target in targets {
+                        if file_set.contains(target.as_str()) {
+                            internal_edges += 1;
+                        } else {
+                            outgoing_edges += 1;
+                        }
+                    }
+                }
+                for (source, targets) in adj {
+                    if !file_set.contains(source.as_str()) && targets.contains(file) {
+                        incoming_edges += 1;
+                    }
+                }
+            }
+            DsmCluster {
+                directory,
+                file_count: files.len(),
+                internal_edges,
+                outgoing_edges,
+                incoming_edges,
+            }
+        })
+        .collect();
+    clusters.sort_by(|left, right| {
+        right
+            .boundary_edges()
+            .cmp(&left.boundary_edges())
+            .then_with(|| right.file_count.cmp(&left.file_count))
+            .then_with(|| left.directory.cmp(&right.directory))
+    });
+    clusters
 }
 
 /// Score = min(1.0, ideal\_depth / max\_depth). Shallower is better.
