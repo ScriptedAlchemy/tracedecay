@@ -2234,11 +2234,12 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     use crate::diagnostics_store::DiagnosticsStore;
     use tracedecay_domain::feedback::{
         FeedbackCycleId, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
-        FeedbackDiagnosticClassificationV1, FeedbackDurabilityV1, FeedbackFindingId,
+        FeedbackDiagnosticClassificationV1, FeedbackDiagnosticProducerV1,
+        FeedbackDiagnosticProjectionV1, FeedbackDurabilityV1, FeedbackFindingId,
         FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1,
         FeedbackResultId, FeedbackScopeV1, FeedbackTargetV1, ProviderEvaluationStateV1,
     };
-    use tracedecay_domain::{ComponentVersion, ContentDigest};
+    use tracedecay_domain::{ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan};
 
     struct FixedDocument(String);
 
@@ -2376,6 +2377,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         retrieval_anchor_id: Some(record.diagnostic_anchor.clone()),
         provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
         safe_bounded_preview: None,
+        diagnostic_projection: None,
     };
     let cycle = FeedbackCycleResultV1 {
         result_id: id::<FeedbackResultId>("result.diagnostics.admission"),
@@ -2420,6 +2422,32 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         omitted_findings: 0,
         advisory_only: false,
     };
+    let advisory_cycle = FeedbackCycleResultV1 {
+        findings: vec![FeedbackFindingV1 {
+            finding_id: id("finding.github.direct-projection"),
+            classification: FeedbackDiagnosticClassificationV1::Unknown,
+            lifecycle: FeedbackFindingLifecycleV1::Active,
+            retrieval_anchor_id: Some(id("anchor.github.evidence-only")),
+            provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+            safe_bounded_preview: None,
+            diagnostic_projection: Some(FeedbackDiagnosticProjectionV1 {
+                file: indexed_file.clone(),
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 2,
+                },
+                symbol: None,
+                code: "github-review".to_owned(),
+                severity: DiagnosticSeverityV1::Information,
+                safe_bounded_message: "Unresolved GitHub review comment".to_owned(),
+                producer: FeedbackDiagnosticProducerV1::GitHubReview,
+            }),
+        }],
+        total_findings: 1,
+        returned_findings: 1,
+        omitted_findings: 0,
+        ..cycle.clone()
+    };
 
     let document_uri = url::Url::from_file_path(fixture.path().join("src/lib.rs"))
         .expect("document uri")
@@ -2433,7 +2461,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     );
     let published = projection
         .project(
-            AdmittedRoot::new(root_uri),
+            AdmittedRoot::new(root_uri.clone()),
             document_uri.clone(),
             LspFeedbackProjectionScope {
                 head_commit_id: id(&head_commit),
@@ -2441,7 +2469,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 snapshot_digest: projection_identity.snapshot_digest.clone(),
                 invalidation_digest: projection_identity.invalidation_digest.clone(),
                 snapshot_content_digest: projection_identity.snapshot_content_digest.clone(),
-                document_content_digest: Some(document_content_digest),
+                document_content_digest: Some(document_content_digest.clone()),
                 generation: 1,
             },
             cycle,
@@ -2464,6 +2492,32 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     );
     let sources: BTreeSet<_> = published.iter().map(|entry| entry.source).collect();
     assert!(sources.iter().all(|source| source.is_tracedecay()));
+
+    let advisory = projection
+        .project(
+            AdmittedRoot::new(root_uri),
+            document_uri,
+            LspFeedbackProjectionScope {
+                head_commit_id: id(&head_commit),
+                code_generation_id: generation,
+                snapshot_digest: projection_identity.snapshot_digest,
+                invalidation_digest: projection_identity.invalidation_digest,
+                snapshot_content_digest: projection_identity.snapshot_content_digest,
+                document_content_digest: Some(document_content_digest),
+                generation: 2,
+            },
+            advisory_cycle,
+            BTreeMap::new(),
+        )
+        .await
+        .expect("advisory projection succeeds");
+    assert_eq!(
+        advisory.len(),
+        1,
+        "a bounded advisory code projection must not require its evidence anchor in the diagnostic store"
+    );
+    assert_eq!(advisory[0].source, DiagnosticSource::TraceDecayGitHub);
+    assert_eq!(advisory[0].code.as_deref(), Some("github-review"));
 
     registry.shutdown().await;
 }

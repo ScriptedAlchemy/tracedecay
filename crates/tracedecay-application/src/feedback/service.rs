@@ -1716,6 +1716,7 @@ fn collect_diagnostics(
                             retrieval_anchor_id: Some(diagnostic.diagnostic_anchor.clone()),
                             provider_state: result.state.feedback_state(),
                             safe_bounded_preview: Some(bounded_preview(&diagnostic.message)),
+                            diagnostic_projection: None,
                         });
                     }
                     FeedbackDiagnosticV1::SessionOverlay(diagnostic)
@@ -1732,6 +1733,7 @@ fn collect_diagnostics(
                             retrieval_anchor_id: None,
                             provider_state: result.state.feedback_state(),
                             safe_bounded_preview: Some(diagnostic.safe_bounded_message.clone()),
+                            diagnostic_projection: None,
                         });
                     }
                     FeedbackDiagnosticV1::Saved(_) | FeedbackDiagnosticV1::SessionOverlay(_) => {
@@ -2091,6 +2093,7 @@ mod tests {
                     retrieval_anchor_id: None,
                     provider_state: ProviderEvaluationStateV1::Partial,
                     safe_bounded_preview: None,
+                    diagnostic_projection: None,
                 }],
             }
             .validate()

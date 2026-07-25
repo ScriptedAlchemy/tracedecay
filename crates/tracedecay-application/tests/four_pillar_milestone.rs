@@ -1,7 +1,10 @@
 //! One canonical branch/PR fixture proving the four advisory pillars coexist.
 
 use tracedecay_application::feedback::{GitHubReviewReadRequestV1, GitHubReviewReadResponseV1};
-use tracedecay_application::feedback_surface_catalog_contribution;
+use tracedecay_application::{
+    AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1,
+    feedback_surface_catalog_contribution,
+};
 use tracedecay_domain::feedback::*;
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId,
@@ -38,6 +41,7 @@ fn finding(id: &str, retrieval_anchor_id: RetrievalAnchorId) -> FeedbackFindingV
         retrieval_anchor_id: Some(retrieval_anchor_id),
         provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
         safe_bounded_preview: None,
+        diagnostic_projection: None,
     }
 }
 
@@ -301,6 +305,55 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
     assert!(stale_proximity.validate().is_err());
     stale_proximity.coverage = ProximityCoverageV1::Stale;
     stale_proximity.validate().unwrap();
+
+    let validity = AdvisoryFindingValidityWindowV1 {
+        valid_at: UtcMicros(2),
+        expires_at: UtcMicros(99),
+    };
+    let github_finding = github
+        .advisory_findings(validity)
+        .unwrap()
+        .findings
+        .pop()
+        .expect("GitHub finding");
+    assert_eq!(
+        github_finding.retrieval_anchor_id.as_ref(),
+        Some(&github_anchor),
+        "evidence expansion keeps the provider body anchor"
+    );
+    assert_eq!(
+        github_finding
+            .diagnostic_projection
+            .as_ref()
+            .map(|projection| projection.producer),
+        Some(FeedbackDiagnosticProducerV1::GitHubReview)
+    );
+    let ci_finding = ci
+        .advisory_findings(validity)
+        .unwrap()
+        .findings
+        .pop()
+        .expect("CI finding");
+    assert_eq!(
+        ci_finding
+            .diagnostic_projection
+            .as_ref()
+            .map(|projection| projection.producer),
+        Some(FeedbackDiagnosticProducerV1::CiLocalization)
+    );
+    let proximity_finding = proximity
+        .advisory_findings(validity)
+        .unwrap()
+        .findings
+        .pop()
+        .expect("proximity finding");
+    assert_eq!(
+        proximity_finding
+            .diagnostic_projection
+            .as_ref()
+            .map(|projection| projection.producer),
+        Some(FeedbackDiagnosticProducerV1::Proximity)
+    );
 
     assert_eq!(
         cycle_result.termination,

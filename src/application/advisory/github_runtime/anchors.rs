@@ -34,6 +34,8 @@ pub struct ProjectGitHubAnchorAuthorityV1 {
     database: Database,
     project_root: Arc<PathBuf>,
     scope: FeedbackScopeV1,
+    code_index_identity:
+        Option<Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>>,
 }
 
 pub struct ProjectGitHubRegistrarAuthoritiesV1<A> {
@@ -60,7 +62,18 @@ impl ProjectGitHubAnchorAuthorityV1 {
             database,
             project_root: Arc::new(project_root),
             scope,
+            code_index_identity: None,
         })
+    }
+
+    fn with_code_index_identity(
+        mut self,
+        code_index_identity: Arc<
+            dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
+        >,
+    ) -> Self {
+        self.code_index_identity = Some(code_index_identity);
+        self
     }
 
     async fn resolve_seed(
@@ -135,7 +148,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         if current_digest != original.content_digest {
             return remap_state(original.clone(), current_scope.clone(), None, true);
         }
-        let current = immutable_anchor(
+        let mut current = immutable_anchor(
             current_scope,
             &current_scope.head_commit_id,
             &stored.seed.path,
@@ -143,6 +156,20 @@ impl ProjectGitHubAnchorAuthorityV1 {
             original.span,
             None,
         )?;
+        if let Some(resolver) = self.code_index_identity.as_ref() {
+            let identity = resolver.resolve(self.project_root.as_ref().clone()).await?;
+            if identity.source_revision() != Some(&current_scope.head_commit_id) {
+                return remap_state(original.clone(), current_scope.clone(), None, true);
+            }
+            let Some((file, indexed_digest)) = identity.file(&stored.seed.path) else {
+                return remap_state(original.clone(), current_scope.clone(), None, true);
+            };
+            if indexed_digest != &current_digest {
+                return remap_state(original.clone(), current_scope.clone(), None, true);
+            }
+            current.file = file.clone();
+            current.validate().ok()?;
+        }
         remap_state(
             original.clone(),
             current_scope.clone(),
@@ -271,12 +298,14 @@ pub fn github_anchor_authorities_arc_v1(
     database: Database,
     project_root: impl Into<PathBuf>,
     scope: FeedbackScopeV1,
+    code_index_identity: Arc<
+        dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
+    >,
 ) -> Option<ProjectGitHubRegistrarAuthoritiesV1<Arc<ProjectGitHubAnchorAuthorityV1>>> {
-    let authority = Arc::new(ProjectGitHubAnchorAuthorityV1::new(
-        database,
-        project_root,
-        scope,
-    )?);
+    let authority = Arc::new(
+        ProjectGitHubAnchorAuthorityV1::new(database, project_root, scope)?
+            .with_code_index_identity(code_index_identity),
+    );
     Some(ProjectGitHubRegistrarAuthoritiesV1 {
         github_remapper: Arc::clone(&authority),
         github_anchors: authority,

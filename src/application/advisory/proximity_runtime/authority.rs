@@ -67,6 +67,8 @@ pub struct ProductionProximityEvidenceAuthorityV1 {
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
     normalized_worktree: String,
+    code_index_identity:
+        Option<Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>>,
 }
 
 pub type SharedCanonicalProximityEvidenceAuthorityV1 =
@@ -111,7 +113,18 @@ impl ProductionProximityEvidenceAuthorityV1 {
             scope,
             worktree_root,
             normalized_worktree,
+            code_index_identity: None,
         })
+    }
+
+    fn with_code_index_identity(
+        mut self,
+        code_index_identity: Arc<
+            dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
+        >,
+    ) -> Self {
+        self.code_index_identity = Some(code_index_identity);
+        self
     }
 
     async fn load(
@@ -124,6 +137,23 @@ impl ProductionProximityEvidenceAuthorityV1 {
         ) {
             return Some(partial);
         }
+        let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
+            let Some(identity) = resolver.resolve(self.worktree_root.clone()).await else {
+                return Some(CanonicalProximityEvidenceBatchV1 {
+                    evidence: Vec::new(),
+                    coverage: ProximityCoverageV1::Partial,
+                });
+            };
+            if identity.source_revision() != Some(&request.scope.head_commit_id) {
+                return Some(CanonicalProximityEvidenceBatchV1 {
+                    evidence: Vec::new(),
+                    coverage: ProximityCoverageV1::Partial,
+                });
+            }
+            Some(identity)
+        } else {
+            None
+        };
         let observed_seconds = request.observed_at.0.div_euclid(1_000_000);
         let since = observed_seconds.saturating_sub(ACTIVITY_HORIZON_SECONDS_V1);
         let session_snapshot = self.sessions.read_snapshot().await.ok()?;
@@ -240,21 +270,22 @@ impl ProductionProximityEvidenceAuthorityV1 {
         partial |= active.keys().any(|key| !observations.contains_key(key));
 
         let mut graph_nodes = BTreeMap::<String, Vec<crate::types::Node>>::new();
-        let mut verified_graph_paths = BTreeSet::new();
+        let mut verified_graph_paths = BTreeMap::new();
         for path in edits.keys() {
             match self.graph.get_nodes_by_file(path).await {
                 Ok(nodes) => {
                     graph_nodes.insert(path.clone(), nodes);
                     let source = std::fs::read_to_string(self.worktree_root.join(path));
                     let record = self.graph.db().get_file(path).await;
-                    if matches!(
-                        (source, record),
+                    match (source, record) {
                         (Ok(source), Ok(Some(record)))
-                            if crate::sync::content_hash(&source) == record.content_hash
-                    ) {
-                        verified_graph_paths.insert(path.clone());
-                    } else {
-                        partial = true;
+                            if crate::sync::content_hash(&source) == record.content_hash =>
+                        {
+                            verified_graph_paths.insert(path.clone(), record.content_hash);
+                        }
+                        _ => {
+                            partial = true;
+                        }
                     }
                 }
                 Err(_) => {
@@ -343,6 +374,27 @@ impl ProductionProximityEvidenceAuthorityV1 {
         let expires_at = UtcMicros(request.observed_at.0.checked_add(EVIDENCE_TTL_MICROS_V1)?);
         let mut evidence = Vec::with_capacity(candidates.len());
         for candidate in candidates {
+            let file = if let Some(identity) = code_index_identity.as_ref() {
+                let Some((file, indexed_digest)) = identity.file(&candidate.path) else {
+                    partial = true;
+                    continue;
+                };
+                let Some(graph_digest) = verified_graph_paths.get(&candidate.path) else {
+                    partial = true;
+                    continue;
+                };
+                if indexed_digest.as_str() != graph_digest {
+                    partial = true;
+                    continue;
+                }
+                file.clone()
+            } else {
+                let Ok(file) = FileOccurrenceId::new(candidate.path.clone()) else {
+                    partial = true;
+                    continue;
+                };
+                file
+            };
             let selected = candidate
                 .session_keys
                 .iter()
@@ -393,7 +445,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 .unwrap_or(10_000),
             );
             let exact_address = verified_graph_paths
-                .contains(&candidate.path)
+                .contains_key(&candidate.path)
                 .then(|| exact_graph_address(&self.worktree_root, &candidate.path, path_nodes))
                 .flatten();
             if candidate.warning_class == ProximityWarningClassV1::SameFile
@@ -423,7 +475,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
                     .collect(),
                 address: ProximityAddressV1 {
                     scope: request.scope.clone(),
-                    file: FileOccurrenceId::new(candidate.path).ok()?,
+                    file,
                     span: exact_address.as_ref().map(|address| address.0),
                     symbol: exact_address.map(|address| address.1),
                 },
@@ -504,13 +556,14 @@ pub(crate) fn production_proximity_evidence_authority_v1(
     graph: Arc<TraceDecay>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
+    code_index_identity: Arc<
+        dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
+    >,
 ) -> Option<SharedCanonicalProximityEvidenceAuthorityV1> {
-    Some(Arc::new(ProductionProximityEvidenceAuthorityV1::new(
-        sessions,
-        graph,
-        scope,
-        worktree_root,
-    )?))
+    Some(Arc::new(
+        ProductionProximityEvidenceAuthorityV1::new(sessions, graph, scope, worktree_root)?
+            .with_code_index_identity(code_index_identity),
+    ))
 }
 
 #[derive(Clone)]
