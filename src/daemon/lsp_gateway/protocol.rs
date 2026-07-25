@@ -47,11 +47,12 @@ use super::provider::{
     UnavailableDiagnosticSnapshotProvider,
 };
 use super::rpc::{
-    RpcFailure, diagnostic_result_id, diagnostic_value, document_diagnostic_report_value,
-    document_position, document_uri, error_response, incoming_calls_value, initialized_root_uri,
-    outgoing_calls_value, overlay_failure, parse_call_item, parse_overlay_change, parse_type_item,
-    request_id, request_id_value, required_i64, required_nonempty_string, required_string,
-    response_value, semantic_response_value, success_response, text_document, type_items_value,
+    DiagnosticSerializationCapabilities, RpcFailure, diagnostic_result_id, diagnostic_value,
+    document_diagnostic_report_value, document_position, document_uri, error_response,
+    incoming_calls_value, initialized_root_uri, outgoing_calls_value, overlay_failure,
+    parse_call_item, parse_overlay_change, parse_type_item, request_id, request_id_value,
+    required_i64, required_nonempty_string, required_string, response_value,
+    semantic_response_value, success_response, text_document, type_items_value,
 };
 use super::session::{
     CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
@@ -263,8 +264,10 @@ impl NativeDiagnostic {
             range,
             severity,
             code,
+            code_description_uri: None,
             message: self.message,
             source: DiagnosticSource::Upstream,
+            related_information: Vec::new(),
             data: None,
         })
     }
@@ -2169,14 +2172,18 @@ where
         let result_id = diagnostic_result_id(generation, version);
         let merged =
             self.merge_document_diagnostics(uri, diagnostics.upstream, diagnostics.tracedecay);
-        let value = document_diagnostic_report_value(DocumentDiagnosticReport::full(
-            result_id.clone(),
-            self.visible_diagnostics(merged.items),
-        ));
+        let value = document_diagnostic_report_value(
+            DocumentDiagnosticReport::full(
+                result_id.clone(),
+                self.visible_diagnostics(merged.items),
+            ),
+            DiagnosticSerializationCapabilities::pull(self.gateway.capabilities()),
+        );
         let previous = params.get("previousResultId").and_then(Value::as_str);
         if previous == Some(result_id.as_str()) {
             return Ok(document_diagnostic_report_value(
                 DocumentDiagnosticReport::Unchanged { result_id },
+                DiagnosticSerializationCapabilities::pull(self.gateway.capabilities()),
             ));
         }
         if overlay.is_some() {
@@ -2386,7 +2393,15 @@ where
         DiagnosticMerge::for_document(uri, upstream, tracedecay)
     }
 
-    fn visible_diagnostics(&self, diagnostics: Vec<GatewayDiagnostic>) -> Vec<GatewayDiagnostic> {
+    fn visible_diagnostics(
+        &self,
+        mut diagnostics: Vec<GatewayDiagnostic>,
+    ) -> Vec<GatewayDiagnostic> {
+        for diagnostic in &mut diagnostics {
+            diagnostic
+                .related_information
+                .retain(|related| self.gateway.root().contains_document(&related.uri));
+        }
         if !self.cursor_native_mode {
             return diagnostics;
         }
@@ -2406,14 +2421,24 @@ where
         if !self.gateway.capabilities().supports_publish_diagnostics {
             return false;
         }
+        let capabilities = self.gateway.capabilities();
+        let mut params = json!({
+            "uri": uri,
+            "diagnostics": diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic_value(
+                    diagnostic,
+                    DiagnosticSerializationCapabilities::push(capabilities),
+                ))
+                .collect::<Vec<_>>(),
+        });
+        if capabilities.publish_diagnostics_version {
+            params["version"] = Value::from(version);
+        }
         let value = json!({
             "jsonrpc": "2.0",
             "method": "textDocument/publishDiagnostics",
-            "params": {
-                "uri": uri,
-                "version": version,
-                "diagnostics": diagnostics.into_iter().map(diagnostic_value).collect::<Vec<_>>(),
-            },
+            "params": params,
         });
         self.enqueue_publication(
             value,
@@ -3070,8 +3095,10 @@ mod tests {
                         },
                         severity: Some(DiagnosticSeverity::Warning),
                         code: Some("warning".into()),
+                        code_description_uri: None,
                         message: "bounded diagnostic".into(),
                         source: DiagnosticSource::Upstream,
+                        related_information: Vec::new(),
                         data: None,
                     }],
                     tracedecay: Vec::new(),
@@ -3436,6 +3463,100 @@ mod tests {
             .find(|message: &Value| message["method"] == "textDocument/publishDiagnostics")
             .unwrap();
         assert_eq!(publication["params"]["version"], 1);
+    }
+
+    #[test]
+    fn publish_diagnostics_omits_unnegotiated_optional_fields() {
+        let mut session = session();
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///root","capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"publishDiagnostics":{"versionSupport":true}}}}}"#,
+            0,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+            1,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":4,"text":"fn a() {}"}}}"#,
+            2,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#,
+            3,
+        );
+
+        let publication: Value = session
+            .drain_outbound()
+            .iter()
+            .map(|message| serde_json::from_slice(message).unwrap())
+            .find(|message: &Value| message["method"] == "textDocument/publishDiagnostics")
+            .expect("baseline publish diagnostics remains available");
+        assert_eq!(publication["params"]["version"], 4);
+        let diagnostic = &publication["params"]["diagnostics"][0];
+        assert!(diagnostic.get("relatedInformation").is_none());
+        assert!(diagnostic.get("codeDescription").is_none());
+        assert!(diagnostic.get("data").is_none());
+    }
+
+    #[test]
+    fn related_locations_are_limited_to_the_admitted_root() {
+        let session = session();
+        let diagnostic = GatewayDiagnostic {
+            uri: "file:///root/a.rs".to_owned(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: Some(DiagnosticSeverity::Information),
+            code: Some("github-review".to_owned()),
+            code_description_uri: None,
+            message: "review".to_owned(),
+            source: DiagnosticSource::TraceDecayGitHub,
+            related_information: vec![
+                super::super::diagnostics::GatewayDiagnosticRelatedInformation {
+                    uri: "file:///root/caller.rs".to_owned(),
+                    range: LspRange {
+                        start: LspPosition {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: LspPosition {
+                            line: 1,
+                            character: 1,
+                        },
+                    },
+                    message: "authorized".to_owned(),
+                },
+                super::super::diagnostics::GatewayDiagnosticRelatedInformation {
+                    uri: "file:///other/secret.rs".to_owned(),
+                    range: LspRange {
+                        start: LspPosition {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: LspPosition {
+                            line: 1,
+                            character: 1,
+                        },
+                    },
+                    message: "outside root".to_owned(),
+                },
+            ],
+            data: None,
+        };
+
+        let visible = session.visible_diagnostics(vec![diagnostic]);
+        assert_eq!(visible[0].related_information.len(), 1);
+        assert_eq!(
+            visible[0].related_information[0].uri,
+            "file:///root/caller.rs"
+        );
     }
 
     #[test]
