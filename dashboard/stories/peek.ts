@@ -9,7 +9,7 @@
  *   npx tsx stories/peek.ts out-dir /brain /brain?scope=tracedecay
  */
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { chromium } from '@playwright/test';
 import { installApiFixtures } from './fixtures/route.ts';
@@ -49,7 +49,21 @@ for (const target of targets) {
   const theme = rawTheme || 'dark';
   const width = Number(rawWidth || '1440');
   const page = await browser.newPage({ viewport: { width, height: 900 } });
-  await installApiFixtures(page);
+  // With TRACEDECAY_DASHBOARD_API set, rsbuild proxies `/api` to that daemon
+  // and the surface is shot against real data; otherwise fixtures are served.
+  // PEEK_REGISTRY overrides just `/api/projects` with a payload captured from a
+  // real daemon, so a composition can be reviewed against the actual registry
+  // (dozens of repositories) without one running.
+  if (!process.env['TRACEDECAY_DASHBOARD_API']) await installApiFixtures(page);
+  // Registered AFTER the catch-all on purpose: Playwright runs the most
+  // recently added matching handler first.
+  const registryFile = process.env['PEEK_REGISTRY'];
+  if (registryFile) {
+    const body = readFileSync(registryFile, 'utf8');
+    await page.route('**/api/projects', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body }),
+    );
+  }
   await page.goto(`${base}${route}`, { waitUntil: 'domcontentloaded' });
   await page.evaluate((t) => {
     try {
@@ -62,7 +76,8 @@ for (const target of targets) {
   await page.waitForSelector('main#td-main', { timeout: 20_000 }).catch(() => {});
   await page.waitForTimeout(3_000);
   const slug = route!.split('?')[0]!.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
-  const scoped = route!.includes('scope=') ? '-scoped' : '';
+  const scopeId = /scopeLabel=([^&]+)/.exec(route!)?.[1];
+  const scoped = scopeId ? `-scoped-${decodeURIComponent(scopeId)}` : '';
   const name = `${slug || 'root'}${scoped}-${theme}-${width}.png`;
   await page.screenshot({ path: path.join(outDir, name) });
   console.log('wrote', path.join(outDir, name));

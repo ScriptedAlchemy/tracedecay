@@ -274,10 +274,17 @@ export function composeRegistryField(
 /**
  * Smallest horizontal offset from a column's centre line that clears every body
  * already settled in that column, searched outward in alternating directions so
- * a column fills symmetrically. Capped at the column's own half-width: past
- * that the body stays put and is allowed to overlap, because two projects with
- * the same recency AND the same mass genuinely are in the same place, and
- * saying so is better than moving one of them somewhere it does not belong.
+ * a column fills symmetrically. Never leaves the column's own half-width: an
+ * offset within a column costs nothing, an offset across one would be a lie
+ * about when the project was last seen.
+ *
+ * A real registry does exhaust that width — thirty-odd projects all seen in the
+ * same week, holding much the same amount, want the same point. When no offset
+ * clears, the body takes the one that leaves the most room rather than the
+ * centre line, so a crowded column reads as a dense band with structure in it
+ * instead of a pile on its axis. Bodies there genuinely do overlap, which is
+ * the truth: those projects are in the same place because they measure the
+ * same.
  */
 function clearOffset(
   y: number,
@@ -285,15 +292,24 @@ function clearOffset(
   settled: ReadonlyArray<{ offset: number; y: number; radius: number }>,
 ): number {
   const steps = Math.floor(COLUMN_HALF_WIDTH / NUDGE);
+  let roomiest = 0;
+  let mostRoom = -Infinity;
   for (let step = 0; step <= steps; step += 1) {
     for (const direction of step === 0 ? [0] : [1, -1]) {
       const offset = direction * step * NUDGE;
-      const clear = settled.every(
-        (point) =>
-          Math.hypot(point.offset - offset, point.y - y) >= point.radius + radius,
-      );
-      if (clear) return offset;
+      let room = Infinity;
+      for (const point of settled) {
+        room = Math.min(
+          room,
+          Math.hypot(point.offset - offset, point.y - y) - (point.radius + radius),
+        );
+      }
+      if (room >= 0) return offset;
+      if (room > mostRoom) {
+        mostRoom = room;
+        roomiest = offset;
+      }
     }
   }
-  return 0;
+  return roomiest;
 }
