@@ -338,6 +338,42 @@ pub trait AgentIntegration {
     fn activate_deployed_host_registration(&self, _ctx: &InstallContext) -> Result<()> {
         Ok(())
     }
+
+    /// Re-activate only the native registration owned by the selected
+    /// receipt-backed components. The default keeps compatibility for hosts
+    /// whose only registered component is Core.
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&host_bundle_v2::HostBundleComponentV1::Core) {
+            self.activate_deployed_host_registration(ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Remove host-native registration for component assets already removed
+    /// by the receipt-backed lifecycle without deleting or rewriting any
+    /// deployed component artifacts.
+    fn deactivate_deployed_host_registration(&self, _ctx: &InstallContext) -> Result<()> {
+        Ok(())
+    }
+
+    /// Remove only the native registration owned by the selected
+    /// receipt-backed components.
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&host_bundle_v2::HostBundleComponentV1::Core) {
+            self.deactivate_deployed_host_registration(ctx)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Outcome of [`AgentIntegration::update_plugin`].
