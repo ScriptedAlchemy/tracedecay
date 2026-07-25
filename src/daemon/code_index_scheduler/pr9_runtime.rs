@@ -27,7 +27,7 @@ use crate::query::retrieval::exact::{
 use crate::query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
 use crate::query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use crate::query::retrieval::lexical::{
-    LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever,
+    LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
 use crate::query::retrieval::{
     AuthorizedPr9FallbackV1, Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1, RawRetrievalRequestV1,
@@ -315,22 +315,14 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let exact = owners.exact.retrieve_exact(&exact_request)?;
 
-        let whole_terms = query_view
-            .as_str()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let subtokens = whole_terms
-            .iter()
-            .map(|term| term.to_ascii_lowercase())
-            .collect();
+        let lexical_parts = lexical_query_parts(query_view.as_str())?;
         let lexical_request = LexicalLaneRequest {
             base: request.clone(),
             query_view,
             generation: generation.clone(),
-            whole_terms,
-            subtokens,
-            phrases: Vec::new(),
+            whole_terms: lexical_parts.whole_terms,
+            subtokens: lexical_parts.subtokens,
+            phrases: lexical_parts.phrases,
             field_filters: Vec::new(),
             fuzzy_budget: input.fuzzy_budget,
             lexical_profile_revision: input.lexical_profile_revision,

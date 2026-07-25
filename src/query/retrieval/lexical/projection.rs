@@ -510,9 +510,13 @@ impl CodeLexicalProjectionAdapterV1 {
         let lane = retriever.as_str();
         let chunk_id = row.chunk.id.as_str();
         let generation = row.chunk.anchor.generation_id.as_str();
+        let evidence_id = row.chunk.anchor.symbol_occurrence_id.as_ref().map_or_else(
+            || format!("code-chunk:{chunk_id}"),
+            |symbol| format!("code-symbol:{}", symbol.as_str()),
+        );
         Ok(CompactCandidate {
-            anchor_id: retrieval_anchor(format!("code-chunk:{chunk_id}"))?,
-            logical_evidence_id: LogicalEvidenceId::new(format!("code-chunk:{chunk_id}"))
+            anchor_id: retrieval_anchor(evidence_id.clone())?,
+            logical_evidence_id: LogicalEvidenceId::new(evidence_id)
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             source_occurrence_id: SourceOccurrenceId::new(format!(
                 "code-chunk:{generation}:{chunk_id}"
@@ -682,7 +686,12 @@ fn exact_matches(
     let mut matched_kinds = BTreeSet::new();
     for literal in &request.literals {
         let mut matched = false;
-        if literal.field == ExactFieldV1::QuotedPhrase {
+        if matches!(
+            literal.field,
+            ExactFieldV1::QuotedPhrase
+                | ExactFieldV1::DiagnosticText
+                | ExactFieldV1::CompilerOrRuntimeError
+        ) {
             matched = contains_bytes(
                 row.chunk.sanitized_text.as_str().as_bytes(),
                 &literal.original_bytes,

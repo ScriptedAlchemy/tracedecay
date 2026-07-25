@@ -234,20 +234,10 @@ impl CodeGraphEvidenceAdapterV1 {
                         continue;
                     };
                     let occurrence = format!("code-graph:{}", edge.to_occurrence.as_str());
-                    let (anchor_id, logical_evidence_id) = if let Some(chunk) = &binding_meta.chunk
-                    {
-                        (
-                            retrieval_anchor(format!("code-chunk:{}", chunk.as_str()))?,
-                            LogicalEvidenceId::new(format!("code-chunk:{}", chunk.as_str()))
-                                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-                        )
-                    } else {
-                        (
-                            retrieval_anchor(format!("anchor.{occurrence}"))?,
-                            LogicalEvidenceId::new(format!("logical.{occurrence}"))
-                                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-                        )
-                    };
+                    let evidence_id = format!("code-symbol:{}", edge.to_occurrence.as_str());
+                    let anchor_id = retrieval_anchor(evidence_id.clone())?;
+                    let logical_evidence_id = LogicalEvidenceId::new(evidence_id)
+                        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
                     let candidate = CompactCandidate {
                         anchor_id,
                         logical_evidence_id,

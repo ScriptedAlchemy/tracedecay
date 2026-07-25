@@ -1258,7 +1258,11 @@ impl DeterministicCodeChunker {
             .iter()
             .filter(|node| is_symbol_kind(&node.kind))
             .map(|node| {
-                let start = byte_offset(offsets, len, node.start_line, node.start_column);
+                let start = if node.attrs_start_line < node.start_line {
+                    byte_offset(offsets, len, node.attrs_start_line, 0)
+                } else {
+                    byte_offset(offsets, len, node.start_line, node.start_column)
+                };
                 let end = byte_offset(offsets, len, node.end_line, node.end_column);
                 Raw {
                     node_id: node.id.clone(),
@@ -2094,6 +2098,24 @@ mod tests {
             .find(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature)
             .expect("signature chunk");
         assert!(signature.sanitized_text.as_str().contains("fn "));
+    }
+
+    #[test]
+    fn symbol_member_chunks_include_leading_attributes() {
+        let result = chunk_source(
+            "pub enum DomainError {\n    #[error(\"time interval start must not be after its end\")]\n    InvalidTimeInterval,\n}\n",
+        );
+        assert!(result.chunks.iter().any(|chunk| {
+            chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolMember
+                && chunk
+                    .sanitized_text
+                    .as_str()
+                    .contains("InvalidTimeInterval")
+                && chunk
+                    .sanitized_text
+                    .as_str()
+                    .contains("time interval start must not be after its end")
+        }));
     }
 
     #[test]
