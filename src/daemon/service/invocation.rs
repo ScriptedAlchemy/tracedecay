@@ -583,6 +583,7 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ModuleApi
             | crate::application_surface::ApplicationSurfaceOperation::FileMetadata
             | crate::application_surface::ApplicationSurfaceOperation::HealthRead
+            | crate::application_surface::ApplicationSurfaceOperation::HealthDelta
             | crate::application_surface::ApplicationSurfaceOperation::StorageStatus
             | crate::application_surface::ApplicationSurfaceOperation::DiagnosticsRead
             | crate::application_surface::ApplicationSurfaceOperation::CodeSymbolSearch
@@ -765,6 +766,10 @@ impl DaemonInvocationRequest {
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthRead,
                 request @ Pr12PrimitiveRequest::HealthRead(_),
+            )
+            | (
+                surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthDelta,
+                request @ Pr12PrimitiveRequest::HealthDelta(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::StorageStatus,

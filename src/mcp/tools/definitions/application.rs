@@ -644,6 +644,27 @@ pub(super) fn def_health_read() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_health_delta() -> ToolDefinition {
+    primitive_read_definition(
+        "health_delta",
+        "Compare pinned project health",
+        json!({
+            "before_cursor": {
+                "type": "string",
+                "maxLength": 96,
+                "description": "Stable cursor returned by an earlier health_delta call. Omit to pin the current state."
+            },
+            "path_prefix": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "Optional project-relative scope prefix."
+            },
+            "meta": retrieval_meta_schema()
+        }),
+        &["meta"],
+    )
+}
+
 pub(super) fn def_storage_status_read() -> ToolDefinition {
     def_always_load(
         "tracedecay_storage_status",
@@ -1118,6 +1139,7 @@ mod tests {
             def_module_api_read(),
             def_file_metadata_read(),
             def_health_read(),
+            def_health_delta(),
             def_storage_status_read(),
             def_diagnostics_read(),
             def_code_exact_occurrence(),

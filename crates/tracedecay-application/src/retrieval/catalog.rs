@@ -45,7 +45,7 @@ struct PrimitiveReadSpec {
     use_case: &'static str,
 }
 
-const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 16] = [
+const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 17] = [
     primitive_spec("code_signature_search"),
     primitive_spec("code_implementations"),
     primitive_spec("code_type_hierarchy"),
@@ -60,6 +60,7 @@ const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 16] = [
     primitive_spec("module_api"),
     primitive_spec("file_metadata"),
     primitive_spec("health_read"),
+    primitive_spec("health_delta"),
     primitive_spec("storage_status"),
     primitive_spec("diagnostics_read"),
 ];

@@ -34,11 +34,11 @@ use tracedecay_application::retrieval::{
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
-    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
-    IdempotencyKey, LegalAction, OperationTermination, PageRequest, ProblemOwningLayer,
-    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder,
-    RetrievalRequestMeta, RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
-    StreamEvent, StreamEventKind,
+    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthDeltaRequest,
+    HealthReadRequest, IdempotencyKey, LegalAction, OperationTermination, PageRequest,
+    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
+    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
+    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
 };
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
@@ -130,6 +130,7 @@ pub enum ApplicationSurfaceOperation {
     ModuleApi,
     FileMetadata,
     HealthRead,
+    HealthDelta,
     StorageStatus,
     DiagnosticsRead,
     ConfigurationList,
@@ -198,6 +199,7 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 65] = [
     ApplicationSurfaceOperation::ModuleApi,
     ApplicationSurfaceOperation::FileMetadata,
     ApplicationSurfaceOperation::HealthRead,
+    ApplicationSurfaceOperation::HealthDelta,
     ApplicationSurfaceOperation::StorageStatus,
     ApplicationSurfaceOperation::DiagnosticsRead,
     ApplicationSurfaceOperation::ConfigurationList,
@@ -268,6 +270,7 @@ impl ApplicationSurfaceOperation {
             Self::ModuleApi => "module_api",
             Self::FileMetadata => "file_metadata",
             Self::HealthRead => "health_read",
+            Self::HealthDelta => "health_delta",
             Self::StorageStatus => "storage_status",
             Self::DiagnosticsRead => "diagnostics_read",
             Self::ConfigurationList => "configuration_list",
@@ -1966,6 +1969,10 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::HealthRead
                 )
                 | (
+                    Self::Primitive(Pr12PrimitiveRequest::HealthDelta(_)),
+                    ApplicationSurfaceOperation::HealthDelta
+                )
+                | (
                     Self::Primitive(Pr12PrimitiveRequest::StorageStatus(_)),
                     ApplicationSurfaceOperation::StorageStatus
                 )
@@ -2381,6 +2388,12 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::HealthRead => {
             serde_json::from_value::<HealthReadRequest>(value)
                 .map(Pr12PrimitiveRequest::HealthRead)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::HealthDelta => {
+            serde_json::from_value::<HealthDeltaRequest>(value)
+                .map(Pr12PrimitiveRequest::HealthDelta)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
@@ -2901,6 +2914,7 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::ModuleApi
         | ApplicationSurfaceOperation::FileMetadata
         | ApplicationSurfaceOperation::HealthRead
+        | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
         | ApplicationSurfaceOperation::DiagnosticsRead
         | ApplicationSurfaceOperation::ConfigurationList
@@ -2953,6 +2967,7 @@ fn plan26_surface_is_observable(operation: ApplicationSurfaceOperation) -> bool 
             | ApplicationSurfaceOperation::ModuleApi
             | ApplicationSurfaceOperation::FileMetadata
             | ApplicationSurfaceOperation::HealthRead
+            | ApplicationSurfaceOperation::HealthDelta
             | ApplicationSurfaceOperation::StorageStatus
             | ApplicationSurfaceOperation::DiagnosticsRead
     )
@@ -3311,6 +3326,7 @@ fn application_operation_for_http(
         HttpApplicationOperation::ModuleApi => ApplicationSurfaceOperation::ModuleApi,
         HttpApplicationOperation::FileMetadata => ApplicationSurfaceOperation::FileMetadata,
         HttpApplicationOperation::HealthRead => ApplicationSurfaceOperation::HealthRead,
+        HttpApplicationOperation::HealthDelta => ApplicationSurfaceOperation::HealthDelta,
         HttpApplicationOperation::StorageStatus => ApplicationSurfaceOperation::StorageStatus,
         HttpApplicationOperation::DiagnosticsRead => ApplicationSurfaceOperation::DiagnosticsRead,
         HttpApplicationOperation::ConfigurationList => {

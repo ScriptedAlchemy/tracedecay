@@ -5,15 +5,15 @@
 //! invoking the retained owner.
 
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UseCaseId,
+    AuthorityRequirement, AvailabilityContract, BindingDeprecation, BindingId, BindingStatus,
+    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass, PaginationContract,
+    PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
@@ -145,7 +145,16 @@ pub fn retained_surface_catalog_contribution()
                 operation: SurfaceOperationName::new(spec.operation.as_str())?,
                 protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
                 required_features: Vec::new(),
-                status: BindingStatus::Current,
+                status: if matches!(
+                    spec.operation,
+                    RetainedSurfaceOperation::SessionStart | RetainedSurfaceOperation::SessionEnd
+                ) {
+                    BindingStatus::Deprecated {
+                        deprecation: BindingDeprecation::new(2)?,
+                    }
+                } else {
+                    BindingStatus::Current
+                },
                 alias_of: None,
             })?);
             binding_ids.push(binding_id);

@@ -245,6 +245,57 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
 }
 
 #[test]
+fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
+    let catalog = super::application_surface_catalog().expect("application catalog");
+    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .expect("application profile");
+    for (surface, name) in [
+        (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
+        (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+        (tracedecay_tool_catalog::BindingSurface::Http, "http"),
+    ] {
+        let binding = crate::daemon_client::BindingResolver::resolve_binding(
+            &resolver,
+            surface,
+            &crate::daemon_client::BindingResolution {
+                profile_id: profile_id.clone(),
+                operation: tracedecay_tool_catalog::SurfaceOperationName::new("health_delta")
+                    .expect("operation"),
+                protocol_revision: APPLICATION_PROTOCOL_REVISION,
+                negotiated_features: application_negotiated_features(),
+            },
+        )
+        .unwrap_or_else(|| panic!("health_delta must resolve on {surface:?}"));
+        assert_eq!(
+            binding.binding_id.as_str(),
+            format!("binding.{name}.health_delta.v1")
+        );
+    }
+
+    let parsed = parse_application_surface_request(
+        ApplicationSurfaceOperation::HealthDelta,
+        serde_json::json!({
+            "before_cursor": "health-delta.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "path_prefix": "src",
+            "meta": {
+                "temporal": {"kind": "current"},
+                "page": {"page_size": 10, "cursor": null},
+                "projection": "summary",
+                "order": "stable_identity"
+            }
+        }),
+    )
+    .expect("typed health delta request");
+    assert!(matches!(
+        parsed,
+        ApplicationSurfaceRequest::Primitive(Pr12PrimitiveRequest::HealthDelta(_))
+    ));
+}
+
+#[test]
 fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
     let fixtures = [
         (
