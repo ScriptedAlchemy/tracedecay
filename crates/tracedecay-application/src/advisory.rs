@@ -115,7 +115,7 @@ impl AdvisoryFindingContributorV1 for GitHubReviewIngressResultV1 {
                 safe_bounded_preview: None,
                 diagnostic_projection: (lifecycle == FeedbackFindingLifecycleV1::Active
                     && item.remap.state == GitHubReviewRemapStateV1::ExactCurrent)
-                    .then(|| item.remap.current.as_ref())
+                    .then_some(item.remap.current.as_ref())
                     .flatten()
                     .and_then(|current| {
                         Some(FeedbackDiagnosticProjectionV1 {
@@ -169,7 +169,7 @@ impl AdvisoryFindingContributorV1 for CiFailureLocalizationResultV1 {
                 provider_state,
                 safe_bounded_preview: None,
                 diagnostic_projection: (lifecycle == FeedbackFindingLifecycleV1::Active)
-                    .then(|| self.symbol.as_ref())
+                    .then_some(self.symbol.as_ref())
                     .flatten()
                     .map(|symbol| FeedbackDiagnosticProjectionV1 {
                         file: symbol.file.clone(),

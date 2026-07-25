@@ -1069,7 +1069,7 @@ impl HostAdmissionTestRuntimeV1 {
     /// standalone `TraceDecay::init` path, preserving the same project-session
     /// authority required by daemon-owned production opens.
     #[doc(hidden)]
-    #[cfg(feature = "test-transport")]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn initialize_project_graph_for_test(
         &self,
         project_root: &Path,

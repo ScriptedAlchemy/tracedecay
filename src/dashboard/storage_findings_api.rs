@@ -30,7 +30,8 @@ pub(crate) async fn findings(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::tracedecay::TraceDecay;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_domain::ProjectId;
 
     #[tokio::test]
     async fn route_without_admitted_reader_is_typed_unsupported() {
@@ -38,7 +39,18 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            ProjectId::new("project.dashboard-storage-findings").expect("project id"),
+        )
+        .await
+        .expect("registered test runtime");
+        let cg = runtime
+            .initialize_project_graph_for_test(
+                project.path(),
+                crate::tracedecay::TraceDecayOpenOptions::default(),
+            )
             .await
             .expect("project init");
         let state = crate::dashboard::build_state(&cg)
