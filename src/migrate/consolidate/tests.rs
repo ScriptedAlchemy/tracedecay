@@ -291,14 +291,36 @@ fn migration_cursor_for(session_id: &str, byte_offset: u64) -> ClaudeSourceCurso
     migration_cursor_generation_for(session_id, 17, byte_offset)
 }
 
+fn migration_cursor_for_scope(
+    session_id: &str,
+    byte_offset: u64,
+    scope: ObservationScopeV1,
+) -> ClaudeSourceCursorV1 {
+    migration_cursor_generation_for_scope(session_id, 17, byte_offset, scope)
+}
+
 fn migration_cursor_generation_for(
     session_id: &str,
     generation: u64,
     byte_offset: u64,
 ) -> ClaudeSourceCursorV1 {
+    migration_cursor_generation_for_scope(
+        session_id,
+        generation,
+        byte_offset,
+        ObservationScopeV1::Profile,
+    )
+}
+
+fn migration_cursor_generation_for_scope(
+    session_id: &str,
+    generation: u64,
+    byte_offset: u64,
+    scope: ObservationScopeV1,
+) -> ClaudeSourceCursorV1 {
     ClaudeSourceCursorV1::new(
         ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap(),
-        ObservationScopeV1::Profile,
+        scope,
         ClaudeFileGenerationV1::new(generation).unwrap(),
         byte_offset,
     )
@@ -344,6 +366,18 @@ fn migration_observation_for(
     migration_observation_range_generation(session_id, 17, 0, 10, receipt_id, message_id, body)
 }
 
+fn migration_observation_for_scope(
+    session_id: &str,
+    scope: ObservationScopeV1,
+    receipt_id: &str,
+    message_id: &str,
+    body: &str,
+) -> DurableClaudeObservationV1 {
+    migration_observation_range_generation_for_scope(
+        session_id, scope, 17, 0, 10, receipt_id, message_id, body,
+    )
+}
+
 fn migration_observation_range(
     session_id: &str,
     start: u64,
@@ -355,8 +389,44 @@ fn migration_observation_range(
     migration_observation_range_generation(session_id, 17, start, end, receipt_id, message_id, body)
 }
 
+fn migration_observation_range_for_scope(
+    session_id: &str,
+    scope: ObservationScopeV1,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    message_id: &str,
+    body: &str,
+) -> DurableClaudeObservationV1 {
+    migration_observation_range_generation_for_scope(
+        session_id, scope, 17, start, end, receipt_id, message_id, body,
+    )
+}
+
 fn migration_observation_range_generation(
     session_id: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    message_id: &str,
+    body: &str,
+) -> DurableClaudeObservationV1 {
+    migration_observation_range_generation_for_scope(
+        session_id,
+        ObservationScopeV1::Profile,
+        generation,
+        start,
+        end,
+        receipt_id,
+        message_id,
+        body,
+    )
+}
+
+fn migration_observation_range_generation_for_scope(
+    session_id: &str,
+    scope: ObservationScopeV1,
     generation: u64,
     start: u64,
     end: u64,
@@ -389,7 +459,7 @@ fn migration_observation_range_generation(
     .unwrap();
     let identity = ClaudeObservationIdentityMaterialV1::new(
         ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap(),
-        ObservationScopeV1::Profile,
+        scope,
         ClaudeFileGenerationV1::new(generation).unwrap(),
         ClaudeByteRangeV1::new(start, end).unwrap(),
     )

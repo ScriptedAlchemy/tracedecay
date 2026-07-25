@@ -55,10 +55,16 @@ impl TemporalOwnedSessionFixture {
 async fn temporal_database(path: &Path, mode: crate::db::TestDatabaseRuntimeMode) -> Database {
     let authority =
         DatabaseAuthority::acquire_test(path, "temporal consolidation fixture").unwrap();
-    Database::publish_test_runtime(path, &authority, mode)
+    let database = Database::publish_test_runtime(path, &authority, mode)
         .await
         .unwrap()
-        .0
+        .0;
+    if mode == crate::db::TestDatabaseRuntimeMode::Initialize {
+        crate::global_db::ensure_registered_schema(database.conn())
+            .await
+            .unwrap();
+    }
+    database
 }
 
 async fn temporal_execute_batch(path: &Path, sql: &str) {
@@ -529,14 +535,20 @@ async fn temporal_observation_effect_rebinds_to_destination_sequence() {
     let target_path = target.path.clone();
     let source_path = source.path.clone();
     let target_input_path = temp.path().join("target-input.db");
-    let target_observation = migration_observation_for(
+    let target_observation = migration_observation_for_scope(
         "session.temporal.target",
+        ObservationScopeV1::Project {
+            project_id: target.project_id.clone(),
+        },
         "receipt.temporal.target",
         "message-temporal-target",
         "target observation",
     );
-    let source_observation = migration_observation_for(
+    let source_observation = migration_observation_for_scope(
         "session.temporal.source",
+        ObservationScopeV1::Project {
+            project_id: source.project_id.clone(),
+        },
         "receipt.temporal.source",
         "message-temporal-source",
         "source observation",
@@ -779,8 +791,11 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
     let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "eligible-target").await;
     let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
-    let observation = migration_observation_for(
+    let observation = migration_observation_for_scope(
         "session.legacy.forward",
+        ObservationScopeV1::Project {
+            project_id: target_runtime.project_id.clone(),
+        },
         "receipt.legacy.forward",
         "message.legacy.forward",
         "eligible legacy body",
@@ -992,8 +1007,11 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
     let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "recover-target").await;
     let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
-    let observation = migration_observation_for(
+    let observation = migration_observation_for_scope(
         "session.legacy.recover",
+        ObservationScopeV1::Project {
+            project_id: target_runtime.project_id.clone(),
+        },
         "receipt.legacy.recover",
         "message.legacy.recover",
         "recoverable legacy body",
@@ -1217,14 +1235,19 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
     let target_runtime = TemporalOwnedSessionFixture::new(temp.path(), "multi-output-target").await;
     let target = target_runtime.path.clone();
     let empty = temp.path().join("empty.db");
-    let first = migration_observation_for(
+    let observation_scope = ObservationScopeV1::Project {
+        project_id: target_runtime.project_id.clone(),
+    };
+    let first = migration_observation_for_scope(
         "session.multi.output",
+        observation_scope.clone(),
         "receipt.multi.output.a",
         "message.multi.a",
         "first multi-output body",
     );
-    let second = migration_observation_range(
+    let second = migration_observation_range_for_scope(
         "session.multi.output",
+        observation_scope.clone(),
         10,
         20,
         "receipt.multi.output.b",
@@ -1259,7 +1282,11 @@ async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
     Box::pin(persist_migration_observation(
         db,
         second,
-        Some(migration_cursor_for("session.multi.output", 10)),
+        Some(migration_cursor_for_scope(
+            "session.multi.output",
+            10,
+            observation_scope,
+        )),
     ))
     .await;
     assert_eq!(project_all_migration_observations(db).await, 1);
@@ -1382,8 +1409,11 @@ async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
         0
     );
 
-    let observation = migration_observation_for(
+    let observation = migration_observation_for_scope(
         "session.phase.fts",
+        ObservationScopeV1::Project {
+            project_id: target_runtime.project_id.clone(),
+        },
         "receipt.phase.fts",
         "message.phase.fts",
         "fts phase rollback body",
