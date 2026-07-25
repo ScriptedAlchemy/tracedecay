@@ -24,6 +24,7 @@ const REDACTED_ENTROPY: &str = "[TraceDecay redacted: high-entropy token]";
 const REDACTED_SENSITIVE_FIELD: &str = "[TraceDecay redacted: sensitive field]";
 const MEMORY_FACT_SANITIZER_VERSION_V1: &str = "privacy.memory-fact.v1";
 const MEMORY_FACT_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.memory-fact.receipt.v1\0";
+const MAX_FINDING_LOCATION_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyDetectorV1 {
@@ -152,10 +153,12 @@ impl TryFrom<SanitizationFindingWireV1> for SanitizationFindingV1 {
     type Error = &'static str;
 
     fn try_from(wire: SanitizationFindingWireV1) -> Result<Self, Self::Error> {
-        if !is_safe_structural_location(&wire.location)
-            || wire.evidence_anchors.is_empty()
+        if wire.location.len() > MAX_FINDING_LOCATION_BYTES
+            || !is_safe_structural_location(&wire.location)
+            || wire.evidence_anchors.len() != 1
             || wire.evidence_anchors.iter().any(|anchor| {
-                anchor.structural_location != wire.location
+                anchor.structural_location.len() > MAX_FINDING_LOCATION_BYTES
+                    || anchor.structural_location != wire.location
                     || !is_safe_structural_location(&anchor.structural_location)
             })
         {
@@ -659,7 +662,7 @@ fn structural_location(path: &[JsonPathSegment]) -> String {
 }
 
 fn bounded_location(location: String) -> String {
-    if location.len() <= 256 {
+    if location.len() <= MAX_FINDING_LOCATION_BYTES {
         location
     } else {
         "$/<bounded-location>".to_string()
