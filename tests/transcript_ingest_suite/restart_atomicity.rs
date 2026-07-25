@@ -41,6 +41,9 @@ fn test_project_id(project: &Path) -> ProjectId {
 }
 
 pub(super) fn mark_test_project(project: &Path) -> ProjectId {
+    if !project.join(".git").exists() {
+        init_git_repo(project);
+    }
     let sequence = NEXT_TEST_PROJECT_ID.fetch_add(1, Ordering::Relaxed);
     let project_id = ProjectId::new(format!("{TEST_PROJECT_ID}-{sequence}"))
         .expect("valid unique fixture project id");
