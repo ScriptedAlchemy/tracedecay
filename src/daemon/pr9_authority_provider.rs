@@ -174,10 +174,10 @@ impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
         Box::pin(async move {
             let scope = committed.scope.clone();
             let semantic_enabled = committed.state.active().compatibility().semantic.is_some();
+            unregister_project_semantic_redundancy_authority(&project_root);
             provider
                 .update_after_successful_activation(scope.clone(), committed.state.clone())
                 .map_err(map_update_observer_error)?;
-            unregister_project_semantic_redundancy_authority(&project_root);
             registry
                 .clear_semantic_query_authority(&scope)
                 .await

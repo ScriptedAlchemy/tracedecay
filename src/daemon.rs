@@ -1249,6 +1249,40 @@ pub(crate) mod store_runtime;
 pub fn mark_process_long_lived_for_session_maintenance() {
     store_runtime::session_registry::mark_process_long_lived_for_session_maintenance();
 }
+
+const SEMANTIC_ARTIFACT_GC_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+
+struct SemanticArtifactGcMaintenanceTask(JoinHandle<()>);
+
+impl Drop for SemanticArtifactGcMaintenanceTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMaintenanceTask {
+    SemanticArtifactGcMaintenanceTask(tokio::spawn(async {
+        let mut interval = tokio::time::interval(SEMANTIC_ARTIFACT_GC_PERIOD);
+        loop {
+            interval.tick().await;
+            let Some(owner) = crate::semantic_code::SemanticModelLifecycleOwnerV1::mounted_shared()
+            else {
+                continue;
+            };
+            let now_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if owner.run_daemon_artifact_gc(now_unix).is_err() {
+                log_daemon_event(
+                    "semantic_artifact_gc",
+                    &[("outcome", "retry_next_interval".to_owned())],
+                );
+            }
+        }
+    }))
+}
+
 pub(crate) mod transport;
 pub(crate) use service::invocation::{
     BoundedPr13HookOrchestratorV1, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
@@ -1319,6 +1353,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
@@ -1471,6 +1506,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
     // Install the git-metadata watcher (design D3/D5). The daemon has no single
     // project root, so it uses the default `[sync]` config plus env overrides.
     // When `auto_watch` is off the watcher is inert. The watcher shares the
