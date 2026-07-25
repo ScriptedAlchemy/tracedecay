@@ -301,6 +301,17 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
             return Ok(hook_v2_catchup_response(action));
         }
     };
+    // Live-activity tap: a bound hook-v2 envelope reaching admission IS an agent
+    // working in this project — the primary live hook path for every v2-bound
+    // host. Publish it here, where the project scope is already resolved. Free
+    // when no dashboard is connected.
+    crate::dashboard::activity_bus::publish(
+        crate::dashboard::activity_bus::ActivityFamilyV1::Hook,
+        cg.project_root(),
+        cg.store_layout().identity.project_id.as_deref(),
+        1,
+        Some(hook_v2_family_label(envelope.event.family())),
+    );
     let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
     let claim_authority = match (
         crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
@@ -366,6 +377,19 @@ async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Va
         "ready_guidance": ready_guidance,
         "feedback_notice": feedback_notice,
     }))
+}
+
+/// Short, stable label for the dashboard's activity payload. Kept here rather
+/// than on the domain type: it is a display detail of the live tap, not part of
+/// the hook contract.
+const fn hook_v2_family_label(family: tracedecay_hooks::HookEventFamily) -> &'static str {
+    match family {
+        tracedecay_hooks::HookEventFamily::SessionBoundary => "session_boundary",
+        tracedecay_hooks::HookEventFamily::PromptBoundary => "prompt_boundary",
+        tracedecay_hooks::HookEventFamily::ToolLifecycle => "tool_lifecycle",
+        tracedecay_hooks::HookEventFamily::SavedEdit => "saved_edit",
+        tracedecay_hooks::HookEventFamily::TestLifecycle => "test_lifecycle",
+    }
 }
 
 async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Result<Value> {
