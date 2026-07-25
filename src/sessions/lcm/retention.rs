@@ -45,7 +45,8 @@
 //!    the content-addressed store (deduplicated by hash) and replaced with a
 //!    recoverable placeholder, reclaiming the inline column and its FTS shadow.
 //! 3. **Projected dedupe** (shortest window): a projected `session_messages`
-//!    row whose raw twin is still present is pure duplication of the retained
+//!    row is eligible only when its raw twin is still present and that raw row
+//!    has durable summary lineage. It is then pure duplication of the retained
 //!    raw copy, so it is dropped — the raw row is the single content copy and
 //!    the projected form is reconstructable from it.
 //!
