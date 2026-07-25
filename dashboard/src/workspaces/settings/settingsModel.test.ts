@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
+import * as settingsModelModule from './settingsModel.ts';
 import {
   buildSettingsModel,
   countSettings,
@@ -238,3 +239,188 @@ describe('Settings value helpers', () => {
     expect(splitPath('bare')).toEqual({ head: '', tail: 'bare' });
   });
 });
+
+describe('Settings authorized changes', () => {
+  it('captures the editable values and configuration revision from the GET payload', () => {
+    const buildSettingsEditor = modelFunction<(payload: unknown) => unknown>(
+      'buildSettingsEditor',
+    );
+
+    expect(buildSettingsEditor(payload)).toEqual({
+      expectedRevisionId: 'rev-42',
+      project: {
+        include: ['src/**', 'dashboard/src/**'],
+        exclude: ['target/**', 'node_modules/**'],
+        max_file_size: '1048576',
+        extract_docstrings: true,
+        track_call_sites: true,
+        git_ignore: true,
+        telemetry_timings: false,
+        auto_track_pr_branches: true,
+        auto_track_pr_poll_secs: '120',
+      },
+      user: {
+        upload_enabled: false,
+        watcher_debounce: '2s',
+        extraction_timeout_secs: '30',
+      },
+    });
+  });
+
+  it('builds a project patch containing only supported changed fields', () => {
+    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
+      'buildSettingsEditor',
+    );
+    const planProjectSettingsChange = modelFunction<
+      (payload: unknown, values: unknown) => unknown
+    >('planProjectSettingsChange');
+    const editor = buildSettingsEditor(payload);
+
+    expect(
+      planProjectSettingsChange(payload, {
+        ...editor.project,
+        include: ['src/**', 'tests/**'],
+        max_file_size: '2097152',
+        telemetry_timings: true,
+        auto_track_pr_poll_secs: '180',
+      }),
+    ).toEqual({
+      outcome: 'ready',
+      expectedRevisionId: 'rev-42',
+      patch: {
+        include: ['src/**', 'tests/**'],
+        max_file_size: 2_097_152,
+        telemetry: { timings: true },
+        sync: { auto_track_pr_poll_secs: 180 },
+      },
+    });
+  });
+
+  it('rejects project values the backend validation rejects before a request', () => {
+    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
+      'buildSettingsEditor',
+    );
+    const planProjectSettingsChange = modelFunction<
+      (payload: unknown, values: unknown) => any
+    >('planProjectSettingsChange');
+    const editor = buildSettingsEditor(payload);
+
+    const result = planProjectSettingsChange(payload, {
+      ...editor.project,
+      include: [''],
+      exclude: ['src/['],
+      max_file_size: '0',
+      auto_track_pr_poll_secs: '59',
+    });
+
+    expect(result.outcome).toBe('invalid');
+    expect(result.errors).toEqual([
+      { field: 'include', message: 'include patterns must not be empty' },
+      { field: 'exclude', message: "invalid glob pattern 'src/['" },
+      { field: 'max_file_size', message: 'max_file_size must be at least 1 byte' },
+      {
+        field: 'auto_track_pr_poll_secs',
+        message: 'auto_track_pr_poll_secs must be at least 60 seconds',
+      },
+    ]);
+  });
+
+  it('matches the backend glob parser at escape and negated-class boundaries', () => {
+    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
+      'buildSettingsEditor',
+    );
+    const planProjectSettingsChange = modelFunction<
+      (payload: unknown, values: unknown) => any
+    >('planProjectSettingsChange');
+    const editor = buildSettingsEditor(payload);
+
+    expect(
+      planProjectSettingsChange(payload, {
+        ...editor.project,
+        include: ['src/\\'],
+      }).outcome,
+    ).toBe('ready');
+    expect(
+      planProjectSettingsChange(payload, {
+        ...editor.project,
+        include: ['[!]'],
+      }),
+    ).toMatchObject({
+      outcome: 'invalid',
+      errors: [{ field: 'include', message: "invalid glob pattern '[!]'" }],
+    });
+  });
+
+  it('builds a user patch containing only supported changed fields', () => {
+    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
+      'buildSettingsEditor',
+    );
+    const planUserSettingsChange = modelFunction<
+      (payload: unknown, values: unknown) => unknown
+    >('planUserSettingsChange');
+    const editor = buildSettingsEditor(payload);
+
+    expect(
+      planUserSettingsChange(payload, {
+        ...editor.user,
+        upload_enabled: true,
+        watcher_debounce: '15s',
+      }),
+    ).toEqual({
+      outcome: 'ready',
+      expectedRevisionId: 'rev-42',
+      patch: {
+        upload_enabled: true,
+        watcher_debounce: '15s',
+      },
+    });
+  });
+
+  it('rejects user values the backend validation rejects before a request', () => {
+    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
+      'buildSettingsEditor',
+    );
+    const planUserSettingsChange = modelFunction<
+      (payload: unknown, values: unknown) => any
+    >('planUserSettingsChange');
+    const editor = buildSettingsEditor(payload);
+
+    expect(
+      planUserSettingsChange(payload, {
+        ...editor.user,
+        watcher_debounce: '1h',
+        extraction_timeout_secs: '0',
+      }),
+    ).toEqual({
+      outcome: 'invalid',
+      errors: [
+        {
+          field: 'watcher_debounce',
+          message: 'watcher_debounce must be a duration like "2s", "15s", or "1m"',
+        },
+        {
+          field: 'extraction_timeout_secs',
+          message: 'extraction_timeout_secs must be at least 1 second',
+        },
+      ],
+    });
+  });
+
+  it('reports a stale held revision as a conflict', () => {
+    const settingsRevisionConflict = modelFunction<
+      (expectedRevisionId: string, payload: unknown) => unknown
+    >('settingsRevisionConflict');
+
+    expect(settingsRevisionConflict('rev-41', payload)).toEqual({
+      expectedRevisionId: 'rev-41',
+      actualRevisionId: 'rev-42',
+    });
+    expect(settingsRevisionConflict('rev-42', payload)).toBeNull();
+  });
+});
+
+function modelFunction<T>(name: string): T {
+  const candidate = Reflect.get(settingsModelModule, name);
+  expect(candidate, `${name} must be implemented`).toBeTypeOf('function');
+  return candidate as T;
+}

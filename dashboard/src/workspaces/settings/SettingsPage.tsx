@@ -1,22 +1,39 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
+import { useMutation } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Search, X } from 'lucide-react';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { scopedUrl, useScope } from '../../data/scope/store.ts';
+import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { cn } from '../../ui/cn';
 import { Lamp, WorkspaceHeader } from '../../ui/instrument.tsx';
 import {
+  buildSettingsEditor,
   buildSettingsModel,
   countSettings,
   filterOverrides,
   filterRows,
+  planProjectSettingsChange,
+  planUserSettingsChange,
   splitPath,
   type ConfigRow,
   type ConfigSection,
   type EnvOverride,
   type OriginKind,
+  type ProjectSettingsPatch,
+  type ProjectSettingsValues,
+  type SettingsChangePlan,
   type SettingsModel,
+  type SettingsValidationError,
+  type UserSettingsPatch,
+  type UserSettingsValues,
 } from './settingsModel.ts';
+import {
+  applySettingsMutation,
+  type SettingsMutationResult,
+  type SettingsMutationScope,
+} from './settingsMutation.ts';
 
 /**
  * Settings: effective configuration, with provenance shown exactly as far as
@@ -38,18 +55,40 @@ import {
  * literal comes from `/api/settings`.
  */
 export function SettingsPage() {
+  const scope = useScope((state) => state.scope);
   const settings = useLegacy(['settings'], '/api/settings', AnyObject);
+  const readUrl = scopedUrl(scope, '/api/settings');
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <LegacyBoundary title="Settings" pending={settings.isPending} result={settings.data}>
-        {(data) => <SettingsSurface payload={data} />}
+        {(data) => (
+          <SettingsSurface
+            payload={data}
+            readUrl={readUrl}
+            projectPatchUrl={scopedUrl(scope, '/api/settings/project')}
+            userPatchUrl={scopedUrl(scope, '/api/settings/user')}
+            onApplied={() => void settings.refetch()}
+          />
+        )}
       </LegacyBoundary>
     </div>
   );
 }
 
-function SettingsSurface({ payload }: { payload: unknown }) {
+function SettingsSurface({
+  payload,
+  readUrl,
+  projectPatchUrl,
+  userPatchUrl,
+  onApplied,
+}: {
+  payload: unknown;
+  readUrl: string;
+  projectPatchUrl: string;
+  userPatchUrl: string;
+  onApplied: () => void;
+}) {
   const model = useMemo(() => buildSettingsModel(payload), [payload]);
   const [query, setQuery] = useState('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -93,7 +132,7 @@ function SettingsSurface({ payload }: { payload: unknown }) {
         // leading slash here silently falls through to the `--` fallback.
         path="settings"
         title="Settings"
-        note="effective configuration · read-only"
+        note="effective configuration · validated changes"
         actions={
           model.stamps.length > 0 ? (
             <span className="flex shrink-0 flex-wrap items-center gap-1.5">
@@ -170,6 +209,15 @@ function SettingsSurface({ payload }: { payload: unknown }) {
             </p>
           ) : (
             <>
+              {query === '' ? (
+                <SettingsEditorPanel
+                  payload={payload}
+                  readUrl={readUrl}
+                  projectPatchUrl={projectPatchUrl}
+                  userPatchUrl={userPatchUrl}
+                  onApplied={onApplied}
+                />
+              ) : null}
               {query === '' ? <OriginBand model={model} onJump={jumpTo} /> : null}
               {filtered.map(({ section, rows }) => (
                 <ConfigSectionBlock
@@ -186,6 +234,462 @@ function SettingsSurface({ payload }: { payload: unknown }) {
       </div>
     </>
   );
+}
+
+type ReadyProjectPlan = Extract<
+  SettingsChangePlan<ProjectSettingsPatch>,
+  { outcome: 'ready' }
+>;
+type ReadyUserPlan = Extract<SettingsChangePlan<UserSettingsPatch>, { outcome: 'ready' }>;
+type PendingSettingsReview =
+  | { readonly scope: 'project'; readonly plan: ReadyProjectPlan }
+  | { readonly scope: 'user'; readonly plan: ReadyUserPlan };
+
+function SettingsEditorPanel({
+  payload,
+  readUrl,
+  projectPatchUrl,
+  userPatchUrl,
+  onApplied,
+}: {
+  payload: unknown;
+  readUrl: string;
+  projectPatchUrl: string;
+  userPatchUrl: string;
+  onApplied: () => void;
+}) {
+  const editor = useMemo(() => buildSettingsEditor(payload), [payload]);
+  const [project, setProject] = useState<ProjectSettingsValues | null>(
+    editor?.project ?? null,
+  );
+  const [user, setUser] = useState<UserSettingsValues | null>(editor?.user ?? null);
+  const [review, setReview] = useState<PendingSettingsReview | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [clientErrors, setClientErrors] = useState<readonly SettingsValidationError[]>(
+    [],
+  );
+  const [notice, setNotice] = useState<{
+    readonly message: string;
+    readonly resyncRecommended: boolean;
+    readonly restartRecommended: boolean;
+  } | null>(null);
+  const mutation = useMutation({
+    mutationFn: applySettingsMutation,
+    onSuccess: (result) => {
+      if (result.outcome !== 'success') return;
+      setNotice({
+        message:
+          result.scope === 'project' ? 'Project settings saved' : 'User settings saved',
+        resyncRecommended: result.resyncRecommended,
+        restartRecommended: result.restartRecommended,
+      });
+      setReview(null);
+      setConfirmed(false);
+      onApplied();
+    },
+  });
+
+  useEffect(() => {
+    setProject(editor?.project ?? null);
+    setUser(editor?.user ?? null);
+  }, [editor]);
+
+  if (!editor || !project || !user) {
+    return (
+      <section className="border-b border-edge-subtle p-3" aria-label="Supported settings changes">
+        <p className="text-xs text-state-unsupported-schema">
+          Editable settings are unavailable because the response omitted a supported value or
+          configuration revision.
+        </p>
+      </section>
+    );
+  }
+
+  const openProjectReview = () => {
+    const plan = planProjectSettingsChange(payload, project);
+    openReview('project', plan, setReview, setClientErrors, mutation.reset);
+  };
+  const openUserReview = () => {
+    const plan = planUserSettingsChange(payload, user);
+    openReview('user', plan, setReview, setClientErrors, mutation.reset);
+  };
+  const apply = () => {
+    if (!review) return;
+    mutation.mutate({
+      scope: review.scope,
+      expectedRevisionId: review.plan.expectedRevisionId,
+      readUrl,
+      patchUrl: review.scope === 'project' ? projectPatchUrl : userPatchUrl,
+      patch: review.plan.patch,
+    });
+  };
+
+  return (
+    <section
+      className="border-b border-edge-subtle bg-surface-0 p-3"
+      aria-labelledby="settings-editor-title"
+    >
+      <div className="mb-3 flex flex-wrap items-baseline gap-2">
+        <h2 id="settings-editor-title" className="td-title">
+          Supported settings changes
+        </h2>
+        <span className="text-2xs text-text-muted">
+          validate → review → confirm against revision {editor.expectedRevisionId}
+        </span>
+      </div>
+
+      {notice ? (
+        <div
+          role="status"
+          className="mb-3 flex flex-wrap gap-2 border border-state-ready/40 bg-surface-1 px-3 py-2 text-xs text-text-secondary"
+        >
+          <strong className="font-semibold text-text-primary">{notice.message}</strong>
+          {notice.resyncRecommended ? <span>Resync recommended</span> : null}
+          {notice.restartRecommended ? <span>Restart recommended</span> : null}
+        </div>
+      ) : null}
+      <ValidationErrors errors={clientErrors} />
+
+      <div className="grid gap-3 xl:grid-cols-2">
+        <ProjectSettingsFields values={project} onChange={setProject} onReview={openProjectReview} />
+        <UserSettingsFields values={user} onChange={setUser} onReview={openUserReview} />
+      </div>
+
+      <SettingsReviewDialog
+        review={review}
+        confirmed={confirmed}
+        result={mutation.data}
+        applying={mutation.isPending}
+        onConfirmedChange={setConfirmed}
+        onOpenChange={(open) => {
+          if (!open) {
+            setReview(null);
+            setConfirmed(false);
+            mutation.reset();
+          }
+        }}
+        onApply={apply}
+      />
+    </section>
+  );
+}
+
+function openReview<T extends ProjectSettingsPatch | UserSettingsPatch>(
+  scope: SettingsMutationScope,
+  plan: SettingsChangePlan<T>,
+  setReview: (review: PendingSettingsReview | null) => void,
+  setErrors: (errors: readonly SettingsValidationError[]) => void,
+  resetMutation: () => void,
+): void {
+  resetMutation();
+  if (plan.outcome === 'invalid') {
+    setReview(null);
+    setErrors(plan.errors);
+    return;
+  }
+  if (plan.outcome === 'unchanged') {
+    setReview(null);
+    setErrors([{ field: scope, message: `No ${scope} settings have changed.` }]);
+    return;
+  }
+  setErrors([]);
+  setReview(
+    scope === 'project'
+      ? { scope, plan: plan as ReadyProjectPlan }
+      : { scope, plan: plan as ReadyUserPlan },
+  );
+}
+
+function ProjectSettingsFields({
+  values,
+  onChange,
+  onReview,
+}: {
+  values: ProjectSettingsValues;
+  onChange: (values: ProjectSettingsValues) => void;
+  onReview: () => void;
+}) {
+  return (
+    <fieldset className="min-w-0 border border-edge-subtle bg-surface-1 p-3">
+      <legend className="px-1 text-xs font-semibold text-text-primary">Project settings</legend>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <SettingsTextArea
+          label="Include globs"
+          value={values.include.join('\n')}
+          onChange={(value) => onChange({ ...values, include: globLines(value) })}
+        />
+        <SettingsTextArea
+          label="Exclude globs"
+          value={values.exclude.join('\n')}
+          onChange={(value) => onChange({ ...values, exclude: globLines(value) })}
+        />
+        <SettingsInput
+          label="Maximum file size (bytes)"
+          inputMode="numeric"
+          value={values.max_file_size}
+          onChange={(value) => onChange({ ...values, max_file_size: value })}
+        />
+        <SettingsInput
+          label="PR branch poll interval (seconds)"
+          inputMode="numeric"
+          value={values.auto_track_pr_poll_secs}
+          onChange={(value) => onChange({ ...values, auto_track_pr_poll_secs: value })}
+        />
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <SettingsCheckbox
+          label="Extract docstrings"
+          checked={values.extract_docstrings}
+          onChange={(checked) => onChange({ ...values, extract_docstrings: checked })}
+        />
+        <SettingsCheckbox
+          label="Track call sites"
+          checked={values.track_call_sites}
+          onChange={(checked) => onChange({ ...values, track_call_sites: checked })}
+        />
+        <SettingsCheckbox
+          label="Honor git ignore"
+          checked={values.git_ignore}
+          onChange={(checked) => onChange({ ...values, git_ignore: checked })}
+        />
+        <SettingsCheckbox
+          label="Record telemetry timings"
+          checked={values.telemetry_timings}
+          onChange={(checked) => onChange({ ...values, telemetry_timings: checked })}
+        />
+        <SettingsCheckbox
+          label="Auto-track pull request branches"
+          checked={values.auto_track_pr_branches}
+          onChange={(checked) => onChange({ ...values, auto_track_pr_branches: checked })}
+        />
+      </div>
+      <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
+        Review project changes
+      </button>
+    </fieldset>
+  );
+}
+
+function UserSettingsFields({
+  values,
+  onChange,
+  onReview,
+}: {
+  values: UserSettingsValues;
+  onChange: (values: UserSettingsValues) => void;
+  onReview: () => void;
+}) {
+  return (
+    <fieldset className="min-w-0 border border-edge-subtle bg-surface-1 p-3">
+      <legend className="px-1 text-xs font-semibold text-text-primary">User settings</legend>
+      <div className="grid gap-2">
+        <SettingsInput
+          label="Watcher debounce"
+          value={values.watcher_debounce}
+          onChange={(value) => onChange({ ...values, watcher_debounce: value })}
+        />
+        <SettingsInput
+          label="Extraction timeout (seconds)"
+          inputMode="numeric"
+          value={values.extraction_timeout_secs}
+          onChange={(value) => onChange({ ...values, extraction_timeout_secs: value })}
+        />
+        <SettingsCheckbox
+          label="Upload enabled"
+          checked={values.upload_enabled}
+          onChange={(checked) => onChange({ ...values, upload_enabled: checked })}
+        />
+      </div>
+      <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
+        Review user changes
+      </button>
+    </fieldset>
+  );
+}
+
+function SettingsInput({
+  label,
+  value,
+  inputMode,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  inputMode?: 'numeric';
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="grid gap-1 text-2xs text-text-secondary">
+      <span>{label}</span>
+      <input
+        value={value}
+        inputMode={inputMode}
+        onChange={(event) => onChange(event.target.value)}
+        className={settingsInputClass}
+      />
+    </label>
+  );
+}
+
+function SettingsTextArea({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="grid gap-1 text-2xs text-text-secondary">
+      <span>{label}</span>
+      <textarea
+        rows={3}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className={`${settingsInputClass} h-auto min-h-16 py-1.5 font-mono`}
+      />
+    </label>
+  );
+}
+
+function SettingsCheckbox({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex min-h-8 items-center gap-2 text-2xs text-text-secondary">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+function SettingsReviewDialog({
+  review,
+  confirmed,
+  result,
+  applying,
+  onConfirmedChange,
+  onOpenChange,
+  onApply,
+}: {
+  review: PendingSettingsReview | null;
+  confirmed: boolean;
+  result: SettingsMutationResult | undefined;
+  applying: boolean;
+  onConfirmedChange: (confirmed: boolean) => void;
+  onOpenChange: (open: boolean) => void;
+  onApply: () => void;
+}) {
+  const scope = review?.scope ?? 'project';
+  return (
+    <Dialog.Root open={review != null} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-5 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <Dialog.Title className="text-base font-semibold tracking-tight">
+                Review {scope} settings change
+              </Dialog.Title>
+              <Dialog.Description className="mt-1 text-xs text-text-muted">
+                Only the validated changed fields below will be sent. The held revision is checked
+                again immediately before apply.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close
+              aria-label="Close settings review"
+              className="rounded-[var(--radius-chip)] p-1 text-text-muted hover:bg-surface-2"
+            >
+              <X aria-hidden size={16} />
+            </Dialog.Close>
+          </div>
+          {review ? (
+            <div className="mt-4 grid gap-3">
+              <pre className="max-h-56 overflow-auto border border-edge-subtle bg-surface-0 p-3 text-2xs text-text-secondary">
+                {JSON.stringify(review.plan.patch, null, 2)}
+              </pre>
+              <p className="break-all font-mono text-2xs text-text-muted">
+                expected revision {review.plan.expectedRevisionId}
+              </p>
+              <label className="flex items-start gap-2 border border-edge-subtle p-3 text-xs text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={confirmed}
+                  onChange={(event) => onConfirmedChange(event.target.checked)}
+                />
+                <span>
+                  I confirm this change against configuration revision{' '}
+                  {review.plan.expectedRevisionId}.
+                </span>
+              </label>
+              <MutationFeedback result={result} />
+              <div className="flex justify-end gap-2">
+                <Dialog.Close className={secondarySettingsButtonClass}>Cancel</Dialog.Close>
+                <button
+                  type="button"
+                  className={settingsButtonClass}
+                  disabled={!confirmed || applying}
+                  onClick={onApply}
+                >
+                  {applying ? `Applying ${scope} settings` : `Apply ${scope} settings`}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function MutationFeedback({ result }: { result: SettingsMutationResult | undefined }) {
+  if (!result || result.outcome === 'success') return null;
+  if (result.outcome === 'conflict') {
+    return (
+      <p role="alert" className="text-xs text-state-conflicting">
+        Configuration changed since this form loaded (held {result.expectedRevisionId}, current{' '}
+        {result.actualRevisionId ?? 'unknown'}).
+      </p>
+    );
+  }
+  if (result.outcome === 'validation') {
+    return <ValidationErrors errors={result.errors} />;
+  }
+  return (
+    <p role="alert" className="text-xs text-state-error">
+      {result.detail}
+    </p>
+  );
+}
+
+function ValidationErrors({ errors }: { errors: readonly SettingsValidationError[] }) {
+  if (errors.length === 0) return null;
+  return (
+    <ul role="alert" className="mb-3 grid gap-1 text-xs text-state-error">
+      {errors.map((error, index) => (
+        <li key={`${error.field}:${index}`}>
+          <span className="font-mono">{error.field}:</span>{' '}
+          <span>{error.message}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function globLines(value: string): string[] {
+  if (value.trim() === '') return [];
+  return value.split(/\r?\n/).map((line) => line.trim());
 }
 
 /* ------------------------------------------------------------------ index --*/
@@ -652,3 +1156,10 @@ function Highlight({ text, query }: { text: string; query: string }) {
   if (cursor < text.length) parts.push(text.slice(cursor));
   return <>{parts}</>;
 }
+
+const settingsInputClass =
+  'h-8 w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 px-2 text-xs text-text-primary outline-none focus-visible:border-accent';
+const settingsButtonClass =
+  'inline-flex h-8 items-center justify-center rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-3 text-2xs font-semibold text-text-primary hover:border-accent disabled:cursor-not-allowed disabled:opacity-50';
+const secondarySettingsButtonClass =
+  'inline-flex h-8 items-center justify-center rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-3 text-2xs font-medium text-text-secondary hover:text-text-primary';
