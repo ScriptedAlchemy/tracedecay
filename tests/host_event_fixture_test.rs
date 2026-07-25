@@ -704,7 +704,29 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         "{provider} native parser must reach observation authority"
     );
     assert_external_source_contract(provider, &scope, &project_id, observations[0].observation());
-    facade.probe(provider, scope)
+    let committed = runtime
+        .external_source_receipt_for_test(scope, observations[0].commit_receipt())
+        .await
+        .unwrap()
+        .expect("sanitized host observation must reach the canonical external-source store");
+    assert_eq!(committed.projection().effects().len(), 1);
+    let outcome = facade.probe(provider, scope);
+    drop(facade);
+    drop(runtime);
+
+    let reopened =
+        HostAdmissionTestRuntimeV1::project(tmp.path().join("profile"), &project, project_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        reopened
+            .external_source_receipt_for_test(scope, observations[0].commit_receipt())
+            .await
+            .unwrap(),
+        Some(committed),
+        "external-source receipt and projection effects must survive runtime restart"
+    );
+    outcome
 }
 
 fn encode_workspace_path(path: &Path) -> String {
