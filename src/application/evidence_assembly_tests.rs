@@ -5,12 +5,13 @@ use tracedecay_application::{
     RequestContext as ProductRequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorOwnerBindingV1,
-    AnchorSourceGenerationV3, CoverageReportV1, EvidenceClass, ManifestDigest, PayloadAccessState,
-    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProjectionGenerationId,
-    RepositoryId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV3, RetrievalAnchorRecordV3Parts, RetrievalAnchorTargetV3,
-    ScopeResolutionId, SourceOccurrenceId, UserProfileId, UtcMicros, VectorWatermark, WorktreeId,
+    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorLineageRefV3, AnchorOwnerBindingV1,
+    AnchorProvenanceRelationV2, AnchorSourceGenerationV3, CoverageReportV1, EvidenceClass,
+    ManifestDigest, PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectId, ProjectionGenerationId, RepositoryId, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorId, RetrievalAnchorRecordV3, RetrievalAnchorRecordV3Parts,
+    RetrievalAnchorTargetV3, ScopeResolutionId, SourceOccurrenceId, UserProfileId, UtcMicros,
+    VectorWatermark, WorktreeId,
 };
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionReasonClassV1, AnchorDispositionStateV1,
@@ -91,7 +92,15 @@ fn runtime_anchor(owner: &EvidenceAssemblyOwnerV1) -> RetrievalAnchorRecordV3 {
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
         source_observations: vec![],
-        source_anchors: vec![],
+        source_anchors: vec![
+            AnchorLineageRefV3::new(
+                0,
+                AnchorProvenanceRelationV2::DerivedFrom,
+                RetrievalAnchorId::new("anchor.source.evidence-test").unwrap(),
+                owner.owner.clone(),
+            )
+            .unwrap(),
+        ],
         authorization: ResolutionAuthorizationV1 {
             resolved_scope_id: ScopeResolutionId::new("scope.evidence-test").unwrap(),
             privacy_domain_id: PrivacyDomainId::new("privacy.evidence-test").unwrap(),
