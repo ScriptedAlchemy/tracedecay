@@ -521,7 +521,7 @@ fn sync_config_env_overrides_bool_and_int() {
 }
 
 #[tokio::test]
-async fn discover_project_root_with_identity_resolves_global_only_store() {
+async fn discover_project_root_with_identity_does_not_open_registry_only_store() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
 
@@ -574,19 +574,19 @@ async fn discover_project_root_with_identity_resolves_global_only_store() {
         "sync discover_project_root must not see a global-only store"
     );
 
-    assert_eq!(
-        super::discover_project_root_with_identity(&project_root).await,
-        Some(project_root.clone()),
-        "identity wrapper must resolve a global-only registered store"
+    assert!(
+        super::discover_project_root_with_identity(&project_root)
+            .await
+            .is_none(),
+        "process-local discovery must leave registry-only aliases to the daemon"
     );
     let nested = project_root.join("crates/inner");
     fs::create_dir_all(&nested).unwrap();
-    assert_eq!(
+    assert!(
         super::discover_project_root_with_identity(&nested)
             .await
-            .map(|p| p.canonicalize().unwrap()),
-        Some(project_root.clone()),
-        "identity wrapper must walk up from a nested cwd to the registered root"
+            .is_none(),
+        "nested discovery must not open the global registry"
     );
 
     let bare = TempDir::new().unwrap();
@@ -600,7 +600,7 @@ async fn discover_project_root_with_identity_resolves_global_only_store() {
 }
 
 #[tokio::test]
-async fn config_path_with_identity_uses_registered_store_without_enrollment() {
+async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
     let gdb =
@@ -660,14 +660,14 @@ async fn config_path_with_identity_uses_registered_store_without_enrollment() {
 
     assert_eq!(
         super::get_config_path_with_identity(&project_root).await,
-        identity_layout.config_path
+        super::get_config_path(&project_root)
     );
     assert_eq!(
         super::load_config_with_identity(&project_root)
             .await
             .unwrap()
             .root_dir,
-        "identity-config"
+        project_root.to_string_lossy()
     );
 }
 
