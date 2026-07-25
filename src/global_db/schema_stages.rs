@@ -257,6 +257,11 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
     observation_projection::ensure_observation_projection_schema(&transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize observation projection", error))?;
+    crate::db::install_external_source_schema(
+        &transaction,
+        "initialize registered external source state",
+    )
+    .await?;
     ensure_authority_invariant_schema(&transaction).await?;
     validate_authority_schema_contract(&transaction).await?;
 

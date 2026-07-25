@@ -217,10 +217,15 @@ impl RuntimeExternalSourceStore {
         ))
         .map_err(invalid)?;
         let current = self.read_state(binding_identity.clone()).await?;
-        if let Some(existing) = current
-            .as_ref()
-            .and_then(|state| state.receipt_by_idempotency_key(&idempotency_key))
+        if let Some(state) = current.as_ref()
+            && let Some(existing) = state.receipt_by_idempotency_key(&idempotency_key)
         {
+            if state.definition() != &definition || state.binding() != &binding {
+                return Err(RuntimeExternalSourceErrorV1::Invalid(
+                    "host source replay authority differs from durable definition or binding"
+                        .to_owned(),
+                ));
+            }
             return if existing.request_digest() == &request_digest {
                 Ok(existing.clone())
             } else {

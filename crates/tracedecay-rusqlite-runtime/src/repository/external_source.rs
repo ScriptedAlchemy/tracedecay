@@ -317,7 +317,9 @@ mod tests {
         let state = match ExternalSourceExecutor
             .execute_read(
                 &transaction,
-                &ExternalSourceReadOperationV1::State { binding },
+                &ExternalSourceReadOperationV1::State {
+                    binding: binding.clone(),
+                },
             )
             .unwrap()
         {
