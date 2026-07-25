@@ -712,6 +712,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn state_transition_rejects_model_route_or_limit_drift() {
+        let current = ContextScoutControlV1 {
+            configuration_revision: [1; 32],
+            state: super::super::context_scout_v2::ContextScoutServiceStateV1::Active,
+            mode: super::super::context_scout_v2::ContextScoutRuntimeModeV1::ConfiguredModel,
+            model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
+            limits: super::super::context_scout_v2::ContextScoutLimitsV1::bounded_defaults(),
+        };
+        let paused = ContextScoutControlV1 {
+            configuration_revision: [2; 32],
+            state: super::super::context_scout_v2::ContextScoutServiceStateV1::Paused,
+            ..current
+        };
+        assert!(context_scout_state_transition_is_exact(current, paused));
+
+        let changed_model = ContextScoutControlV1 {
+            model_path: Some(ContextScoutModelBackendV1::Unsupported),
+            ..paused
+        };
+        assert!(!context_scout_state_transition_is_exact(
+            current,
+            changed_model
+        ));
+
+        let changed_limits = ContextScoutControlV1 {
+            limits: super::super::context_scout_v2::ContextScoutLimitsV1 {
+                max_candidates: paused.limits.max_candidates.saturating_add(1),
+                ..paused.limits
+            },
+            ..paused
+        };
+        assert!(!context_scout_state_transition_is_exact(
+            current,
+            changed_limits
+        ));
+    }
+
+    #[test]
     fn delayed_windows_require_their_exact_native_boundary() {
         let saved_edit = HookEventV2::SavedEdit {
             file_id: [1; 16],
