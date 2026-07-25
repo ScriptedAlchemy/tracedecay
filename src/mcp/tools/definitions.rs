@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 159;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 165;
 
 mod admin;
 mod analysis;
@@ -393,6 +393,12 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_code_type_hierarchy(),
         def_code_callers(),
         def_code_callees(),
+        def_code_facets(),
+        def_code_timeline(),
+        def_code_declaration(),
+        def_code_definition(),
+        def_code_type_definition(),
+        def_code_references(),
         def_session_lookup(),
         def_qualified_name_read(),
         def_call_chain_read(),
@@ -617,6 +623,12 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_code_type_hierarchy",
     "tracedecay_code_callers",
     "tracedecay_code_callees",
+    "tracedecay_code_facets",
+    "tracedecay_code_timeline",
+    "tracedecay_code_declaration",
+    "tracedecay_code_definition",
+    "tracedecay_code_type_definition",
+    "tracedecay_code_references",
     "tracedecay_session_lookup",
     "tracedecay_qualified_name",
     "tracedecay_call_chain",

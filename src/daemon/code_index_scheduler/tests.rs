@@ -7,10 +7,12 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_application::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
-    CodeQueryScope, CodeRelationRequest, CodeSymbolSearchRequest, Deadline, DisclosureClass,
-    ExactOccurrenceRequest, OmissionReason, PageRequest, PhraseSearchRequest, RequestContext,
-    RequestId, ResolvedScope, ResultProjection, RetrievalOrder, RetrievalPortContext,
-    RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
+    CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeQueryScope,
+    CodeRelationRequest, CodeSymbolSearchRequest, CodeTimelineRequest, Deadline, DisclosureClass,
+    ExactOccurrenceRequest, OmissionReason, PageRequest, PhraseSearchRequest, QualifiedNameRequest,
+    RequestContext, RequestId, ResolvedScope, ResultProjection, RetrievalOrder,
+    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRequest,
+    callable_code_operation,
 };
 use tracedecay_domain::{
     ActorId, AuthorizationRevision, CalibrationProfileId, CommitId, ComponentRevision,
@@ -1578,6 +1580,8 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let lexical_request = PhraseSearchRequest::new(
         query,
         vec!["callee".to_owned()],
+        Vec::new(),
+        0,
         scope.clone(),
         query_meta(),
     )
@@ -1615,7 +1619,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .to_owned();
     let graph_operation =
         callable_code_operation(CallableCodeOperationKind::Callees).expect("operation");
-    let graph_context = application_context(&graph_operation, repository, worktree);
+    let graph_context = application_context(&graph_operation, repository.clone(), worktree.clone());
     let graph_request = CodeRelationRequest {
         node_id: caller,
         maximum_depth: 2,
@@ -1643,6 +1647,181 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
+
+    let qualified_name = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("callee"))
+        .expect("callee symbol")
+        .qualified_name
+        .clone();
+    let qualified_operation =
+        callable_code_operation(CallableCodeOperationKind::QualifiedName).expect("operation");
+    let qualified_context =
+        application_context(&qualified_operation, repository.clone(), worktree.clone());
+    let qualified_request = QualifiedNameRequest {
+        qualified_name,
+        scope: graph_request.scope.clone(),
+        meta: query_meta(),
+    };
+    let qualified = registry
+        .qualified_name(
+            RetrievalPortContext {
+                request: &qualified_context,
+                operation: &qualified_operation,
+            },
+            &qualified_request,
+        )
+        .await;
+    assert_eq!(
+        qualified
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("qualified page")
+            .items
+            .len(),
+        1
+    );
+
+    let file = latest.generation.snapshot().files[0]
+        .file_occurrence_id
+        .clone();
+    let metadata_operation =
+        callable_code_operation(CallableCodeOperationKind::SourceMetadata).expect("operation");
+    let metadata_context = application_context(&metadata_operation, repository, worktree);
+    let metadata_request =
+        SourceMetadataRequest::new(vec![file], graph_request.scope.clone(), query_meta())
+            .expect("metadata request");
+    let metadata = registry
+        .source_metadata(
+            RetrievalPortContext {
+                request: &metadata_context,
+                operation: &metadata_operation,
+            },
+            &metadata_request,
+        )
+        .await;
+    let metadata_page = metadata.evidence().payload.as_ref().expect("metadata page");
+    assert_eq!(metadata_page.items[0].path, "src/lib.rs");
+    assert_eq!(metadata_page.items[0].language.as_deref(), Some("rust"));
+
+    let facets_operation =
+        callable_code_operation(CallableCodeOperationKind::Facets).expect("operation");
+    let facets_context = application_context(
+        &facets_operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree"),
+    );
+    let facets = registry
+        .facets(
+            RetrievalPortContext {
+                request: &facets_context,
+                operation: &facets_operation,
+            },
+            &CodeFacetRequest {
+                dimension: CodeFacetDimension::Kind,
+                scope: graph_request.scope.clone(),
+                meta: query_meta(),
+            },
+        )
+        .await;
+    assert!(
+        !facets
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("facet page")
+            .items
+            .is_empty()
+    );
+
+    let timeline_operation =
+        callable_code_operation(CallableCodeOperationKind::Timeline).expect("operation");
+    let timeline_context = application_context(
+        &timeline_operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree"),
+    );
+    let timeline = registry
+        .timeline(
+            RetrievalPortContext {
+                request: &timeline_context,
+                operation: &timeline_operation,
+            },
+            &CodeTimelineRequest {
+                scope: graph_request.scope.clone(),
+                meta: query_meta(),
+            },
+        )
+        .await;
+    assert_eq!(
+        timeline
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("timeline page")
+            .items
+            .len(),
+        1
+    );
+
+    let callee = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("callee"))
+        .expect("callee")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let references_operation =
+        callable_code_operation(CallableCodeOperationKind::References).expect("operation");
+    let references_context = application_context(
+        &references_operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree"),
+    );
+    let references = registry
+        .references(
+            RetrievalPortContext {
+                request: &references_context,
+                operation: &references_operation,
+            },
+            &CodeNavigationRequest {
+                node_id: callee,
+                scope: graph_request.scope.clone(),
+                meta: query_meta(),
+            },
+        )
+        .await;
+    assert!(
+        !references
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("references page")
+            .items
+            .is_empty()
+    );
 
     registry.shutdown().await;
 }

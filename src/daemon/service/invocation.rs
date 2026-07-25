@@ -187,6 +187,12 @@ pub(crate) enum DaemonInvocationOperation {
     CodeExactOccurrence,
     CodePhraseSearch,
     CodeCallees,
+    CodeFacets,
+    CodeTimeline,
+    CodeDeclaration,
+    CodeDefinition,
+    CodeTypeDefinition,
+    CodeReferences,
     Configuration,
     ContextScout,
     SemanticEvaluateAndPublish,
@@ -223,6 +229,12 @@ impl DaemonInvocationOperation {
             Self::CodeExactOccurrence => "code_exact_occurrence",
             Self::CodePhraseSearch => "code_phrase_search",
             Self::CodeCallees => "code_callees",
+            Self::CodeFacets => "code_facets",
+            Self::CodeTimeline => "code_timeline",
+            Self::CodeDeclaration => "code_declaration",
+            Self::CodeDefinition => "code_definition",
+            Self::CodeTypeDefinition => "code_type_definition",
+            Self::CodeReferences => "code_references",
             Self::Configuration => "configuration",
             Self::ContextScout => "context_scout",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
@@ -582,7 +594,13 @@ impl DaemonInvocationRequest {
             }
             crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence
             | crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch
-            | crate::application_surface::ApplicationSurfaceOperation::CodeCallees => {
+            | crate::application_surface::ApplicationSurfaceOperation::CodeCallees
+            | crate::application_surface::ApplicationSurfaceOperation::CodeFacets
+            | crate::application_surface::ApplicationSurfaceOperation::CodeTimeline
+            | crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration
+            | crate::application_surface::ApplicationSurfaceOperation::CodeDefinition
+            | crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition
+            | crate::application_surface::ApplicationSurfaceOperation::CodeReferences => {
                 unreachable!("callable code operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::GitStatus
@@ -1058,6 +1076,30 @@ impl DaemonInvocationRequest {
                 request: crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
                 ..
             } => DaemonInvocationOperation::CodeCallees,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
+                ..
+            } => DaemonInvocationOperation::CodeFacets,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
+                ..
+            } => DaemonInvocationOperation::CodeTimeline,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
+                ..
+            } => DaemonInvocationOperation::CodeDeclaration,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
+                ..
+            } => DaemonInvocationOperation::CodeDefinition,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
+                ..
+            } => DaemonInvocationOperation::CodeTypeDefinition,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::References(_),
+                ..
+            } => DaemonInvocationOperation::CodeReferences,
             DaemonInvocationPayload::Configuration { .. } => {
                 DaemonInvocationOperation::Configuration
             }
@@ -2121,6 +2163,30 @@ async fn execute_callable_code(
             crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
             crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
         ) => CallableCodeOperationKind::Callees,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+        ) => CallableCodeOperationKind::Facets,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+        ) => CallableCodeOperationKind::Timeline,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+        ) => CallableCodeOperationKind::Declaration,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+        ) => CallableCodeOperationKind::Definition,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+        ) => CallableCodeOperationKind::TypeDefinition,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::References(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
+        ) => CallableCodeOperationKind::References,
         _ => {
             return DaemonInvocationResponse::problem(
                 wire_request_id,
@@ -2186,6 +2252,54 @@ async fn execute_callable_code(
                 wire_request_id,
                 &registered.scope,
                 query.callees(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Facets(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.facets(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Timeline(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.timeline(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Declaration(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.declaration(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Definition(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.definition(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.type_definition(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::References(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.references(&context, request, observed_at).await,
             )
         }
     }
@@ -7178,6 +7292,12 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::CodeExactOccurrence
         | DaemonInvocationOperation::CodePhraseSearch
         | DaemonInvocationOperation::CodeCallees
+        | DaemonInvocationOperation::CodeFacets
+        | DaemonInvocationOperation::CodeTimeline
+        | DaemonInvocationOperation::CodeDeclaration
+        | DaemonInvocationOperation::CodeDefinition
+        | DaemonInvocationOperation::CodeTypeDefinition
+        | DaemonInvocationOperation::CodeReferences
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
@@ -7571,10 +7691,8 @@ mod tests {
                 project_id: ProjectId::new("project.configuration.foreign").expect("project"),
             },
             tracedecay_domain::configuration::ConfigurationLayerIdV1::UserProfile {
-                profile_id: tracedecay_domain::UserProfileId::new(
-                    "profile.configuration.foreign",
-                )
-                .expect("profile"),
+                profile_id: tracedecay_domain::UserProfileId::new("profile.configuration.foreign")
+                    .expect("profile"),
             },
             tracedecay_domain::configuration::ConfigurationLayerIdV1::Collection {
                 collection_id: tracedecay_domain::QueryCollectionId::new(
@@ -7611,8 +7729,8 @@ mod tests {
         };
 
         let project_id = ProjectId::new("project.configuration.mounted").expect("project");
-        let profile_id =
-            tracedecay_domain::UserProfileId::new("profile.configuration.mounted").expect("profile");
+        let profile_id = tracedecay_domain::UserProfileId::new("profile.configuration.mounted")
+            .expect("profile");
         let winning = tracedecay_domain::QueryCollectionId::new("collection.configuration.winning")
             .expect("collection");
         let overridden =
@@ -7621,8 +7739,8 @@ mod tests {
         let rejected =
             tracedecay_domain::QueryCollectionId::new("collection.configuration.rejected")
                 .expect("collection");
-        let key = tracedecay_domain::configuration::SettingKey::new("sync.auto_watch")
-            .expect("setting");
+        let key =
+            tracedecay_domain::configuration::SettingKey::new("sync.auto_watch").expect("setting");
         let revision =
             ConfigurationRevisionId::new("configuration.revision.mounted").expect("revision");
         let candidate = |collection_id, disposition| ConfigurationCandidateV1 {
@@ -7784,8 +7902,7 @@ mod tests {
             ]
         ));
         assert_ne!(
-            partial.evidence_authorities[0].evidence_id,
-            complete_evidence_id,
+            partial.evidence_authorities[0].evidence_id, complete_evidence_id,
             "native Git evidence identity must bind the captured result"
         );
     }
@@ -8327,6 +8444,11 @@ mod tests {
         let phrase = crate::application_surface::CodePhraseSearchSurfaceRequest {
             query: "daemon invocation".to_owned(),
             phrases: vec!["daemon invocation".to_owned()],
+            field_filters: vec![tracedecay_application::CodeLexicalFieldFilter {
+                field: tracedecay_application::CodeLexicalField::Path,
+                include: true,
+            }],
+            fuzzy_budget: 7,
             scope: tracedecay_application::CodeQueryScope::new(
                 tracedecay_domain::CodeGenerationId::new("generation.callable-code")
                     .expect("generation"),
@@ -8356,6 +8478,14 @@ mod tests {
             canonical.query.normalization_revision().as_str(),
             "query-normalization.daemon.v1"
         );
+        assert_eq!(
+            canonical.field_filters,
+            [tracedecay_application::CodeLexicalFieldFilter {
+                field: tracedecay_application::CodeLexicalField::Path,
+                include: true,
+            }]
+        );
+        assert_eq!(canonical.fuzzy_budget, 7);
         let request = crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(phrase);
         let invocation = DaemonInvocationRequest::callable_code(
             "request.callable-code.transport",
