@@ -231,7 +231,10 @@ fn capability(
         request_schema: schema(spec.name, "request")?,
         result_schema: schema(spec.name, "result")?,
         effect,
-        scope: ScopeRequirement::new(vec![ScopeDimension::ConfigurationLayer])?,
+        scope: ScopeRequirement::new(vec![
+            ScopeDimension::ConfigurationLayer,
+            ScopeDimension::Project,
+        ])?,
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
@@ -420,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_surface_discovers_projectless_profile_and_exact_layer_routes() {
+    fn configuration_surface_requires_mounted_project_and_exact_layer_routes() {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
 
         for capability in contribution.capabilities() {
@@ -432,8 +435,8 @@ mod tests {
                 capability.capability_id()
             );
             assert!(
-                !capability.scope().requires(ScopeDimension::Project),
-                "{} must remain discoverable for projectless profile authority",
+                capability.scope().requires(ScopeDimension::Project),
+                "{} must not advertise a nonexistent projectless profile route",
                 capability.capability_id()
             );
         }
