@@ -243,6 +243,10 @@ pub(crate) struct DashboardState {
     /// references descriptive and non-actionable.
     pub(crate) doctor_remediation_dispatcher:
         Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+    /// Active-project daemon application transport. Mutating dashboard routes
+    /// use this catalog-bound client instead of opening stores or applying
+    /// configuration inside HTTP adapters.
+    pub(crate) application_client: Option<DaemonInvocationClient>,
 }
 
 /// Test-only lifetime owner for the same registered authorities retained by a
@@ -439,6 +443,7 @@ async fn build_state_inner(
         automation_writer,
         doctor_report_reader,
         doctor_remediation_dispatcher,
+        application_client: None,
     };
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
@@ -710,7 +715,10 @@ pub(crate) fn validate_dashboard_host(host: &str) -> Result<&str> {
 /// daemon. They are not part of the selected-project dashboard gateway; PR14
 /// must add explicit selected-project and Hermes adapters before that scope
 /// can change.
-struct ActiveProjectApplicationRoutes(Router);
+struct ActiveProjectApplicationRoutes {
+    router: Router,
+    client: Option<DaemonInvocationClient>,
+}
 
 impl ActiveProjectApplicationRoutes {
     fn for_active_project(cg: &TraceDecay) -> Result<Self> {
@@ -730,20 +738,23 @@ impl ActiveProjectApplicationRoutes {
             }
         };
         let router = http_application_router(
-            client,
+            client.clone(),
             daemon_operation_event_authority(),
             active_project_id,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("could not mount application HTTP routes: {error}"),
         })?;
-        Ok(Self(router))
+        Ok(Self {
+            router,
+            client: Some(client),
+        })
     }
 }
 
 /// Builds the complete dashboard router shared by direct and daemon-managed
 /// startup. The supplied state is the active writable project authority.
-pub(crate) async fn router(cg: &TraceDecay, state: DashboardState) -> Result<Router> {
+pub(crate) async fn router(cg: &TraceDecay, mut state: DashboardState) -> Result<Router> {
     // Fact writes defer derived memory rebuilds. Invoke the canonical bounded
     // convergence policy exactly once for the active writable project before
     // serving either startup path. Selected-project states are opened later
@@ -769,7 +780,10 @@ pub(crate) async fn router(cg: &TraceDecay, state: DashboardState) -> Result<Rou
     // dashboard and skip the `/api/application` surface, mirroring the
     // best-effort derived-memory repair above.
     let application = match ActiveProjectApplicationRoutes::for_active_project(cg) {
-        Ok(application) => Some(application),
+        Ok(application) => {
+            state.application_client = application.client.clone();
+            Some(application)
+        }
         Err(error) => {
             tracing::warn!("Active-project application routes skipped: {error}");
             None
@@ -815,7 +829,7 @@ fn router_with_active_application(
         .fallback(get(assets::app_spa_fallback))
         .with_state(runtime);
     match application {
-        Some(application) => router.nest("/api/application", application.0),
+        Some(application) => router.nest("/api/application", application.router),
         None => router,
     }
 }
@@ -1036,6 +1050,30 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/code-diagnostics/refresh/{language}",
             post(code_diagnostics_api::refresh_language),
         )
+        .route(
+            "/api/plugins/code-diagnostics/settings/preview",
+            post(code_diagnostics_api::preview_settings),
+        )
+        .route(
+            "/api/plugins/code-diagnostics/settings/apply",
+            post(code_diagnostics_api::apply_settings),
+        )
+        .route(
+            "/api/plugins/code-diagnostics/refresh/preview",
+            post(code_diagnostics_api::preview_refresh),
+        )
+        .route(
+            "/api/plugins/code-diagnostics/refresh/apply",
+            post(code_diagnostics_api::apply_refresh),
+        )
+        .route(
+            "/api/plugins/code-diagnostics/operations/{operation_id}",
+            get(code_diagnostics_api::operation_status),
+        )
+        .route(
+            "/api/plugins/code-diagnostics/operations/{operation_id}/rollback",
+            post(code_diagnostics_api::rollback_settings),
+        )
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
         .route("/api/costs", get(savings_api::costs))
@@ -1052,6 +1090,22 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/settings/user",
             patch(settings_api::patch_user_settings),
+        )
+        .route(
+            "/api/settings/user/preview",
+            post(settings_api::preview_user_settings_route),
+        )
+        .route(
+            "/api/settings/user/apply",
+            post(settings_api::apply_user_settings_route),
+        )
+        .route(
+            "/api/settings/user/operations/{operation_id}",
+            get(settings_api::user_settings_operation_status),
+        )
+        .route(
+            "/api/settings/user/operations/{operation_id}/rollback",
+            post(settings_api::rollback_user_settings_route),
         )
         // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and
@@ -1469,9 +1523,10 @@ mod authority_tests {
             .expect("project init");
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
-        let application = ActiveProjectApplicationRoutes(
-            Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
-        );
+        let application = ActiveProjectApplicationRoutes {
+            router: Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
+            client: None,
+        };
         let app = router_with_active_application(state, Some(application));
 
         let active = app

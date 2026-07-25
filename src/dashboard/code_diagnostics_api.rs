@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+//! Thin HTTP adapter for canonical code-diagnostics application operations.
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -6,358 +7,272 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use tracedecay_domain::ManifestDigest;
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
-use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
-use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState, NodeSpan};
-use crate::diagnostics::lsp::settings::{IdleBackfillMode, save_settings};
+use crate::application::code_diagnostics_control::{
+    CodeDiagnosticsControl, CodeDiagnosticsOperationReceiptV1, CodeDiagnosticsRefreshPreviewV1,
+    CodeDiagnosticsRefreshTargetV1, CodeDiagnosticsSettingsPatchV1,
+    CodeDiagnosticsSettingsPreviewV1, settings_revision,
+};
+use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState};
+use crate::diagnostics::lsp::settings::IdleBackfillMode;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct SettingsPatch {
-    #[serde(default)]
-    idle_backfill: Option<IdleBackfillMode>,
-    #[serde(default)]
-    languages: BTreeMap<String, LanguageSettingsPatch>,
-    #[serde(default)]
-    custom_adapters: Option<Vec<LspAdapterDefinition>>,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SettingsApplyBodyV1 {
+    preview: CodeDiagnosticsSettingsPreviewV1,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct LanguageSettingsPatch {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_command_override_patch")]
-    command_override: CommandOverridePatch,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RefreshPreviewBodyV1 {
+    target: CodeDiagnosticsRefreshTargetV1,
 }
 
-#[derive(Debug, Clone, Default)]
-enum CommandOverridePatch {
-    #[default]
-    Missing,
-    Null,
-    Value(String),
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RefreshApplyBodyV1 {
+    preview: CodeDiagnosticsRefreshPreviewV1,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RollbackBodyV1 {
+    expected_revision: ManifestDigest,
 }
 
 pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
-    let snapshot = diagnostics_snapshot(&state).await?;
+    let application = application(&state)?;
+    let snapshot = application.snapshot().await.map_err(internal_error)?;
     maybe_spawn_idle_backfill(&state, &snapshot);
-    Ok(Json(json!(snapshot)))
+    snapshot_response(&snapshot, None)
 }
 
+/// Compatibility route: preview and apply remain separate application
+/// operations even when the legacy HTTP shape requests them in one call.
 pub(crate) async fn patch_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<SettingsPatch>(patch)
-        .map_err(|err| bad_request(&format!("invalid code diagnostics settings patch: {err}")))?;
-    let mut settings = state.code_diagnostics.read().await.snapshot().settings;
-    if let Some(mode) = patch.idle_backfill {
-        settings.idle_backfill = mode;
-    }
-    for (language, language_patch) in patch.languages {
-        let language_settings = settings.languages.entry(language).or_default();
-        if let Some(enabled) = language_patch.enabled {
-            language_settings.enabled = enabled;
-        }
-        match language_patch.command_override {
-            CommandOverridePatch::Missing => {}
-            CommandOverridePatch::Null => {
-                language_settings.command_override = None;
-            }
-            CommandOverridePatch::Value(command_override) => {
-                language_settings.command_override = Some(command_override);
-            }
-        }
-    }
-    if let Some(custom_adapters) = patch.custom_adapters {
-        settings.custom_adapters = custom_adapters;
-    }
-    save_settings(&state.dashboard_root, &settings)
+    let patch =
+        serde_json::from_value::<CodeDiagnosticsSettingsPatchV1>(patch).map_err(|error| {
+            bad_request(&format!("invalid code diagnostics settings patch: {error}"))
+        })?;
+    let application = application(&state)?;
+    let preview = application
+        .preview_settings(patch)
         .await
-        .map_err(|err| internal_error(&err))?;
-    let mut adapters = crate::diagnostics::lsp::adapters::builtin_adapters();
-    adapters.extend(settings.custom_adapters.clone());
-    let mut broker = state.code_diagnostics.write().await;
-    broker.update_adapters(adapters);
-    broker.update_settings(settings);
-    drop(broker);
-    let snapshot = diagnostics_snapshot(&state).await?;
-    Ok(Json(json!(snapshot)))
+        .map_err(operation_error)?;
+    let receipt = application
+        .apply_settings(preview)
+        .await
+        .map_err(operation_error)?;
+    let snapshot = application.snapshot().await.map_err(internal_error)?;
+    snapshot_response(&snapshot, Some(&receipt))
+}
+
+pub(crate) async fn preview_settings(
+    State(state): State<DashboardState>,
+    Json(patch): Json<Value>,
+) -> ApiResult {
+    let patch =
+        serde_json::from_value::<CodeDiagnosticsSettingsPatchV1>(patch).map_err(|error| {
+            bad_request(&format!("invalid code diagnostics settings patch: {error}"))
+        })?;
+    let preview = application(&state)?
+        .preview_settings(patch)
+        .await
+        .map_err(operation_error)?;
+    Ok(Json(json!({ "preview": preview })))
+}
+
+pub(crate) async fn apply_settings(
+    State(state): State<DashboardState>,
+    Json(body): Json<SettingsApplyBodyV1>,
+) -> ApiResult {
+    let application = application(&state)?;
+    let receipt = application
+        .apply_settings(body.preview)
+        .await
+        .map_err(operation_error)?;
+    let snapshot = application.snapshot().await.map_err(internal_error)?;
+    snapshot_response(&snapshot, Some(&receipt))
 }
 
 pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
-    let languages = refreshable_languages(&state).await?;
-    for language in languages {
-        refresh_one_reconciled(&state, &language).await?;
-    }
-    let snapshot = diagnostics_snapshot(&state).await?;
-    Ok(Json(json!(snapshot)))
+    refresh(&state, CodeDiagnosticsRefreshTargetV1::All).await
 }
 
 pub(crate) async fn refresh_language(
     State(state): State<DashboardState>,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
-    refresh_one(&state, &language).await?;
-    let snapshot = diagnostics_snapshot(&state).await?;
-    Ok(Json(json!(snapshot)))
+    refresh(&state, CodeDiagnosticsRefreshTargetV1::Language(language)).await
 }
 
-async fn refresh_one(state: &DashboardState, language: &str) -> std::result::Result<(), JsonError> {
-    reconcile_project_language_activity(state).await?;
-    refresh_one_reconciled(state, language).await
+pub(crate) async fn preview_refresh(
+    State(state): State<DashboardState>,
+    Json(body): Json<RefreshPreviewBodyV1>,
+) -> ApiResult {
+    let preview = application(&state)?
+        .preview_refresh(body.target)
+        .await
+        .map_err(operation_error)?;
+    Ok(Json(json!({ "preview": preview })))
 }
 
-async fn refresh_one_reconciled(
-    state: &DashboardState,
-    language: &str,
-) -> std::result::Result<(), JsonError> {
-    let snapshot = state.code_diagnostics.read().await.snapshot();
-    if !snapshot.settings.language_enabled(language) {
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .set_language_enabled(language, false);
-        return Ok(());
-    }
-    let Some(adapter) = state.code_diagnostics.read().await.adapter_for(language) else {
-        return Err(bad_request(&format!(
-            "no code diagnostics adapter registered for language '{language}'"
-        )));
-    };
-    let files = indexed_files(&state.mem_db)
+pub(crate) async fn apply_refresh(
+    State(state): State<DashboardState>,
+    Json(body): Json<RefreshApplyBodyV1>,
+) -> ApiResult {
+    let application = application(&state)?;
+    let receipt = application
+        .apply_refresh(body.preview)
         .await
-        .map_err(|err| internal_error(&err))?;
-    let documents = documents_for_adapter(&state.project_root, &adapter, files)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let document_count = documents.len();
-    state
-        .code_diagnostics
-        .write()
-        .await
-        .record_backfill_progress(language, document_count, document_count, 0, None);
-    if documents.is_empty() {
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .record_backfill_progress(
-                language,
-                0,
-                0,
-                0,
-                Some(crate::tracedecay::current_timestamp()),
-            );
-        return Ok(());
-    }
-    let prepared = state
-        .code_diagnostics
-        .write()
-        .await
-        .prepare_refresh(language, documents);
-    let mut progress_recorded_in_task = false;
-    let refresh_ok = match prepared {
-        Ok(Some(prepared)) => {
-            progress_recorded_in_task = true;
-            let state_for_refresh = state.clone();
-            let language_for_refresh = language.to_string();
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
-                let refresh_ok = completed.is_ok();
-                {
-                    let mut broker = state_for_refresh.code_diagnostics.write().await;
-                    let _ = broker.finish_refresh(completed);
-                    let graph_db = Arc::clone(&state_for_refresh.mem_db);
-                    broker
-                        .resolve_enclosing_nodes(move |file| {
-                            let graph_db = Arc::clone(&graph_db);
-                            async move { node_spans_for_file(&graph_db, &file).await }
-                        })
-                        .await;
-                    let snapshot = broker.snapshot();
-                    let files_with_diagnostics =
-                        files_with_diagnostics(&snapshot, &language_for_refresh);
-                    broker.record_backfill_progress(
-                        &language_for_refresh,
-                        document_count,
-                        document_count,
-                        files_with_diagnostics,
-                        refresh_ok.then(crate::tracedecay::current_timestamp),
-                    );
-                }
-                let _ = tx.send(refresh_ok);
-            });
-            rx.await.unwrap_or(false)
-        }
-        Ok(None) => true,
-        Err(_) => false,
-    };
-    if !progress_recorded_in_task {
-        let snapshot = state.code_diagnostics.read().await.snapshot();
-        let files_with_diagnostics = files_with_diagnostics(&snapshot, language);
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .record_backfill_progress(
-                language,
-                document_count,
-                document_count,
-                files_with_diagnostics,
-                refresh_ok.then(crate::tracedecay::current_timestamp),
-            );
-    }
-    Ok(())
+        .map_err(operation_error)?;
+    let snapshot = application.snapshot().await.map_err(internal_error)?;
+    snapshot_response(&snapshot, Some(&receipt))
 }
 
-fn files_with_diagnostics(snapshot: &DiagnosticsSnapshot, language: &str) -> usize {
-    snapshot
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.language == language)
-        .map(|diagnostic| diagnostic.file.as_str())
-        .collect::<BTreeSet<_>>()
-        .len()
+pub(crate) async fn operation_status(
+    State(state): State<DashboardState>,
+    AxumPath(operation_id): AxumPath<String>,
+) -> ApiResult {
+    let operation_id = ManifestDigest::new(operation_id).map_err(|error| bad_request(&error))?;
+    let receipt = application(&state)?
+        .status(&operation_id)
+        .await
+        .map_err(operation_error)?;
+    Ok(Json(json!({ "operation": receipt })))
+}
+
+pub(crate) async fn rollback_settings(
+    State(state): State<DashboardState>,
+    AxumPath(operation_id): AxumPath<String>,
+    Json(body): Json<RollbackBodyV1>,
+) -> ApiResult {
+    let operation_id = ManifestDigest::new(operation_id).map_err(|error| bad_request(&error))?;
+    let application = application(&state)?;
+    let status = application
+        .status(&operation_id)
+        .await
+        .map_err(operation_error)?;
+    let rollback = application
+        .rollback_settings(&status.receipt, body.expected_revision)
+        .await
+        .map_err(operation_error)?;
+    let snapshot = application.snapshot().await.map_err(internal_error)?;
+    snapshot_response(&snapshot, Some(&rollback))
+}
+
+async fn refresh(state: &DashboardState, target: CodeDiagnosticsRefreshTargetV1) -> ApiResult {
+    let application = application(state)?;
+    let preview = application
+        .preview_refresh(target)
+        .await
+        .map_err(operation_error)?;
+    let receipt = application
+        .apply_refresh(preview)
+        .await
+        .map_err(operation_error)?;
+    let snapshot = application.snapshot().await.map_err(internal_error)?;
+    snapshot_response(&snapshot, Some(&receipt))
+}
+
+fn application(state: &DashboardState) -> std::result::Result<CodeDiagnosticsControl, JsonError> {
+    let raw = state.project_id.as_deref().ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "detail": "project diagnostics authority is unavailable" })),
+        )
+    })?;
+    let project_id = tracedecay_domain::ProjectId::new(raw).map_err(internal_error)?;
+    Ok(CodeDiagnosticsControl::new(
+        project_id,
+        state.project_root.clone(),
+        state.dashboard_root.clone(),
+        Arc::clone(&state.mem_db),
+        Arc::clone(&state.code_diagnostics),
+    ))
+}
+
+fn snapshot_response(
+    snapshot: &DiagnosticsSnapshot,
+    receipt: Option<&CodeDiagnosticsOperationReceiptV1>,
+) -> ApiResult {
+    let mut payload = serde_json::to_value(snapshot).map_err(internal_error)?;
+    payload["settings_revision"] =
+        json!(settings_revision(&snapshot.settings).map_err(internal_error)?);
+    if let Some(receipt) = receipt {
+        payload["operation"] = json!(receipt);
+    }
+    Ok(Json(payload))
 }
 
 fn maybe_spawn_idle_backfill(state: &DashboardState, snapshot: &DiagnosticsSnapshot) {
-    if snapshot.settings.idle_backfill != IdleBackfillMode::Idle {
-        return;
-    }
-    let languages = backfill_languages(snapshot);
-    if languages.is_empty() {
-        return;
-    }
-    if state
-        .code_diagnostics_backfill_started
-        .swap(true, Ordering::AcqRel)
-    {
-        return;
-    }
-    let state = state.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(750)).await;
-        for language in languages {
-            let _ = refresh_one(&state, &language).await;
-            tokio::task::yield_now().await;
-        }
-    });
-}
-
-async fn diagnostics_snapshot(
-    state: &DashboardState,
-) -> std::result::Result<DiagnosticsSnapshot, JsonError> {
-    reconcile_project_language_activity(state).await?;
-    Ok(state.code_diagnostics.read().await.snapshot())
-}
-
-async fn refreshable_languages(
-    state: &DashboardState,
-) -> std::result::Result<Vec<String>, JsonError> {
-    let snapshot = diagnostics_snapshot(state).await?;
-    Ok(backfill_languages(&snapshot))
-}
-
-fn backfill_languages(snapshot: &DiagnosticsSnapshot) -> Vec<String> {
-    snapshot
-        .engines
-        .iter()
-        .filter(|engine| {
+    if snapshot.settings.idle_backfill != IdleBackfillMode::Idle
+        || !snapshot.engines.iter().any(|engine| {
             engine.enabled
                 && !matches!(
                     engine.state,
                     EngineState::Disabled | EngineState::Inactive | EngineState::Unavailable
                 )
         })
-        .map(|engine| engine.language.clone())
-        .collect()
+        || state
+            .code_diagnostics_backfill_started
+            .swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let Ok(application) = application(&state) else {
+            return;
+        };
+        let Ok(preview) = application
+            .preview_refresh(CodeDiagnosticsRefreshTargetV1::All)
+            .await
+        else {
+            return;
+        };
+        let _ = application.apply_refresh(preview).await;
+    });
 }
 
-async fn reconcile_project_language_activity(
-    state: &DashboardState,
-) -> std::result::Result<(), JsonError> {
-    let files = indexed_files(&state.mem_db)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let adapters = {
-        let broker = state.code_diagnostics.read().await;
-        broker
-            .snapshot()
-            .engines
-            .into_iter()
-            .filter_map(|engine| broker.adapter_for(&engine.language))
-            .collect::<Vec<_>>()
-    };
-    let active_languages = active_languages_for_files(&state.project_root, &adapters, &files);
-    state
-        .code_diagnostics
-        .write()
-        .await
-        .update_project_languages(active_languages);
-    Ok(())
-}
-
-/// Loads the indexed symbol spans for a file so a diagnostic can be attributed
-/// to its smallest enclosing node. Returns an empty vec (leaving the diagnostic
-/// unattributed) when the file isn't indexed or the query fails — the enclosing
-/// node is a best-effort annotation, never a hard dependency of a refresh.
-async fn node_spans_for_file(db: &crate::db::Database, file: &str) -> Vec<NodeSpan> {
-    db.get_nodes_by_file(file)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|node| NodeSpan {
-            start_line: node.start_line,
-            end_line: node.end_line,
-            qualified_name: node.qualified_name,
-        })
-        .collect()
-}
-
-async fn indexed_files(db: &crate::db::Database) -> crate::errors::Result<Vec<String>> {
-    let mut files = db
-        .get_all_files()
-        .await?
-        .into_iter()
-        .map(|file| file.path)
-        .collect::<Vec<_>>();
-    files.sort();
-    Ok(files)
-}
-
-fn bad_request(err: &impl ToString) -> JsonError {
+fn bad_request(error: &impl ToString) -> JsonError {
     (
         StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": err.to_string(),
-        })),
+        Json(json!({ "detail": error.to_string() })),
     )
 }
 
-fn deserialize_command_override_patch<'de, D>(
-    deserializer: D,
-) -> std::result::Result<CommandOverridePatch, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(match Option::<String>::deserialize(deserializer)? {
-        Some(value) => CommandOverridePatch::Value(value),
-        None => CommandOverridePatch::Null,
-    })
+fn operation_error(error: impl ToString) -> JsonError {
+    let detail = error.to_string();
+    let status = if detail.contains("revision conflict") || detail.contains("stale") {
+        StatusCode::CONFLICT
+    } else if detail.contains("not authorized") {
+        StatusCode::FORBIDDEN
+    } else if detail.contains("invalid")
+        || detail.contains("disabled")
+        || detail.contains("not refreshable")
+    {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(json!({ "detail": detail })))
 }
 
-fn internal_error(err: &impl ToString) -> JsonError {
+fn internal_error(error: impl ToString) -> JsonError {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
+        Json(http_detail(&error.to_string())),
     )
 }

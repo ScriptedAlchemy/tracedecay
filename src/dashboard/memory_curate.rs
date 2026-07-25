@@ -160,6 +160,7 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         automation_writer: super::direct_dashboard_automation_writer(),
         doctor_report_reader: None,
         doctor_remediation_dispatcher: None,
+        application_client: None,
     })
 }
 
@@ -202,6 +203,7 @@ fn user_state(
         automation_writer: super::direct_dashboard_automation_writer(),
         doctor_report_reader: None,
         doctor_remediation_dispatcher: None,
+        application_client: None,
     }
 }
 
