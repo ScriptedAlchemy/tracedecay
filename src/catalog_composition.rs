@@ -125,7 +125,7 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(192, 32_000_000, 18_000)?,
+            ProfileBudget::new(192, 64_000_000, 18_000)?,
             true,
         ),
         (
