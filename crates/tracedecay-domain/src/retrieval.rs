@@ -19,7 +19,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::code_intelligence::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
-use crate::research::id::{PrivacyDomainId, RetrievalAnchorId};
+use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
 use crate::research::{DomainError, canonical_sha256};
@@ -1154,6 +1154,7 @@ pub struct HydrationReceipt {
 #[serde(deny_unknown_fields)]
 pub struct SemanticRetrievalContinuationV1 {
     pub profile_id: FusionProfileId,
+    pub profile_digest: ManifestDigest,
     pub code_generation: CodeGenerationId,
     pub vector_generation: VectorGenerationIdV1,
     pub projection_key: ProjectionKeyV1,
@@ -1161,6 +1162,8 @@ pub struct SemanticRetrievalContinuationV1 {
     pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub lane_checkpoints: Vec<RetrieverContinuation>,
     pub ranking_revision: RankingRevision,
+    pub rerank: OptionalStagePublicStatus,
+    pub ordered_candidate_anchors: Vec<RetrievalAnchorId>,
     pub next_ordinal: u32,
 }
 
@@ -1181,6 +1184,19 @@ impl SemanticRetrievalContinuationV1 {
         {
             return Err(RetrievalContractError::InvalidCursorBinding {
                 field: "semantic lane checkpoint without admitted lane status",
+            });
+        }
+        let unique_anchors = self
+            .ordered_candidate_anchors
+            .iter()
+            .collect::<BTreeSet<_>>();
+        if unique_anchors.len() != self.ordered_candidate_anchors.len()
+            || usize::try_from(self.next_ordinal)
+                .ok()
+                .is_none_or(|next| next > self.ordered_candidate_anchors.len())
+        {
+            return Err(RetrievalContractError::InvalidCursorBinding {
+                field: "semantic frozen candidate order",
             });
         }
         Ok(())
