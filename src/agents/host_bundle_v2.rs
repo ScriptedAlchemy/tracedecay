@@ -350,8 +350,8 @@ pub fn cline_family_evidence(provider: ClineFamilyProviderV1) -> Option<ClineFam
 /// A documented-but-not-captured declaration remains degraded rather than
 /// being promoted to native capture evidence.
 pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNativeFixtureEvidenceV1> {
-    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::{CheckedInEvidenceMissing, NativeFixtureLimited};
+    use HostCapabilityStateV1::{Supported, Unavailable};
+    use HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing;
 
     let unavailable = Unavailable(CheckedInEvidenceMissing);
     let (provider, source_path, evidenced_event, edit, stop) = match host {
@@ -392,17 +392,23 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         ),
         HostKindV1::OpenCode => (
             "opencode",
-            "crates/tracedecay-hooks/fixtures/host_events/opencode.json",
-            "file.edited,session.idle",
-            Degraded(NativeFixtureLimited),
-            Degraded(NativeFixtureLimited),
+            "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json",
+            "file.edited,tool.execute.after,session.status,session.idle",
+            Supported,
+            Supported,
+        ),
+        HostKindV1::KimiCode => (
+            "kimi",
+            "crates/tracedecay-hooks/fixtures/host_events/kimi-code.json",
+            "PostToolUse,Stop",
+            Supported,
+            Supported,
         ),
         HostKindV1::CursorCloud
         | HostKindV1::ClineFamily
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo
-        | HostKindV1::KimiCode => return None,
+        | HostKindV1::Kilo => return None,
     };
     let bytes = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(source_path)).ok()?;
     Some(HostNativeFixtureEvidenceV1 {
@@ -423,6 +429,7 @@ pub fn native_host_edit_stop_conformance_evidence() -> Vec<HostNativeFixtureEvid
         HostKindV1::CursorDesktop,
         HostKindV1::Hermes,
         HostKindV1::Kiro,
+        HostKindV1::KimiCode,
         HostKindV1::OpenCode,
     ]
     .into_iter()
@@ -5717,6 +5724,45 @@ mod tests {
         bundle.manifest.validate_structure().unwrap();
         assert!(require_capability(HostKindV1::OpenCode, HostCapabilityV1::Lsp).is_ok());
         assert!(require_capability(HostKindV1::KimiCode, HostCapabilityV1::Hooks).is_ok());
+    }
+
+    #[test]
+    fn kimi_native_edit_and_stop_captures_back_supported_hook_capability() {
+        let evidence = stock_host_native_fixture_evidence(HostKindV1::KimiCode)
+            .expect("checked-in Kimi native captures must back capability evidence");
+        assert_eq!(
+            evidence.source_path,
+            "crates/tracedecay-hooks/fixtures/host_events/kimi-code.json"
+        );
+        assert_eq!(evidence.evidenced_event, "PostToolUse,Stop");
+        assert_eq!(evidence.edit, HostCapabilityStateV1::Supported);
+        assert_eq!(evidence.stop, HostCapabilityStateV1::Supported);
+        let expected_digest: [u8; 32] = Sha256::digest(include_bytes!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/kimi-code.json"
+        ))
+        .into();
+        assert_eq!(evidence.fixture_digest, expected_digest);
+    }
+
+    #[test]
+    fn opencode_native_capture_path_resolves_to_checked_in_evidence() {
+        let evidence = stock_host_native_fixture_evidence(HostKindV1::OpenCode)
+            .expect("checked-in OpenCode native capture must resolve");
+        assert_eq!(
+            evidence.source_path,
+            "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+        );
+        assert_eq!(
+            evidence.evidenced_event,
+            "file.edited,tool.execute.after,session.status,session.idle"
+        );
+        assert_eq!(evidence.edit, HostCapabilityStateV1::Supported);
+        assert_eq!(evidence.stop, HostCapabilityStateV1::Supported);
+        let expected_digest: [u8; 32] = Sha256::digest(include_bytes!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+        ))
+        .into();
+        assert_eq!(evidence.fixture_digest, expected_digest);
     }
 
     #[test]

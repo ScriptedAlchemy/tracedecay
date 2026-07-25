@@ -150,6 +150,7 @@ pub struct GitHubReadNetworkMetadataV1 {
     pub etag: Option<GitHubReviewEtagV1>,
     pub next_cursor: Option<GitHubReviewCursorV1>,
     pub rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
+    pub retry_at: Option<tracedecay_domain::UtcMicros>,
 }
 
 impl GitHubReadNetworkMetadataV1 {
@@ -165,7 +166,14 @@ impl GitHubReadNetworkMetadataV1 {
                 .rate_limit
                 .as_ref()
                 .is_none_or(|limit| limit.validate().is_ok())
-            && (self.status != GitHubReadNetworkStatusV1::RateLimited || self.rate_limit.is_some())
+            && match self.status {
+                GitHubReadNetworkStatusV1::RateLimited => {
+                    self.rate_limit.is_some() || self.retry_at.is_some()
+                }
+                GitHubReadNetworkStatusV1::Ok | GitHubReadNetworkStatusV1::NotModified => {
+                    self.retry_at.is_none()
+                }
+            }
     }
 }
 
@@ -1588,6 +1596,7 @@ mod tests {
                     remaining: 0,
                     reset_at: UtcMicros(100),
                 }),
+                retry_at: None,
             },
             body: Vec::new(),
         })
@@ -1788,6 +1797,7 @@ mod tests {
                         .transpose()
                         .unwrap(),
                     rate_limit: None,
+                    retry_at: None,
                 },
                 body: Vec::new(),
             })
@@ -1871,6 +1881,7 @@ mod tests {
                         etag: None,
                         next_cursor: None,
                         rate_limit: None,
+                        retry_at: None,
                     },
                     body: Vec::new(),
                 }),
