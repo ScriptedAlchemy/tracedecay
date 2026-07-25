@@ -285,6 +285,7 @@ pub(crate) struct ManagedTestRunResult {
 pub(crate) struct ManagedTestRunSnapshot {
     pub(crate) operation_id: OperationId,
     pub(crate) generation: u64,
+    pub(crate) source_revision: u64,
     pub(crate) head_commit_id: Option<CommitId>,
     pub(crate) code_generation_id: Option<CodeGenerationId>,
     pub(crate) document_content_digests: BTreeMap<String, ContentDigest>,
@@ -359,56 +360,83 @@ impl CanonicalManagedTestRunReader {
                 );
             }
         };
-        let Some(current_head) = current.head_commit_id.as_ref() else {
-            return ManagedTestRunReadOutcome::Unavailable(
-                ManagedTestRunUnavailableReason::CurrentHeadUnbound,
-            );
-        };
-        let Some(current_generation) = current.code_generation_id.as_ref() else {
-            return ManagedTestRunReadOutcome::Unavailable(
-                ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
-            );
-        };
-        let Some(retained_head) = snapshot.head_commit_id.as_ref() else {
-            return ManagedTestRunReadOutcome::Unavailable(
-                ManagedTestRunUnavailableReason::RetainedHeadUnbound,
-            );
-        };
-        let Some(retained_generation) = snapshot.code_generation_id.as_ref() else {
-            return ManagedTestRunReadOutcome::Unavailable(
-                ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
-            );
-        };
-        if retained_head != current_head || retained_generation != current_generation {
-            return ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity);
-        }
-        match (
-            current.document_uri.as_ref(),
-            current.document_content_digest.as_ref(),
-        ) {
-            (None, None) => {}
-            (Some(document_uri), Some(current_digest)) => {
-                let Some(retained_digest) =
-                    snapshot.document_content_digests.get(document_uri.as_str())
-                else {
-                    return ManagedTestRunReadOutcome::Unavailable(
-                        ManagedTestRunUnavailableReason::RetainedDocumentUnbound,
-                    );
-                };
-                if retained_digest != current_digest {
-                    return ManagedTestRunReadOutcome::Stale(
-                        ManagedTestRunStaleReason::DocumentContent,
-                    );
-                }
+        current_managed_test_run(snapshot, current)
+    }
+
+    pub(crate) fn try_latest_current(
+        &self,
+        current: &ManagedTestRunCurrentScope,
+    ) -> Option<ManagedTestRunReadOutcome> {
+        let snapshot = match self.events.try_latest_managed_test_run(&current.root_uri)? {
+            Ok(snapshot) => snapshot,
+            Err(OperationEventError::FrontierExpired) => {
+                return Some(ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::FrontierExpired,
+                ));
             }
-            _ => {
+            Err(_) => {
+                return Some(ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::AuthorityFailure,
+                ));
+            }
+        };
+        Some(current_managed_test_run(snapshot, current))
+    }
+}
+
+fn current_managed_test_run(
+    snapshot: ManagedTestRunSnapshot,
+    current: &ManagedTestRunCurrentScope,
+) -> ManagedTestRunReadOutcome {
+    let Some(current_head) = current.head_commit_id.as_ref() else {
+        return ManagedTestRunReadOutcome::Unavailable(
+            ManagedTestRunUnavailableReason::CurrentHeadUnbound,
+        );
+    };
+    let Some(current_generation) = current.code_generation_id.as_ref() else {
+        return ManagedTestRunReadOutcome::Unavailable(
+            ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
+        );
+    };
+    let Some(retained_head) = snapshot.head_commit_id.as_ref() else {
+        return ManagedTestRunReadOutcome::Unavailable(
+            ManagedTestRunUnavailableReason::RetainedHeadUnbound,
+        );
+    };
+    let Some(retained_generation) = snapshot.code_generation_id.as_ref() else {
+        return ManagedTestRunReadOutcome::Unavailable(
+            ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
+        );
+    };
+    if retained_head != current_head || retained_generation != current_generation {
+        return ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity);
+    }
+    match (
+        current.document_uri.as_ref(),
+        current.document_content_digest.as_ref(),
+    ) {
+        (None, None) => {}
+        (Some(document_uri), Some(current_digest)) => {
+            let Some(retained_digest) =
+                snapshot.document_content_digests.get(document_uri.as_str())
+            else {
                 return ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::CurrentDocumentUnbound,
+                    ManagedTestRunUnavailableReason::RetainedDocumentUnbound,
+                );
+            };
+            if retained_digest != current_digest {
+                return ManagedTestRunReadOutcome::Stale(
+                    ManagedTestRunStaleReason::DocumentContent,
                 );
             }
         }
-        ManagedTestRunReadOutcome::Current(snapshot)
+        _ => {
+            return ManagedTestRunReadOutcome::Unavailable(
+                ManagedTestRunUnavailableReason::CurrentDocumentUnbound,
+            );
+        }
     }
+    ManagedTestRunReadOutcome::Current(snapshot)
 }
 
 #[derive(Clone)]
@@ -784,85 +812,15 @@ impl OperationEventAuthority {
         root_uri: &str,
     ) -> Result<ManagedTestRunSnapshot, OperationEventError> {
         let state = self.inner.state.lock().await;
-        let record = state
-            .insertion_order
-            .iter()
-            .rev()
-            .filter_map(|operation_id| state.operations.get(operation_id))
-            .find(|record| {
-                record.binding.operation == OperationKind::TestRun
-                    && matches!(
-                        &record.binding.authorization,
-                        OperationAuthorization::ProjectRoot {
-                            root_uri: retained,
-                            ..
-                        }
-                            if retained.trim_end_matches('/') == root_uri.trim_end_matches('/')
-                    )
-            })
-            .ok_or(OperationEventError::FrontierExpired)?;
-        let results = record
-            .history
-            .iter()
-            .filter_map(|event| match &event.kind {
-                StreamEventKind::Item(OperationEventItem::TestRunResult { test, passed }) => {
-                    Some(ManagedTestRunResult {
-                        test: test.clone(),
-                        passed: *passed,
-                    })
-                }
-                _ => None,
-            })
-            .collect();
-        let (completed, total) = record
-            .history
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                StreamEventKind::Progress { completed, total } => Some((*completed, *total)),
-                _ => None,
-            })
-            .unwrap_or((0, None));
-        let termination = record
-            .terminal
-            .as_ref()
-            .and_then(|event| match &event.kind {
-                StreamEventKind::Terminal(terminal) => Some(terminal.termination),
-                _ => None,
-            });
-        Ok(ManagedTestRunSnapshot {
-            operation_id: record.binding.operation_id.clone(),
-            generation: record.generation,
-            head_commit_id: match &record.binding.authorization {
-                OperationAuthorization::ProjectRoot { head_commit_id, .. } => {
-                    head_commit_id.clone()
-                }
-                OperationAuthorization::Request { .. } => None,
-            },
-            code_generation_id: match &record.binding.authorization {
-                OperationAuthorization::ProjectRoot {
-                    code_generation_id, ..
-                } => code_generation_id.clone(),
-                OperationAuthorization::Request { .. } => None,
-            },
-            document_content_digests: match &record.binding.authorization {
-                OperationAuthorization::ProjectRoot {
-                    document_content_digests,
-                    ..
-                } => document_content_digests.clone(),
-                OperationAuthorization::Request { .. } => BTreeMap::new(),
-            },
-            deadline: match &record.binding.authorization {
-                OperationAuthorization::ProjectRoot { deadline, .. } => deadline.clone(),
-                OperationAuthorization::Request { .. } => {
-                    return Err(OperationEventError::InvalidTestRunEvent);
-                }
-            },
-            results,
-            completed,
-            total,
-            termination,
-        })
+        managed_test_run_snapshot(&state, root_uri)
+    }
+
+    pub(crate) fn try_latest_managed_test_run(
+        &self,
+        root_uri: &str,
+    ) -> Option<Result<ManagedTestRunSnapshot, OperationEventError>> {
+        let state = self.inner.state.try_lock().ok()?;
+        Some(managed_test_run_snapshot(&state, root_uri))
     }
 
     /// Requests cancellation for one exact trusted project-local test run.
@@ -1129,6 +1087,89 @@ impl OperationEventAuthority {
         }
         Ok(())
     }
+}
+
+fn managed_test_run_snapshot(
+    state: &AuthorityState,
+    root_uri: &str,
+) -> Result<ManagedTestRunSnapshot, OperationEventError> {
+    let record = state
+        .insertion_order
+        .iter()
+        .rev()
+        .filter_map(|operation_id| state.operations.get(operation_id))
+        .find(|record| {
+            record.binding.operation == OperationKind::TestRun
+                && matches!(
+                    &record.binding.authorization,
+                    OperationAuthorization::ProjectRoot {
+                        root_uri: retained,
+                        ..
+                    } if retained.trim_end_matches('/') == root_uri.trim_end_matches('/')
+                )
+        })
+        .ok_or(OperationEventError::FrontierExpired)?;
+    let results = record
+        .history
+        .iter()
+        .filter_map(|event| match &event.kind {
+            StreamEventKind::Item(OperationEventItem::TestRunResult { test, passed }) => {
+                Some(ManagedTestRunResult {
+                    test: test.clone(),
+                    passed: *passed,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    let (completed, total) = record
+        .history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            StreamEventKind::Progress { completed, total } => Some((*completed, *total)),
+            _ => None,
+        })
+        .unwrap_or((0, None));
+    let termination = record
+        .terminal
+        .as_ref()
+        .and_then(|event| match &event.kind {
+            StreamEventKind::Terminal(terminal) => Some(terminal.termination),
+            _ => None,
+        });
+    Ok(ManagedTestRunSnapshot {
+        operation_id: record.binding.operation_id.clone(),
+        generation: record.generation,
+        source_revision: record.next_sequence,
+        head_commit_id: match &record.binding.authorization {
+            OperationAuthorization::ProjectRoot { head_commit_id, .. } => head_commit_id.clone(),
+            OperationAuthorization::Request { .. } => None,
+        },
+        code_generation_id: match &record.binding.authorization {
+            OperationAuthorization::ProjectRoot {
+                code_generation_id, ..
+            } => code_generation_id.clone(),
+            OperationAuthorization::Request { .. } => None,
+        },
+        document_content_digests: match &record.binding.authorization {
+            OperationAuthorization::ProjectRoot {
+                document_content_digests,
+                ..
+            } => document_content_digests.clone(),
+            OperationAuthorization::Request { .. } => BTreeMap::new(),
+        },
+        deadline: match &record.binding.authorization {
+            OperationAuthorization::ProjectRoot { deadline, .. } => deadline.clone(),
+            OperationAuthorization::Request { .. } => {
+                return Err(OperationEventError::InvalidTestRunEvent);
+            }
+        },
+        results,
+        completed,
+        total,
+        termination,
+    })
 }
 
 #[derive(Clone)]
