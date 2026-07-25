@@ -355,6 +355,8 @@ pub struct McpServer {
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     dashboard_doctor_remediation_dispatcher:
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    dashboard_code_index_freshness_reader:
+        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
@@ -685,6 +687,7 @@ impl McpServer {
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             dashboard_doctor_remediation_dispatcher,
+            dashboard_code_index_freshness_reader,
             diagnostics_lsp,
             hook_branch_writer,
             background_refresh_writer,
@@ -869,6 +872,7 @@ impl McpServer {
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             dashboard_doctor_remediation_dispatcher,
+            dashboard_code_index_freshness_reader,
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,

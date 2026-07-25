@@ -35,7 +35,7 @@ pub(crate) use automation_run_service::{
 mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
-mod code_index_freshness_api;
+pub(crate) mod code_index_freshness_api;
 mod doctor_findings_api;
 pub(crate) mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
@@ -210,6 +210,9 @@ pub(crate) struct DashboardState {
     /// Display path of the global accounting DB.
     pub(crate) savings_db_path: String,
     pub(crate) project_root: PathBuf,
+    /// Live read port over the daemon-owned code-index scheduler registry.
+    pub(crate) code_index_freshness_reader:
+        Option<code_index_freshness_api::CodeIndexFreshnessReader>,
     /// Storage mode resolved for the active project store.
     pub(crate) storage_mode: String,
     /// Resolved active project store root.
@@ -395,6 +398,7 @@ async fn build_state_inner(
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+    code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -429,6 +433,7 @@ async fn build_state_inner(
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
+        code_index_freshness_reader,
         storage_mode,
         store_root,
         config_path,
@@ -467,6 +472,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         direct_dashboard_automation_writer(),
         None,
         None,
+        None,
     )
     .await
 }
@@ -480,6 +486,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+    code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
 ) -> Result<DashboardState> {
     build_state_inner(
         cg.as_ref(),
@@ -492,6 +499,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
         automation_writer,
         doctor_report_reader,
         doctor_remediation_dispatcher,
+        code_index_freshness_reader,
     )
     .await
 }
@@ -517,6 +525,7 @@ pub(crate) async fn build_selected_project_state(
         // daemon owner for that project's identity.
         None,
         None,
+        active.code_index_freshness_reader.clone(),
     )
     .await
 }
@@ -649,6 +658,7 @@ where
         options.warm_token_counts,
         None,
         direct_dashboard_automation_writer(),
+        None,
         None,
         None,
     )
@@ -1400,6 +1410,7 @@ mod authority_tests {
             direct_dashboard_automation_writer(),
             Some(Arc::clone(&doctor_reader)),
             Some(doctor_dispatcher),
+            None,
         )
         .await
         .expect("dashboard state");

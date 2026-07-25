@@ -57,6 +57,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) dashboard_doctor_remediation_dispatcher:
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    pub(crate) dashboard_code_index_freshness_reader:
+        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub(crate) hook_branch_writer: HookBranchWriter,
@@ -137,6 +139,7 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
+            dashboard_code_index_freshness_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
@@ -207,6 +210,7 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
+            dashboard_code_index_freshness_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
@@ -283,6 +287,14 @@ impl McpServerConstructionContext {
         dispatcher: crate::dashboard::DoctorRemediationDispatcherV1,
     ) -> Self {
         self.dashboard_doctor_remediation_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub(crate) fn with_dashboard_code_index_freshness_reader(
+        mut self,
+        reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+    ) -> Self {
+        self.dashboard_code_index_freshness_reader = Some(reader);
         self
     }
 
