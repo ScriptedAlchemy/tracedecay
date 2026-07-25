@@ -282,7 +282,8 @@ matrices, and compilation-only conformance are not retained as release gates.
   work, apply edits, invoke arbitrary methods, or create local fallback
   authority.
 - Linux and Windows package-install and documentation examples pass for all
-  three languages, followed by one aggregate repository gate.
+  three languages, followed by the ordinary aggregate repository checks rather
+  than a separate acceptance gate.
 
 ## Not in PR18
 

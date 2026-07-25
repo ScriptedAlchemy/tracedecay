@@ -313,9 +313,9 @@ material conflict/revocation transitions bypass debounce; deterministic
 overflow and restart preserve every visible transition and per-root
 watermark/coverage; and an open/half-open Plan 37 circuit breaker cannot reveal
 or add a root, reuse stale stack authorization, or block truthful non-preflight
-delivery. The relevant
-all-feature aggregate gate remains the final PR15 gate; PR15 adds no benchmark
-harness or placeholder baseline.
+delivery. The final PR15 check is the relevant ordinary all-feature repository
+test run, not a separate acceptance gate; PR15 adds no benchmark harness or
+placeholder baseline.
 
 ## Not in PR15
 

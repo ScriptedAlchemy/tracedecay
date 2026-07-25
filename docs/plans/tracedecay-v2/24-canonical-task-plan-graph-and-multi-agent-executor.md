@@ -20,6 +20,11 @@ DAG, timeline, causal, critical-path, workload, executor/model,
 repository/delivery, evidence, and history views are projections over the same
 versioned graph, not separate stores or authorities.
 
+PR14 does not own or deliver this graph, Kanban, or a Work workspace. Its
+dashboard scope is exactly the twelve pre-Work workspaces. PR17 delivers Work
+and these projections over Plan 24 state; session-derived tasks, an independent
+Kanban database, or a dashboard-owned task authority are rejected substitutes.
+
 Roadmap Markdown, `NEXT.md`, PR sequences, contributor checklists, and
 completion ledgers are documentation and Git evidence only. PR17 never parses,
 imports, schedules, or executes them. Product work enters through explicit
@@ -357,11 +362,12 @@ target movement, exact ref CAS, safe fast-forward/merge/cherry-pick where
 authorized, partial or unknown external effects, and recovery without replaying
 ambiguity or moving a ref backward.
 
-The aggregate gate proves one graph authority and one Plan 32 runtime authority,
-no provider-local defaults, no hidden model choice, no auto-apply, no duplicate
-effect, and no parser or executor for these roadmap files. Compact focused
-fixtures may cover the named behaviors; PR17 does not require a giant
-declarative corpus or one gate per declaration.
+The direct journey tests plus normal aggregate repository checks prove one
+graph authority and one Plan 32 runtime authority, no provider-local defaults,
+no hidden model choice, no auto-apply, no duplicate effect, and no parser or
+executor for these roadmap files. Compact focused fixtures may cover the named
+behaviors; PR17 does not require a giant declarative corpus or a separate
+acceptance gate per declaration.
 
 ## Not in PR17
 

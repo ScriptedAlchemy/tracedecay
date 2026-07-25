@@ -152,9 +152,10 @@ nothing until separately accepted.
 Focused failures cover stale evidence or graph versions, revoked or narrowed
 authority, scope denial, missing provider capability, invalid
 calibration, deterministic fallback, human override, cancellation, unknown
-outcome, self-grading attempts, and idempotent replay. The aggregate gate also
-proves that policy performs no I/O or runtime/graph/Git effect and that no
-provider-local default or hidden model selection exists.
+outcome, self-grading attempts, and idempotent replay. Those direct tests plus
+ordinary aggregate repository checks also prove that policy performs no I/O or
+runtime/graph/Git effect and that no provider-local default or hidden model
+selection exists; no separate acceptance gate is created.
 
 A direct local/live-correlation regression supplies distinct local
 code/session and live Git watermarks and proves both are returned unchanged
