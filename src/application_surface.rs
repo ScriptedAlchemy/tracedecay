@@ -2982,6 +2982,11 @@ fn application_operation_for_http(
     operation: HttpApplicationOperation,
 ) -> ApplicationSurfaceOperation {
     match operation {
+        HttpApplicationOperation::GitStatus => ApplicationSurfaceOperation::GitStatus,
+        HttpApplicationOperation::GitDiff => ApplicationSurfaceOperation::GitDiff,
+        HttpApplicationOperation::GitHistory => ApplicationSurfaceOperation::GitHistory,
+        HttpApplicationOperation::GitBlame => ApplicationSurfaceOperation::GitBlame,
+        HttpApplicationOperation::GitHunks => ApplicationSurfaceOperation::GitHunks,
         HttpApplicationOperation::GitPreview => ApplicationSurfaceOperation::GitPreview,
         HttpApplicationOperation::GitApply => ApplicationSurfaceOperation::GitApply,
         HttpApplicationOperation::FeedbackDiagnostics => {

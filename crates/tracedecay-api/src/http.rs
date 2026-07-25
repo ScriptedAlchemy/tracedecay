@@ -36,6 +36,11 @@ const fn default_http_page_size() -> u32 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOperation {
+    GitStatus,
+    GitDiff,
+    GitHistory,
+    GitBlame,
+    GitHunks,
     GitPreview,
     GitApply,
     FeedbackDiagnostics,
@@ -105,6 +110,11 @@ pub enum HttpApplicationOwnerKind {
 impl HttpApplicationOperation {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitHistory => "git_history",
+            Self::GitBlame => "git_blame",
+            Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
@@ -163,7 +173,13 @@ impl HttpApplicationOperation {
 
     pub const fn owner_kind(self) -> HttpApplicationOwnerKind {
         match self {
-            Self::GitPreview | Self::GitApply => HttpApplicationOwnerKind::Git,
+            Self::GitStatus
+            | Self::GitDiff
+            | Self::GitHistory
+            | Self::GitBlame
+            | Self::GitHunks
+            | Self::GitPreview
+            | Self::GitApply => HttpApplicationOwnerKind::Git,
             Self::FeedbackDiagnostics
             | Self::FeedbackGet
             | Self::FeedbackExpand
@@ -405,6 +421,7 @@ where
     Router::new()
         .route("/git/preview", post(git_preview::<O>))
         .route("/git/apply", post(git_apply::<O>))
+        .route("/git/{operation}", post(git_read::<O>))
         .route("/feedback/diagnostics", post(feedback_diagnostics::<O>))
         .route("/feedback/get", post(feedback_get::<O>))
         .route("/feedback/expand", post(feedback_expand::<O>))
@@ -424,6 +441,37 @@ where
         )
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
+}
+
+fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    match operation {
+        "status" => Some(HttpApplicationOperation::GitStatus),
+        "diff" => Some(HttpApplicationOperation::GitDiff),
+        "history" => Some(HttpApplicationOperation::GitHistory),
+        "blame" => Some(HttpApplicationOperation::GitBlame),
+        "hunks" => Some(HttpApplicationOperation::GitHunks),
+        _ => None,
+    }
+}
+
+async fn git_read<O>(
+    Path(operation): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    let Some(operation) = parse_git_read_operation(&operation) else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+    };
+    invoke_route(operation, state, request_id, cancellation, page, body).await
 }
 
 async fn git_preview<O>(
@@ -838,7 +886,7 @@ mod tests {
     use super::{
         DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
         parse_callable_code_operation, parse_configuration_operation,
-        parse_context_scout_operation,
+        parse_context_scout_operation, parse_git_read_operation,
     };
 
     #[test]
@@ -847,6 +895,24 @@ mod tests {
             .expect("empty HTTP query uses adapter defaults");
         assert_eq!(query.page_size, DEFAULT_HTTP_PAGE_SIZE);
         assert!(query.cursor.is_none());
+    }
+
+    #[test]
+    fn git_read_operation_parser_is_exact_and_read_only() {
+        for (route, operation) in [
+            ("status", HttpApplicationOperation::GitStatus),
+            ("diff", HttpApplicationOperation::GitDiff),
+            ("history", HttpApplicationOperation::GitHistory),
+            ("blame", HttpApplicationOperation::GitBlame),
+            ("hunks", HttpApplicationOperation::GitHunks),
+        ] {
+            assert_eq!(parse_git_read_operation(route), Some(operation));
+            assert_eq!(operation.owner_kind(), HttpApplicationOwnerKind::Git);
+            assert_eq!(operation.as_str(), format!("git_{route}"));
+        }
+        for rejected in ["", "preview", "apply", "git_status", "status/"] {
+            assert_eq!(parse_git_read_operation(rejected), None);
+        }
     }
 
     #[test]
