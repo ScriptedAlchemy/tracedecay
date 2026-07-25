@@ -326,12 +326,7 @@ pub fn normalize_application_tool_args(
         .unwrap_or("workspace")
     {
         "workspace" => serde_json::json!("workspace"),
-        "package" => serde_json::json!({
-            "package": args
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
-        }),
+        "package" => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         "file" => serde_json::json!({
             "file": args
                 .get("path")
@@ -342,8 +337,11 @@ pub fn normalize_application_tool_args(
     };
     Ok(serde_json::json!({
         "scope": scope,
-        "maximum_diagnostics": 1000,
-        "cursor": null,
+        "maximum_diagnostics": args
+            .get("maximum_diagnostics")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(1000)),
+        "cursor": args.get("cursor").cloned().unwrap_or(Value::Null),
     }))
 }
 
@@ -3144,7 +3142,8 @@ async fn invoke_http_application_request(
     let binding_id = binding.binding_id;
     let result_contract = ResultContractRef::from_schema(&binding.result_schema);
     let request_id = request.request_id;
-    let application_request = match parse_application_surface_request(operation, request.body) {
+    let body = apply_http_page_to_surface_body(operation, request.body, &request.page);
+    let application_request = match parse_application_surface_request(operation, body) {
         Ok(request) => request,
         Err(error) => {
             observe_surface_argument_rejection(
@@ -3211,6 +3210,29 @@ async fn invoke_http_application_request(
             Err(http_adapter_problem(result_contract, request_id, error)),
         ),
     }
+}
+
+fn apply_http_page_to_surface_body(
+    operation: ApplicationSurfaceOperation,
+    mut body: Value,
+    page: &PageRequest,
+) -> Value {
+    if operation != ApplicationSurfaceOperation::DiagnosticsRead {
+        return body;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "maximum_diagnostics".to_owned(),
+            Value::from(page.page_size),
+        );
+        object.insert(
+            "cursor".to_owned(),
+            page.cursor
+                .as_ref()
+                .map_or(Value::Null, |cursor| Value::from(cursor.as_str())),
+        );
+    }
+    body
 }
 
 fn application_operation_for_http(
