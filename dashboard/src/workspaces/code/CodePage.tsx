@@ -6,7 +6,7 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
@@ -118,6 +118,18 @@ export function CodePage() {
           </form>
           <LegacyBoundary title="Graph" pending={overview.isPending} result={overview.data}>
             {(data) => {
+              if (
+                data.totals.nodes === 0 ||
+                data.totals.edges === 0 ||
+                data.totals.files === 0
+              ) {
+                return (
+                  <CenteredState
+                    title="Graph totals are unverified — the legacy response cannot distinguish zero data from a query failure"
+                    kind="partial"
+                  />
+                );
+              }
               const kinds = (data.nodes_by_kind ?? [])
                 .slice(0, 12)
                 .map((k) => ({ label: k.kind, value: k.count, hint: 'nodes' }));
@@ -179,105 +191,116 @@ export function CodePage() {
             }}
           />
         ) : (
-        <div className="flex h-full flex-col">
-          <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
-            <LegacyBoundary
-              title="Code graph"
-              pending={subgraph.isPending}
-              result={subgraph.data}
-            >
-              {(payload) => (
-                <>
-                  <GraphCanvas
-                    nodes={canvasNodes}
-                    edges={canvasEdges}
-                    selectedId={selected?.id ?? null}
-                    onSelect={selectFromCanvas}
-                    height={300}
-                    canvasClassName="md:min-h-[400px]"
-                    activation={activationRef.current}
-                    encoding={{
-                      body: 'symbol',
-                      size: 'connectedness',
-                      hue: 'symbol kind',
-                      signal: 'search or click activation',
-                      relation: 'relation; activation thickens',
-                    }}
-                  />
-                  {/* Eighty nodes out of a hundred and eighteen thousand is not a
-                    * reading until the rule that picked them is stated: "the
-                    * busiest connected region" and "one symbol's neighbours" are
-                    * different claims about identically-shaped pictures. Both
-                    * branches are read off the endpoint's own `mode`. */}
-                  <SubgraphCaption
-                    payload={payload}
-                    totalNodes={
-                      overview.data?.outcome === 'ok'
-                        ? overview.data.data.totals.nodes
-                        : null
-                    }
-                    seedLabel={selected ? displayName(selected) : null}
-                  />
-                </>
-              )}
-            </LegacyBoundary>
-          </div>
-          <div className="min-h-0 flex-1 overflow-auto">
-        {submitted === '' ? (
-          <TopConnectedList
-            overviewPending={overview.isPending}
-            overviewResult={overview.data}
-            onSelect={(node) => {
-              // A hub card is the entry to TRACE: selecting the symbol and
-              // flooding its topography are one gesture, because "touch a
-              // symbol = TRACE floods" is the navigation model, not a
-              // secondary action hidden behind a second click.
-              setSelected(node);
-              setTraced(node);
-            }}
-            selected={selected}
-          />
-        ) : (
-          <LegacyBoundary title="Symbols" pending={search.isPending} result={search.data}>
-            {(data) => {
-              const rows = data.results ?? [];
-              if (rows.length === 0)
-                return (
-                  <p className="p-6 text-center text-sm text-text-muted">
-                    no symbols matched “{submitted}”
-                  </p>
-                );
-              const capped = data.total != null && data.total > rows.length;
-              const degreeCeiling = rows.reduce(
-                (max, node) => Math.max(max, node.degree ?? 0),
-                0,
-              );
-              return (
-                <VirtualList
-                  items={rows}
-                  getKey={(node) => node.id}
-                  header={
-                    <p className="td-legend border-b border-edge-subtle px-3 py-2">
-                      {capped
-                        ? `${rows.length} of ${data.total} matches`
-                        : `${data.total ?? rows.length} matches`}
-                    </p>
+          <div className="flex h-full flex-col">
+            <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
+              <LegacyBoundary
+                title="Code graph"
+                pending={subgraph.isPending}
+                result={subgraph.data}
+              >
+                {(payload) => {
+                  if (payload.nodes.length === 0) {
+                    return (
+                      <CenteredState
+                        title="Graph slice is unverified — the legacy response cannot distinguish an empty slice from query failure"
+                        kind="partial"
+                      />
+                    );
                   }
-                  renderItem={(node) => (
-                    <SymbolRow
-                      node={node}
-                      degreeCeiling={degreeCeiling}
-                      selected={selected?.id === node.id}
-                      onSelect={() => setSelected(node)}
-                    />
-                  )}
+                  return (
+                    <>
+                      <GraphCanvas
+                        nodes={canvasNodes}
+                        edges={canvasEdges}
+                        selectedId={selected?.id ?? null}
+                        onSelect={selectFromCanvas}
+                        height={300}
+                        canvasClassName="md:min-h-[400px]"
+                        activation={activationRef.current}
+                        encoding={{
+                          body: 'symbol',
+                          size: 'connectedness',
+                          hue: 'symbol kind',
+                          signal: 'search or click activation',
+                          relation: 'relation; activation thickens',
+                        }}
+                      />
+                      {/* Eighty nodes out of a hundred and eighteen thousand is not a
+                        * reading until the rule that picked them is stated: "the
+                        * busiest connected region" and "one symbol's neighbours" are
+                        * different claims about identically-shaped pictures. Both
+                        * branches are read off the endpoint's own `mode`. */}
+                      <SubgraphCaption
+                        payload={payload}
+                        totalNodes={
+                          overview.data?.outcome === 'ok'
+                            ? overview.data.data.totals.nodes
+                            : null
+                        }
+                        seedLabel={selected ? displayName(selected) : null}
+                      />
+                    </>
+                  );
+                }}
+              </LegacyBoundary>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto">
+              {submitted === '' ? (
+                <TopConnectedList
+                  overviewPending={overview.isPending}
+                  overviewResult={overview.data}
+                  onSelect={(node) => {
+                    // A hub card is the entry to TRACE: selecting the symbol and
+                    // flooding its topography are one gesture, because "touch a
+                    // symbol = TRACE floods" is the navigation model, not a
+                    // secondary action hidden behind a second click.
+                    setSelected(node);
+                    setTraced(node);
+                  }}
+                  selected={selected}
                 />
-              );
-            }}
-          </LegacyBoundary>
-        )}
+              ) : (
+                <LegacyBoundary title="Symbols" pending={search.isPending} result={search.data}>
+                  {(data) => {
+                    const rows = data.results ?? [];
+                    if (rows.length === 0)
+                      return (
+                        <CenteredState
+                          title="Search result is unverified — the legacy response cannot distinguish no matches from query failure"
+                          kind="partial"
+                        />
+                      );
+                    const capped = data.total != null && data.total > rows.length;
+                    const degreeCeiling = rows.reduce(
+                      (max, node) => Math.max(max, node.degree ?? 0),
+                      0,
+                    );
+                    return (
+                      <VirtualList
+                        items={rows}
+                        getKey={(node) => node.id}
+                        header={
+                          <p className="td-legend border-b border-edge-subtle px-3 py-2">
+                            {capped
+                              ? `${rows.length} of ${data.total} matches`
+                              : `${data.total ?? rows.length} matches`}
+                          </p>
+                        }
+                        renderItem={(node) => (
+                          <SymbolRow
+                            node={node}
+                            degreeCeiling={degreeCeiling}
+                            selected={selected?.id === node.id}
+                            onSelect={() => setSelected(node)}
+                          />
+                        )}
+                      />
+                    );
+                  }}
+                </LegacyBoundary>
+              )}
+            </div>
           </div>
-        </div>
         )
       }
       inspector={
@@ -371,9 +394,10 @@ function TopConnectedList({
         const hubs = (payload.top_connected ?? []) as GraphNode[];
         if (hubs.length === 0)
           return (
-            <p className="p-6 text-center text-sm text-text-muted">
-              search the code graph to see symbols
-            </p>
+            <CenteredState
+              title="Connected-symbol ranking is unverified — the legacy response returned no rows without read health"
+              kind="partial"
+            />
           );
         return (
           <HubField

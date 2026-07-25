@@ -186,12 +186,11 @@ export function TraceView({
             if (callers.length === 0 && callees.length === 0) {
               return (
                 <div className="flex flex-col gap-2 p-6">
-                  <CenteredState title="Trace" kind="complete_zero_findings" />
+                  <CenteredState title="Call-edge result is unverified" kind="partial" />
                   <p className="mx-auto max-w-md text-center text-xs leading-relaxed text-text-muted">
-                    The graph records no <code className="font-mono">calls</code> edge in either
-                    direction for {displayName(focus)}. That is a measured zero for call edges
-                    only — other edge kinds on this symbol, and callers the extractor could not
-                    resolve, are not counted here.
+                    The legacy graph response returned no <code className="font-mono">calls</code>{' '}
+                    rows for {displayName(focus)}, but it carries no read-health field. The
+                    frontend cannot distinguish a successful empty result from a query failure.
                   </p>
                 </div>
               );

@@ -233,7 +233,7 @@ describe('TraceView', () => {
     expect(container.querySelector('canvas')).toBeNull();
   });
 
-  it('reports a measured zero for call edges without claiming the symbol is isolated', async () => {
+  it('does not treat an empty legacy neighbor payload as a measured zero', async () => {
     mockFetch((url) =>
       url.includes('/neighbors')
         ? new Response(
@@ -252,9 +252,9 @@ describe('TraceView', () => {
     );
     const { container } = renderTrace();
     await waitFor(() => {
-      expect(container.querySelector('[data-state="complete_zero_findings"]')).toBeTruthy();
+      expect(container.querySelector('[data-state="partial"]')).toBeTruthy();
     });
-    expect(screen.getByText(/measured zero for call edges only/i)).toBeTruthy();
-    expect(screen.getByText(/callers the extractor could not\s+resolve, are not counted/i)).toBeTruthy();
+    expect(screen.getByText(/call-edge result is unverified/i)).toBeTruthy();
+    expect(screen.queryByText(/measured zero/i)).toBeNull();
   });
 });

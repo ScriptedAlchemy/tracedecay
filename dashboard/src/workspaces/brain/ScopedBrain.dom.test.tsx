@@ -144,42 +144,78 @@ describe('ScopedBrain', () => {
     expect(screen.getByText('release/2.4')).toBeTruthy();
   });
 
-  it('composes the unmounted-graph state out of what the registry does know', async () => {
-    // Exactly the daemon's behaviour: the registry answers, the scoped gateway
-    // does not, because only one project's graph is mounted at a time.
+  it('does not infer an unmounted graph from a generic scoped read failure', async () => {
     vi.stubGlobal(
       'fetch',
-      serve({ '/api/projects/proj_x': { status: 200, body: CONTEXT } }),
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': {
+          status: 500,
+          body: { status: 'error' },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
     );
     renderScoped();
 
-    await waitFor(() =>
-      expect(screen.getByText(/keeps one project's code graph mounted/i)).toBeTruthy(),
-    );
-    // No canvas is drawn, because there is no neighbourhood to draw.
+    await waitFor(() => expect(screen.getByText(/the read failed/i)).toBeTruthy());
+    expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
     expect(screen.queryByTestId('graph-canvas')).toBeNull();
-    // And the space is spent on the registry facts rather than on an apology:
-    // one store, two branches indexed, 125.0 MiB on disk, two checkouts.
-    // 125.0 MiB appears three times on purpose: the field's own reading, the
-    // store card's total, and the graph_db artifact row that accounts for
-    // essentially all of it.
-    expect(screen.getAllByText('125.0').length).toBe(3);
-    expect(screen.getAllByText('2').length).toBeGreaterThan(0);
-    // The project's root, once as its identity and once as the checkout that
-    // was most recently seen there.
-    expect(screen.getAllByText('/fast/projects/ai-train').length).toBe(2);
+    // The independently successful registry backbone remains available.
+    expect(screen.getByText('release/2.4')).toBeTruthy();
+  });
+
+  it('separates an HTTP-success empty slice from transport failure without claiming zero', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': {
+          status: 200,
+          body: { nodes: [], edges: [], capped: { nodes: false, edges: false } },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByText(/graph slice is unverified/i)).toBeTruthy());
+    expect(screen.queryByText(/the read failed/i)).toBeNull();
+    expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
+    expect(screen.queryByTestId('graph-canvas')).toBeNull();
+  });
+
+  it('does not present collapsed scoped overview zeros as measured graph totals', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/overview': {
+          status: 200,
+          body: { totals: { nodes: 0, edges: 0, files: 0 } },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    expect(screen.getByText(/graph totals are unverified/i)).toBeTruthy();
+    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(3);
   });
 
   it('prints an em dash rather than a number it was never given', async () => {
     vi.stubGlobal(
       'fetch',
-      serve({ '/api/projects/proj_x': { status: 200, body: CONTEXT } }),
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': {
+          status: 500,
+          body: { status: 'error' },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
     );
     renderScoped();
 
-    await waitFor(() =>
-      expect(screen.getByText(/keeps one project's code graph mounted/i)).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText(/the read failed/i)).toBeTruthy());
     // nodes / edges / files / facts / entities / events all unresolved.
     expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(6);
   });
