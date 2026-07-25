@@ -148,6 +148,42 @@ pub trait McpTransport {
     fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
 }
 
+/// Read half of a transport whose input and output can be driven concurrently.
+pub trait McpTransportReader {
+    /// Read the next line from the transport. Returns `None` on EOF.
+    fn read_line(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<Option<String>>> + Send;
+}
+
+/// Write half of a transport whose input and output can be driven concurrently.
+pub trait McpTransportWriter {
+    /// Write a complete line (including trailing newline) to the transport.
+    fn write_line(
+        &mut self,
+        line: &str,
+    ) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
+
+    /// Flush any buffered output.
+    fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
+}
+
+/// A line transport that exposes independent read and write halves.
+pub trait McpDuplexTransport: McpTransport {
+    /// Borrowed read half.
+    type Reader<'a>: McpTransportReader + Send + 'a
+    where
+        Self: 'a;
+
+    /// Borrowed write half.
+    type Writer<'a>: McpTransportWriter + Send + 'a
+    where
+        Self: 'a;
+
+    /// Split the transport into independently borrowable halves.
+    fn split(&mut self) -> (Self::Reader<'_>, Self::Writer<'_>);
+}
+
 /// Wraps a transport with a queue of already-consumed input lines that must
 /// be re-delivered before reading from the underlying transport again.
 ///
@@ -242,6 +278,31 @@ impl McpTransport for StdioTransport {
     }
 }
 
+impl McpTransportReader for &mut tokio::io::BufReader<tokio::io::Stdin> {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        crate::application::host_admission::read_bounded_mcp_line(&mut **self).await
+    }
+}
+
+impl McpTransportWriter for &mut tokio::io::Stdout {
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        tokio::io::AsyncWriteExt::write_all(&mut **self, line.as_bytes()).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        tokio::io::AsyncWriteExt::flush(&mut **self).await
+    }
+}
+
+impl McpDuplexTransport for StdioTransport {
+    type Reader<'a> = &'a mut tokio::io::BufReader<tokio::io::Stdin>;
+    type Writer<'a> = &'a mut tokio::io::Stdout;
+
+    fn split(&mut self) -> (Self::Reader<'_>, Self::Writer<'_>) {
+        (&mut self.reader, &mut self.writer)
+    }
+}
+
 /// In-memory transport for tests — backed by tokio mpsc channels.
 #[cfg(any(test, feature = "test-transport"))]
 pub struct ChannelTransport {
@@ -297,6 +358,46 @@ impl McpTransport for ChannelTransport {
 
     async fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+impl McpTransportReader for &mut tokio::sync::mpsc::UnboundedReceiver<String> {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        match self.recv().await {
+            Some(line)
+                if line.len() > crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
+            {
+                let prefix = line.as_bytes()[..line
+                    .len()
+                    .min(crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
+                    .to_vec();
+                Err(crate::application::host_admission::wire_oversized_io_error_with_prefix(prefix))
+            }
+            other => Ok(other),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+impl McpTransportWriter for &mut tokio::sync::mpsc::UnboundedSender<String> {
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.send(line.to_string())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+impl McpDuplexTransport for ChannelTransport {
+    type Reader<'a> = &'a mut tokio::sync::mpsc::UnboundedReceiver<String>;
+    type Writer<'a> = &'a mut tokio::sync::mpsc::UnboundedSender<String>;
+
+    fn split(&mut self) -> (Self::Reader<'_>, Self::Writer<'_>) {
+        (&mut self.rx, &mut self.tx)
     }
 }
 
