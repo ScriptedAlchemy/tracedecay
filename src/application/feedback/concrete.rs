@@ -210,14 +210,16 @@ impl ProjectFeedbackObservationSinkV1 {
                         envelope
                     },
                 };
-                let Some(envelope) = envelope else {
+                let Some(mut envelope) = envelope else {
                     continue;
                 };
+                let reported_drops =
+                    apply_pending_worker_drops(&mut envelope, &worker_dropped_count);
                 if persist_feedback_observation(&database, envelope)
                     .await
                     .is_err()
                 {
-                    saturating_increment(&worker_dropped_count);
+                    saturating_add(&worker_dropped_count, reported_drops.saturating_add(1));
                 }
             }
         });
@@ -1403,9 +1405,7 @@ fn project_observation_ledger(
         model.watermark.producer_boot_id = Some(boot.boot_id.clone());
         model.watermark.producer_sequence = (boot.last_sequence > 0).then_some(boot.last_sequence);
         model.watermark.observed_through = boot.last_observed_at;
-        if ledger.observations.is_empty()
-            && ledger.retention_dropped == 0
-            && incomplete_boots == 0
+        if ledger.observations.is_empty() && ledger.retention_dropped == 0 && incomplete_boots == 0
         {
             model.coverage = super::observations::Plan26CoverageV1::Known;
         }
@@ -1718,9 +1718,25 @@ fn retain_removed_boot_accounting(ledger: &mut StoredFeedbackObservationLedgerV1
 }
 
 fn saturating_increment(counter: &AtomicU64) {
+    saturating_add(counter, 1);
+}
+
+fn saturating_add(counter: &AtomicU64, increment: u64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-        Some(count.saturating_add(1))
+        Some(count.saturating_add(increment))
     });
+}
+
+fn apply_pending_worker_drops(
+    envelope: &mut FeedbackObservationEnvelopeV1,
+    dropped_count: &AtomicU64,
+) -> u64 {
+    let pending = dropped_count.swap(0, Ordering::Relaxed);
+    envelope.delivery.dropped = envelope.delivery.dropped.saturating_add(pending);
+    if envelope.delivery.dropped > 0 {
+        envelope.delivery.coverage = super::observations::Plan26CoverageV1::Partial;
+    }
+    envelope.delivery.dropped
 }
 
 fn publication_matches_context(
@@ -2048,5 +2064,23 @@ mod tests {
         assert_eq!(model.watermark.producer_boot_id, Some(latest_boot));
         assert_eq!(model.watermark.producer_sequence, Some(7));
         assert_eq!(model.watermark.observed_through, Some(observed_at));
+    }
+
+    #[test]
+    fn worker_persistence_drops_are_carried_into_the_next_envelope() {
+        let boot_id = canonical_sha256(&"feedback-worker-drop-boot").unwrap();
+        let mut envelope = sequenced_source_envelope(&boot_id, 1);
+        envelope.delivery = super::super::observations::FeedbackObservationDeliveryV1::delivered(2);
+        let dropped_count = AtomicU64::new(3);
+
+        assert_eq!(apply_pending_worker_drops(&mut envelope, &dropped_count), 5);
+        assert_eq!(dropped_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            envelope.delivery.coverage,
+            super::super::observations::Plan26CoverageV1::Partial
+        );
+
+        saturating_add(&dropped_count, envelope.delivery.dropped.saturating_add(1));
+        assert_eq!(dropped_count.load(Ordering::Relaxed), 6);
     }
 }
