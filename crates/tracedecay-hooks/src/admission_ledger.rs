@@ -688,9 +688,7 @@ mod tests {
         let admitted = envelope(9, 5);
         {
             let mut ledger = open(root.path(), UtcMicros(1));
-            let first = ledger
-                .admit_with_receipt(&admitted, UtcMicros(2))
-                .unwrap();
+            let first = ledger.admit_with_receipt(&admitted, UtcMicros(2)).unwrap();
             assert!(!first.work_completed);
         }
 
@@ -717,9 +715,7 @@ mod tests {
         let root = TestDir::new("ledger-work-completion-failure");
         let admitted = envelope(9, 5);
         let mut ledger = open(root.path(), UtcMicros(1));
-        ledger
-            .admit_with_receipt(&admitted, UtcMicros(2))
-            .unwrap();
+        ledger.admit_with_receipt(&admitted, UtcMicros(2)).unwrap();
 
         let completions = completions_path(root.path());
         fs::remove_file(&completions).unwrap();
