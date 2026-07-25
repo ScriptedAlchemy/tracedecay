@@ -339,6 +339,8 @@ pub struct GitHubReviewItemV1 {
     pub body_digest: ManifestDigest,
     pub body_anchor: RetrievalAnchorId,
     pub safe_url_anchor: Option<RetrievalAnchorId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_url: Option<String>,
     pub lifecycle: GitHubReviewLifecycleV1,
     pub provider_outcome: GitHubReviewIngressProviderOutcomeV1,
     pub remap: GitHubReviewCurrentBranchRemapV1,
@@ -367,6 +369,15 @@ impl GitHubReviewItemV1 {
         self.safe_url_anchor
             .as_ref()
             .map_or(Ok(()), RetrievalAnchorId::validate)?;
+        match (&self.safe_url_anchor, &self.safe_url) {
+            (None, None) | (Some(_), None) => {}
+            (Some(_), Some(value)) if safe_github_url(value) => {}
+            _ => {
+                return Err(DomainError::NonCanonical {
+                    field: "github review safe URL",
+                });
+            }
+        }
         self.remap.validate()?;
         if self.remap.original.repository_id != self.repository_id {
             return Err(DomainError::NonCanonical {
@@ -382,6 +393,21 @@ impl GitHubReviewItemV1 {
         }
         Ok(())
     }
+}
+
+fn safe_github_url(value: &str) -> bool {
+    if value.len() > 2_048 {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
 }
 
 /// Read-only connector output. Partial and stale outcomes may still include

@@ -2892,6 +2892,10 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 severity: DiagnosticSeverityV1::Information,
                 safe_bounded_message: "Unresolved GitHub review comment".to_owned(),
                 producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                code_description_uri: Some(
+                    "https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1"
+                        .to_owned(),
+                ),
             }),
         }],
         total_findings: 1,

@@ -203,6 +203,7 @@ impl Pr13SourceBackedCompositeFixtureV1 {
             body_digest: self.github.body_digest.clone(),
             body_anchor: anchors.body_anchor,
             safe_url_anchor: anchors.safe_url_anchor,
+            safe_url: (!self.github.safe_url.is_empty()).then_some(self.github.safe_url.clone()),
             lifecycle: self.github.lifecycle,
             provider_outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
             remap,
