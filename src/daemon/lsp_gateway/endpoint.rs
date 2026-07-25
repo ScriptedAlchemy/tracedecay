@@ -242,6 +242,16 @@ impl LspSessionRegistry {
         access: &LspSessionAccess,
         now_ms: u64,
     ) -> Result<(), LspEndpointError> {
+        self.authenticate(access, now_ms)?
+            .detach()
+            .map_err(LspEndpointError::Lifecycle)
+    }
+
+    pub fn close(
+        &mut self,
+        access: &LspSessionAccess,
+        now_ms: u64,
+    ) -> Result<(), LspEndpointError> {
         self.authenticate(access, now_ms)?;
         let mut session = self
             .sessions
@@ -259,6 +269,30 @@ impl LspSessionRegistry {
         self.authenticate(access, now_ms)?
             .reconnect()
             .map_err(LspEndpointError::Lifecycle)
+    }
+
+    pub fn reconnect_with_credential(
+        &mut self,
+        access: &LspSessionAccess,
+        credential: LspSessionCredential,
+        now_ms: u64,
+    ) -> Result<LspSessionAccess, LspEndpointError> {
+        match self.authenticate(access, now_ms)?.lifecycle() {
+            SessionLifecycle::Detached => self.reconnect(access, now_ms)?,
+            SessionLifecycle::AwaitingInitialize
+            | SessionLifecycle::AwaitingInitialized
+            | SessionLifecycle::Ready
+            | SessionLifecycle::Shutdown => {}
+            SessionLifecycle::Exited | SessionLifecycle::Expired => {
+                return Err(LspEndpointError::SessionUnavailable);
+            }
+        }
+        let session = self
+            .sessions
+            .get_mut(&access.session_id)
+            .ok_or(LspEndpointError::AuthenticationFailed)?;
+        session.credential = credential.clone();
+        Ok(LspSessionAccess::new(access.session_id.clone(), credential))
     }
 
     /// Expiry releases the registry's ephemeral control state. A caller that
@@ -418,9 +452,19 @@ mod tests {
         control.begin_initialize().unwrap();
         control.initialized().unwrap();
         endpoint.registry_mut().detach(&access, 2).unwrap();
+        let reconnected = endpoint
+            .registry_mut()
+            .reconnect_with_credential(&access, LspSessionCredential::new(vec![9; 16]).unwrap(), 3)
+            .unwrap();
+        assert_eq!(endpoint.registry().active_sessions(), 1);
+        assert_eq!(
+            endpoint.registry_mut().authenticate(&access, 4).err(),
+            Some(LspEndpointError::AuthenticationFailed)
+        );
+        endpoint.registry_mut().close(&reconnected, 4).unwrap();
         assert_eq!(endpoint.registry().active_sessions(), 0);
         assert_eq!(
-            endpoint.registry_mut().reconnect(&access, 3).err(),
+            endpoint.registry_mut().reconnect(&reconnected, 5).err(),
             Some(LspEndpointError::AuthenticationFailed)
         );
     }
