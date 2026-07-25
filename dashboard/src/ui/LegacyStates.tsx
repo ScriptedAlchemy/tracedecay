@@ -94,7 +94,9 @@ export function StatTile({
 }: {
   label: string;
   value: ReactNode;
-  hint?: string;
+  /** Widened from `string` so a tile can annotate its value with the shared
+   * evidence-class marker, which `Readout`'s own `note` already accepts. */
+  hint?: ReactNode;
   /** Narrow-rail variant: smaller numerals that never clip. */
   dense?: boolean;
 }) {

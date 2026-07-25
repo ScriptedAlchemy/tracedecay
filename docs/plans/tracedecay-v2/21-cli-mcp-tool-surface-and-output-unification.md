@@ -341,11 +341,12 @@ credential leakage and terminal-control cases, recursive-dispatch attempts, dirt
 conflicting Git preview, CAS drift, duplicate apply, and effect-unknown
 reconciliation.
 
-The aggregate gate compares semantic JSON and required human fields across
-CLI, MCP, HTTP, and dashboard, proves adapters open no business store or
-provider/runtime path, and proves old handler logic is deleted. It does not
-require byte-identical prose, a generated inventory, giant Cartesian fixture
-matrix, or PR17 public SDK names.
+Direct parity tests run through the ordinary aggregate repository checks,
+compare semantic JSON and required human fields across CLI, MCP, HTTP, and
+dashboard, prove adapters open no business store or provider/runtime path, and
+prove old handler logic is deleted. They create no separate acceptance gate and
+do not require byte-identical prose, a generated inventory, giant Cartesian
+fixture matrix, or PR17 public SDK names.
 
 ## Not in PR17
 

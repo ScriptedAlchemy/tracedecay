@@ -1,5 +1,10 @@
 # Holographic dashboard test blockers
 
+> Historical follow-up for the legacy plugin harness. The `test:node`,
+> `test:dom`, and `dashboard/test/**` paths below are retired; current
+> single-app checks are `npm test` and `npm run visual:audit` from
+> `dashboard/`.
+
 This follow-up keeps the existing pure-helper coverage and adds a DOM-capable harness for the highest-value interaction seams.
 
 Harness added

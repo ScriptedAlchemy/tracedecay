@@ -72,6 +72,22 @@ pub(crate) async fn query_i64(
     }
 }
 
+/// Runs a scalar integer query while preserving SQL, row-iteration, empty-row,
+/// and conversion failures for read models where zero carries domain meaning.
+pub(crate) async fn query_i64_result(
+    conn: &(impl QueryExecutor + ?Sized),
+    sql: &str,
+    params: impl IntoParams,
+) -> std::result::Result<i64, String> {
+    let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "scalar query returned no rows".to_string())?;
+    row.get::<i64>(0).map_err(|e| e.to_string())
+}
+
 /// Clamps a user-supplied limit (mirrors `_coerce_limit` in the Python APIs).
 pub(crate) fn coerce_limit(value: Option<i64>, default: i64, maximum: i64) -> i64 {
     value.unwrap_or(default).clamp(1, maximum)
@@ -305,6 +321,35 @@ mod tests {
         assert_eq!(
             query_i64(&conn, "SELECT v FROM c WHERE v = 999", ()).await,
             0
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn query_i64_result_preserves_scalar_read_failures() {
+        let (_directory, conn) = test_conn();
+        conn.execute_batch("CREATE TABLE c (v INTEGER)")
+            .await
+            .unwrap();
+        conn.execute_batch("INSERT INTO c VALUES (7)")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            query_i64_result(&conn, "SELECT v FROM c", ())
+                .await
+                .unwrap(),
+            7
+        );
+        assert!(
+            query_i64_result(&conn, "SELECT COUNT(*) FROM missing", ())
+                .await
+                .is_err()
+        );
+        assert!(
+            query_i64_result(&conn, "SELECT v FROM c WHERE v = 999", ())
+                .await
+                .is_err()
         );
     }
 }

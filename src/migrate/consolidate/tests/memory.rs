@@ -3,6 +3,103 @@
 use super::*;
 
 #[tokio::test]
+async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("project.db");
+    let source_path = temp.path().join("branch-v17.db");
+    let (target, _) = test_initialize(&target_path).await;
+    let (source, _) = test_initialize(&source_path).await;
+
+    target
+        .conn()
+        .execute_batch(
+            "INSERT INTO memory_facts(
+                 fact_id, content, category, tags, trust_score, retrieval_count,
+                 access_count, helpful_count, unhelpful_count, created_at, updated_at,
+                 source, metadata, hrr_vector, hrr_algebra, hrr_dim, hrr_precision
+             ) VALUES(
+                 1, 'shared', 'general', '[\"target\"]', 0.4, 2, 3, 1, 0,
+                 10, 10, 'target-source', '{\"target\":true,\"winner\":\"target\"}',
+                 X'01', 'amari_fhrr', 2048, 'f32'
+             );",
+        )
+        .await
+        .unwrap();
+    source
+        .conn()
+        .execute_batch(
+            "DROP TABLE memory_fact_relations;
+             PRAGMA user_version = 17;
+             INSERT INTO memory_facts(
+                 fact_id, content, category, tags, trust_score, retrieval_count,
+                 access_count, helpful_count, unhelpful_count, created_at, updated_at,
+                 last_feedback_at, source, metadata, hrr_vector, hrr_algebra,
+                 hrr_dim, hrr_precision
+             ) VALUES
+                 (1, 'shared', 'decision', '[\"source\"]', 0.9, 5, 7, 2, 1,
+                  5, 20, 20, 'source-source',
+                  '{\"source\":true,\"winner\":\"source\"}',
+                  X'0203', 'amari_fhrr', 2048, 'f64'),
+                 (2, 'branch exclusive', 'project', '[]', 0.8, 0, 0, 0, 0,
+                  20, 20, NULL, 'branch', '{}', NULL, 'amari_fhrr', 2048, 'f32');",
+        )
+        .await
+        .unwrap();
+    source.checkpoint().await.unwrap();
+    source.close();
+
+    let snapshot = crate::sqlite_read_snapshot::open_in(&source_path, temp.path())
+        .await
+        .unwrap();
+    sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
+        .await
+        .unwrap();
+
+    let mut rows = target
+        .conn()
+        .query(
+            "SELECT category, tags, trust_score, retrieval_count, access_count,
+                    helpful_count, unhelpful_count, created_at, updated_at, source,
+                    metadata, hex(hrr_vector), hrr_precision
+             FROM memory_facts WHERE content='shared'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "decision");
+    let tags: Vec<String> = serde_json::from_str(&row.get::<String>(1).unwrap()).unwrap();
+    assert_eq!(tags, vec!["source", "target"]);
+    assert_eq!(row.get::<f64>(2).unwrap(), 0.9);
+    assert_eq!(row.get::<i64>(3).unwrap(), 5);
+    assert_eq!(row.get::<i64>(4).unwrap(), 7);
+    assert_eq!(row.get::<i64>(5).unwrap(), 2);
+    assert_eq!(row.get::<i64>(6).unwrap(), 1);
+    assert_eq!(row.get::<i64>(7).unwrap(), 5);
+    assert_eq!(row.get::<i64>(8).unwrap(), 20);
+    assert_eq!(row.get::<String>(9).unwrap(), "source-source");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&row.get::<String>(10).unwrap()).unwrap();
+    assert_eq!(metadata["target"], true);
+    assert_eq!(metadata["source"], true);
+    assert_eq!(metadata["winner"], "source");
+    assert_eq!(row.get::<String>(11).unwrap(), "0203");
+    assert_eq!(row.get::<String>(12).unwrap(), "f64");
+    drop(rows);
+    let mut rows = target
+        .conn()
+        .query("SELECT COUNT(*) FROM memory_facts", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        2
+    );
+    drop(rows);
+    target.close();
+}
+
+#[tokio::test]
 async fn overlapping_facts_merge_tags_metadata_and_feedback_without_duplication() {
     let fixture = fixture().await;
     add_fact_to_shard(

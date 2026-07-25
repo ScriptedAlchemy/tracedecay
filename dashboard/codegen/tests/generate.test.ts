@@ -23,6 +23,11 @@ describe("contracts generator", () => {
     expect(a.files).toEqual(b.files);
   });
 
+  it("owns the live contract boundary instead of an unused preview", () => {
+    expect(OUTPUT_FILES.GENERATED_FILE).toBe("src/contracts/generated.ts");
+    expect(OUTPUT_FILES.INDEX_FILE).toBe("src/contracts/index.ts");
+  });
+
   it("emits no timestamps or host/env state (reviewable diffs)", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;

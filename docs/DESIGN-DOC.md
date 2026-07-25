@@ -187,8 +187,9 @@ again on the full graph to pick up any new cross-file edges.
 
 ## Database Layer
 
-The database uses `libsql` (a SQLite fork by Turso) for async support. The schema
-is managed by sequential migrations tracked via `PRAGMA user_version`.
+The database uses SQLite through the bundled `tracedecay-rusqlite-runtime` and
+the `src/db/engine` abstraction. The schema is managed by sequential migrations
+tracked via `PRAGMA user_version`.
 
 Key schema features:
 
@@ -198,9 +199,10 @@ Key schema features:
 - **Content-addressed node IDs** enable deduplication and stable references
 - **WAL mode** with `NORMAL` synchronous for concurrent read/write safety
 
-The `queries.rs` module (~1600 lines) implements all data access as async methods
-on `Database`. Complex analytical queries (god classes, inheritance depth, coupling)
-use CTEs and window functions to avoid pulling large datasets into Rust.
+Domain-specific modules under `src/db/` implement data access through the
+engine executor traits. Complex analytical queries (god classes, inheritance
+depth, coupling) use CTEs and window functions to avoid pulling large datasets
+into Rust.
 
 ## Graph Algorithms
 
