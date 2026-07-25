@@ -672,12 +672,17 @@ pub(crate) async fn ensure_git_correlation_schema_in_transaction(
     // v4 repair. Every path reaching here is below v4 (equal returned early,
     // newer errored above), so the compaction runs exactly once per store.
     compact_session_git_spans(conn, DEFAULT_SPAN_MERGE_GAP_SECS).await?;
+    // `applied_at` records when this store first gained the correlation schema
+    // and is deliberately left alone by later version bumps. Consolidation
+    // verifies the destination's `session_schema_migrations` against a *frozen*
+    // copy of the target store that is never normalized, so a bump that also
+    // rewrote `applied_at` would make the destination diverge from the union of
+    // its own inputs. Nothing reads the column as a per-version watermark.
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
          ON CONFLICT(name) DO UPDATE SET
-            version = excluded.version,
-            applied_at = unixepoch()",
+            version = excluded.version",
         params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
     )
     .await?;
