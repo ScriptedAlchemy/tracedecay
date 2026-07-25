@@ -1075,26 +1075,26 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         open_options: crate::tracedecay::TraceDecayOpenOptions,
     ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
-        let project_id = self.project_id.as_ref().ok_or_else(|| {
-            crate::errors::TraceDecayError::Config {
-                message: "project graph initialization requires project-scoped test authority"
-                    .to_owned(),
-            }
-        })?;
+        let project_id =
+            self.project_id
+                .as_ref()
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                    message: "project graph initialization requires project-scoped test authority"
+                        .to_owned(),
+                })?;
         let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
             crate::errors::TraceDecayError::Config {
                 message: "project graph initialization requires a registered project session"
                     .to_owned(),
             }
         })?;
-        let store_layout =
-            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
-                project_root,
-                &open_options,
-                self.profile_database.as_ref(),
-                true,
-            )
-            .await?;
+        let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            self.profile_database.as_ref(),
+            true,
+        )
+        .await?;
         if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
             return Err(crate::errors::TraceDecayError::Config {
                 message: "project graph identity differs from registered test authority".to_owned(),
@@ -1119,24 +1119,24 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         open_options: crate::tracedecay::TraceDecayOpenOptions,
     ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
-        let project_id = self.project_id.as_ref().ok_or_else(|| {
-            crate::errors::TraceDecayError::Config {
-                message: "project graph open requires project-scoped test authority".to_owned(),
-            }
-        })?;
+        let project_id =
+            self.project_id
+                .as_ref()
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                    message: "project graph open requires project-scoped test authority".to_owned(),
+                })?;
         let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
             crate::errors::TraceDecayError::Config {
                 message: "project graph open requires a registered project session".to_owned(),
             }
         })?;
-        let store_layout =
-            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
-                project_root,
-                &open_options,
-                self.profile_database.as_ref(),
-                true,
-            )
-            .await?;
+        let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            self.profile_database.as_ref(),
+            true,
+        )
+        .await?;
         if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
             return Err(crate::errors::TraceDecayError::Config {
                 message: "project graph identity differs from registered test authority".to_owned(),
