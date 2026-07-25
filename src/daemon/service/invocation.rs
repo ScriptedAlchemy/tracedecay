@@ -35,10 +35,10 @@ use tracedecay_application::{
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
     GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey, Omission,
     OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest,
-    PageState, PolicyConsumerV1, PolicyDecisionRef, PolicyEvaluationContextV1,
-    PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
-    ReconciliationState, RequestContext, RequestId, ResolvedScope, RetrieverContribution,
-    RetryDirective, SafeDiagnostic, TemporalState, callable_code_operations,
+    PageState, PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
+    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestContext,
+    RequestId, ResolvedScope, RetrieverContribution, RetryDirective, SafeDiagnostic, TemporalState,
+    callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -4358,16 +4358,15 @@ impl DaemonFeedbackRuntimeRegistrar {
         // reaches here (`RequestContext::validate` rejects a scope that differs
         // from the grant's), so this route really is scope-matched. Live
         // correlation only reads, so it requires the Read effect class.
-        let correlation_policy = operation.evaluate_policy_route(
+        let correlation_policy = operation.evaluate_local_live_policy(
             &policy,
-            PolicyConsumerV1::LocalLiveCorrelation,
             &policy_context,
             correlation_availability,
             ScopeMatchV1::Match,
             correlation_state,
             CapabilityEffectClassV1::Read,
             TruthFreshnessRequirementV1::FreshOrPartial,
-            Some(evidence_horizon),
+            evidence_horizon,
             evaluated_at,
         )?;
         let provider_admissions = provider_candidates
