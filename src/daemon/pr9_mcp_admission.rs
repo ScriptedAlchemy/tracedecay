@@ -19,13 +19,6 @@ use tracedecay_domain::{
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
 
 pub(crate) const PR9_MCP_READ_CAPABILITY_V1: &str = "capability.application.code-index.search-read";
-const PR9_MCP_GIT_READ_CAPABILITIES_V1: [&str; 5] = [
-    "capability.application.git.status",
-    "capability.application.git.diff",
-    "capability.application.git.history",
-    "capability.application.git.blame",
-    "capability.application.git.hunks",
-];
 const PR9_MCP_GRANT_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
 const AUTHORIZATION_REVISION_DOMAIN_V1: &str = "tracedecay.daemon.pr9-mcp-read-authorization.v1";
 const PRINCIPAL_DOMAIN_V1: &str = "tracedecay.daemon.pr9-mcp-profile-principal.v1";
@@ -151,7 +144,6 @@ fn admit_pr9_mcp_read_at(
         return Err(Pr9McpAdmissionUnavailableV1::InvalidGrant);
     }
     let capabilities = std::iter::once(PR9_MCP_READ_CAPABILITY_V1)
-        .chain(PR9_MCP_GIT_READ_CAPABILITIES_V1)
         .map(CapabilityId::new)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Pr9McpAdmissionUnavailableV1::InvalidGrant)?;
@@ -204,15 +196,6 @@ impl Pr9McpReadAdmissionV1 {
         self.authorize_at(scope, supplied, PR9_MCP_READ_CAPABILITY_V1, now_micros())
     }
 
-    pub(crate) fn authorize_git_read(
-        &self,
-        scope: &ResolvedScope,
-        supplied: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-        request: &crate::application::git_reads::GitReadRequestV1,
-    ) -> Result<crate::mcp::server::CodeIndexSearchAuthorityV1, Pr9McpAdmissionUnavailableV1> {
-        self.authorize_at(scope, supplied, git_read_capability(request), now_micros())
-    }
-
     fn authorize_at(
         &self,
         scope: &ResolvedScope,
@@ -250,26 +233,6 @@ impl Pr9McpReadAdmissionV1 {
     #[allow(dead_code)]
     pub(crate) fn revoke(&self) {
         self.route_registered.store(false, Ordering::Release);
-    }
-}
-
-fn git_read_capability(request: &crate::application::git_reads::GitReadRequestV1) -> &'static str {
-    match request {
-        crate::application::git_reads::GitReadRequestV1::Status => {
-            "capability.application.git.status"
-        }
-        crate::application::git_reads::GitReadRequestV1::Diff { .. } => {
-            "capability.application.git.diff"
-        }
-        crate::application::git_reads::GitReadRequestV1::History { .. } => {
-            "capability.application.git.history"
-        }
-        crate::application::git_reads::GitReadRequestV1::Blame { .. } => {
-            "capability.application.git.blame"
-        }
-        crate::application::git_reads::GitReadRequestV1::Hunks { .. } => {
-            "capability.application.git.hunks"
-        }
     }
 }
 
@@ -401,47 +364,6 @@ mod tests {
                 UtcMicros(11),
             ),
             Err(Pr9McpAdmissionUnavailableV1::Revoked)
-        );
-    }
-
-    #[test]
-    fn git_read_capabilities_use_the_same_exact_scope_and_live_route_grant() {
-        let scope = scope("project.one", "worktree.one");
-        let admission = admission(&scope);
-        let authority = admission.search_authority();
-        let request = crate::application::git_reads::GitReadRequestV1::Status;
-
-        assert_eq!(
-            admission.authorize_at(
-                &scope,
-                Some(&authority),
-                super::git_read_capability(&request),
-                UtcMicros(11),
-            ),
-            Ok(authority)
-        );
-        assert_eq!(
-            admission.authorize_at(
-                &scope,
-                Some(&admission.search_authority()),
-                "capability.application.git.write",
-                UtcMicros(11),
-            ),
-            Err(Pr9McpAdmissionUnavailableV1::CapabilityMismatch)
-        );
-
-        let mut missing_status = admission.clone();
-        missing_status
-            .capabilities
-            .retain(|capability| capability.as_str() != "capability.application.git.status");
-        assert_eq!(
-            missing_status.authorize_at(
-                &scope,
-                Some(&missing_status.search_authority()),
-                super::git_read_capability(&request),
-                UtcMicros(11),
-            ),
-            Err(Pr9McpAdmissionUnavailableV1::CapabilityMismatch)
         );
     }
 

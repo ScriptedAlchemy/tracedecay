@@ -293,548 +293,7 @@ fn apply_canonical_component_set(
     Ok(())
 }
 
-struct CompatibilityAgentRegistrationDelegate {
-    integration: Box<dyn tracedecay::agents::AgentIntegration>,
-    context: tracedecay::agents::InstallContext,
-    health_context: tracedecay::agents::HealthcheckContext,
-    lifecycle_root: PathBuf,
-    registration_path: Option<PathBuf>,
-    registration_paths: Vec<PathBuf>,
-    project_path: Option<PathBuf>,
-    operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
-    should_apply: bool,
-    confirmed_registration_revision: Option<[u8; 32]>,
-    registration_stage_completed: bool,
-}
-
-impl CompatibilityAgentRegistrationDelegate {
-    fn new(
-        agent_id: &str,
-        home: &Path,
-        lifecycle_root: &Path,
-        operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
-    ) -> tracedecay::errors::Result<Self> {
-        let project_path = std::env::current_dir().unwrap_or_else(|_| home.to_path_buf());
-        let integration = tracedecay::agents::get_integration(agent_id)?;
-        let registration_path = integration.primary_config_path(home);
-        let mut registration_paths = integration.host_registration_paths(home);
-        registration_paths.sort();
-        registration_paths.dedup();
-        Ok(Self {
-            integration,
-            context: tracedecay::agents::InstallContext {
-                home: home.to_path_buf(),
-                tracedecay_bin: tracedecay::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string()),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                project_root: None,
-                dashboard: true,
-            },
-            health_context: tracedecay::agents::HealthcheckContext {
-                home: home.to_path_buf(),
-                project_path,
-            },
-            lifecycle_root: lifecycle_root.to_path_buf(),
-            registration_path,
-            registration_paths,
-            project_path: None,
-            operation,
-            should_apply: false,
-            confirmed_registration_revision: None,
-            registration_stage_completed: false,
-        })
-    }
-
-    fn new_project_local(
-        agent_id: &str,
-        home: &Path,
-        project_path: &Path,
-        lifecycle_root: &Path,
-        operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
-    ) -> tracedecay::errors::Result<Self> {
-        let integration = tracedecay::agents::get_integration(agent_id)?;
-        let registration_path = project_local_registration_path(agent_id, home, project_path);
-        let registration_paths = registration_path.iter().cloned().collect();
-        Ok(Self {
-            integration,
-            context: tracedecay::agents::InstallContext {
-                home: home.to_path_buf(),
-                tracedecay_bin: tracedecay::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string()),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                project_root: Some(project_path.to_path_buf()),
-                dashboard: true,
-            },
-            health_context: tracedecay::agents::HealthcheckContext {
-                home: home.to_path_buf(),
-                project_path: project_path.to_path_buf(),
-            },
-            lifecycle_root: lifecycle_root.to_path_buf(),
-            registration_path,
-            registration_paths,
-            project_path: Some(project_path.to_path_buf()),
-            operation,
-            should_apply: false,
-            confirmed_registration_revision: None,
-            registration_stage_completed: false,
-        })
-    }
-
-    fn registration_error(
-        error: tracedecay::errors::TraceDecayError,
-    ) -> tracedecay::agents::host_bundle_v2::HostBundleError {
-        // The transaction error vocabulary is fixed, so surface the
-        // integration's own message here before it is collapsed into the
-        // generic storage failure — otherwise the actionable cause (for
-        // example a refused symlinked project config) is lost.
-        eprintln!("{error}");
-        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-    }
-
-    fn backup_dir(&self, operation_id: [u8; 16]) -> PathBuf {
-        self.lifecycle_root
-            .join(".tracedecay-host-bundle-v1")
-            .join("registration-backups")
-            .join(hex::encode(operation_id))
-            .join(self.integration.id())
-    }
-
-    fn backup_path(&self, operation_id: [u8; 16], index: usize) -> PathBuf {
-        self.backup_dir(operation_id)
-            .join(format!("registration-{index}"))
-    }
-
-    fn missing_marker_path(&self, operation_id: [u8; 16], index: usize) -> PathBuf {
-        self.backup_dir(operation_id)
-            .join(format!("registration-{index}.missing"))
-    }
-
-    fn apply_marker_path(&self, operation_id: [u8; 16]) -> PathBuf {
-        self.backup_dir(operation_id).join("apply")
-    }
-
-    fn should_apply_from_backup(&self, operation_id: [u8; 16]) -> bool {
-        fs::read(self.apply_marker_path(operation_id))
-            .ok()
-            .is_some_and(|bytes| bytes == b"1")
-    }
-
-    fn competing_opencode_analyzer_present(&self) -> bool {
-        if self.integration.id() != "opencode" {
-            return false;
-        }
-        let Some(path) = &self.registration_path else {
-            return false;
-        };
-        let Ok(bytes) = fs::read(path) else {
-            return false;
-        };
-        let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return false;
-        };
-        config
-            .get("lsp")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|servers| {
-                servers.iter().any(|(name, registration)| {
-                    name != "tracedecay"
-                        && registration
-                            .get("command")
-                            .is_some_and(|command| command.to_string().contains("tracedecay"))
-                })
-            })
-    }
-
-    fn registration_is_current(
-        &self,
-        component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
-    ) -> tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
-        if self.project_path.is_none() {
-            return self
-                .integration
-                .host_component_registration(component, &self.health_context);
-        }
-        let Some(path) = &self.registration_path else {
-            return tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
-        };
-        let Ok(contents) = fs::read_to_string(path) else {
-            return tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
-        };
-        if contents.contains("tracedecay") {
-            tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current
-        } else {
-            tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing
-        }
-    }
-
-    fn current_registration_revision(
-        &self,
-        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-    ) -> Result<[u8; 32], tracedecay::agents::host_bundle_v2::HostBundleError> {
-        let mut digest = Sha256::new();
-        digest.update(b"tracedecay.host-registration.revision.v1");
-        digest.update((self.integration.id().len() as u64).to_be_bytes());
-        digest.update(self.integration.id().as_bytes());
-        if !self.registration_paths.is_empty() {
-            for (index, path) in self.registration_paths.iter().enumerate() {
-                digest.update((index as u64).to_be_bytes());
-                digest.update((path.as_os_str().len() as u64).to_be_bytes());
-                digest.update(path.as_os_str().as_encoded_bytes());
-                match fs::symlink_metadata(path) {
-                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                        return Err(
-                            tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
-                        );
-                    }
-                    Ok(_) => {
-                        let bytes = fs::read(path).map_err(|_| {
-                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?;
-                        digest.update(b"file");
-                        digest.update((bytes.len() as u64).to_be_bytes());
-                        digest.update(bytes);
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        digest.update(b"missing");
-                    }
-                    Err(_) => {
-                        return Err(
-                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                        );
-                    }
-                }
-            }
-        } else {
-            digest.update(b"typed-state");
-            let mut components = component_set
-                .components
-                .iter()
-                .map(|component| component.manifest.component)
-                .collect::<Vec<_>>();
-            components.sort_unstable();
-            for component in components {
-                digest.update([match self.registration_is_current(component) {
-                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current => 1,
-                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable => 2,
-                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing => 3,
-                    tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt => 4,
-                }]);
-            }
-        }
-        Ok(digest.finalize().into())
-    }
-
-    fn backup_registration(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        let backup_dir = self.backup_dir(operation_id);
-        fs::create_dir_all(&backup_dir)
-            .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-        fs::write(
-            self.apply_marker_path(operation_id),
-            if self.should_apply { b"1" } else { b"0" },
-        )
-        .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-        for (index, path) in self.registration_paths.iter().enumerate() {
-            match fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err(
-                        tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
-                    );
-                }
-                Ok(_) => {
-                    let bytes = fs::read(path).map_err(|_| {
-                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
-                    write_registration_backup(&self.backup_path(operation_id, index), &bytes)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    fs::write(self.missing_marker_path(operation_id, index), b"missing").map_err(
-                        |_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                    )?;
-                }
-                Err(_) => {
-                    return Err(
-                        tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn restore_registration(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        for (index, path) in self.registration_paths.iter().enumerate() {
-            let backup = self.backup_path(operation_id, index);
-            let missing = self.missing_marker_path(operation_id, index);
-            if backup.is_file() {
-                let bytes = fs::read(&backup).map_err(|_| {
-                    tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                })?;
-                write_registration_backup(path, &bytes)?;
-            } else if missing.is_file() {
-                match fs::symlink_metadata(path) {
-                    Ok(metadata) if metadata.file_type().is_file() => fs::remove_file(path)
-                        .map_err(|_| {
-                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?,
-                    Ok(_) => {
-                        return Err(
-                            tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
-                        );
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => {
-                        return Err(
-                            tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                        );
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn retire_backup(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        let backup_dir = self.backup_dir(operation_id);
-        match fs::symlink_metadata(&backup_dir) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                fs::remove_dir_all(backup_dir).map_err(|_| {
-                    tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure
-                })
-            }
-            Ok(_) => Err(tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure),
-        }
-    }
-}
-
-impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
-    for CompatibilityAgentRegistrationDelegate
-{
-    fn current_revision(
-        &self,
-        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        _request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-    ) -> Result<[u8; 32], tracedecay::agents::host_bundle_v2::HostBundleError> {
-        self.current_registration_revision(component_set)
-    }
-
-    fn confirm_preview(
-        &mut self,
-        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-        preview: &tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        if preview.operation_id != request.operation_id
-            || preview.current_registration_revision != preview.base_registration_revision
-            || self.current_registration_revision(component_set)?
-                != preview.base_registration_revision
-        {
-            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
-        }
-        self.confirmed_registration_revision = Some(preview.base_registration_revision);
-        Ok(())
-    }
-
-    fn preflight(
-        &mut self,
-        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        _request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        if let Some(expected) = self.confirmed_registration_revision
-            && self.current_registration_revision(component_set)? != expected
-        {
-            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
-        }
-        if self.competing_opencode_analyzer_present() {
-            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
-        }
-        let states = component_set
-            .components
-            .iter()
-            .map(|component| self.registration_is_current(component.manifest.component))
-            .collect::<Vec<_>>();
-        let all_current = states.iter().all(|state| {
-            *state == tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current
-        });
-        let all_missing = states.iter().all(|state| {
-            *state == tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing
-        });
-        let any_corrupt = states.iter().any(|state| {
-            *state == tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt
-        });
-        if any_corrupt {
-            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
-        }
-        self.should_apply = match self.operation {
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install => {
-                if !all_current && !all_missing {
-                    return Err(
-                        tracedecay::agents::host_bundle_v2::HostBundleError::OwnershipConflict,
-                    );
-                }
-                all_missing
-            }
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => !all_missing,
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-            | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => true,
-        };
-        Ok(())
-    }
-
-    fn stage(
-        &mut self,
-        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        if let Some(expected) = self.confirmed_registration_revision
-            && self.current_registration_revision(component_set)? != expected
-        {
-            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
-        }
-        self.backup_registration(request.operation_id)?;
-        self.registration_stage_completed = true;
-        Ok(())
-    }
-
-    fn apply(
-        &mut self,
-        _component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        if !self.should_apply {
-            return Ok(());
-        }
-        if let Some(project_path) = &self.project_path {
-            return match request.lifecycle.operation {
-                tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                    .integration
-                    .uninstall_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-                tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
-                | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-                | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
-                    .integration
-                    .install_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-            };
-        }
-        match request.lifecycle.operation {
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                .integration
-                .uninstall(&self.context)
-                .map_err(Self::registration_error),
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
-            | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-            | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
-                .integration
-                .install(&self.context)
-                .map_err(Self::registration_error),
-        }
-    }
-
-    fn verify(
-        &mut self,
-        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        let expected = if request.lifecycle.operation
-            == tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall
-        {
-            tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing
-        } else {
-            tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current
-        };
-        if component_set
-            .components
-            .iter()
-            .all(|component| self.registration_is_current(component.manifest.component) == expected)
-        {
-            Ok(())
-        } else {
-            Err(tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)
-        }
-    }
-
-    fn commit(
-        &mut self,
-        _component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        self.retire_backup(request.operation_id)
-    }
-
-    fn rollback(
-        &mut self,
-        _component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
-        request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
-    ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-        if !self.registration_stage_completed && !self.backup_dir(request.operation_id).is_dir() {
-            return Ok(());
-        }
-        self.should_apply |= self.should_apply_from_backup(request.operation_id);
-        if !self.should_apply {
-            self.restore_registration(request.operation_id)?;
-            return Ok(());
-        }
-        if let Some(project_path) = &self.project_path {
-            let result = match request.lifecycle.operation {
-                tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install => self
-                    .integration
-                    .uninstall_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-                tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                    .integration
-                    .install_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-                tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-                | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => Ok(()),
-            };
-            result?;
-            return self.restore_registration(request.operation_id);
-        }
-        let result = match request.lifecycle.operation {
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install => self
-                .integration
-                .uninstall(&self.context)
-                .map_err(Self::registration_error),
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                .integration
-                .install(&self.context)
-                .map_err(Self::registration_error),
-            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-            | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => Ok(()),
-        };
-        result?;
-        self.restore_registration(request.operation_id)
-    }
-}
-
-fn write_registration_backup(
-    path: &Path,
-    bytes: &[u8],
-) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
-    let parent = path
-        .parent()
-        .ok_or(tracedecay::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath)?;
-    fs::create_dir_all(parent)
-        .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-    let digest = hex::encode(Sha256::digest(bytes));
-    let temporary = parent.join(format!(".registration-{digest}.tmp"));
-    fs::write(&temporary, bytes)
-        .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-    fs::rename(&temporary, path)
-        .map_err(|_| tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)
-}
+use tracedecay::agents::host_component_registration::HostComponentRegistrationDelegate as CompatibilityAgentRegistrationDelegate;
 
 fn apply_default_canonical_component_set(
     agent_id: &str,
@@ -2418,9 +1877,10 @@ pub(crate) async fn handle_uninstall_command(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
 
@@ -2432,9 +1892,35 @@ mod tests {
         canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
     };
 
-    fn seed_opencode_non_context_state(
-        home: &std::path::Path,
-    ) -> (PathBuf, PathBuf, PathBuf) {
+    const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
+"#;
+    const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
+"#;
+    static HOST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => unsafe { std::env::set_var(self.key, previous) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
         let config_path = home.join(".config/opencode/opencode.json");
         let core_path = home.join(".config/opencode/plugins/tracedecay.ts");
         let agent_set = canonical_host_component_set(
@@ -2449,19 +1935,26 @@ mod tests {
         for path in [&config_path, &core_path, &agent_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         }
-        std::fs::write(&config_path, b"{\"unrelated\":{\"keep\":true}}\n").unwrap();
+        std::fs::write(&config_path, OPENCODE_UNRELATED_CONFIG).unwrap();
         std::fs::write(&core_path, b"core-sentinel\n").unwrap();
         std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
         (config_path, core_path, agent_path)
     }
 
     fn assert_opencode_non_context_state(paths: &(PathBuf, PathBuf, PathBuf)) {
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.0).unwrap()).unwrap();
+        assert_eq!(config["unrelated"]["keep"], true);
         assert_eq!(
-            std::fs::read(&paths.0).unwrap(),
-            b"{\"unrelated\":{\"keep\":true}}\n"
+            config["lsp"]["other"]["command"],
+            serde_json::json!(["tracedecay", "lsp", "bridge", "--stdio"])
         );
         assert_eq!(std::fs::read(&paths.1).unwrap(), b"core-sentinel\n");
         assert_eq!(std::fs::read(&paths.2).unwrap(), b"agent-sentinel\n");
+        assert!(
+            !PathBuf::from(format!("{}.bak", paths.0.display())).exists(),
+            "component lifecycle must not leave a legacy config backup"
+        );
     }
 
     #[tokio::test]
@@ -2650,6 +2143,8 @@ mod tests {
         registration
             .stage(&component_set.component_set, &request)
             .unwrap();
+        let prompt_path = home.path().join(".config/opencode/AGENTS.md");
+        std::fs::write(&prompt_path, b"concurrent prompt edit\n").unwrap();
         registration
             .apply(&component_set.component_set, &request)
             .unwrap();
@@ -2658,6 +2153,426 @@ mod tests {
             .unwrap();
 
         assert_opencode_non_context_state(&preserved);
+        assert_eq!(
+            std::fs::read(&prompt_path).unwrap(),
+            b"concurrent prompt edit\n"
+        );
+    }
+
+    #[test]
+    fn opencode_non_owner_component_cannot_remove_context_registration() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
+        let integration = tracedecay::agents::get_integration("opencode").unwrap();
+        let context = tracedecay::agents::InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "tracedecay".to_string(),
+            tool_permissions: Vec::new(),
+            project_root: None,
+            dashboard: true,
+        };
+
+        integration
+            .activate_deployed_host_component_registration(
+                &[tracedecay::agents::host_bundle_v2::HostBundleComponentV1::OperatorMcp],
+                &context,
+            )
+            .unwrap();
+        integration
+            .deactivate_deployed_host_component_registration(
+                &[tracedecay::agents::host_bundle_v2::HostBundleComponentV1::OperatorMcp],
+                &context,
+            )
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            OPENCODE_CONTEXT_CONFIG
+        );
+    }
+
+    #[test]
+    fn current_opencode_context_install_is_byte_preserving() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "opencode",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .commit(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            OPENCODE_CONTEXT_CONFIG
+        );
+    }
+
+    #[test]
+    fn opencode_core_rollback_restores_every_registration_side_effect() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        let prompt_path = home.path().join(".config/opencode/AGENTS.md");
+        let targets_path = home
+            .path()
+            .join(".tracedecay/agent_managed/memory_digest_targets.json");
+        for path in [&config_path, &prompt_path, &targets_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        let original_config = b"{\"unrelated\":\"keep\"}\n";
+        let original_prompt = b"user prompt\n";
+        let original_targets = b"{\"foreign\":\"keep\"}\n";
+        std::fs::write(&config_path, original_config).unwrap();
+        std::fs::write(&prompt_path, original_prompt).unwrap();
+        std::fs::write(&targets_path, original_targets).unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Repair, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "opencode",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
+        assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
+        assert_eq!(std::fs::read(&targets_path).unwrap(), original_targets);
+    }
+
+    #[test]
+    fn explicit_core_component_lifecycle_preserves_opencode_companions() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        let context_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let agent_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Agent),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let context_path = home
+            .path()
+            .join(&context_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        let agent_path = home
+            .path()
+            .join(&agent_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        for path in [&config_path, &context_path, &agent_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
+        std::fs::write(&context_path, b"context-sentinel\n").unwrap();
+        std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
+        let core_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Core),
+            dry_run: false,
+            yes: true,
+        };
+
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Update,
+            HostBundleCliOperation::Repair,
+            HostBundleCliOperation::Uninstall,
+        ] {
+            apply_canonical_component_set(
+                "opencode",
+                operation,
+                &core_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+            assert_eq!(config["unrelated"]["keep"], true);
+            assert_eq!(
+                config["mcp"]["other"]["command"],
+                serde_json::json!(["other"])
+            );
+            assert_eq!(
+                config["mcp"]["tracedecay"]["command"],
+                serde_json::json!(["tracedecay", "serve"])
+            );
+            if operation == HostBundleCliOperation::Uninstall {
+                assert!(config["lsp"].get("tracedecay").is_none());
+            } else {
+                let tracedecay_bin = tracedecay::agents::which_tracedecay()
+                    .unwrap_or_else(|| "tracedecay".to_string());
+                assert_eq!(
+                    config["lsp"]["tracedecay"]["command"],
+                    serde_json::json!([
+                        tracedecay_bin,
+                        "lsp",
+                        "bridge",
+                        "--stdio",
+                        "--project",
+                        "."
+                    ])
+                );
+            }
+            assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
+            assert_eq!(std::fs::read(&agent_path).unwrap(), b"agent-sentinel\n");
+            assert!(!PathBuf::from(format!("{}.bak", config_path.display())).exists());
+        }
+    }
+
+    #[test]
+    fn opencode_core_refuses_a_competing_analyzer_without_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, OPENCODE_UNRELATED_CONFIG).unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Core),
+            dry_run: false,
+            yes: true,
+        };
+
+        let error = apply_canonical_component_set(
+            "opencode",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ownership marker conflicts"));
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            OPENCODE_UNRELATED_CONFIG
+        );
+        for artifact in &component_set.component_set.components[0].manifest.artifacts {
+            assert!(!home.path().join(&artifact.relative_path).exists());
+        }
+    }
+
+    #[test]
+    fn kimi_canonical_component_set_uses_deployed_registration_lifecycle() {
+        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &installed_path,
+            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
+"#,
+        )
+        .unwrap();
+        let component_set = canonical_host_component_set("kimi", None, 0)
+            .unwrap()
+            .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+        };
+
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Update,
+            HostBundleCliOperation::Repair,
+        ] {
+            apply_canonical_component_set(
+                "kimi",
+                operation,
+                &component_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+        }
+
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
+        assert_eq!(installed["unrelated"], "keep");
+        assert!(
+            installed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["id"] == "foreign")
+        );
+        assert!(
+            installed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["id"] == "tracedecay")
+        );
+        assert!(
+            code_home
+                .join("plugins/managed/tracedecay/.kimi-plugin/plugin.json")
+                .is_file()
+        );
+        assert!(
+            !home
+                .path()
+                .join(".tracedecay/host-bundle-stage/kimi")
+                .exists(),
+            "the component transaction deploys assets directly; registration must not rerun the legacy installer"
+        );
+
+        apply_canonical_component_set(
+            "kimi",
+            HostBundleCliOperation::Uninstall,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
+        assert_eq!(installed["unrelated"], "keep");
+        assert_eq!(installed["plugins"].as_array().unwrap().len(), 1);
+        assert_eq!(installed["plugins"][0]["id"], "foreign");
+        for artifact in &component_set.component_set.components[0].manifest.artifacts {
+            assert!(
+                !home.path().join(&artifact.relative_path).exists(),
+                "uninstall must remove owned Kimi artifact {}",
+                artifact.relative_path
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_registration_rollback_survives_delegate_restart() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        let original =
+            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
+"#;
+        std::fs::write(&installed_path, original).unwrap();
+        let component_set = canonical_host_component_set("kimi", None, 0)
+            .unwrap()
+            .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        drop(registration);
+
+        let mut restarted = CompatibilityAgentRegistrationDelegate::new(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        restarted
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_eq!(std::fs::read(installed_path).unwrap(), original);
     }
 
     #[test]
@@ -2783,7 +2698,7 @@ mod tests {
             .confirm_preview(&component_set.component_set, &request, &preview)
             .unwrap();
 
-        let registration_path = registration.registration_path.clone().unwrap();
+        let registration_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
         std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
         assert_eq!(
