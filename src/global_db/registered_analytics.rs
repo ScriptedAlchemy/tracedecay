@@ -181,10 +181,14 @@ impl RegisteredGlobalDb {
             i64::try_from(query.limit).unwrap_or(i64::MAX),
         ));
         let limit_param = values.len();
-        let _ = write!(
-            sql,
-            " ORDER BY timestamp DESC, id DESC LIMIT ?{limit_param}"
-        );
+        if query.provider.as_deref() == Some("tracedecay-observability") {
+            let _ = write!(sql, " ORDER BY id DESC LIMIT ?{limit_param}");
+        } else {
+            let _ = write!(
+                sql,
+                " ORDER BY timestamp DESC, id DESC LIMIT ?{limit_param}"
+            );
+        }
 
         let snapshot = self
             .read_snapshot()
