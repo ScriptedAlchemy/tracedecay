@@ -532,7 +532,7 @@ fn comma_split_array_of_pairs_gets_corrective_error() {
 
 #[test]
 fn per_key_json_object_parses() {
-    let d = def("search");
+    let d = def("message_search");
     let parsed = parse_invocation(
         &d,
         &[
@@ -551,7 +551,7 @@ fn per_key_json_object_parses() {
 
 #[test]
 fn per_key_non_json_object_gets_corrective_type_error() {
-    let d = def("search");
+    let d = def("message_search");
     let err = parse_invocation(
         &d,
         &[

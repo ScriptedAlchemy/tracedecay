@@ -511,11 +511,10 @@ impl CommandFamily {
     }
 }
 
-async fn dispatch_command(
-    command: Commands,
-    host_bundle: HostBundleCliOptions,
+fn validate_host_bundle_options(
+    family: CommandFamily,
+    host_bundle: &HostBundleCliOptions,
 ) -> tracedecay::errors::Result<()> {
-    let family = CommandFamily::for_command(&command);
     // `--component`, `--dry-run`, and `--yes` are declared as global flags so
     // clap accepts them before the subcommand is known, but they are only
     // meaningful for the agent-lifecycle commands. Enforcing that scope here
@@ -531,6 +530,15 @@ async fn dispatch_command(
                     .to_string(),
         });
     }
+    Ok(())
+}
+
+async fn dispatch_command(
+    command: Commands,
+    host_bundle: HostBundleCliOptions,
+) -> tracedecay::errors::Result<()> {
+    let family = CommandFamily::for_command(&command);
+    validate_host_bundle_options(family, &host_bundle)?;
     match family {
         CommandFamily::Project => dispatch_project_command(command).await,
         CommandFamily::Runtime => dispatch_runtime_command(command).await,
