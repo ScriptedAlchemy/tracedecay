@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Search } from 'lucide-react';
+import { Search, Waypoints } from 'lucide-react';
 import {
   DataRow,
   ExplorerSplit,
@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
+import { TraceView } from './TraceView.tsx';
 import {
   GraphOverviewPayloadSchema,
   GraphSearchPayloadSchema,
@@ -44,6 +45,11 @@ export function CodePage() {
     GraphSearchPayloadSchema,
   );
   const [selected, setSelected] = useState<GraphNode | null>(null);
+  // The TRACE drill-in (plan 11b). It is a state of THIS page, not a route:
+  // the spine and the trace are two zoom positions on one field, and a URL
+  // change between them would break the "one navigable space" model. Escape
+  // and the back control return to the spine.
+  const [traced, setTraced] = useState<GraphNode | null>(null);
   const subgraph = useLegacy(
     ['graph', 'subgraph', selected?.id ?? ''],
     `${BASE}/subgraph${selected ? `?node_id=${encodeURIComponent(selected.id)}` : ''}`,
@@ -162,6 +168,16 @@ export function CodePage() {
         </div>
       }
       list={
+        traced ? (
+          <TraceView
+            focus={traced}
+            onClose={() => setTraced(null)}
+            onFocusChange={(node) => {
+              setTraced(node);
+              setSelected(node);
+            }}
+          />
+        ) : (
         <div className="flex h-full flex-col">
           <div className="border-b border-edge-subtle p-3">
             {subgraph.isPending ? (
@@ -184,7 +200,14 @@ export function CodePage() {
           <TopConnectedList
             overviewPending={overview.isPending}
             overviewResult={overview.data}
-            onSelect={setSelected}
+            onSelect={(node) => {
+              // A hub card is the entry to TRACE: selecting the symbol and
+              // flooding its topography are one gesture, because "touch a
+              // symbol = TRACE floods" is the navigation model, not a
+              // secondary action hidden behind a second click.
+              setSelected(node);
+              setTraced(node);
+            }}
             selected={selected}
           />
         ) : (
@@ -228,11 +251,25 @@ export function CodePage() {
         )}
           </div>
         </div>
+        )
       }
       inspector={
         selected ? (
           <InspectorPanel title="Symbol" onClose={() => setSelected(null)}>
             <div className="flex flex-col gap-3">
+              {/* The way into TRACE for anything reached by search, and the
+               * keyboard path for everything else. The hub cards below open it
+               * directly; this is the same drill-in for a symbol that was found
+               * rather than ranked. */}
+              <button
+                type="button"
+                onClick={() => setTraced(selected)}
+                disabled={traced?.id === selected.id}
+                className="flex items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-2 py-1 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:cursor-default disabled:text-text-muted"
+              >
+                <Waypoints aria-hidden size={12} />
+                {traced?.id === selected.id ? 'Tracing this symbol' : 'Trace call topography'}
+              </button>
               {selected.signature ? (
                 <pre className="overflow-x-auto rounded-[var(--radius-standard)] bg-surface-2 p-2 font-mono text-2xs leading-relaxed">
                   {selected.signature}
@@ -430,8 +467,15 @@ function HubField({
                 <span
                   key={node.id ?? rank}
                   aria-hidden
-                  title={`${displayName(node)} · ${node.kind} · ${degree.toLocaleString()} deg`}
-                  className="absolute top-1/2 rounded-full bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
+                  title={`${displayName(node)} · ${node.kind} · ${degree.toLocaleString()} deg — click to trace`}
+                  // A pointer shortcut into the same drill-in the card opens.
+                  // The mark stays a mark: not focusable, not exposed to AT,
+                  // no accessible name of its own — because the ranked card
+                  // below IS its keyboard and screen-reader equivalent, and
+                  // duplicating it as a control would make a reader walk the
+                  // same twelve symbols twice.
+                  onClick={() => onSelect(node)}
+                  className="absolute top-1/2 cursor-pointer rounded-full bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
                   style={{
                     ...kindColorVars(node.kind),
                     left: `${ceiling > 0 ? (degree / ceiling) * 100 : 0}%`,
