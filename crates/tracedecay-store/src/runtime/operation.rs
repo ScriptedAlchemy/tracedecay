@@ -883,11 +883,11 @@ impl RepositoryWritePayloadV1 {
             Self::ExternalSource(commit) => match (&commit.binding().owner, scope) {
                 (
                     tracedecay_domain::SourceBindingOwnerV1::Project(_),
-                    StoreShardScopeV1::Project { .. },
+                    StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProjectSessions { .. },
                 )
                 | (
                     tracedecay_domain::SourceBindingOwnerV1::Profile(_),
-                    StoreShardScopeV1::Profile,
+                    StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
                 ) => true,
                 _ => false,
             },
@@ -1032,11 +1032,14 @@ impl RepositoryOperationEnvelopeV1 {
                     tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
                     StoreShardScopeV1::Project {
                         project_id: shard_project,
+                    }
+                    | StoreShardScopeV1::ProjectSessions {
+                        project_id: shard_project,
                     },
                 ) => project_id == shard_project,
                 (
                     tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
-                    StoreShardScopeV1::Profile,
+                    StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
                 ) => profile_id == &self.metadata.shard_id.profile_id,
                 _ => false,
             };

@@ -8,16 +8,22 @@ use tracedecay_application::{
     SourceCanonicalRefetchAuthorityV1, SourceCaptureAdmissionErrorV1, SourceCaptureApplicationV1,
 };
 use tracedecay_domain::{
-    ComponentVersion, ManifestDigest, SourceAggregateFrontierV1, SourceBindingV1,
-    SourceDefinitionV1, SourceObjectObservationV1, SourcePartitionFrontierV1,
-    SourceProviderEnvelopeV1, SourceRefreshReceiptV1, SourceWholeRootStageV1, UtcMicros,
+    ComponentVersion, LocatorDigest, ManifestDigest, ObservationScopeV1, ProviderId,
+    SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
+    SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
+    SourceCoverageV1, SourceCursorV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
+    SourceEnvelopeKindV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
+    SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
+    SourceProviderEnvelopeV1, SourceRefetchStrategyV1, SourceRefreshCauseV1,
+    SourceRefreshReceiptV1, SourceSnapshotIdV1, SourceWholeRootStageV1, UtcMicros,
     canonical_sha256,
 };
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryOperationEnvelopeV1,
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
-    SourceCommitReceiptV1, SourceCommitV1,
+    SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1, SourceObjectTransitionV1,
+    SourceObservationEvidenceV1, SourceStoreStateV1,
 };
 
 use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
@@ -43,7 +49,7 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
     pub(crate) expected_frontier: Option<SourceAggregateFrontierV1>,
     pub(crate) next_partition: SourcePartitionFrontierV1,
     pub(crate) previous_whole_root_stage: Option<&'a SourceWholeRootStageV1>,
-    pub(crate) observations: Vec<SourceObjectObservationV1>,
+    pub(crate) mutations: Vec<SourceObjectMutationV1>,
     pub(crate) idempotency_key: ManifestDigest,
     pub(crate) request_digest: ManifestDigest,
 }
@@ -77,9 +83,30 @@ impl RuntimeExternalSourceStore {
         request: RuntimeSourceCaptureRequestV1<'_>,
         projector: ComponentVersion,
     ) -> Result<SourceCommitReceiptV1, RuntimeExternalSourceErrorV1> {
+        let requested_binding = request.binding.immutable_identity().map_err(invalid)?;
+        if let Some(state) = self.read_state(requested_binding).await? {
+            if state.definition() != &request.definition || state.binding() != &request.binding {
+                return Err(RuntimeExternalSourceErrorV1::Invalid(
+                    "external source replay authority differs from durable definition or binding"
+                        .to_owned(),
+                ));
+            }
+            if let Some(receipt) = state.receipt_by_idempotency_key(&request.idempotency_key) {
+                return if receipt.request_digest() == &request.request_digest {
+                    Ok(receipt.clone())
+                } else {
+                    Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
+                };
+            }
+        }
         projector
             .validate()
             .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
+        let observations = request
+            .mutations
+            .iter()
+            .map(|mutation| mutation.observation().clone())
+            .collect();
         let admission = capture.capture_sanitized(
             request.definition,
             request.binding,
@@ -89,7 +116,7 @@ impl RuntimeExternalSourceStore {
             request.expected_frontier,
             request.next_partition,
             request.previous_whole_root_stage,
-            request.observations,
+            observations,
             request.idempotency_key,
             request.request_digest,
         )?;
@@ -100,12 +127,23 @@ impl RuntimeExternalSourceStore {
             envelope,
             expected_frontier,
             next_frontier,
-            observations,
+            admitted_observations,
             _whole_root_stage,
             snapshot_completion,
             idempotency_key,
             request_digest,
         ) = admission.into_parts();
+        if admitted_observations.len() != request.mutations.len()
+            || admitted_observations
+                .iter()
+                .zip(&request.mutations)
+                .any(|(observation, mutation)| observation != mutation.observation())
+        {
+            return Err(RuntimeExternalSourceErrorV1::Invalid(
+                "external source mutations do not match the admitted sanitized observations"
+                    .to_owned(),
+            ));
+        }
         let binding_identity = binding.immutable_identity().map_err(invalid)?;
         let commit = SourceCommitV1::new(
             definition,
@@ -116,7 +154,7 @@ impl RuntimeExternalSourceStore {
             request_digest,
             expected_frontier,
             next_frontier,
-            observations,
+            request.mutations,
             snapshot_completion,
         )
         .map_err(invalid)?;
@@ -141,10 +179,244 @@ impl RuntimeExternalSourceStore {
         }
     }
 
+    pub(crate) async fn capture_host_observation(
+        &self,
+        receipt: &tracedecay_store::ObservationCommitReceipt,
+    ) -> Result<SourceCommitReceiptV1, RuntimeExternalSourceErrorV1> {
+        let observation = receipt.observation();
+        let provider = observation.source().provider().clone();
+        let definition = host_source_definition(provider.clone())?;
+        let authorization = receipt.retrieval_anchor().authorization().clone();
+        let binding = host_source_binding(
+            &definition,
+            observation,
+            authorization.privacy_domain_id.clone(),
+            self.runtime.binding(),
+        )?;
+        let binding_identity = binding.immutable_identity().map_err(invalid)?;
+        let partition = SourcePartitionIdV1::new(
+            canonical_sha256(&(
+                "tracedecay.host-observation.partition.v1",
+                observation.source(),
+                observation.scope(),
+            ))
+            .map_err(invalid)?,
+        );
+        let idempotency_key = canonical_sha256(&(
+            "tracedecay.host-observation.idempotency.v1",
+            observation.observation_id(),
+        ))
+        .map_err(invalid)?;
+        let request_digest = canonical_sha256(&(
+            "tracedecay.host-observation.request.v1",
+            observation.observation_id(),
+            observation.payload_reference(),
+            receipt.committed_cursor(),
+            receipt.retrieval_anchor(),
+            receipt.projection_generation(),
+        ))
+        .map_err(invalid)?;
+        let current = self.read_state(binding_identity.clone()).await?;
+        if let Some(existing) = current
+            .as_ref()
+            .and_then(|state| state.receipt_by_idempotency_key(&idempotency_key))
+        {
+            return if existing.request_digest() == &request_digest {
+                Ok(existing.clone())
+            } else {
+                Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
+            };
+        }
+
+        let expected_frontier = current
+            .as_ref()
+            .map(|state| state.source_frontier().clone());
+        let previous_partition = expected_frontier
+            .as_ref()
+            .and_then(|frontier| frontier.partition(&partition));
+        let sequence = previous_partition.map_or(1, |frontier| frontier.sequence() + 1);
+        let refresh_id = canonical_sha256(&(
+            "tracedecay.host-observation.refresh.v1",
+            observation.observation_id(),
+        ))
+        .map_err(invalid)?;
+        let snapshot = SourceSnapshotIdV1::new(
+            canonical_sha256(&(
+                "tracedecay.host-observation.snapshot.v1",
+                observation.observation_id(),
+                observation.payload_reference(),
+            ))
+            .map_err(invalid)?,
+        );
+        let continuation = SourceCursorV1::new(
+            canonical_sha256(&(
+                "tracedecay.host-observation.continuation.v1",
+                receipt.committed_cursor(),
+            ))
+            .map_err(invalid)?,
+        );
+        let sanitized_digest =
+            ManifestDigest::new(observation.payload_reference().digest().as_str())
+                .map_err(invalid)?;
+        let refresh = SourceRefreshReceiptV1::new(
+            binding_identity.clone(),
+            provider.clone(),
+            refresh_id.clone(),
+            SourceRefreshCauseV1::Poll,
+            SourceCaptureModeV1::Poll,
+            SourceRefetchStrategyV1::WholeRoot,
+        )
+        .map_err(invalid)?;
+        let envelope = SourceProviderEnvelopeV1::new(
+            binding_identity.clone(),
+            provider,
+            refresh_id,
+            SourceRefreshCauseV1::Poll,
+            SourceCaptureModeV1::Poll,
+            SourceRefetchStrategyV1::WholeRoot,
+            SourceEnvelopeKindV1::WholeRoot,
+            partition.clone(),
+            1,
+            None,
+            Some(continuation.clone()),
+            Some(snapshot.clone()),
+            SourceCoverageV1::Partial,
+            sanitized_digest.clone(),
+        )
+        .map_err(invalid)?;
+        let next_partition = SourcePartitionFrontierV1::new(
+            binding_identity.clone(),
+            partition.clone(),
+            None,
+            Some(snapshot),
+            Some(continuation),
+            SourceCoverageV1::Partial,
+            sequence,
+            previous_partition.and_then(SourcePartitionFrontierV1::last_complete_snapshot),
+            envelope.envelope_digest().clone(),
+        )
+        .map_err(invalid)?;
+        let source_observation = SourceObjectObservationV1::new(
+            SourceNativeObjectIdV1::new(
+                canonical_sha256(&(
+                    "tracedecay.host-observation.native-object.v1",
+                    observation.observation_id(),
+                ))
+                .map_err(invalid)?,
+            ),
+            SourceObjectRevisionV1::new(
+                canonical_sha256(&(
+                    "tracedecay.host-observation.revision.v1",
+                    observation.observation_id(),
+                    observation.payload_reference(),
+                ))
+                .map_err(invalid)?,
+            ),
+            sanitized_digest,
+            SourceContentStateV1::Live,
+        )
+        .map_err(invalid)?;
+        let evidence = SourceObservationEvidenceV1::new(
+            binding_identity,
+            partition,
+            &source_observation,
+            observation.receipt().receipt().clone(),
+            receipt.retrieval_anchor_id().clone(),
+            authorization.clone(),
+            canonical_sha256(&(
+                "tracedecay.host-observation.source-authorization.v1",
+                &definition,
+                &binding,
+                &refresh,
+                &envelope,
+                &authorization,
+            ))
+            .map_err(invalid)?,
+        )
+        .map_err(invalid)?;
+        let mutation = SourceObjectMutationV1::new(
+            source_observation,
+            None,
+            SourceObjectTransitionV1::Initial,
+            evidence,
+        )
+        .map_err(invalid)?;
+        let capture = SourceCaptureApplicationV1::authorize(
+            &definition,
+            &binding,
+            binding.binding_revision,
+            ManifestDigest::new(authorization.access_policy_digest.as_str()).map_err(invalid)?,
+            self.runtime.binding().authority_epoch.get(),
+            canonical_sha256(&(
+                "tracedecay.host-observation.sink-authority.v1",
+                self.runtime.binding(),
+            ))
+            .map_err(invalid)?,
+            &refresh,
+            &envelope,
+        )?;
+        self.capture_and_commit_sanitized(
+            &capture,
+            RuntimeSourceCaptureRequestV1 {
+                definition,
+                binding,
+                refresh,
+                provider_envelope: envelope,
+                canonical_refetch: None,
+                expected_frontier,
+                next_partition,
+                previous_whole_root_stage: None,
+                mutations: vec![mutation],
+                idempotency_key,
+                request_digest,
+            },
+            ComponentVersion::new("projector.host-observation.external-source.v1")
+                .map_err(invalid)?,
+        )
+        .await
+    }
+
+    pub(crate) async fn read_host_observation_receipt(
+        &self,
+        receipt: &tracedecay_store::ObservationCommitReceipt,
+    ) -> Result<Option<SourceCommitReceiptV1>, RuntimeExternalSourceErrorV1> {
+        let observation = receipt.observation();
+        let definition = host_source_definition(observation.source().provider().clone())?;
+        let binding = host_source_binding(
+            &definition,
+            observation,
+            receipt
+                .retrieval_anchor()
+                .authorization()
+                .privacy_domain_id
+                .clone(),
+            self.runtime.binding(),
+        )?;
+        let idempotency_key = canonical_sha256(&(
+            "tracedecay.host-observation.idempotency.v1",
+            observation.observation_id(),
+        ))
+        .map_err(invalid)?;
+        Ok(self
+            .read_state(binding.immutable_identity().map_err(invalid)?)
+            .await?
+            .and_then(|state| state.receipt_by_idempotency_key(&idempotency_key).cloned()))
+    }
+
     async fn read_receipt(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
     ) -> Result<SourceCommitReceiptV1, RuntimeExternalSourceErrorV1> {
+        self.read_state(binding)
+            .await?
+            .map(|state| state.receipt().clone())
+            .ok_or(RuntimeExternalSourceErrorV1::Unavailable)
+    }
+
+    async fn read_state(
+        &self,
+        binding: tracedecay_domain::SourceBindingIdentityV1,
+    ) -> Result<Option<SourceStoreStateV1>, RuntimeExternalSourceErrorV1> {
         let operation = ExternalSourceReadOperationV1::State { binding };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
         let probe = ExternalSourceRuntimeProbe::from_control(request.control());
@@ -164,9 +436,112 @@ impl RuntimeExternalSourceStore {
                     RepositoryReadResultV1::ExternalSource(ExternalSourceReadResultV1::State(Some(
                         state,
                     ))),
-            }) => Ok(state.receipt().clone()),
+            }) => Ok(Some(state.as_ref().clone())),
+            Some(RuntimeReadResultV1::Repository {
+                result:
+                    RepositoryReadResultV1::ExternalSource(ExternalSourceReadResultV1::State(None)),
+            }) => Ok(None),
             _ => Err(RuntimeExternalSourceErrorV1::Unavailable),
         }
+    }
+}
+
+fn host_source_definition(
+    provider: ProviderId,
+) -> Result<SourceDefinitionV1, RuntimeExternalSourceErrorV1> {
+    let capabilities = SourceAcquisitionCapabilitiesV1::new(
+        [SourceCaptureModeV1::Poll].into_iter().collect(),
+        [SourceRefetchStrategyV1::WholeRoot].into_iter().collect(),
+        [SourceDeletionSemanticsV1::ExplicitOnly]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(invalid)?;
+    SourceDefinitionV1::new(
+        SourceInstanceId::new(format!("source.host-observation.{}", provider.as_str()))
+            .map_err(invalid)?,
+        1,
+        SourceAcquisitionContractV1::new(provider, capabilities).map_err(invalid)?,
+        SourceCaptureModeV1::Poll,
+        SourceRefetchStrategyV1::WholeRoot,
+        SourceDeletionSemanticsV1::ExplicitOnly,
+        1,
+    )
+    .map_err(invalid)
+}
+
+fn host_source_owner(
+    scope: &ObservationScopeV1,
+    profile_id: &tracedecay_domain::UserProfileId,
+) -> SourceBindingOwnerV1 {
+    match scope {
+        ObservationScopeV1::Project { project_id } => {
+            SourceBindingOwnerV1::Project(project_id.clone())
+        }
+        ObservationScopeV1::Profile => SourceBindingOwnerV1::Profile(profile_id.clone()),
+    }
+}
+
+fn host_source_binding(
+    definition: &SourceDefinitionV1,
+    observation: &tracedecay_domain::DurableObservationV1,
+    privacy_domain: tracedecay_domain::PrivacyDomainId,
+    runtime: &tracedecay_store::StoreRuntimeBindingV1,
+) -> Result<SourceBindingV1, RuntimeExternalSourceErrorV1> {
+    let binding = SourceBindingV1::new(
+        definition,
+        host_source_owner(observation.scope(), &runtime.shard_id.profile_id),
+        privacy_domain,
+        host_native_root(observation)?,
+        1,
+    )
+    .map_err(invalid)?;
+    validate_host_source_shard(&binding, runtime)?;
+    Ok(binding)
+}
+
+fn host_native_root(
+    observation: &tracedecay_domain::DurableObservationV1,
+) -> Result<LocatorDigest, RuntimeExternalSourceErrorV1> {
+    LocatorDigest::new(
+        canonical_sha256(&(
+            "tracedecay.host-observation.native-root.v1",
+            observation.source(),
+            observation.scope(),
+        ))
+        .map_err(invalid)?
+        .as_str(),
+    )
+    .map_err(invalid)
+}
+
+fn validate_host_source_shard(
+    binding: &SourceBindingV1,
+    runtime: &tracedecay_store::StoreRuntimeBindingV1,
+) -> Result<(), RuntimeExternalSourceErrorV1> {
+    let exact = match (&binding.owner, &runtime.shard_id.scope) {
+        (
+            SourceBindingOwnerV1::Project(project_id),
+            tracedecay_store::StoreShardScopeV1::Project {
+                project_id: shard_project,
+            }
+            | tracedecay_store::StoreShardScopeV1::ProjectSessions {
+                project_id: shard_project,
+            },
+        ) => project_id == shard_project,
+        (
+            SourceBindingOwnerV1::Profile(profile_id),
+            tracedecay_store::StoreShardScopeV1::Profile
+            | tracedecay_store::StoreShardScopeV1::ProfileSessions,
+        ) => profile_id == &runtime.shard_id.profile_id,
+        _ => false,
+    };
+    if exact {
+        Ok(())
+    } else {
+        Err(RuntimeExternalSourceErrorV1::Invalid(
+            "host observation source authority does not match the selected store shard".to_owned(),
+        ))
     }
 }
 
