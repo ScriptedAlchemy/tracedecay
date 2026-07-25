@@ -70,7 +70,9 @@ function parse<T>(schema: ZodType<T>, pathname: string, search = ''): T {
 
 /* --- Faithful mirrors of module-local page schemas (not exported) ---------- */
 
-// SessionsPage.tsx / LoomPage.tsx: OverviewPayload.
+// SessionsPage.tsx: OverviewPayload. (LoomPage no longer reads this route —
+// `/api/plugins/hermes-lcm/overview` 500s on the real profile, so the weave
+// draws from `/api/plugins/savings/sessions` instead; see loom/contracts.ts.)
 const OverviewPayload = z
   .object({ latest_sessions: z.array(AnyObject).optional() })
   .passthrough();
@@ -268,6 +270,23 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     const data = parse(DeliveryProjectsPayloadSchema, '/api/projects');
     const checkouts = (data.project_tree ?? []).flatMap((g) => g.projects);
     expect(checkouts.some((c) => c.kind === 'worktree')).toBe(true);
+
+    // The delivery field has to compose into something readable, and the
+    // bounds below encode the SHAPE of the real registry, not just its size.
+    const field = composeDeliveryField(data.project_tree ?? []);
+    expect(field.bodies.length).toBeGreaterThanOrEqual(10);
+    // Branch counts must be skewed, or the log y axis is untested.
+    expect(field.branchCeiling / Math.max(field.branchFloor, 1)).toBeGreaterThan(5);
+    // Repositories must land in more than one recency column, or the x axis
+    // renders as a single occupied stripe and proves nothing.
+    expect(field.columns.filter((column) => column.count > 0).length).toBeGreaterThanOrEqual(2);
+    // Multi-checkout repositories exercise the size channel, which the real
+    // registry currently has nothing to spend.
+    expect(field.multiCheckoutCount).toBeGreaterThan(0);
+    // No body may be pushed out of its own recency column by packing.
+    for (const body of field.bodies) {
+      expect(Math.abs(body.offset)).toBeLessThanOrEqual(0.4);
+    }
   });
 
   it('GET /api/plugins/holographic/ — knowledge (MemoryOverviewPayloadSchema)', () => {
@@ -313,6 +332,64 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
       expect(typeof s['message_count']).toBe('number');
       expect(Number(s['first_timestamp'])).toBeLessThan(Number(s['last_timestamp']));
     }
+  });
+
+  it('GET /api/plugins/savings/sessions — loom threads (LoomSessionsPayloadSchema)', () => {
+    const data = parse(LoomSessionsPayloadSchema, '/api/plugins/savings/sessions');
+    const sessions = data.sessions ?? [];
+    expect(sessions.length).toBeGreaterThanOrEqual(30);
+    expect(new Set(sessions.map((s) => s.provider)).size).toBe(3);
+
+    // The weave has to compose the fixture into something with structure in
+    // it, or the audit shot is a picture of nothing. These bounds encode the
+    // distribution the real store has (plan 11a finding 4), not just its size.
+    const weave = composeWeave(sessions);
+    expect(weave.hosts).toHaveLength(3);
+    expect(weave.threads.length).toBe(sessions.length);
+
+    // Most sessions carry no served end: the open-thread idiom is the whole
+    // honesty story of this surface and must be exercised, not bypassed.
+    expect(weave.openEndedCount).toBeGreaterThan(weave.threads.length / 2);
+    // ...but not ALL of them, or the measured-extent state never renders.
+    expect(weave.openEndedCount).toBeLessThan(weave.threads.length);
+
+    // Zero-message sessions exist and are drawn hollow.
+    expect(weave.hollowCount).toBeGreaterThan(0);
+    // Subagents exist, so the head crossbar renders.
+    expect(weave.threads.some((thread) => thread.isSubagent)).toBe(true);
+    // Model attribution reaches the detail rail.
+    expect(weave.threads.some((thread) => thread.models.length > 0)).toBe(true);
+
+    // Skew, not merely magnitude: a uniform fixture would never show that the
+    // width channel needed a log scale.
+    expect(weave.messageCeiling).toBeGreaterThan(500);
+    const median = [...weave.threads]
+      .map((thread) => thread.messages)
+      .sort((a, b) => a - b)[Math.floor(weave.threads.length / 2)]!;
+    expect(weave.messageCeiling / Math.max(median, 1)).toBeGreaterThan(20);
+
+    // Every row is placeable: a fixture row with no start would silently
+    // shrink the field instead of failing here.
+    expect(weave.undated).toBe(0);
+    expect(weave.extent).not.toBeNull();
+  });
+
+  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (LoomChainPayloadSchema)', () => {
+    const data = parse(
+      LoomChainPayloadSchema,
+      '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
+    );
+    expect(data.exists).toBe(true);
+    const summary = summarizeChain(data.messages ?? [], data.counts, false);
+    expect(summary.steps.length).toBeGreaterThanOrEqual(20);
+    // Roles and tools both populate, so the composition and tool-histogram
+    // sections of the rail render rather than falling to their zero states.
+    expect(summary.roles.length).toBeGreaterThanOrEqual(2);
+    expect(summary.tools.length).toBeGreaterThanOrEqual(3);
+    // The daemon serves no per-message timestamp. The fixture must not invent
+    // one, or the audit never shoots the "ordinal order" caption that the real
+    // surface always shows.
+    expect(summary.timestamped).toBe(false);
   });
 
   it('GET /api/plugins/hermes-lcm/timeline — sessions (TimelinePayload)', () => {
