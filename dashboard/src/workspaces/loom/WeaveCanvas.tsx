@@ -178,29 +178,41 @@ export function WeaveCanvas({
                     * is truncated to what its own column can hold rather than
                     * being allowed to trespass on its neighbour's — a header
                     * that overlaps the next column mislabels it. */}
-                  <clipPath id={`weave-head-${index}`}>
-                    <rect
-                      x={x}
-                      y={0}
-                      width={Math.max(geometry.columnWidth - 4, 1)}
-                      height={HEAD}
-                    />
-                  </clipPath>
-                  {/* Truncation trims the label to an ESTIMATE of the room its
-                    * column has; the clip guarantees the result. Font metrics
-                    * are not knowable here, so the estimate alone kept letting
-                    * a count graze the next column and mislabel it. */}
-                  <text
-                    x={x + 6}
-                    y={HEAD - 9}
-                    clipPath={`url(#weave-head-${index})`}
-                    className="fill-text-secondary text-[9px] uppercase tracking-[0.18em]"
-                  >
-                    {truncateLabel(host.label, geometry.columnWidth)}
-                    <tspan dx={7} className="fill-text-muted tracking-normal">
-                      {host.count}
-                    </tspan>
-                  </text>
+                  {/* Below ~96px a column cannot hold a host name and its
+                    * count without one of them being cut, and a clipped count
+                    * ("12" rendered as "1") is worse than no count: it is a
+                    * wrong number. The header is simply omitted there. Nothing
+                    * is lost — the per-host readout row directly beneath the
+                    * canvas names every host with its thread and message
+                    * totals, and it wraps rather than truncating. */}
+                  {geometry.columnWidth >= HEADER_MIN_WIDTH ? (
+                    <>
+                      <clipPath id={`weave-head-${index}`}>
+                        <rect
+                          x={x}
+                          y={0}
+                          width={Math.max(geometry.columnWidth - 2, 1)}
+                          height={HEAD}
+                        />
+                      </clipPath>
+                      {/* Truncation trims the label to an ESTIMATE of the room
+                        * its column has; the clip guarantees it. Font metrics
+                        * are not knowable here, so the estimate alone kept
+                        * letting a count graze the column next door and
+                        * mislabel it. */}
+                      <text
+                        x={x + 6}
+                        y={HEAD - 9}
+                        clipPath={`url(#weave-head-${index})`}
+                        className="fill-text-secondary text-[9px] uppercase tracking-[0.18em]"
+                      >
+                        {truncateLabel(host.label, geometry.columnWidth)}
+                        <tspan dx={7} className="fill-text-muted tracking-normal">
+                          {host.count}
+                        </tspan>
+                      </text>
+                    </>
+                  ) : null}
                 </g>
               );
             })
@@ -260,8 +272,12 @@ export function WeaveCanvas({
   );
 }
 
+/** Narrowest column that can carry a host name and its count without cutting
+ * either. Below this the header is dropped rather than clipped. */
+const HEADER_MIN_WIDTH = 96;
+
 /** Letterspaced 9px small caps run about 7.4px per character; the count and its
- * gap need roughly 22px more. Trimmed to at least three characters so a column
+ * gap need roughly 42px more. Trimmed to at least three characters so a column
  * always carries some identity rather than an ellipsis alone. */
 function truncateLabel(label: string, columnWidth: number): string {
   const room = Math.floor((columnWidth - 42) / 7.4);
