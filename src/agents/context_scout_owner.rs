@@ -22,7 +22,8 @@ use super::context_scout_v2::{
     ContextScoutModelBackendV1, ContextScoutModelErrorV1, ContextScoutModelExecutionV1,
     ContextScoutModelFuture, ContextScoutModelRequestV1, ContextScoutModelRunOutcomeV1,
     ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1,
-    ContextScoutSelectionInputV1, ContextScoutStatusV1, ContextScoutWorkV1,
+    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
+    ContextScoutWorkV1,
     ProjectContextScoutDurableStoreV1,
 };
 use crate::application::context::{CancellationToken, MonotonicDeadline};
@@ -362,6 +363,26 @@ impl ProjectContextScoutOwnerV1 {
         Ok(())
     }
 
+    /// Installs only an admitted active/paused control transition while
+    /// preserving the already-selected model authority.
+    pub async fn install_state_transition(
+        &self,
+        pin: ContextScoutConfigurationPinV1,
+    ) -> Result<(), ContextScoutErrorV1> {
+        let next = pin.control();
+        let mut configuration = self.configuration.write().await;
+        let current = configuration
+            .as_ref()
+            .ok_or(ContextScoutErrorV1::ConfigurationUnavailable)?
+            .control();
+        if !context_scout_state_transition_is_exact(current, next) {
+            return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+        }
+        self.runtime.lock().await.status(next)?;
+        *configuration = Some(pin);
+        Ok(())
+    }
+
     pub async fn configured_status(&self) -> Result<ContextScoutStatusV1, ContextScoutErrorV1> {
         let configuration = self.configuration.read().await;
         let control = configuration
@@ -581,6 +602,26 @@ impl ProjectContextScoutOwnerV1 {
         let _ = self.store.requeue(claim).await;
         ContextScoutDurableClaimOutcomeV1::Empty
     }
+}
+
+fn context_scout_state_transition_is_exact(
+    current: ContextScoutControlV1,
+    next: ContextScoutControlV1,
+) -> bool {
+    current.configuration_revision != next.configuration_revision
+        && current.mode == next.mode
+        && current.model_path == next.model_path
+        && current.limits == next.limits
+        && matches!(
+            (current.state, next.state),
+            (
+                ContextScoutServiceStateV1::Active,
+                ContextScoutServiceStateV1::Paused
+            ) | (
+                ContextScoutServiceStateV1::Paused,
+                ContextScoutServiceStateV1::Active
+            )
+        )
 }
 
 fn delivery_window_admitted_at_hook(
