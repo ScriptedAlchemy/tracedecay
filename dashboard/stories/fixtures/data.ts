@@ -70,6 +70,7 @@ function projectEntry(
   label: string,
   root: string,
   ageSecs: number,
+  mass?: { stores: number; scopes: number; artifacts: number },
 ): Record<string, unknown> {
   return {
     project_id: id,
@@ -79,12 +80,60 @@ function projectEntry(
     kind: 'git',
     default_branch: 'master',
     branches: ['master', 'codex/tracedecay-total-redesign-plan'],
-    store_count: 3,
-    graph_scope_count: 2,
-    artifact_count: 7,
+    store_count: mass?.stores ?? 3,
+    graph_scope_count: mass?.scopes ?? 2,
+    artifact_count: mass?.artifacts ?? 7,
     alias_count: 1,
     last_seen_at: nowSecs - ageSecs,
     is_active: id === 'tracedecay',
+  };
+}
+
+/**
+ * The real registry is dozens of repositories with one checkout each, spread
+ * across months of last-contact and three orders of magnitude of indexed mass.
+ * Brain's field is a composition OF that spread, so a three-repo fixture could
+ * not exercise it: every audited screenshot would show one column and tell a
+ * reviewer nothing about the layout being reviewed. These entries are generated
+ * from the same `projectEntry` shape as the hand-written ones above (so they
+ * stay gated by the parse test), and their ages and masses are derived from the
+ * index — deterministic, never random — to land bodies in every recency column
+ * and across the mass axis.
+ */
+const SYNTHETIC_REPOS: ReadonlyArray<{ name: string; ageSecs: number; mass: number }> =
+  [
+    'rslint', 'vite-rsbuild', 'mold', 'core', 'ai-train', 'browser-linux',
+    'cargo-slot', 'ci-runner-orchestrator', 'claude-code', 'codex-cli',
+    'graphology-fork', 'hermes-lcm', 'lynx-stack', 'module-federation',
+    'nextjs-app', 'rspack', 'sigma-fork', 'turbo-cache', 'wasm-host',
+    'zed-extensions', 'polars-bench', 'sqlite-vfs', 'tokio-probe',
+  ].map((name, index) => ({
+    name,
+    // 0.6h · 1.9 ^ index — a geometric spread from "minutes ago" out past a
+    // year, so every recency column is occupied and none is crowded.
+    ageSecs: Math.round(2_160 * 1.9 ** index),
+    // Masses that cycle through four magnitudes rather than tracking age, so
+    // the two axes stay independent and the field is not a diagonal line.
+    mass: [1, 4, 9, 22, 58, 140, 310][index % 7]!,
+  }));
+
+function syntheticGroup(repo: { name: string; ageSecs: number; mass: number }) {
+  const root = `/fast/projects/${repo.name}`;
+  return {
+    label: repo.name,
+    git_common_dir: `${root}/.git`,
+    project_count: 1,
+    branches: ['main'],
+    projects: [
+      {
+        ...projectEntry(`proj_${repo.name}`, repo.name, root, repo.ageSecs, {
+          stores: 1,
+          scopes: Math.max(1, Math.round(repo.mass * 0.35)),
+          artifacts: Math.max(1, Math.round(repo.mass * 0.65)),
+        }),
+        kind: 'primary',
+      },
+    ],
   };
 }
 
@@ -95,7 +144,11 @@ const projects: Record<string, unknown> = {
   truncated: false,
   active_project_id: 'tracedecay',
   active_project_root: '/fast/projects/tracedecay',
-  summary: { project_count: 4, repo_count: 3, truncated: false },
+  summary: {
+    project_count: 4 + SYNTHETIC_REPOS.length,
+    repo_count: 3 + SYNTHETIC_REPOS.length,
+    truncated: false,
+  },
   project_tree: [
     {
       label: 'tracedecay',
@@ -133,6 +186,7 @@ const projects: Record<string, unknown> = {
         { ...projectEntry('hermes', 'hermes', '/fast/projects/hermes', 2 * DAY), kind: 'primary' },
       ],
     },
+    ...SYNTHETIC_REPOS.map(syntheticGroup),
   ],
 };
 
@@ -1241,7 +1295,11 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/graph/subgraph': subgraphPayload(null),
   // Savings.
   '/api/plugins/savings/overview': savingsPayload(),
+  // Memory bank status (memory_api.rs::status) — the scoped Brain's fact and
+  // entity readouts. Distinct from the overview payload above.
+  '/api/plugins/holographic/status': memoryStatusPayload(),
   // Analytics.
+  '/api/plugins/analytics/overview': analyticsOverviewPayload(),
   '/api/plugins/analytics/usage': analyticsUsagePayload(),
   '/api/plugins/analytics/hints': analyticsHintsPayload(),
   // Automation.
@@ -1259,11 +1317,137 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   ['/api/plugins/holographic', memoryPayload()],
   ['/api/plugins/graph', graphOverviewPayload()],
   ['/api/plugins/savings', savingsPayload()],
-  ['/api/projects/', projects],
 ];
+
+/** GET /api/plugins/holographic/status (src/dashboard/memory_api.rs `status`). */
+function memoryStatusPayload(): Record<string, unknown> {
+  return {
+    error: '',
+    exists: true,
+    path: '/fast/projects/tracedecay/.tracedecay/memory.db',
+    largest_bank_fact_count: 169,
+    largest_bank_utilization_pct: 0.0477,
+    memory: {
+      algebra_name: 'amari_fhrr',
+      bank_count: 7,
+      entity_count: 1186,
+      estimated_capacity: 354_304,
+      fact_count: 173,
+    },
+  };
+}
+
+/** GET /api/plugins/analytics/overview (src/dashboard/analytics_api.rs). */
+function analyticsOverviewPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+    scope: 'profile_sharded',
+    usage: {
+      available: true,
+      source: 'analytics_events',
+      event_count: 10_000,
+      message_count: 10_000,
+      by_category: [
+        { category: 'tracedecay_mcp', events: 6837, kind: 'tool' },
+        { category: 'memory', events: 610, kind: 'tool' },
+        { category: 'lcm_session', events: 22, kind: 'tool' },
+      ],
+    },
+  };
+}
 
 /** Empty-but-valid fallback for any unmapped /api route. */
 export const EMPTY_FIXTURE: Record<string, unknown> = {};
+
+/**
+ * GET /api/projects/{project_id} — the registry backbone (src/dashboard/
+ * projects.rs `context`). Resolves for every registered project regardless of
+ * whether its graph is mounted, which is exactly the property the scoped Brain
+ * depends on, so the fixture answers for any id rather than only known ones.
+ */
+function projectContextPayload(projectId: string): Record<string, unknown> {
+  const known = (projects['project_tree'] as Array<Record<string, unknown>>)
+    .flatMap((group) => group['projects'] as Array<Record<string, unknown>>)
+    .find((entry) => entry['project_id'] === projectId);
+  const entry =
+    known ?? projectEntry(projectId, projectId, `/fast/projects/${projectId}`, 3 * DAY);
+  const root = entry['canonical_root'] as string;
+  const lastSeen = entry['last_seen_at'] as number;
+  const branches = ['master', 'codex/tracedecay-total-redesign-plan', 'release/2.4'];
+  return {
+    status: 'ok',
+    is_active: entry['is_active'] === true,
+    project: entry,
+    aliases: [
+      { project_id: projectId, alias_path: root, last_seen_at: lastSeen },
+      ...branches.slice(1).map((branch, i) => ({
+        project_id: projectId,
+        alias_path: `${root}/.worktrees/${branch.replace(/\//g, '-')}`,
+        last_seen_at: lastSeen - (i + 1) * 4 * 3600,
+      })),
+    ],
+    stores: [
+      {
+        store: {
+          store_id: `store:${projectId}:profile_sharded`,
+          project_id: projectId,
+          store_kind: 'code_project',
+          storage_mode: 'profile_sharded',
+          store_relpath: `projects/${projectId}`,
+          manifest_relpath: `projects/${projectId}/store_manifest.json`,
+          created_at: lastSeen - 90 * DAY,
+          last_verified_at: lastSeen,
+          last_write_at: lastSeen,
+        },
+        graph_scopes: branches.map((branch, i) => ({
+          graph_scope_id: `store:${projectId}:branch:${branch}`,
+          project_id: projectId,
+          store_id: `store:${projectId}:profile_sharded`,
+          branch_name: branch,
+          db_relpath: `projects/${projectId}/branches/${branch.replace(/\//g, '-')}.db`,
+          parent_scope_id: null,
+          last_synced_at: lastSeen - i * 6 * 3600,
+          writable: i === 0,
+        })),
+        artifacts: [
+          {
+            store_id: `store:${projectId}:profile_sharded`,
+            artifact_kind: 'graph_db',
+            relpath: `projects/${projectId}/tracedecay.db`,
+            schema_version: null,
+            size_bytes: 131_088_384,
+            updated_at: lastSeen,
+          },
+          {
+            store_id: `store:${projectId}:profile_sharded`,
+            artifact_kind: 'sessions_db',
+            relpath: `projects/${projectId}/sessions.db`,
+            schema_version: null,
+            size_bytes: 42_930_176,
+            updated_at: lastSeen,
+          },
+          {
+            store_id: `store:${projectId}:profile_sharded`,
+            artifact_kind: 'memory_db',
+            relpath: `projects/${projectId}/memory.db`,
+            schema_version: null,
+            size_bytes: 9_027_584,
+            updated_at: lastSeen,
+          },
+          {
+            store_id: `store:${projectId}:profile_sharded`,
+            artifact_kind: 'branch_meta',
+            relpath: `projects/${projectId}/branch-meta.json`,
+            schema_version: null,
+            size_bytes: 14_704,
+            updated_at: lastSeen,
+          },
+        ],
+      },
+    ],
+  };
+}
 
 /**
  * Resolve a request pathname to its fixture payload. `search` is the raw query
@@ -1272,6 +1456,19 @@ export const EMPTY_FIXTURE: Record<string, unknown> = {};
  * otherwise ignored so all other routes resolve by pathname alone.
  */
 export function resolveFixture(pathname: string, search = ''): unknown {
+  // The project-scoped gateway. The daemon binds `/api/projects/{id}/{tail}`
+  // and serves `/api/{tail}` against that project's own state
+  // (src/dashboard/mod.rs `project_scoped_api_gateway`), so the fixture layer
+  // has to perform the same rewrite — otherwise every scoped read a workspace
+  // makes would resolve to the registry payload and the scoped surfaces would
+  // be audited against a shape the daemon never sends. `/api/projects/{id}`
+  // with no tail is a different route (`projects::context`) and is handled
+  // below, not here.
+  const scoped = /^\/api\/projects\/([^/]+)\/(.+)$/.exec(pathname);
+  if (scoped) return resolveFixture(`/api/${scoped[2]}`, search);
+  const contextMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname);
+  if (contextMatch) return projectContextPayload(contextMatch[1]!);
+
   if (pathname === '/api/plugins/graph/subgraph') {
     const nodeId = new URLSearchParams(search).get('node_id');
     return subgraphPayload(nodeId);
