@@ -50,7 +50,7 @@ impl SemanticRedundancyProfileV1 {
             return None;
         }
         let scaled = ((1.0 - cosine) * SEMANTIC_DISTANCE_SCALE).round();
-        (scaled >= 0.0 && scaled <= f64::from(MAX_COSINE_DISTANCE_MICROS)).then_some(scaled as i64)
+        (scaled >= 0.0 && scaled <= MAX_COSINE_DISTANCE_MICROS as f64).then_some(scaled as i64)
     }
 
     pub(crate) fn accepts(&self, cosine: f64) -> Option<i64> {
