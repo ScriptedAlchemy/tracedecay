@@ -1717,6 +1717,7 @@ mod tests {
         let request = ContextProjectionRequest {
             kind: ContextProjectionKind::diagnostics(),
             document_uri: Some("file:///root/a.rs".to_owned()),
+            document_content_digest: None,
         };
         assert_eq!(
             adapter.snapshot(&root, &request_id, &request),
