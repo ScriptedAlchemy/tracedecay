@@ -104,6 +104,13 @@ export const MemoryOverviewPayloadSchema = z
   .passthrough();
 export type MemoryOverviewPayload = z.infer<typeof MemoryOverviewPayloadSchema>;
 
+export const FactDetailPayloadSchema = z
+  .object({
+    fact: FactRowSchema.nullable().optional(),
+    error: z.string().optional(),
+  })
+  .passthrough();
+
 /**
  * GET /api/plugins/holographic/status (src/dashboard/memory_api.rs `status`).
  *
