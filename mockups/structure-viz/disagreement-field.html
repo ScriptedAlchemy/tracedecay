@@ -1,0 +1,475 @@
+<!doctype html>
+<!--
+  MOCKUP — not production code. Concept 3 of 3: DISAGREEMENT FIELD.
+
+  Chrome tokens copied verbatim from dashboard/src/theme/tokens.css and the
+  @theme block of dashboard/src/theme/tailwind.css; kindColor() is a
+  line-for-line port of dashboard/src/viz/graph/kindColor.ts.
+
+  Every value is INVENTED but honestly shaped — see notes/disagreement-field.md.
+  All three edge counts in the legend are COMPUTED from the edge list below, so
+  the caption and the picture cannot disagree with each other.
+
+  Theme: append ?theme=light to the file:// URL.
+-->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>Disagreement field — mockup</title>
+<style>
+:root {
+  --raw-surface-0: oklch(0.145 0.003 260);
+  --raw-surface-1: oklch(0.178 0.0035 260);
+  --raw-surface-2: oklch(0.215 0.004 260);
+  --raw-surface-3: oklch(0.262 0.0045 260);
+  --raw-text-primary: oklch(0.945 0.002 260);
+  --raw-text-secondary: oklch(0.79 0.003 260);
+  --raw-text-muted: oklch(0.685 0.004 260);
+  --raw-edge-subtle: oklch(0.315 0.004 260);
+  --raw-edge-strong: oklch(0.46 0.006 260);
+  --raw-accent: oklch(0.75 0.15 200);
+  --raw-accent-emphasis: oklch(0.64 0.16 200);
+  --raw-grid: oklch(0.24 0.004 260);
+  --raw-grid-minor: oklch(0.195 0.003 260);
+  --raw-state-ready: oklch(0.72 0.14 155);
+  --raw-state-partial: oklch(0.78 0.14 85);
+  --raw-state-unknown: oklch(0.6 0.015 260);
+  --raw-state-error: oklch(0.62 0.18 25);
+  --raw-state-conflicting: oklch(0.7 0.14 55);
+  --raw-membrane-lift: oklch(0.34 0.016 262 / 0.55);
+  --raw-depth: oklch(0.07 0.012 262 / 0.6);
+  --raw-well: oklch(0.118 0.0035 262);
+  --raw-raised: oklch(0.228 0.004 260);
+  --shadow-well: inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
+  --shadow-raised: inset 0 1px 0 var(--raw-membrane-lift), 0 1px 2px var(--raw-depth);
+  --raw-graph-field:
+    radial-gradient(85% 70% at 50% 42%, oklch(0.245 0.035 262 / 0.75) 0%, transparent 62%),
+    radial-gradient(140% 120% at 50% 45%, oklch(0.165 0.014 264) 0%, oklch(0.105 0.012 268) 100%);
+  --grid-cell: 32px;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  --text-3xs: 10px; --text-2xs: 11px; --text-xs: 12px; --text-sm: 13px;
+  --text-base: 15px; --text-lg: 19px; --text-xl: 26px; --text-2xl: 34px;
+}
+[data-theme='light'] {
+  --raw-surface-0: oklch(0.985 0.001 260);
+  --raw-surface-1: oklch(0.962 0.0015 260);
+  --raw-surface-2: oklch(0.936 0.002 260);
+  --raw-surface-3: oklch(0.9 0.0025 260);
+  --raw-text-primary: oklch(0.2 0.004 260);
+  --raw-text-secondary: oklch(0.37 0.005 260);
+  --raw-text-muted: oklch(0.45 0.005 260);
+  --raw-edge-subtle: oklch(0.855 0.003 260);
+  --raw-edge-strong: oklch(0.7 0.005 260);
+  --raw-accent: oklch(0.47 0.14 220);
+  --raw-accent-emphasis: oklch(0.43 0.15 220);
+  --raw-grid: oklch(0.895 0.002 260);
+  --raw-grid-minor: oklch(0.945 0.001 260);
+  --raw-state-ready: oklch(0.52 0.14 155);
+  --raw-state-partial: oklch(0.56 0.13 85);
+  --raw-state-unknown: oklch(0.46 0.015 260);
+  --raw-state-error: oklch(0.48 0.19 25);
+  --raw-state-conflicting: oklch(0.5 0.15 55);
+  --raw-membrane-lift: oklch(1 0 0 / 0.9);
+  --raw-depth: oklch(0.52 0.03 262 / 0.16);
+  --raw-well: oklch(0.945 0.0018 260);
+  --raw-raised: oklch(1 0 0);
+  --raw-graph-field:
+    radial-gradient(85% 70% at 50% 42%, oklch(0.995 0.008 250 / 0.9) 0%, transparent 62%),
+    radial-gradient(140% 120% at 50% 45%, oklch(0.965 0.008 264) 0%, oklch(0.918 0.012 268) 100%);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--raw-surface-0); color: var(--raw-text-primary);
+  font-family: var(--font-sans); font-size: 14px;
+  font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased;
+}
+.td-legend {
+  font-size: var(--text-3xs); line-height: 1; letter-spacing: 0.16em;
+  text-transform: uppercase; font-weight: 500; color: var(--raw-text-muted); white-space: nowrap;
+}
+.td-title {
+  font-size: var(--text-2xs); line-height: 1; letter-spacing: 0.13em;
+  text-transform: uppercase; font-weight: 600; color: var(--raw-text-secondary);
+}
+.td-value { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--raw-text-primary); }
+.td-unit { font-size: var(--text-3xs); letter-spacing: 0.1em; text-transform: uppercase; color: var(--raw-text-muted); }
+.td-display {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500;
+  letter-spacing: -0.035em; line-height: 0.92; color: var(--raw-text-primary);
+}
+.td-rule { flex: 1 1 0%; height: 1px; min-width: 8px; background: var(--raw-edge-subtle); }
+.chassis { width: 1440px; }
+.masthead {
+  display: flex; align-items: flex-end; gap: 20px;
+  padding: 14px 20px 12px; border-bottom: 1px solid var(--raw-edge-subtle);
+}
+.headline { font-size: var(--text-xl); letter-spacing: -0.02em; }
+.readouts { display: flex; margin-left: auto; }
+.readout {
+  padding: 6px 16px; border-left: 1px solid var(--raw-edge-subtle);
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-end;
+}
+.readout .n { font-size: var(--text-xl); }
+.section-bar {
+  display: flex; align-items: center; gap: 12px; padding: 9px 20px;
+  border-bottom: 1px solid var(--raw-edge-subtle);
+}
+figure { margin: 0; }
+figcaption { font-size: var(--text-3xs); color: var(--raw-text-muted); line-height: 1.5; padding: 8px 20px 12px; }
+svg { display: block; }
+/* The one place this console shows depth: the field is a window cut into the
+ * face, so it gets the graph-field atmosphere and the CRT ruling. */
+.field { position: relative; background: var(--raw-graph-field); }
+.field::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom, color-mix(in oklab, var(--raw-surface-0) 55%, transparent) 0 1px, transparent 1px 4px);
+  opacity: 0.13;
+}
+.key { display: flex; gap: 0; border-bottom: 1px solid var(--raw-edge-subtle); }
+.key > div {
+  flex: 1; padding: 11px 20px; border-right: 1px solid var(--raw-edge-subtle);
+  display: flex; gap: 14px; align-items: flex-start;
+}
+.key > div:last-child { border-right: 0; }
+.key .n { font-size: var(--text-2xl); }
+.key .swatch { width: 46px; flex: none; padding-top: 7px; }
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 0; text-align: left; font-weight: inherit; }
+.rowline td { border-top: 1px solid var(--raw-edge-subtle); }
+</style>
+</head>
+<body>
+<div class="chassis">
+
+  <header class="masthead">
+    <div>
+      <div class="td-legend" style="margin-bottom:9px">disagreement field</div>
+      <div class="headline td-display">what the compiler links vs. what the work touches</div>
+      <div class="td-legend" style="text-transform:none;letter-spacing:normal;margin-top:9px;color:var(--raw-text-muted)">
+        25 symbols · call edges from the graph, co-change edges from sessions that edited both within one session
+      </div>
+    </div>
+    <div class="readouts">
+      <div class="readout"><span class="td-legend">symbols</span><span class="n td-display">25</span></div>
+      <div class="readout"><span class="td-legend">call edges</span><span class="n td-display" id="n-call">–</span></div>
+      <div class="readout"><span class="td-legend">co-change pairs</span><span class="n td-display" id="n-co">–</span></div>
+      <div class="readout">
+        <span class="td-legend">unlinked co-change</span>
+        <span class="n td-display" id="n-loud" style="color:var(--raw-state-conflicting)">–</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ==================================================================
+       THE KEY, at the top rather than tucked in a corner: three edge
+       states is exactly two more than a reader can absorb by osmosis, so
+       the states are declared before the field is shown, each with its own
+       count and its own one-line meaning.
+       ================================================================== -->
+  <div class="key">
+    <div>
+      <div class="swatch">
+        <svg viewBox="0 0 46 10" width="46" height="10"><line x1="1" y1="5" x2="45" y2="5"
+          stroke="var(--raw-edge-strong)" stroke-width="1.5" /></svg>
+      </div>
+      <div style="min-width:0">
+        <div style="display:flex;align-items:baseline;gap:9px">
+          <span class="n td-display" id="k-both">–</span>
+          <span class="td-title">coupled &amp; called</span>
+        </div>
+        <div style="font-size:var(--text-2xs);color:var(--raw-text-muted);margin-top:8px;line-height:1.45">
+          one calls the other <b style="font-weight:500">and</b> they get edited in the same session.
+          Agreement. The expected state, so it is drawn quietest.
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="swatch">
+        <svg viewBox="0 0 46 10" width="46" height="10"><line x1="1" y1="5" x2="45" y2="5"
+          stroke="var(--raw-edge-subtle)" stroke-width="1.5" stroke-dasharray="1.5 4" /></svg>
+      </div>
+      <div style="min-width:0">
+        <div style="display:flex;align-items:baseline;gap:9px">
+          <span class="n td-display" id="k-call">–</span>
+          <span class="td-title">called, never co-touched</span>
+        </div>
+        <div style="font-size:var(--text-2xs);color:var(--raw-text-muted);margin-top:8px;line-height:1.45">
+          a real call edge that no captured session has ever crossed. Usually a settled interface —
+          occasionally a piece of code nobody has had to think about in months.
+        </div>
+      </div>
+    </div>
+    <div style="background:color-mix(in oklab, var(--raw-state-conflicting) 8%, transparent)">
+      <div class="swatch">
+        <svg viewBox="0 0 46 10" width="46" height="10">
+          <line x1="1" y1="5" x2="45" y2="5" stroke="var(--raw-state-conflicting)" stroke-width="7" opacity="0.22" />
+          <line x1="1" y1="5" x2="45" y2="5" stroke="var(--raw-state-conflicting)" stroke-width="2.5" />
+        </svg>
+      </div>
+      <div style="min-width:0">
+        <div style="display:flex;align-items:baseline;gap:9px">
+          <span class="n td-display" id="k-loud" style="color:var(--raw-state-conflicting)">–</span>
+          <span class="td-title" style="color:var(--raw-state-conflicting)">co-changed, not linked</span>
+        </div>
+        <div style="font-size:var(--text-2xs);color:var(--raw-text-secondary);margin-top:8px;line-height:1.45">
+          edited together, repeatedly, with <b style="font-weight:500">no call edge in either direction</b>.
+          The coupling is real and the code does not record it. This is the finding.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <figure>
+    <div class="field">
+      <svg id="field" viewBox="0 0 1440 660" width="1440" height="660" role="img"
+           aria-label="Disagreement field: 25 symbols in four module clusters, with call edges and co-change edges overlaid in three distinct states. Seven pairs are co-changed with no call edge between them."></svg>
+    </div>
+    <figcaption>
+      node position = module cluster, hand-laid for legibility — <b style="color:var(--raw-text-secondary);font-weight:500">position
+      carries no magnitude here</b>, only membership, and the cluster label states which module ·
+      node diameter = <b style="color:var(--raw-text-secondary);font-weight:500">sessions that edited this symbol</b>
+      (1 → 9), which is the denominator every co-change claim rests on: a symbol touched once cannot co-change with anything ·
+      node hue = symbol kind, on the product's kindColor arc ·
+      edge state = the three declared above; the loud state is drawn last and on top, because a finding that renders
+      underneath the expected case is not a finding ·
+      three symbols carry <b style="color:var(--raw-state-unknown);font-weight:500">no session attribution at all</b> and
+      are drawn hollow — their absence from the co-change layer is
+      <b style="font-weight:500">unmeasured, not zero</b>, and collapsing that distinction is the easiest lie this
+      chart could tell
+    </figcaption>
+  </figure>
+
+  <!-- ==================================================================
+       THE INVENTORY. The field shows that the loud state exists and where
+       it clusters; it cannot show WHICH pairs without the reader squinting
+       at two labels across 600px. So the seven pairs are also printed, in
+       full, sorted by how often they co-changed.
+       ================================================================== -->
+  <div class="section-bar" style="border-top:1px solid var(--raw-edge-subtle)">
+    <span class="td-title" style="color:var(--raw-state-conflicting)">the unlinked pairs, in full</span>
+    <span class="td-rule"></span>
+    <span class="td-legend" style="text-transform:none;letter-spacing:normal">
+      sorted by shared sessions, descending · every pair verified to have no call edge in either direction
+    </span>
+  </div>
+  <table id="pairs" style="font-size:var(--text-xs)"></table>
+
+  <div class="section-bar" style="border-bottom:0;border-top:1px solid var(--raw-edge-subtle)">
+    <span class="td-legend">mockup</span>
+    <span class="td-legend" style="text-transform:none;letter-spacing:normal">
+      concept only · every symbol, edge and session count is invented · the three legend counts are computed from the
+      edge list, not typed · see notes/disagreement-field.md
+    </span>
+    <span class="td-rule"></span>
+    <span id="kindkey" style="display:flex;gap:14px;align-items:center"></span>
+  </div>
+</div>
+
+<script>
+/* kindColor — line-for-line port of dashboard/src/viz/graph/kindColor.ts. */
+function hashKind(kind) {
+  let hash = 0;
+  for (let i = 0; i < kind.length; i += 1) hash = (hash * 31 + kind.charCodeAt(i)) >>> 0;
+  return hash;
+}
+function kindColor(kind, light) {
+  const hash = hashKind(kind);
+  const chroma = (light ? 0.135 : 0.152) + ((hash >>> 9) % 6) * 0.012;
+  const lightness = light ? 0.55 : 0.72;
+  return 'oklch(' + lightness + ' ' + chroma.toFixed(3) + ' ' + (186 + (hash % 148)) + ')';
+}
+const theme = new URLSearchParams(location.search).get('theme') === 'light' ? 'light' : 'dark';
+document.documentElement.dataset.theme = theme;
+const LIGHT = theme === 'light';
+const hue = (k) => kindColor(k, LIGHT);
+
+/* ---- 25 symbols. `s` = sessions that edited it (null = never seen in any
+ *      captured session, which is NOT the same as zero co-change). `lp` is
+ *      label placement, hand-set — a label-collision solver is exactly the
+ *      kind of thing a mockup should not pretend to have. ---------------- */
+const N = [
+  /* tracedecay-api */
+  { id: 1,  m: 'api', x: 168, y: 132, s: 7, kind: 'function', name: 'graph_overview_handler', lp: 'n' },
+  { id: 2,  m: 'api', x: 330, y: 108, s: 6, kind: 'function', name: 'feedback_submit',        lp: 'n' },
+  { id: 3,  m: 'api', x: 108, y: 252, s: 5, kind: 'function', name: 'context::run',           lp: 'w' },
+  { id: 4,  m: 'api', x: 268, y: 258, s: 3, kind: 'function', name: 'status::run',            lp: 's' },
+  { id: 5,  m: 'api', x: 176, y: 372, s: 2, kind: 'function', name: 'mount_graph_routes',     lp: 's' },
+  { id: 6,  m: 'api', x: 356, y: 210, s: 4, kind: 'function', name: 'recall::run',            lp: 'e' },
+  /* tracedecay-application */
+  { id: 7,  m: 'app', x: 546, y: 296, s: 9, kind: 'function', name: 'graph_overview',         lp: 'n' },
+  { id: 8,  m: 'app', x: 668, y: 236, s: 5, kind: 'function', name: 'resolve_scope',          lp: 'n' },
+  { id: 9,  m: 'app', x: 490, y: 424, s: 8, kind: 'function', name: 'record_correction',      lp: 'w' },
+  { id: 10, m: 'app', x: 636, y: 486, s: 4, kind: 'function', name: 'surface_catalog::rebuild', lp: 's' },
+  { id: 11, m: 'app', x: 722, y: 372, s: 6, kind: 'function', name: 'refresh_catalog',        lp: 'e' },
+  { id: 12, m: 'app', x: 556, y: 566, s: 5, kind: 'function', name: 'compose_decision',       lp: 's' },
+  { id: 13, m: 'app', x: 424, y: 528, s: 3, kind: 'function', name: 'probe_graph',            lp: 'w' },
+  { id: 14, m: 'app', x: 784, y: 484, s: null, kind: 'function', name: 'storage::open_reader', lp: 'e' },
+  /* tracedecay-policy */
+  { id: 15, m: 'pol', x: 946, y: 168, s: 7, kind: 'function', name: 'admit_scope',            lp: 's' },
+  { id: 16, m: 'pol', x: 1054, y: 244, s: 5, kind: 'function', name: 'replay_decision',       lp: 's' },
+  { id: 17, m: 'pol', x: 866, y: 272, s: 4, kind: 'function', name: 'configuration::reload',  lp: 'w' },
+  { id: 18, m: 'pol', x: 998, y: 92,  s: 3, kind: 'method',   name: 'decision::evaluate',     lp: 'n' },
+  { id: 19, m: 'pol', x: 1136, y: 148, s: 2, kind: 'function', name: 'classify_change',       lp: 'n' },
+  /* tracedecay-store + tracedecay-rusqlite-runtime */
+  { id: 20, m: 'sto', x: 1178, y: 392, s: 6, kind: 'function', name: 'top_connected_rows',    lp: 'n' },
+  { id: 21, m: 'sto', x: 1306, y: 436, s: null, kind: 'function', name: 'kind_histogram',     lp: 'e' },
+  { id: 22, m: 'sto', x: 1146, y: 512, s: 5, kind: 'function', name: 'insert_correction',     lp: 'w' },
+  { id: 23, m: 'sto', x: 1282, y: 566, s: 4, kind: 'method',   name: 'pool::acquire',         lp: 's' },
+  { id: 24, m: 'sto', x: 1352, y: 486, s: 3, kind: 'method',   name: 'transaction::commit',   lp: 's' },
+  { id: 25, m: 'sto', x: 1232, y: 300, s: null, kind: 'function', name: 'snapshot::validate',  lp: 'n' },
+];
+const BY_ID = Object.fromEntries(N.map((n) => [n.id, n]));
+
+const CLUSTERS = [
+  { m: 'api', label: 'tracedecay-api',                                   x: 40,   y: 44 },
+  { m: 'app', label: 'tracedecay-application',                           x: 424,  y: 620 },
+  { m: 'pol', label: 'tracedecay-policy',                                x: 860,  y: 44 },
+  { m: 'sto', label: 'tracedecay-store · tracedecay-rusqlite-runtime',   x: 1002, y: 620 },
+];
+
+/* ---- edges. `both` = a call edge whose two ends also co-change.
+ *      `call` = a call edge with no shared session ever.
+ *      `co`   = shared sessions with NO call edge in either direction.
+ *      `n` on a co-change edge is how many sessions touched both. ------- */
+const E = [
+  /* coupled and called — agreement */
+  { a: 1,  b: 7,  t: 'both', n: 5 }, { a: 3,  b: 7,  t: 'both', n: 4 },
+  { a: 7,  b: 8,  t: 'both', n: 5 }, { a: 7,  b: 11, t: 'both', n: 4 },
+  { a: 9,  b: 12, t: 'both', n: 4 }, { a: 7,  b: 15, t: 'both', n: 3 },
+  { a: 9,  b: 16, t: 'both', n: 3 }, { a: 7,  b: 20, t: 'both', n: 4 },
+  { a: 12, b: 15, t: 'both', n: 3 }, { a: 20, b: 23, t: 'both', n: 3 },
+  { a: 22, b: 24, t: 'both', n: 3 },
+  /* called, never co-touched */
+  { a: 2,  b: 9,  t: 'call' }, { a: 4,  b: 7,  t: 'call' }, { a: 6,  b: 8,  t: 'call' },
+  { a: 5,  b: 1,  t: 'call' }, { a: 10, b: 8,  t: 'call' }, { a: 13, b: 7,  t: 'call' },
+  { a: 14, b: 10, t: 'call' }, { a: 11, b: 8,  t: 'call' }, { a: 12, b: 9,  t: 'call' },
+  { a: 12, b: 18, t: 'call' }, { a: 11, b: 17, t: 'call' }, { a: 15, b: 18, t: 'call' },
+  { a: 16, b: 17, t: 'call' }, { a: 19, b: 16, t: 'call' }, { a: 7,  b: 21, t: 'call' },
+  { a: 9,  b: 22, t: 'call' }, { a: 10, b: 25, t: 'call' }, { a: 14, b: 23, t: 'call' },
+  { a: 21, b: 23, t: 'call' }, { a: 25, b: 20, t: 'call' }, { a: 16, b: 22, t: 'call' },
+  /* co-changed, NOT linked — the finding */
+  { a: 2,  b: 22, t: 'co', n: 5 },
+  { a: 9,  b: 15, t: 'co', n: 4 },
+  { a: 13, b: 23, t: 'co', n: 4 },
+  { a: 6,  b: 17, t: 'co', n: 3 },
+  { a: 5,  b: 11, t: 'co', n: 3 },
+  { a: 4,  b: 20, t: 'co', n: 2 },
+  { a: 10, b: 19, t: 'co', n: 2 },
+];
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs, text) => {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text != null) n.textContent = text;
+  return n;
+};
+const svg = document.getElementById('field');
+
+/* cluster names sit ON the field, at its margins — a separate legend box
+ * would make the reader hold four colour-to-module bindings in their head */
+CLUSTERS.forEach((c) => {
+  svg.appendChild(el('text', {
+    x: c.x, y: c.y, 'font-size': 11, 'letter-spacing': 1.6, fill: 'var(--raw-text-muted)',
+    'font-family': 'var(--font-sans)',
+  }, c.label.toUpperCase()));
+});
+
+/* ---- edges, drawn in state order so the finding lands on top ---------- */
+const draw = (t) => E.filter((e) => e.t === t).forEach((e) => {
+  const a = BY_ID[e.a], b = BY_ID[e.b];
+  const base = { x1: a.x, y1: a.y, x2: b.x, y2: b.y, fill: 'none' };
+  if (t === 'call') {
+    svg.appendChild(el('line', { ...base, stroke: 'var(--raw-edge-subtle)', 'stroke-width': 1.5, 'stroke-dasharray': '1.5 4' }));
+  } else if (t === 'both') {
+    svg.appendChild(el('line', { ...base, stroke: 'var(--raw-edge-strong)', 'stroke-width': 1.5 }));
+  } else {
+    /* the loud state: a halo so it survives crossing a dense cluster, and a
+     * stroke whose width is the number of sessions that touched both ends */
+    svg.appendChild(el('line', { ...base, stroke: 'var(--raw-state-conflicting)', 'stroke-width': 9, opacity: 0.18 }));
+    svg.appendChild(el('line', { ...base, stroke: 'var(--raw-state-conflicting)', 'stroke-width': 1 + e.n * 0.5 }));
+  }
+});
+draw('call'); draw('both'); draw('co');
+
+/* ---- nodes ------------------------------------------------------------ */
+const radius = (s) => (s == null ? 7 : 5 + s * 1.3);
+N.forEach((n) => {
+  const r = radius(n.s);
+  if (n.s == null) {
+    /* unmeasured: an open body, dashed, sized at the low end of the scale so
+     * it is never mistaken for a heavily-edited symbol */
+    svg.appendChild(el('circle', {
+      cx: n.x, cy: n.y, r, fill: 'none', stroke: 'var(--raw-text-muted)',
+      'stroke-width': 1.5, 'stroke-dasharray': '2.5 2.5',
+    }));
+  } else {
+    svg.appendChild(el('circle', {
+      cx: n.x, cy: n.y, r, fill: hue(n.kind),
+      stroke: 'var(--raw-surface-0)', 'stroke-width': 1.5,
+    }));
+  }
+  const off = r + 13;
+  const pos = {
+    n: { x: n.x, y: n.y - off + 3, anchor: 'middle' },
+    s: { x: n.x, y: n.y + off + 3, anchor: 'middle' },
+    e: { x: n.x + off, y: n.y + 4,  anchor: 'start'  },
+    w: { x: n.x - off, y: n.y + 4,  anchor: 'end'    },
+  }[n.lp];
+  svg.appendChild(el('text', {
+    x: pos.x, y: pos.y, 'text-anchor': pos.anchor, 'font-size': 11,
+    'font-family': 'ui-monospace, monospace',
+    fill: n.s == null ? 'var(--raw-text-muted)' : 'var(--raw-text-primary)',
+    'paint-order': 'stroke', stroke: 'var(--raw-surface-0)', 'stroke-width': 4, 'stroke-opacity': 0.75,
+  }, n.name));
+});
+
+/* ---- counts, computed rather than typed ------------------------------- */
+const count = (t) => E.filter((e) => e.t === t).length;
+const both = count('both'), callOnly = count('call'), loud = count('co');
+document.getElementById('k-both').textContent = both;
+document.getElementById('k-call').textContent = callOnly;
+document.getElementById('k-loud').textContent = loud;
+document.getElementById('n-call').textContent = both + callOnly;
+document.getElementById('n-co').textContent = both + loud;
+document.getElementById('n-loud').textContent = loud;
+
+/* ---- the inventory ---------------------------------------------------- */
+const MODULE = { api: 'tracedecay-api', app: 'tracedecay-application', pol: 'tracedecay-policy', sto: 'tracedecay-store' };
+document.getElementById('pairs').innerHTML = E
+  .filter((e) => e.t === 'co')
+  .sort((x, y) => y.n - x.n)
+  .map((e) => {
+    const a = BY_ID[e.a], b = BY_ID[e.b];
+    const cross = a.m !== b.m;
+    return `<tr class="rowline">
+      <td style="padding:9px 0 9px 20px;width:158px;white-space:nowrap">
+        <span class="td-value" style="font-size:13px;color:var(--raw-state-conflicting)">${e.n}</span>
+        <span class="td-unit" style="margin-left:5px">shared sessions</span>
+      </td>
+      <td style="padding:9px 8px;width:60px">
+        <span style="display:block;height:${1 + e.n * 0.5}px;background:var(--raw-state-conflicting)"></span>
+      </td>
+      <td class="td-value" style="padding:9px 12px;text-align:right;width:40%">${a.name}
+        <span class="td-legend" style="margin-left:8px">${MODULE[a.m]}</span></td>
+      <td style="padding:9px 0;width:22px;text-align:center;color:var(--raw-state-conflicting)">↔</td>
+      <td class="td-value" style="padding:9px 12px;width:40%">${b.name}
+        <span class="td-legend" style="margin-left:8px">${MODULE[b.m]}</span></td>
+      <td class="td-legend" style="padding:9px 20px 9px 0;text-align:right;width:150px;color:${cross ? 'var(--raw-state-conflicting)' : 'var(--raw-text-muted)'}">
+        ${cross ? 'crosses a crate' : 'same crate'}</td>
+    </tr>`;
+  }).join('');
+
+const kinds = [...new Set(N.map((n) => n.kind))];
+document.getElementById('kindkey').innerHTML = kinds
+  .map((k) => `<span style="display:inline-flex;align-items:center;gap:6px" class="td-legend">
+      <i style="width:9px;height:9px;border-radius:50%;background:${hue(k)}"></i>${k}</span>`)
+  .join('') +
+  `<span style="display:inline-flex;align-items:center;gap:6px" class="td-legend">
+      <i style="width:9px;height:9px;border-radius:50%;border:1.5px dashed var(--raw-text-muted)"></i>no sessions</span>`;
+</script>
+</body>
+</html>
