@@ -5,8 +5,8 @@ use tracedecay::code_index::diagnostics::{
 };
 use tracedecay::code_index::generations::GenerationPlanner;
 use tracedecay::code_index::git_join::{
-    GenerationGitContextProvidersV1, GenerationGitEvidenceScopeV1, GenerationGitWatermarkV1,
-    GitFileContentIdentityV1, GitSymbolLineBindingV1,
+    GenerationGitContextProvidersV1, GenerationGitEvidenceScopeV1, GenerationGitReadWatermarkV1,
+    GenerationGitWatermarkV1, GitFileContentIdentityV1, GitSymbolLineBindingV1,
 };
 use tracedecay::code_index::impact_join::{GenerationImpactJoinV1, GenerationOccurrenceBindingV1};
 use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
@@ -29,11 +29,11 @@ use tracedecay_application::retrieval::{AffectedTestsResult, GraphImpactResult};
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1,
     DiagnosticProvenanceV1, DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId,
-    GenerationDiagnosticV1, GenerationTestAttributionV1, GitChangeKindV1, GitCoverageV1,
-    GitDiffScopeV1, GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHunkV1, GitOidV1, ManifestDigest,
-    ProviderEvaluationStateV1, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SnapshotFileDispositionV1, SourceSpan, TestAttributionEvidenceClassV1, UtcMicros,
-    ValidatedCodeSnapshotV1,
+    GenerationDiagnosticV1, GenerationTestAttributionV1, GitBlameAvailabilityV1, GitBlameV1,
+    GitChangeKindV1, GitCoverageV1, GitDiffScopeV1, GitDiffV1, GitFileDiffV1, GitFileModeV1,
+    GitHunkV1, GitOidV1, ManifestDigest, ProviderEvaluationStateV1, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, SourceSpan, TestAttributionEvidenceClassV1,
+    UtcMicros, ValidatedCodeSnapshotV1,
 };
 
 use super::support::{id, registry};
@@ -214,6 +214,17 @@ impl GenerationDiagnosticEvidenceAuthorityV1 for DiagnosticAuthority {
     }
 }
 
+struct DiagnosticReadAuthority(GenerationProviderReadV1<GenerationDiagnosticEvidenceV1>);
+
+impl GenerationDiagnosticEvidenceAuthorityV1 for DiagnosticReadAuthority {
+    fn read_diagnostics(
+        &self,
+        _: &tracedecay_domain::CodeGenerationId,
+    ) -> GenerationProviderReadV1<GenerationDiagnosticEvidenceV1> {
+        self.0.clone()
+    }
+}
+
 struct AttributionAuthority(GenerationTestAttributionEvidenceV1);
 
 impl GenerationTestAttributionEvidenceAuthorityV1 for AttributionAuthority {
@@ -248,6 +259,32 @@ impl GenerationGitEvidenceAuthorityV1 for GitAuthority {
         _: &FileOccurrenceId,
     ) -> GenerationProviderReadV1<GenerationGitBlameEvidenceV1> {
         unavailable::<GenerationGitBlameEvidenceV1>()
+    }
+}
+
+struct BlameAuthority(GenerationGitBlameEvidenceV1);
+
+impl GenerationGitEvidenceAuthorityV1 for BlameAuthority {
+    fn read_diff(
+        &self,
+        _: &tracedecay_domain::CodeGenerationId,
+    ) -> GenerationProviderReadV1<GenerationGitDiffEvidenceV1> {
+        unavailable()
+    }
+
+    fn read_history(
+        &self,
+        _: &tracedecay_domain::CodeGenerationId,
+    ) -> GenerationProviderReadV1<GenerationGitHistoryEvidenceV1> {
+        unavailable()
+    }
+
+    fn read_blame(
+        &self,
+        _: &tracedecay_domain::CodeGenerationId,
+        _: &FileOccurrenceId,
+    ) -> GenerationProviderReadV1<GenerationGitBlameEvidenceV1> {
+        complete(self.0.clone())
     }
 }
 
@@ -406,4 +443,110 @@ fn production_readers_join_exact_authorities_and_reject_foreign_generation() {
         ProviderEvaluationStateV1::Unavailable
     );
     assert!(foreign.evidence.is_none());
+}
+
+#[test]
+fn production_readers_abstain_as_stale_on_join_identity_drift() {
+    let (snapshot, manifest) = generation();
+    let mut evidence = diagnostic_evidence(&snapshot, &manifest);
+    evidence.watermark.content_identity = content('e');
+    let reader = ProductionGenerationDiagnosticJoinReaderV1::new(
+        GenerationJoinCodeAuthorityV1 {
+            manifest: manifest.clone(),
+            snapshot,
+        },
+        Arc::new(DiagnosticAuthority(evidence)),
+    );
+
+    let result = reader.read_generation_diagnostics(&manifest.generation_id);
+    assert_eq!(result.provider_state, ProviderEvaluationStateV1::Stale);
+    assert_eq!(result.coverage, GenerationProviderCoverageV1::Unavailable);
+    assert!(result.evidence.is_none());
+}
+
+#[test]
+fn production_readers_preserve_cancelled_provider_state_with_partial_evidence() {
+    let (snapshot, manifest) = generation();
+    let read = GenerationProviderReadV1::new(
+        ProviderEvaluationStateV1::Cancelled,
+        GenerationProviderCoverageV1::Partial {
+            examined: 2,
+            eligible: 1,
+            excluded: 0,
+            unknown: 1,
+            capped: false,
+        },
+        Some(diagnostic_evidence(&snapshot, &manifest)),
+    )
+    .expect("cancelled read may retain bounded partial evidence");
+    let reader = ProductionGenerationDiagnosticJoinReaderV1::new(
+        GenerationJoinCodeAuthorityV1 {
+            manifest: manifest.clone(),
+            snapshot,
+        },
+        Arc::new(DiagnosticReadAuthority(read)),
+    );
+
+    let result = reader.read_generation_diagnostics(&manifest.generation_id);
+    assert_eq!(result.provider_state, ProviderEvaluationStateV1::Cancelled);
+    assert!(matches!(
+        result.coverage,
+        GenerationProviderCoverageV1::Partial { unknown: 1, .. }
+    ));
+    assert!(result.evidence.is_some());
+}
+
+#[test]
+fn production_blame_reader_rejects_another_requested_file() {
+    let (snapshot, manifest) = generation();
+    let blame = GitBlameV1 {
+        repository: snapshot.snapshot.repository.clone(),
+        path: "src/lib.rs".to_owned(),
+        lines: Vec::new(),
+        availability: GitBlameAvailabilityV1::Available,
+        coverage: GitCoverageV1::complete(),
+    };
+    let mut watermark = GenerationGitReadWatermarkV1 {
+        repository: snapshot.snapshot.repository.clone(),
+        source_revision: snapshot.snapshot.source_revision.clone(),
+        snapshot_content_identity: snapshot.snapshot.content_identity.clone(),
+        scope: GenerationGitEvidenceScopeV1 {
+            worktree: snapshot.snapshot.worktree.clone(),
+            index_tree: Some(oid('4')),
+            tree: Some(oid('5')),
+            reference: snapshot.snapshot.reference.clone(),
+            options_digest: digest('6'),
+        },
+        evidence_digest: digest('7'),
+        captured_at: UtcMicros(60),
+    };
+    watermark.evidence_digest = watermark
+        .recompute_blame_digest(&blame)
+        .expect("blame digest");
+    let reader = ProductionGenerationGitJoinReaderV1::new(
+        GenerationJoinCodeAuthorityV1 {
+            manifest: manifest.clone(),
+            snapshot,
+        },
+        Arc::new(BlameAuthority(GenerationGitBlameEvidenceV1 {
+            blame,
+            watermark,
+            file_content: GitFileContentIdentityV1 {
+                path: "src/lib.rs".to_owned(),
+                content_digest: content('a'),
+            },
+            symbol_bindings: Vec::new(),
+        })),
+        Arc::new(ContextAuthority(GenerationGitContextProvidersV1 {
+            symbol_bindings: Vec::new(),
+            impacts: Vec::new(),
+            diagnostics: unavailable(),
+            test_attribution: unavailable(),
+        })),
+    );
+
+    let result = reader.read_git_blame(&manifest.generation_id, &id("file.test"));
+    assert_eq!(result.provider_state, ProviderEvaluationStateV1::Stale);
+    assert_eq!(result.coverage, GenerationProviderCoverageV1::Unavailable);
+    assert!(result.evidence.is_none());
 }

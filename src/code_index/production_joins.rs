@@ -14,21 +14,22 @@ use tracedecay_domain::{
 };
 
 use super::diagnostics::{
-    DiagnosticEvidenceWatermarkV1, GenerationDiagnosticJoinCoverageV1, GenerationDiagnosticJoinV1,
+    DiagnosticEvidenceWatermarkV1, GenerationDiagnosticJoinCoverageV1,
+    GenerationDiagnosticJoinErrorV1, GenerationDiagnosticJoinV1,
 };
 use super::git_join::{
     GenerationGitBlameJoinCoverageV1, GenerationGitBlameJoinV1, GenerationGitContextProvidersV1,
     GenerationGitHistoryJoinCoverageV1, GenerationGitHistoryJoinV1, GenerationGitJoinCoverageV1,
-    GenerationGitJoinV1, GenerationGitReadWatermarkV1, GenerationGitWatermarkV1,
-    GitFileContentIdentityV1, GitSymbolLineBindingV1,
+    GenerationGitJoinErrorV1, GenerationGitJoinV1, GenerationGitReadWatermarkV1,
+    GenerationGitWatermarkV1, GitFileContentIdentityV1, GitSymbolLineBindingV1,
 };
 use super::provider::{
     GenerationDiagnosticJoinReadPort, GenerationGitJoinReadPort, GenerationProviderCoverageV1,
     GenerationProviderReadV1, GenerationTestAttributionJoinReadPort,
 };
 use super::test_attribution::{
-    GenerationTestJoinCoverageV1, GenerationTestJoinV1, TestAttributionOccurrenceV1,
-    TestAttributionWatermarkV1,
+    GenerationTestJoinCoverageV1, GenerationTestJoinErrorV1, GenerationTestJoinV1,
+    TestAttributionOccurrenceV1, TestAttributionWatermarkV1,
 };
 
 /// Exact immutable code-generation authority used by all three adapters.
@@ -131,6 +132,7 @@ impl GenerationGitJoinReadPort for ProductionGenerationGitJoinReaderV1 {
                 )
             },
             |join| matches!(join.coverage, GenerationGitJoinCoverageV1::Complete),
+            git_error_state,
         )
     }
 
@@ -152,6 +154,7 @@ impl GenerationGitJoinReadPort for ProductionGenerationGitJoinReaderV1 {
                 )
             },
             |join| matches!(join.coverage, GenerationGitHistoryJoinCoverageV1::Complete),
+            git_error_state,
         )
     }
 
@@ -166,16 +169,21 @@ impl GenerationGitJoinReadPort for ProductionGenerationGitJoinReaderV1 {
         map_join(
             self.git.read_blame(generation, file),
             |evidence| {
-                GenerationGitBlameJoinV1::join(
+                let joined = GenerationGitBlameJoinV1::join(
                     &self.code.manifest,
                     &self.code.snapshot,
                     &evidence.blame,
                     &evidence.watermark,
                     &evidence.file_content,
                     &evidence.symbol_bindings,
-                )
+                )?;
+                if &joined.file_occurrence_id != file {
+                    return Err(GenerationGitJoinErrorV1::StaleGitEvidence);
+                }
+                Ok(joined)
             },
             |join| matches!(join.coverage, GenerationGitBlameJoinCoverageV1::Complete),
+            git_error_state,
         )
     }
 }
@@ -226,6 +234,7 @@ impl GenerationDiagnosticJoinReadPort for ProductionGenerationDiagnosticJoinRead
                 )
             },
             |join| matches!(join.coverage, GenerationDiagnosticJoinCoverageV1::Complete),
+            diagnostic_error_state,
         )
     }
 }
@@ -278,6 +287,7 @@ impl GenerationTestAttributionJoinReadPort for ProductionGenerationTestAttributi
                 )
             },
             |join| matches!(join.coverage, GenerationTestJoinCoverageV1::Complete),
+            test_error_state,
         )
     }
 }
@@ -294,9 +304,10 @@ fn map_join<Raw, Joined, Error>(
     read: GenerationProviderReadV1<Raw>,
     join: impl FnOnce(&Raw) -> Result<Joined, Error>,
     complete: impl FnOnce(&Joined) -> bool,
+    error_state: impl FnOnce(&Error) -> ProviderEvaluationStateV1,
 ) -> GenerationProviderReadV1<Joined> {
     if read.validate().is_err() {
-        return failed();
+        return abstain(ProviderEvaluationStateV1::Failed);
     }
     let Some(raw) = read.evidence.as_ref() else {
         return GenerationProviderReadV1 {
@@ -305,19 +316,20 @@ fn map_join<Raw, Joined, Error>(
             evidence: None,
         };
     };
-    let Ok(joined) = join(raw) else {
-        return failed();
+    let joined = match join(raw) {
+        Ok(joined) => joined,
+        Err(error) => return abstain(error_state(&error)),
     };
     let is_complete = complete(&joined);
-    let (provider_state, coverage) = if is_complete
+    let (provider_state, coverage) = if !is_complete
         && read.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete
     {
-        (read.provider_state, read.coverage)
-    } else {
         (
             ProviderEvaluationStateV1::Partial,
             partial_coverage(read.coverage),
         )
+    } else {
+        (read.provider_state, read.coverage)
     };
     GenerationProviderReadV1 {
         provider_state,
@@ -343,10 +355,55 @@ fn partial_coverage(coverage: GenerationProviderCoverageV1) -> GenerationProvide
     }
 }
 
-fn failed<T>() -> GenerationProviderReadV1<T> {
+fn abstain<T>(provider_state: ProviderEvaluationStateV1) -> GenerationProviderReadV1<T> {
     GenerationProviderReadV1 {
-        provider_state: ProviderEvaluationStateV1::Failed,
+        provider_state,
         coverage: GenerationProviderCoverageV1::Unavailable,
         evidence: None,
+    }
+}
+
+fn git_error_state(error: &GenerationGitJoinErrorV1) -> ProviderEvaluationStateV1 {
+    match error {
+        GenerationGitJoinErrorV1::StaleGenerationWatermark
+        | GenerationGitJoinErrorV1::RepositoryMismatch
+        | GenerationGitJoinErrorV1::WorktreeMismatch
+        | GenerationGitJoinErrorV1::ReferenceMismatch
+        | GenerationGitJoinErrorV1::StaleSourceRevision
+        | GenerationGitJoinErrorV1::StaleContentWatermark
+        | GenerationGitJoinErrorV1::StaleGitEvidence
+        | GenerationGitJoinErrorV1::BlamePathMismatch
+        | GenerationGitJoinErrorV1::StaleSymbolGeneration(_)
+        | GenerationGitJoinErrorV1::StaleSymbolFile(_)
+        | GenerationGitJoinErrorV1::StaleSymbolContent(_)
+        | GenerationGitJoinErrorV1::MissingSnapshotFile(_)
+        | GenerationGitJoinErrorV1::ContentMismatch(_)
+        | GenerationGitJoinErrorV1::DispositionMismatch(_) => ProviderEvaluationStateV1::Stale,
+        GenerationGitJoinErrorV1::DuplicateSymbolBinding(_)
+        | GenerationGitJoinErrorV1::DuplicateImpact(_)
+        | GenerationGitJoinErrorV1::InvalidSymbolLineRange(_)
+        | GenerationGitJoinErrorV1::DuplicateContentIdentity(_)
+        | GenerationGitJoinErrorV1::MissingContentIdentity(_)
+        | GenerationGitJoinErrorV1::Contract(_) => ProviderEvaluationStateV1::Failed,
+    }
+}
+
+fn diagnostic_error_state(error: &GenerationDiagnosticJoinErrorV1) -> ProviderEvaluationStateV1 {
+    match error {
+        GenerationDiagnosticJoinErrorV1::StaleGenerationWatermark
+        | GenerationDiagnosticJoinErrorV1::StaleDiagnosticWatermark => {
+            ProviderEvaluationStateV1::Stale
+        }
+        GenerationDiagnosticJoinErrorV1::DuplicateDiagnostic(_)
+        | GenerationDiagnosticJoinErrorV1::Contract(_) => ProviderEvaluationStateV1::Failed,
+    }
+}
+
+fn test_error_state(error: &GenerationTestJoinErrorV1) -> ProviderEvaluationStateV1 {
+    match error {
+        GenerationTestJoinErrorV1::StaleGenerationWatermark
+        | GenerationTestJoinErrorV1::StaleAttributionWatermark => ProviderEvaluationStateV1::Stale,
+        GenerationTestJoinErrorV1::DuplicateOccurrence(_)
+        | GenerationTestJoinErrorV1::Contract(_) => ProviderEvaluationStateV1::Failed,
     }
 }
