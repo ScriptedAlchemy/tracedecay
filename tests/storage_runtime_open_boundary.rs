@@ -109,6 +109,18 @@ fn files_below_cfg_test_parent_modules_are_not_production_sources() {
 }
 
 #[test]
+fn direct_opens_under_test_items_are_not_production_sources() {
+    let attachment = RustAst::parse("crates/tracedecay-rusqlite-runtime/src/graph/attachment.rs");
+    assert!(
+        !attachment
+            .production_calls()
+            .iter()
+            .any(|call| call.scope == "create_identity_database"),
+        "a direct SQLite open in a cfg(test) module must not enter the production-open scan"
+    );
+}
+
+#[test]
 fn direct_open_suffixes_match_complete_qualified_segments() {
     assert!(matches_qualified_suffix(
         "rusqlite::Connection::open_with_flags",

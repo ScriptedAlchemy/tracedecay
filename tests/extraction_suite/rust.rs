@@ -1,6 +1,37 @@
 use tracedecay::extraction::LanguageExtractor;
 use tracedecay::extraction::RustExtractor;
 use tracedecay::types::*;
+use tree_sitter::Parser;
+
+#[test]
+fn test_rust_cfg_attribute_in_struct_pattern_field() {
+    let source = r#"
+struct Context {
+    live: bool,
+    test_runtime: bool,
+}
+
+fn destructure(context: Context) {
+    let Context {
+        live,
+        #[cfg(test)]
+        test_runtime,
+    } = context;
+    let _ = (live, test_runtime);
+}
+"#;
+    let mut parser = Parser::new();
+    parser
+        .set_language(
+            &tracedecay::extraction::ts_provider::language("rust").expect("bundled Rust grammar"),
+        )
+        .expect("configure Rust parser");
+    let tree = parser.parse(source, None).expect("parse Rust source");
+    assert!(
+        !tree.root_node().has_error(),
+        "the Rust grammar must accept attributes on struct-pattern fields"
+    );
+}
 
 #[test]
 fn test_rust_file_node_is_root() {
