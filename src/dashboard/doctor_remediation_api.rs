@@ -959,7 +959,7 @@ mod tests {
                     )
                     .unwrap(),
                 operation_digest: ManifestDigest::new(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 )
                 .unwrap(),
                 idempotency_key:
@@ -1378,7 +1378,11 @@ mod tests {
             Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
             Arc::new({
                 let recovered = recovered.clone();
-                move |_| {
+                move |command| {
+                    assert!(matches!(
+                        command,
+                        DoctorRemediationDispatchCommandV1::Resume { .. }
+                    ));
                     let recovered = recovered.clone();
                     Box::pin(async move { Ok(recovered) })
                 }
