@@ -780,13 +780,7 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
     }
 
     let writer = target.database().writer_connection().unwrap();
-    writer
-        .execute_batch(
-            "DROP TRIGGER observations_immutable_update;
-         DROP TRIGGER observations_immutable_delete;
-         DROP TRIGGER sanitization_receipts_immutable_update_v1;
-         DROP TRIGGER sanitization_receipts_immutable_delete_v1;",
-        )
+    crate::global_db::schema_stages::begin_observation_authority_canonical_repair(&writer)
         .await
         .unwrap();
     let canonical_receipt = serde_json::to_string(observation.receipt()).unwrap();
@@ -814,6 +808,9 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
             "UPDATE observations SET observation_json=?1, committed_cursor_json=?2",
             params![noncanonical_observation, noncanonical_cursor],
         )
+        .await
+        .unwrap();
+    crate::global_db::schema_stages::finish_observation_authority_canonical_repair(&writer)
         .await
         .unwrap();
     drop(writer);
@@ -1124,6 +1121,7 @@ async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
     let source = ObservationDatabaseFixture::profile(temp.path().join("source-profile")).await;
     let target_path = target.path.clone();
     let source_path = source.path.clone();
+    let target_input_path = temp.path().join("target-input-sessions.db");
     Box::pin(persist_migration_observation(
         target.database(),
         migration_observation(0, 10, "receipt.migration.target", "target-message"),
@@ -1150,13 +1148,23 @@ async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
         registered_count_rows(target.database(), "observations").await,
         registered_count_rows(target.database(), "source_cursors").await,
     );
-    let error = sqlite::plan_session_offsets(&target_path, &source_path)
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
         .await
-        .unwrap_err();
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    let error = sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("source cursor authority keys disagree with cursor JSON")
+            .contains("cursor authority does not match its storage key")
     );
     assert_eq!(
         (
@@ -1281,8 +1289,6 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
     let temp = TempDir::new().unwrap();
     let target = ObservationDatabaseFixture::profile(temp.path().join("target-profile")).await;
     let source = ObservationDatabaseFixture::profile(temp.path().join("source-profile")).await;
-    let target_path = target.path.clone();
-    let source_path = source.path.clone();
     let observation = migration_observation_for(
         "session.migration.invalid-alias",
         "receipt.migration.invalid-alias",
@@ -1325,9 +1331,11 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
         registered_count_rows(target.database(), "observation_projection_provenance").await,
         registered_count_rows(target.database(), "session_messages").await,
     );
-    let error = sqlite::plan_session_offsets(&target_path, &source_path)
-        .await
-        .unwrap_err();
+    let snapshot = source.database().read_snapshot().await.unwrap();
+    let error =
+        crate::global_db::schema_stages::validate_observation_authority_connection(&snapshot)
+            .await
+            .unwrap_err();
     let crate::errors::TraceDecayError::Database { message, operation } = error else {
         panic!("authority preflight must return a typed database error");
     };
