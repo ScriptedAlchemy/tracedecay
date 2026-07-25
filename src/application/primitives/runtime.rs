@@ -262,11 +262,26 @@ pub struct StorageStatusPrimitiveRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct StorageStatusHistoryPointV1 {
+    pub observed_at: i64,
+    pub database_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StorageStatusPrimitiveResult {
     pub status: String,
     pub read_only: bool,
     pub database_bytes: Option<u64>,
     pub details: Vec<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub store_path: Option<String>,
+    #[serde(default)]
+    pub history: Vec<StorageStatusHistoryPointV1>,
+    #[serde(default)]
+    pub history_coverage: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
