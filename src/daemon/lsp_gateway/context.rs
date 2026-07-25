@@ -314,6 +314,13 @@ pub trait ContextProjectionPort {
     ) -> Vec<ContextProjectionChange> {
         Vec::new()
     }
+
+    fn update_subscriptions(
+        &self,
+        _root: &AdmittedRoot,
+        _subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) {
+    }
 }
 
 impl<T> ContextProjectionPort for Arc<T>
@@ -368,5 +375,13 @@ where
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
         (**self).poll_changes(root, subscriptions)
+    }
+
+    fn update_subscriptions(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) {
+        (**self).update_subscriptions(root, subscriptions);
     }
 }
