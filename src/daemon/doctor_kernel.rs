@@ -34,11 +34,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::ApplicationContractError;
-use tracedecay_application::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId,
-};
 use tracedecay_application::doctor::{
     CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
@@ -46,6 +41,10 @@ use tracedecay_application::doctor::{
     DoctorStorageFamilyReadV1, DoctorStorageFindingV1, HostConformanceV1,
     HostIntegrationDoctorPort, HostIntegrationReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
     RuntimeLivenessV1, StorageDoctorPort,
+};
+use tracedecay_application::{
+    ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+    Deadline, DisclosureClass, RequestContext, RequestId,
 };
 
 use crate::config::PinnedRuntimeConfiguration;
@@ -655,16 +654,13 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         Box::pin(async move {
-            let scope = super::project_open_owners::resolved_scope_for_project(
-                &project_root,
-                &project_id,
-            )
-            .map_err(|_| ApplicationContractError::Inconsistent {
-                field: "daemon Doctor project scope",
-            })?;
+            let scope =
+                super::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+                    .map_err(|_| ApplicationContractError::Inconsistent {
+                        field: "daemon Doctor project scope",
+                    })?;
             let context = doctor_report_request_context(scope)?;
-            let pinned =
-                crate::config::runtime_configuration_for_layout(&project_root, &layout);
+            let pinned = crate::config::runtime_configuration_for_layout(&project_root, &layout);
             let quick_check_ok = graph
                 .quick_check_report()
                 .await
@@ -677,11 +673,10 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             });
             let registered_authority_current = registry.writer_connection().is_ok()
                 && profile_sessions.writer_connection().is_ok();
-            let temporal =
-                crate::global_db::session_temporal::session_temporal_doctor_health_at(
-                    profile_sessions.db_path(),
-                )
-                .await;
+            let temporal = crate::global_db::session_temporal::session_temporal_doctor_health_at(
+                profile_sessions.db_path(),
+            )
+            .await;
             let temporal_ok = match temporal.status() {
                 crate::global_db::session_temporal::SessionTemporalHealthStatus::Complete => {
                     Some(temporal.findings().is_empty())
