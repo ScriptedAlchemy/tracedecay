@@ -181,9 +181,10 @@ subsystem).
   trust X?".
 - **Depends on:** nothing.
 - **Acceptance / observability:** a fact with recorded feedback returns its full
-  trust trail via the new API; a fact with no feedback returns empty. Verified via
-  `tests/dashboard_api_test.rs` (trust-history route) and memory-handler tests
-  (MCP `get` `trust_history`).
+  trust trail via the new API; a fact with no feedback returns empty. Coverage
+  is implemented in `tests/dashboard_api_test/api.rs` (trust-history route) and
+  the memory-handler tests (MCP `get` `trust_history`). The aggregate dashboard
+  suite remains unverified on this branch.
 - **Tier:** T2. **Done (closed/approved, t_97202453).** Closes trust-decay §5
   and visibility G7 (explainability).
 
