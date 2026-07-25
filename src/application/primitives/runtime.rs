@@ -34,9 +34,9 @@ use tracedecay_application::{
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
     EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageState, PolicyDecisionRef,
-    RequestAdmission, RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
-    SafeDiagnostic, TemporalState,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
+    PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
@@ -391,7 +391,7 @@ pub enum Pr12PrimitiveRequest {
     StorageStatus(StorageStatusPrimitiveRequest),
     DiagnosticsRead(DiagnosticsPrimitiveRequest),
     Operational(Pr12OperationalPrimitiveRequest),
-    RecentTestResults,
+    RecentTestResults(PageRequest),
 }
 
 /// One catalog operation plus its closed typed primitive request.
@@ -1175,8 +1175,8 @@ async fn dispatch_admitted(
                 .await;
             validate_operational_result(&context, &operation, maximum_output_bytes, result)
         }
-        Pr12PrimitiveRequest::RecentTestResults => {
-            recent_test_results(runtime, &context, &operation, observed_at).await
+        Pr12PrimitiveRequest::RecentTestResults(page) => {
+            recent_test_results(runtime, &context, &operation, &page, observed_at).await
         }
     }
 }
@@ -1728,6 +1728,7 @@ async fn recent_test_results(
     runtime: &OwnedPr12PrimitiveRuntime,
     context: &RequestContext,
     operation: &ApplicationOperation,
+    page: &PageRequest,
     observed_at: UtcMicros,
 ) -> ApplicationResult<Value> {
     let current = match runtime.test_run_scope.current_identity().await {
@@ -1740,7 +1741,7 @@ async fn recent_test_results(
         },
         Err(_) => return unavailable(context, operation),
     };
-    let snapshot = match runtime.test_runs.latest_current(&current).await {
+    let snapshot = match runtime.test_runs.latest_current_page(&current, page).await {
         ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
         ManagedTestRunReadOutcome::Stale(
             ManagedTestRunStaleReason::SourceIdentity | ManagedTestRunStaleReason::DocumentContent,
@@ -1760,6 +1761,12 @@ async fn recent_test_results(
         ManagedTestRunReadOutcome::Unavailable(_) => return unavailable(context, operation),
     };
     let returned = snapshot.results.len() as u64;
+    let available_results = snapshot.available_results as u64;
+    let termination = snapshot.termination;
+    let next_cursor = snapshot.next_cursor;
+    let partial = !matches!(termination, Some(OperationTermination::Completed))
+        || next_cursor.is_some()
+        || available_results < snapshot.completed;
     let payload = json!({
         "operation_id": snapshot.operation_id.to_string(),
         "generation": snapshot.generation,
@@ -1777,17 +1784,28 @@ async fn recent_test_results(
         })).collect::<Vec<_>>(),
         "completed": snapshot.completed,
         "total": snapshot.total,
-        "termination": snapshot.termination,
+        "termination": termination,
+        "result_offset": snapshot.result_offset,
+        "available_results": available_results,
     });
-    let partial = !matches!(snapshot.termination, Some(OperationTermination::Completed));
     evidence_result(
         &runtime.access,
         context,
         operation,
         EvidenceDomain::Test,
         payload,
-        simple_coverage(partial, returned),
-        None,
+        PrimitiveCoverageV1 {
+            completeness: if partial {
+                CoverageCompleteness::Partial
+            } else {
+                CoverageCompleteness::Complete
+            },
+            returned,
+            visited: Some(available_results),
+            eligible: Some(available_results),
+            unsupported_languages: Vec::new(),
+        },
+        next_cursor,
         observed_at,
         OperationBudgetUsage::default(),
         partial,
