@@ -44,6 +44,12 @@ pub(crate) enum DoctorRemediationDispatchCommandV1 {
         preview_id: Option<PreviewId>,
         idempotency_key: IdempotencyKey,
     },
+    Resume {
+        operation: DoctorOwningOperationRefV1,
+        target: DoctorRemediationTargetV1,
+        preview_id: Option<PreviewId>,
+        idempotency_key: IdempotencyKey,
+    },
     Status {
         operation_id: OperationId,
     },
@@ -141,6 +147,10 @@ pub(crate) struct DoctorRemediationOperationV1 {
     pub preview_id: Option<PreviewId>,
     pub execution: Option<OperationReceipt>,
     pub effect_receipt: Option<EffectReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_effect_receipt: Option<EffectReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_result_digest: Option<ManifestDigest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +158,7 @@ pub(crate) struct DoctorRemediationOperationV1 {
 struct DurableDoctorRemediationRecordV1 {
     schema_version: u16,
     kind: DoctorRemediationKindV1,
+    target: DoctorRemediationTargetV1,
     target_digest: ManifestDigest,
     idempotency_key: Option<IdempotencyKey>,
     operation: DoctorRemediationOperationV1,
@@ -190,6 +201,7 @@ pub(crate) struct DoctorRemediationDispatcherV1 {
     legal_actions: LegalActions,
     dispatch: Dispatch,
     durable_receipt_root: Option<std::path::PathBuf>,
+    dispatch_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DoctorRemediationDispatcherV1 {
@@ -198,6 +210,7 @@ impl DoctorRemediationDispatcherV1 {
             legal_actions,
             dispatch,
             durable_receipt_root: None,
+            dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -206,10 +219,12 @@ impl DoctorRemediationDispatcherV1 {
         legal_actions: LegalActions,
         dispatch: Dispatch,
     ) -> Self {
+        let dispatch_gate = shared_durable_dispatch_gate(&durable_receipt_root);
         Self {
             legal_actions,
             dispatch,
             durable_receipt_root: Some(durable_receipt_root),
+            dispatch_gate,
         }
     }
 
@@ -248,15 +263,55 @@ impl DoctorRemediationDispatcherV1 {
         &self,
         command: DoctorRemediationDispatchCommandV1,
     ) -> Result<DoctorRemediationOperationV1, DoctorRemediationDispatchErrorV1> {
+        let _dispatch_guard = self.dispatch_gate.lock().await;
         if let (Some(root), DoctorRemediationDispatchCommandV1::Status { operation_id }) =
             (&self.durable_receipt_root, &command)
             && let Some(record) = read_durable_operation(root, operation_id)?
         {
             validate_outcome(record.operation.clone())?;
-            let reference =
-                DoctorRemediationRefV1::new(record.operation.owning_operation.clone(), record.kind);
-            if self.legal_actions(&reference).await.is_empty() {
-                return Err(DoctorRemediationDispatchErrorV1::Denied);
+            if record.operation.phase == DoctorRemediationOperationPhaseV1::Running {
+                let reference = DoctorRemediationRefV1::new(
+                    record.operation.owning_operation.clone(),
+                    record.kind,
+                );
+                if self.legal_actions(&reference).await.is_empty() {
+                    return Err(DoctorRemediationDispatchErrorV1::Denied);
+                }
+                let recovery = match record.kind {
+                    DoctorRemediationKindV1::Preview => {
+                        DoctorRemediationDispatchCommandV1::Preview {
+                            operation: record.operation.owning_operation.clone(),
+                            target: record.target.clone(),
+                        }
+                    }
+                    DoctorRemediationKindV1::Action => DoctorRemediationDispatchCommandV1::Resume {
+                        operation: record.operation.owning_operation.clone(),
+                        target: record.target.clone(),
+                        preview_id: record.operation.preview_id.clone(),
+                        idempotency_key: record
+                            .idempotency_key
+                            .clone()
+                            .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?,
+                    },
+                };
+                let outcome = (self.dispatch)(recovery).await?;
+                if outcome.operation_id != record.operation.operation_id {
+                    return Err(DoctorRemediationDispatchErrorV1::InvalidReference);
+                }
+                validate_outcome(outcome.clone())?;
+                let recovered = DurableDoctorRemediationRecordV1 {
+                    operation: outcome.clone(),
+                    ..record
+                };
+                write_durable_record(root, &recovered)?;
+                if recovered.idempotency_key.is_some() {
+                    write_idempotency_record(
+                        root,
+                        &recovered.operation.owning_operation,
+                        &recovered,
+                    )?;
+                }
+                return Ok(outcome);
             }
             return Ok(record.operation);
         }
@@ -281,6 +336,9 @@ impl DoctorRemediationDispatcherV1 {
             DoctorRemediationDispatchCommandV1::Status { .. } => {
                 return (self.dispatch)(command).await;
             }
+            DoctorRemediationDispatchCommandV1::Resume { .. } => {
+                return Err(DoctorRemediationDispatchErrorV1::InvalidReference);
+            }
         };
         target.validate_for(&operation, kind)?;
         let target_digest = target.digest()?;
@@ -292,11 +350,14 @@ impl DoctorRemediationDispatcherV1 {
                 if record.target_digest != target_digest || record.kind != kind {
                     return Err(DoctorRemediationDispatchErrorV1::InvalidReference);
                 }
-                return Ok(record.operation);
+                if record.operation.phase != DoctorRemediationOperationPhaseV1::Running {
+                    return Ok(record.operation);
+                }
             }
             let intent = DurableDoctorRemediationRecordV1 {
                 schema_version: 1,
                 kind,
+                target: target.clone(),
                 target_digest: target_digest.clone(),
                 idempotency_key: idempotency_key.clone(),
                 operation: DoctorRemediationOperationV1 {
@@ -311,6 +372,8 @@ impl DoctorRemediationDispatcherV1 {
                     },
                     execution: None,
                     effect_receipt: None,
+                    owner_effect_receipt: None,
+                    owner_result_digest: None,
                 },
             };
             write_durable_record(root, &intent)?;
@@ -327,6 +390,7 @@ impl DoctorRemediationDispatcherV1 {
             let record = DurableDoctorRemediationRecordV1 {
                 schema_version: 1,
                 kind,
+                target,
                 target_digest,
                 idempotency_key: idempotency_key.clone(),
                 operation: outcome.clone(),
@@ -338,6 +402,25 @@ impl DoctorRemediationDispatcherV1 {
         }
         Ok(outcome)
     }
+}
+
+fn shared_durable_dispatch_gate(root: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<std::path::PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    let gates = GATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut gates = gates
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    if let Some(gate) = gates.get(root).and_then(std::sync::Weak::upgrade) {
+        return gate;
+    }
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    gates.insert(root.to_path_buf(), Arc::downgrade(&gate));
+    gate
 }
 
 pub(crate) fn operation_id_for_command(
@@ -352,6 +435,12 @@ pub(crate) fn operation_id_for_command(
             ))
         }
         DoctorRemediationDispatchCommandV1::Apply {
+            operation,
+            target,
+            idempotency_key,
+            ..
+        }
+        | DoctorRemediationDispatchCommandV1::Resume {
             operation,
             target,
             idempotency_key,
@@ -673,6 +762,10 @@ fn validate_outcome(
             .effect_receipt
             .as_ref()
             .is_some_and(|receipt| receipt.validate().is_err())
+        || outcome
+            .owner_effect_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.validate().is_err())
         || invalid_effect_binding
     {
         return Err(DoctorRemediationDispatchErrorV1::InvalidReference);
@@ -786,15 +879,38 @@ mod tests {
     use tracedecay_application::{Deadline, OperationBudgetUsage, OperationTermination};
     use tracedecay_domain::UtcMicros;
 
-    use crate::tracedecay::TraceDecay;
+    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+
+    async fn initialize_project(project_root: &std::path::Path) -> TraceDecay {
+        let profile_root = crate::config::user_data_dir().expect("isolated profile root");
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile_root,
+            "doctor remediation fixture initialization",
+        )
+        .expect("fixture lifecycle authority");
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            &profile_root,
+            "doctor remediation fixture initialization",
+        )
+        .expect("fixture maintenance database scope");
+        TraceDecay::init_with_exclusive_maintenance(
+            project_root,
+            TraceDecayOpenOptions {
+                profile_root: Some(profile_root),
+                global_db_path: None,
+            },
+            &lifecycle,
+        )
+        .await
+        .expect("project init")
+    }
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let cg = initialize_project(project.path()).await;
         let state = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
@@ -893,6 +1009,8 @@ mod tests {
                 termination: OperationTermination::Failed,
             }),
             effect_receipt: None,
+            owner_effect_receipt: None,
+            owner_result_digest: None,
         }
     }
 
@@ -1075,9 +1193,7 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let cg = initialize_project(project.path()).await;
         let mut first_state = crate::dashboard::build_state(&cg)
             .await
             .expect("first dashboard state");
@@ -1161,22 +1277,31 @@ mod tests {
         let mut failed = failed_operation();
         failed.operation_id = operation_id_for_command(&command).unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let dispatcher = DoctorRemediationDispatcherV1::new_durable(
-            root.path().to_path_buf(),
-            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
-            Arc::new({
-                let calls = Arc::clone(&calls);
+        let legal: LegalActions =
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] }));
+        let owner: Dispatch = Arc::new({
+            let calls = Arc::clone(&calls);
+            let failed = failed.clone();
+            move |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let failed = failed.clone();
-                move |_| {
-                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let failed = failed.clone();
-                    Box::pin(async move { Ok(failed) })
-                }
-            }),
+                Box::pin(async move { Ok(failed) })
+            }
+        });
+        let first_dispatcher = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::clone(&legal),
+            Arc::clone(&owner),
         );
+        let second_dispatcher =
+            DoctorRemediationDispatcherV1::new_durable(root.path().to_path_buf(), legal, owner);
 
-        let first = dispatcher.dispatch(command.clone()).await.unwrap();
-        let second = dispatcher.dispatch(command).await.unwrap();
+        let (first, second) = tokio::join!(
+            first_dispatcher.dispatch(command.clone()),
+            second_dispatcher.dispatch(command)
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
 
         assert_eq!(first, failed);
         assert_eq!(second, failed);
@@ -1184,7 +1309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_status_rechecks_current_owner_authority() {
+    async fn durable_terminal_status_survives_owner_unmount() {
         let root = tempfile::tempdir().expect("receipt root");
         let command = DoctorRemediationDispatchCommandV1::Preview {
             operation: configuration_operation(),
@@ -1214,13 +1339,58 @@ mod tests {
             }),
         );
 
+        let operation_id = failed.operation_id.clone();
         assert_eq!(
             rebuilt
-                .dispatch(DoctorRemediationDispatchCommandV1::Status {
-                    operation_id: failed.operation_id,
-                })
-                .await,
-            Err(DoctorRemediationDispatchErrorV1::Denied)
+                .dispatch(DoctorRemediationDispatchCommandV1::Status { operation_id })
+                .await
+                .unwrap(),
+            failed
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_status_recovers_a_running_idempotent_owner_command() {
+        let root = tempfile::tempdir().expect("receipt root");
+        let command = DoctorRemediationDispatchCommandV1::Apply {
+            operation: configuration_operation(),
+            target: configuration_apply_target(),
+            preview_id: Some(PreviewId::new("preview.running-recovery").unwrap()),
+            idempotency_key: IdempotencyKey::new("idempotency.running-recovery").unwrap(),
+        };
+        let operation_id = operation_id_for_command(&command).unwrap();
+        let first = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
+            Arc::new(|_| {
+                Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
+            }),
+        );
+        assert_eq!(
+            first.dispatch(command).await,
+            Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable)
+        );
+        let mut recovered = failed_operation();
+        recovered.operation_id = operation_id.clone();
+        recovered.preview_id = Some(PreviewId::new("preview.running-recovery").unwrap());
+        let rebuilt = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
+            Arc::new({
+                let recovered = recovered.clone();
+                move |_| {
+                    let recovered = recovered.clone();
+                    Box::pin(async move { Ok(recovered) })
+                }
+            }),
+        );
+
+        assert_eq!(
+            rebuilt
+                .dispatch(DoctorRemediationDispatchCommandV1::Status { operation_id })
+                .await
+                .unwrap(),
+            recovered
         );
     }
 }
