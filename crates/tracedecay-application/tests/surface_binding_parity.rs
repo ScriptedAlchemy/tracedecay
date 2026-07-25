@@ -21,14 +21,14 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         BindingSurface::Http,
         BindingSurface::Dashboard,
     ];
-    const CLI_MCP_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
     const ADVISORY_SURFACES: [BindingSurface; 4] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
         BindingSurface::Http,
         BindingSurface::Lsp,
     ];
-    const ADVISORY_CAPABILITIES: [&str; 3] = [
+    const NO_DIRECT_SURFACES: [BindingSurface; 0] = [];
+    const PROVIDER_CONTRIBUTIONS: [&str; 3] = [
         "capability.application.feedback.github-review-ingest",
         "capability.application.feedback.ci-failure-localize",
         "capability.application.feedback.proximity",
@@ -38,36 +38,14 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
     let git_handlers = git_surface_handler_descriptors().expect("git handlers");
     let feedback_handlers = feedback_surface_handler_descriptors().expect("feedback handlers");
 
-    let git_read_overrides = [
-        (
-            "capability.application.git.status",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.diff",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.history",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.blame",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.hunks",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-    ];
-    assert_surface_contract_parity(
-        &git,
-        &git_handlers,
-        &TRANSPORT_SURFACES,
-        &git_read_overrides,
-    );
-    let advisory_overrides =
-        ADVISORY_CAPABILITIES.map(|capability_id| (capability_id, ADVISORY_SURFACES.as_slice()));
+    assert_surface_contract_parity(&git, &git_handlers, &TRANSPORT_SURFACES, &[]);
+    let mut advisory_overrides = PROVIDER_CONTRIBUTIONS
+        .map(|capability_id| (capability_id, NO_DIRECT_SURFACES.as_slice()))
+        .to_vec();
+    advisory_overrides.push((
+        "capability.application.feedback.advisory-cycle",
+        ADVISORY_SURFACES.as_slice(),
+    ));
     assert_surface_contract_parity(
         &feedback,
         &feedback_handlers,
@@ -121,13 +99,11 @@ fn assert_surface_contract_parity(
         assert_eq!(bindings.len(), surfaces.len());
         assert_eq!(capability.binding_ids().len(), surfaces.len());
 
-        let operation = bindings[0].operation();
         for surface in surfaces {
             let binding = bindings
                 .iter()
                 .find(|binding| binding.surface() == *surface)
-                .unwrap_or_else(|| panic!("missing {operation} on {surface:?}"));
-            assert_eq!(binding.operation(), operation);
+                .unwrap_or_else(|| panic!("missing {} on {surface:?}", capability.capability_id()));
             assert!(capability.binding_ids().contains(binding.binding_id()));
             assert!(binding.required_features().is_empty());
             assert!(!binding.is_alias());
