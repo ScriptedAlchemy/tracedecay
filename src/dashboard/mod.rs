@@ -38,10 +38,11 @@ mod automation_skills_api;
 mod code_diagnostics_api;
 mod code_index_freshness_api;
 mod doctor_findings_api;
-mod doctor_remediation_api;
+pub(crate) mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
     DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
     DoctorRemediationDispatcherV1, DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1,
+    DoctorRemediationTargetV1,
 };
 mod events_api;
 mod graph_api;
