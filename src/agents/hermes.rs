@@ -192,15 +192,21 @@ pub(super) fn write_plugin_files(plugin_dir: &Path, tracedecay_bin: &str) -> Res
     std::fs::create_dir_all(plugin_dir).map_err(|e| TraceDecayError::Config {
         message: format!("failed to create {}: {e}", plugin_dir.display()),
     })?;
-    for (relative_path, contents) in host_bundle_files(tracedecay_bin)? {
+    for (relative_path, contents) in rendered_plugin_files(tracedecay_bin)? {
         write_text_file(&plugin_dir.join(relative_path), &contents)?;
     }
     Ok(())
 }
 
-/// Canonical generated Hermes plugin inventory shared by the legacy installer
-/// and the receipt-backed first-party host-bundle catalog.
-pub(crate) fn host_bundle_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+/// Canonical rendered Hermes plugin inventory. The legacy installer and the
+/// receipt-backed first-party host-bundle catalog must produce byte-identical
+/// files: the component-set transaction verifies installed artifact digests
+/// after the compatibility registration adapter re-runs this installer, so any
+/// rendering drift between the two writers fails installs with
+/// `ArtifactContentMismatch`. Callers must pass the same binary the installer
+/// resolves (`InstallContext::tracedecay_bin` / `which_tracedecay()`), never
+/// the running executable path.
+pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![
         ("plugin.yaml", templates::plugin_manifest()),
         ("schemas.py", templates::plugin_schemas()),
