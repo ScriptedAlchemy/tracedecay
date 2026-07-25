@@ -1,0 +1,620 @@
+<!doctype html>
+<!--
+  MOCKUP — not production code. Concept 1 of 3: SYMBOL ANATOMY.
+
+  Chrome tokens are copied verbatim from dashboard/src/theme/tokens.css and the
+  @theme block of dashboard/src/theme/tailwind.css. kindColor() below is a
+  line-for-line port of dashboard/src/viz/graph/kindColor.ts, so a kind lands on
+  the same hue here as it does in the product's canvas and spine.
+
+  Every number on this page is INVENTED but honestly shaped — see
+  notes/symbol-anatomy.md for exactly which fields a real backend would have to
+  serve and which ones no current endpoint carries.
+
+  Theme: append ?theme=light to the file:// URL.
+-->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>Symbol anatomy — mockup</title>
+<style>
+:root {
+  --raw-surface-0: oklch(0.145 0.003 260);
+  --raw-surface-1: oklch(0.178 0.0035 260);
+  --raw-surface-2: oklch(0.215 0.004 260);
+  --raw-surface-3: oklch(0.262 0.0045 260);
+  --raw-text-primary: oklch(0.945 0.002 260);
+  --raw-text-secondary: oklch(0.79 0.003 260);
+  --raw-text-muted: oklch(0.685 0.004 260);
+  --raw-edge-subtle: oklch(0.315 0.004 260);
+  --raw-edge-strong: oklch(0.46 0.006 260);
+  --raw-accent: oklch(0.75 0.15 200);
+  --raw-accent-emphasis: oklch(0.64 0.16 200);
+  --raw-grid: oklch(0.24 0.004 260);
+  --raw-grid-minor: oklch(0.195 0.003 260);
+  --raw-state-ready: oklch(0.72 0.14 155);
+  --raw-state-partial: oklch(0.78 0.14 85);
+  --raw-state-stale: oklch(0.74 0.11 85);
+  --raw-state-unknown: oklch(0.6 0.015 260);
+  --raw-state-error: oklch(0.62 0.18 25);
+  --raw-state-conflicting: oklch(0.7 0.14 55);
+  --raw-state-locked: oklch(0.68 0.1 300);
+  --raw-membrane-lift: oklch(0.34 0.016 262 / 0.55);
+  --raw-depth: oklch(0.07 0.012 262 / 0.6);
+  --raw-well: oklch(0.118 0.0035 262);
+  --raw-raised: oklch(0.228 0.004 260);
+  --shadow-well: inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
+  --shadow-raised: inset 0 1px 0 var(--raw-membrane-lift), 0 1px 2px var(--raw-depth);
+  --grid-cell: 32px;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  --text-3xs: 10px; --text-2xs: 11px; --text-xs: 12px; --text-sm: 13px;
+  --text-base: 15px; --text-lg: 19px; --text-xl: 26px; --text-2xl: 34px;
+}
+[data-theme='light'] {
+  --raw-surface-0: oklch(0.985 0.001 260);
+  --raw-surface-1: oklch(0.962 0.0015 260);
+  --raw-surface-2: oklch(0.936 0.002 260);
+  --raw-surface-3: oklch(0.9 0.0025 260);
+  --raw-text-primary: oklch(0.2 0.004 260);
+  --raw-text-secondary: oklch(0.37 0.005 260);
+  --raw-text-muted: oklch(0.45 0.005 260);
+  --raw-edge-subtle: oklch(0.855 0.003 260);
+  --raw-edge-strong: oklch(0.7 0.005 260);
+  --raw-accent: oklch(0.47 0.14 220);
+  --raw-accent-emphasis: oklch(0.43 0.15 220);
+  --raw-grid: oklch(0.895 0.002 260);
+  --raw-grid-minor: oklch(0.945 0.001 260);
+  --raw-state-ready: oklch(0.52 0.14 155);
+  --raw-state-partial: oklch(0.56 0.13 85);
+  --raw-state-stale: oklch(0.55 0.11 85);
+  --raw-state-unknown: oklch(0.46 0.015 260);
+  --raw-state-error: oklch(0.48 0.19 25);
+  --raw-state-conflicting: oklch(0.5 0.15 55);
+  --raw-state-locked: oklch(0.48 0.13 300);
+  --raw-membrane-lift: oklch(1 0 0 / 0.9);
+  --raw-depth: oklch(0.52 0.03 262 / 0.16);
+  --raw-well: oklch(0.945 0.0018 260);
+  --raw-raised: oklch(1 0 0);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--raw-surface-0);
+  color: var(--raw-text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+.td-legend {
+  font-size: var(--text-3xs); line-height: 1; letter-spacing: 0.16em;
+  text-transform: uppercase; font-weight: 500; color: var(--raw-text-muted);
+  white-space: nowrap;
+}
+.td-title {
+  font-size: var(--text-2xs); line-height: 1; letter-spacing: 0.13em;
+  text-transform: uppercase; font-weight: 600; color: var(--raw-text-secondary);
+}
+.td-value { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--raw-text-primary); }
+.td-unit { font-size: var(--text-3xs); letter-spacing: 0.1em; text-transform: uppercase; color: var(--raw-text-muted); }
+.td-display {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-weight: 500; letter-spacing: -0.035em; line-height: 0.92;
+  color: var(--raw-text-primary);
+}
+.td-rule { flex: 1 1 0%; height: 1px; min-width: 8px; background: var(--raw-edge-subtle); }
+.td-well { background: var(--raw-well); box-shadow: var(--shadow-well); }
+.td-raised { background: var(--raw-raised); box-shadow: var(--shadow-raised); }
+.td-graticule {
+  background-image:
+    linear-gradient(to right, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to right, var(--raw-grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid-minor) 1px, transparent 1px);
+  background-size:
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    var(--grid-cell) var(--grid-cell), var(--grid-cell) var(--grid-cell);
+  background-position: center center;
+}
+@keyframes td-signal { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+.td-signal { animation: td-signal 1.8s cubic-bezier(0.2,0,0,1) infinite; }
+@media (prefers-reduced-motion: reduce) { .td-signal { animation: none; opacity: 1 } }
+
+/* ---- page frame ---- */
+.chassis { width: 1440px; }
+.masthead {
+  display: flex; align-items: flex-end; gap: 20px;
+  padding: 14px 20px 12px; border-bottom: 1px solid var(--raw-edge-subtle);
+}
+.masthead .who { min-width: 0; }
+.crumb { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.headline { font-size: var(--text-xl); letter-spacing: -0.02em; }
+.headline .dim { color: var(--raw-text-muted); }
+.readouts { display: flex; gap: 0; margin-left: auto; }
+.readout {
+  padding: 6px 16px; border-left: 1px solid var(--raw-edge-subtle);
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-end;
+}
+.readout .n { font-size: var(--text-xl); }
+.kindchip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 7px 3px 5px;
+  border: 1px solid var(--raw-edge-subtle); border-radius: 1px;
+  font-size: var(--text-3xs); letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--raw-text-secondary);
+}
+.kindchip i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+
+.section-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 20px; border-bottom: 1px solid var(--raw-edge-subtle);
+}
+figure { margin: 0; }
+figcaption { font-size: var(--text-3xs); color: var(--raw-text-muted); line-height: 1.45; }
+
+.anatomy { position: relative; border-bottom: 1px solid var(--raw-edge-subtle); }
+.anatomy svg { display: block; }
+
+/* ---- afferent strata ---- */
+.strata { display: grid; grid-template-columns: 1fr; }
+.band { border-bottom: 1px solid var(--raw-edge-subtle); }
+.band:last-child { border-bottom: 0; }
+.bandhead { display: flex; align-items: center; gap: 10px; padding: 7px 20px 6px; }
+.lower { display: grid; grid-template-columns: 1fr 1fr; }
+.lower > * { border-right: 1px solid var(--raw-edge-subtle); }
+.lower > *:last-child { border-right: 0; }
+
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 0; text-align: left; font-weight: inherit; }
+.rowline td { border-top: 1px solid var(--raw-edge-subtle); }
+</style>
+</head>
+<body>
+<div class="chassis">
+
+  <!-- ==================================================================
+       Masthead: what this surface is looking at, and the four counts that
+       the rest of the page then draws. Numbers here are read off, so they
+       sit on the raised plane's typographic tier (td-display).
+       ================================================================== -->
+  <header class="masthead">
+    <div class="who">
+      <div class="crumb">
+        <span class="td-legend">symbol anatomy</span>
+        <span class="td-legend" style="color:var(--raw-text-secondary)">tracedecay-application</span>
+        <span class="kindchip"><i data-kind="function"></i>function</span>
+      </div>
+      <div class="headline td-display">
+        <span class="dim">retrieval::service::</span>graph_overview
+      </div>
+      <div class="td-value" style="font-size:var(--text-2xs);color:var(--raw-text-muted);margin-top:9px">
+        crates/tracedecay-application/src/retrieval/service.rs:412–487
+      </div>
+    </div>
+    <div class="readouts">
+      <div class="readout"><span class="td-legend">callers</span><span class="n td-display">7</span></div>
+      <div class="readout"><span class="td-legend">callees</span><span class="n td-display">9</span></div>
+      <div class="readout"><span class="td-legend">sessions</span><span class="n td-display">6</span></div>
+      <div class="readout"><span class="td-legend">facts</span><span class="n td-display">4</span></div>
+      <div class="readout">
+        <span class="td-legend">last strike</span>
+        <span class="n td-display" style="color:var(--raw-state-ready)">4<span class="td-unit" style="margin-left:3px">min</span></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ==================================================================
+       THE BODY AND ITS TISSUE
+       Callers left, callees right, the symbol itself in the middle. The
+       bar beside each neighbour is its CALL-SITE COUNT — the one number
+       that says how hard that neighbour leans on this symbol — and hue is
+       the neighbour's kind, taken from the product's kindColor arc. The
+       curve between a neighbour and the body is the edge itself: it is a
+       connector, and its length means nothing at all.
+       ================================================================== -->
+  <div class="section-bar">
+    <span class="td-legend">code afferents &amp; efferents</span>
+    <span class="td-rule"></span>
+    <span class="td-legend" style="text-transform:none;letter-spacing:normal">
+      16 direct neighbours · 41 call sites · indirect callers not drawn
+    </span>
+  </div>
+
+  <figure class="anatomy">
+    <svg viewBox="0 0 1440 468" width="1440" height="468" role="img"
+         aria-label="Symbol anatomy: graph_overview with seven callers on the left and nine callees on the right; bar length is call-site count and hue is symbol kind.">
+      <defs>
+        <pattern id="hatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+          <line x1="0" y1="0" x2="0" y2="6" stroke="var(--raw-edge-strong)" stroke-width="2" />
+        </pattern>
+      </defs>
+      <g id="anatomy-edges" fill="none"></g>
+      <g id="anatomy-marks"></g>
+
+      <!-- the body: a machined plate, not a node -->
+      <g id="body">
+        <rect x="586" y="118" width="268" height="216" rx="2"
+              fill="var(--raw-raised)" stroke="var(--raw-edge-strong)" stroke-width="1" />
+        <rect x="586" y="118" width="268" height="3" id="body-kindcap" />
+        <text x="602" y="150" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)"
+              letter-spacing="1.6">this symbol</text>
+        <text x="602" y="182" font-family="ui-monospace, monospace" font-size="24" font-weight="500"
+              letter-spacing="-0.8" fill="var(--raw-text-primary)">graph_overview</text>
+        <text x="602" y="204" font-family="ui-monospace, monospace" font-size="11"
+              fill="var(--raw-text-muted)">retrieval::service</text>
+
+        <line x1="602" y1="228" x2="838" y2="228" stroke="var(--raw-edge-subtle)" />
+
+        <text x="602" y="252" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">lines</text>
+        <text x="838" y="252" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="var(--raw-text-primary)">76</text>
+        <text x="602" y="276" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">cyclomatic</text>
+        <text x="838" y="276" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="var(--raw-text-primary)">9</text>
+        <text x="602" y="300" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">dep. depth</text>
+        <text x="838" y="300" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="var(--raw-text-primary)">1</text>
+        <text x="602" y="324" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">doc comment</text>
+        <text x="838" y="324" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="var(--raw-state-partial)">absent</text>
+      </g>
+
+      <!-- column legends -->
+      <text x="24" y="18" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">callers — who reaches in</text>
+      <text x="1416" y="18" text-anchor="end" class="td-legend" style="font-size:10px" fill="var(--raw-text-muted)" letter-spacing="1.6">callees — what it reaches for</text>
+    </svg>
+
+    <figcaption style="padding:2px 20px 12px">
+      bar length = call sites between that neighbour and this symbol (0 → 6, one scale for both sides) ·
+      hue = neighbour kind on the product's kindColor arc · vertical order = call-site count, descending ·
+      the curve is the edge, its length encodes nothing ·
+      the body's own plate carries only measured fields; <b style="color:var(--raw-state-partial);font-weight:500">absent</b>
+      is printed where the field exists and is empty, never blanked
+    </figcaption>
+  </figure>
+
+  <!-- ==================================================================
+       THE NON-CODE AFFERENTS
+       Everything above is what the compiler knows. Everything below is
+       what the WORK knows: which conversations touched this symbol, what
+       has been asserted about it, what proves it, and whether anything is
+       happening to it right now. Composed as one continuous field with the
+       code anatomy, not parked behind a tab.
+       ================================================================== -->
+  <div class="strata">
+
+    <!-- ---- sessions: the time axis is real elapsed time ---- -->
+    <div class="band">
+      <div class="bandhead">
+        <span class="td-title">sessions that edited this symbol</span>
+        <span class="td-rule"></span>
+        <span class="td-legend" style="text-transform:none;letter-spacing:normal">
+          6 sessions · 63 days · 4 hosts · each links to its thread
+        </span>
+      </div>
+
+      <figure>
+        <svg viewBox="0 0 1440 128" width="1440" height="128" role="img"
+             aria-label="Six editing sessions arranged on a 63-day time axis; tick height is message count.">
+          <!-- axis -->
+          <line x1="40" y1="104" x2="1400" y2="104" stroke="var(--raw-edge-strong)" />
+          <g id="session-grads"></g>
+          <g id="session-marks"></g>
+          <text x="40" y="122" font-family="ui-monospace, monospace" font-size="10" fill="var(--raw-text-muted)">2026-05-24</text>
+          <text x="1400" y="122" text-anchor="end" font-family="ui-monospace, monospace" font-size="10" fill="var(--raw-text-muted)">2026-07-24 · today</text>
+        </svg>
+      </figure>
+
+      <table id="session-table" style="font-size:var(--text-xs)"></table>
+
+      <figcaption style="padding:8px 20px 12px">
+        horizontal position = when the session last touched this symbol, on a linear 63-day axis ·
+        tick height = messages in that session (0 → 214) · hue = host ·
+        the 2026-06-02 session's message count was never recorded, so its tick is drawn
+        <b style="color:var(--raw-text-secondary);font-weight:500">hollow at zero height</b> and its row reads
+        <b style="color:var(--raw-state-unknown);font-weight:500">unrecorded</b> — the session is still on the axis,
+        because it did edit this symbol
+      </figcaption>
+    </div>
+
+    <div class="lower">
+      <!-- ---- facts ---- -->
+      <div>
+        <div class="bandhead">
+          <span class="td-title">facts citing this symbol</span>
+          <span class="td-rule"></span>
+          <span class="td-legend" style="text-transform:none;letter-spacing:normal">4 · trust 0.46–0.98</span>
+        </div>
+        <table id="fact-table" style="font-size:var(--text-xs)"></table>
+        <figcaption style="padding:8px 20px 12px">
+          rail length = trust (0 → 1, anchored at zero) · a fact below 0.5 is drawn at its real short length
+          rather than hidden, because a weak assertion about a hot symbol is the finding
+        </figcaption>
+      </div>
+
+      <!-- ---- tests + live strike ---- -->
+      <div>
+        <div class="bandhead">
+          <span class="td-title">covering tests</span>
+          <span class="td-rule"></span>
+          <span class="td-legend" style="text-transform:none;letter-spacing:normal">3 tests · 9 of 12 branches</span>
+        </div>
+        <table id="test-table" style="font-size:var(--text-xs)"></table>
+
+        <div class="bandhead" style="border-top:1px solid var(--raw-edge-subtle)">
+          <span class="td-title">live</span>
+          <span class="td-rule"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px;padding:2px 20px 16px">
+          <span class="td-signal" style="width:9px;height:9px;border-radius:50%;background:var(--raw-state-ready);flex:none"></span>
+          <div style="min-width:0">
+            <div class="td-value" style="font-size:var(--text-sm)">
+              struck 4 min ago · <span style="color:var(--raw-text-secondary)">write</span>
+            </div>
+            <div class="td-legend" style="text-transform:none;letter-spacing:normal;margin-top:5px">
+              by <span class="td-value" style="font-size:var(--text-2xs)">PR14 code spine redesign</span>
+              on claude-code · this thread is open now
+            </div>
+          </div>
+          <div style="margin-left:auto;text-align:right">
+            <div class="td-legend">strikes / 24h</div>
+            <div class="td-display" style="font-size:var(--text-xl);margin-top:6px">11</div>
+          </div>
+        </div>
+        <figcaption style="padding:0 20px 12px">
+          the pulsing dot is the only animated mark on the surface and it means exactly one thing:
+          an open session has this symbol in its working set · reduced-motion pins it lit
+        </figcaption>
+      </div>
+    </div>
+  </div>
+
+  <footer style="display:flex;gap:14px;align-items:center;padding:10px 20px;border-top:1px solid var(--raw-edge-subtle)">
+    <span class="td-legend">mockup</span>
+    <span class="td-legend" style="text-transform:none;letter-spacing:normal;color:var(--raw-text-muted)">
+      concept only · every value on this page is invented · see notes/symbol-anatomy.md for what a real
+      backend would have to serve
+    </span>
+  </footer>
+</div>
+
+<script>
+/* ------------------------------------------------------------------------
+ * kindColor — line-for-line port of dashboard/src/viz/graph/kindColor.ts.
+ * Duplicated here only because a standalone file:// mockup cannot import the
+ * product module; if the arc ever moves, this copy is wrong and the mockup
+ * should be regenerated rather than patched.
+ * ---------------------------------------------------------------------- */
+function hashKind(kind) {
+  let hash = 0;
+  for (let i = 0; i < kind.length; i += 1) hash = (hash * 31 + kind.charCodeAt(i)) >>> 0;
+  return hash;
+}
+function kindColor(kind, light) {
+  const hash = hashKind(kind);
+  const chroma = (light ? 0.135 : 0.152) + ((hash >>> 9) % 6) * 0.012;
+  const lightness = light ? 0.55 : 0.72;
+  return 'oklch(' + lightness + ' ' + chroma.toFixed(3) + ' ' + (186 + (hash % 148)) + ')';
+}
+
+const params = new URLSearchParams(location.search);
+const theme = params.get('theme') === 'light' ? 'light' : 'dark';
+document.documentElement.dataset.theme = theme;
+const LIGHT = theme === 'light';
+const hue = (kind) => kindColor(kind, LIGHT);
+
+/* ---- INVENTED DATA (honestly shaped) --------------------------------- */
+const CALLERS = [
+  { name: 'tests::graph_overview_contract',        kind: 'test',      sites: 6 },
+  { name: 'api::mcp::tools::context::run',         kind: 'function',  sites: 5 },
+  { name: 'api::handlers::graph_overview_handler', kind: 'function',  sites: 3 },
+  { name: 'cli::commands::health::execute',        kind: 'function',  sites: 2 },
+  { name: 'api::mcp::tools::status::run',          kind: 'function',  sites: 2 },
+  { name: 'application::doctor::probe_graph',      kind: 'function',  sites: 1 },
+  { name: 'api::routes::mount_graph_routes',       kind: 'function',  sites: 1 },
+];
+const CALLEES = [
+  { name: 'store::graph_queries::top_connected_rows', kind: 'function', sites: 4 },
+  { name: 'rusqlite_runtime::reader::pool::acquire',  kind: 'function', sites: 4 },
+  { name: 'policy::routing::admit_scope',             kind: 'function', sites: 3 },
+  { name: 'application::error::MapStoreError::map',   kind: 'trait',    sites: 3 },
+  { name: 'store::graph_queries::kind_histogram',     kind: 'function', sites: 2 },
+  { name: 'retrieval::catalog::resolve_scope',        kind: 'function', sites: 2 },
+  { name: 'domain::GraphOverview::new',               kind: 'method',   sites: 1 },
+  { name: 'domain::ScopeSelector',                    kind: 'struct',   sites: 1 },
+  { name: 'telemetry::span_graph_overview',           kind: 'macro',    sites: 1 },
+];
+const SITE_MAX = 6;                 /* one scale for both columns */
+const BAR_UNIT = 15;                /* px per call site */
+const BAR_BASE = 10;                /* px floor, so 1 site is still a body */
+
+const SESSIONS = [
+  { title: 'PR14 code spine redesign', host: 'claude-code', date: '2026-07-24', days: 0,  msgs: 214, open: true },
+  { title: 'graph_overview scope leak', host: 'codex',      date: '2026-07-11', days: 13, msgs: 96 },
+  { title: 'retrieval catalog parity',  host: 'claude-code', date: '2026-06-28', days: 26, msgs: 148 },
+  { title: 'doctor probe wiring',       host: 'cursor',     date: '2026-06-19', days: 35, msgs: 41 },
+  { title: 'rusqlite reader pool',      host: 'codex',      date: '2026-06-02', days: 52, msgs: null },
+  { title: 'initial graph endpoint',    host: 'hermes',     date: '2026-05-24', days: 61, msgs: 173 },
+];
+const SPAN_DAYS = 63, MSG_MAX = 214;
+
+const FACTS = [
+  { trust: 0.98, kind: 'decision', text: 'graph_overview must admit scope through policy::routing before it touches the store; the store layer trusts its caller.' },
+  { trust: 0.94, kind: 'project',  text: 'top_connected_rows serves exactly twelve rows and five fields — id, name, kind, file_path, degree.' },
+  { trust: 0.81, kind: 'decision', text: 'the overview is unseeded; reseeding happens only on symbol selection.' },
+  { trust: 0.46, kind: 'project',  text: 'kind_histogram was moved out of the overview payload in PR12.' },
+];
+
+const TESTS = [
+  { name: 'graph_overview_contract::serves_top_twelve',   file: 'crates/tracedecay-application/tests', state: 'green', ran: '4 min ago' },
+  { name: 'graph_overview_contract::empty_is_complete_zero', file: 'crates/tracedecay-application/tests', state: 'green', ran: '4 min ago' },
+  { name: 'surface_binding_parity::graph_overview_binding', file: 'crates/tracedecay-application/tests', state: 'stale', ran: '6 days ago' },
+  { name: 'the policy-denied branch', file: '—', state: 'uncovered', ran: '—' },
+];
+
+const HOST_HUE = {
+  'claude-code': 'var(--raw-accent)',
+  'codex':       'var(--raw-state-locked, oklch(0.68 0.1 300))',
+  'cursor':      'var(--raw-state-conflicting)',
+  'hermes':      'var(--raw-state-ready)',
+};
+
+/* ---- anatomy ---------------------------------------------------------- */
+const SVGNS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs, text) => {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text != null) n.textContent = text;
+  return n;
+};
+
+const marks = document.getElementById('anatomy-marks');
+const edges = document.getElementById('anatomy-edges');
+document.getElementById('body-kindcap').setAttribute('fill', hue('function'));
+/* The masthead's kind chip wears the same hue as the body's cap — one rule,
+ * two places, no second palette. */
+document.querySelectorAll('[data-kind]').forEach((n) => {
+  n.style.background = hue(n.dataset.kind);
+});
+
+/* left column */
+CALLERS.forEach((c, i) => {
+  const y = 52 + i * 58;
+  const len = BAR_BASE + c.sites * BAR_UNIT;
+  const x0 = 24;
+  marks.appendChild(el('text', {
+    x: x0, y: y - 12, 'font-family': 'ui-monospace, monospace', 'font-size': 12,
+    fill: 'var(--raw-text-secondary)',
+  }, c.name));
+  marks.appendChild(el('rect', { x: x0, y: y, width: len, height: 7, fill: hue(c.kind) }));
+  marks.appendChild(el('text', {
+    x: x0 + len + 9, y: y + 7, 'font-family': 'ui-monospace, monospace', 'font-size': 11,
+    fill: 'var(--raw-text-muted)',
+  }, c.sites + (c.sites === 1 ? ' site' : ' sites')));
+  const sx = x0 + len + 62, sy = y + 3.5;
+  edges.appendChild(el('path', {
+    d: `M ${sx} ${sy} C ${sx + 130} ${sy}, ${470} ${226}, ${586} ${226}`,
+    stroke: hue(c.kind), 'stroke-width': 1, opacity: 0.55,
+  }));
+});
+
+/* right column */
+CALLEES.forEach((c, i) => {
+  const y = 58 + i * 46;
+  const len = BAR_BASE + c.sites * BAR_UNIT;
+  const x0 = 1100;
+  marks.appendChild(el('text', {
+    x: x0, y: y - 11, 'font-family': 'ui-monospace, monospace', 'font-size': 12,
+    fill: 'var(--raw-text-secondary)',
+  }, c.name));
+  marks.appendChild(el('rect', { x: x0, y: y, width: len, height: 7, fill: hue(c.kind) }));
+  marks.appendChild(el('text', {
+    x: x0 - 9, y: y + 7, 'text-anchor': 'end', 'font-family': 'ui-monospace, monospace',
+    'font-size': 11, fill: 'var(--raw-text-muted)',
+  }, c.sites));
+  const ex = x0 - 40, ey = y + 3.5;
+  edges.appendChild(el('path', {
+    d: `M 854 226 C ${970} ${226}, ${ex - 130} ${ey}, ${ex} ${ey}`,
+    stroke: hue(c.kind), 'stroke-width': 1, opacity: 0.55,
+  }));
+});
+
+/* a kind key, printed where the tissue is, not in a floating legend box */
+const kinds = [...new Set([...CALLERS, ...CALLEES].map((n) => n.kind))];
+kinds.forEach((k, i) => {
+  const x = 24 + i * 96;
+  marks.appendChild(el('rect', { x, y: 452, width: 9, height: 9, fill: hue(k) }));
+  marks.appendChild(el('text', {
+    x: x + 14, y: 460, 'font-size': 10, 'letter-spacing': 1.4,
+    fill: 'var(--raw-text-muted)', 'font-family': 'var(--font-sans)',
+  }, k.toUpperCase()));
+});
+
+/* ---- sessions --------------------------------------------------------- */
+const sgrads = document.getElementById('session-grads');
+const smarks = document.getElementById('session-marks');
+const sx = (days) => 1400 - (days / SPAN_DAYS) * 1360;
+for (let d = 0; d <= SPAN_DAYS; d += 7) {
+  sgrads.appendChild(el('line', {
+    x1: sx(d), y1: 100, x2: sx(d), y2: 108, stroke: 'var(--raw-edge-strong)', opacity: 0.7,
+  }));
+}
+SESSIONS.forEach((s) => {
+  const x = sx(s.days);
+  const h = s.msgs == null ? 0 : (s.msgs / MSG_MAX) * 74;
+  const col = HOST_HUE[s.host] || 'var(--raw-text-muted)';
+  if (s.msgs == null) {
+    /* absence: a hollow foot on the axis, at zero height. Present, empty. */
+    smarks.appendChild(el('rect', {
+      x: x - 5, y: 94, width: 10, height: 10, fill: 'none',
+      stroke: 'var(--raw-text-muted)', 'stroke-dasharray': '2 2',
+    }));
+    smarks.appendChild(el('text', {
+      x, y: 88, 'text-anchor': 'middle', 'font-size': 10, fill: 'var(--raw-text-muted)',
+      'font-family': 'ui-monospace, monospace',
+    }, '—'));
+  } else {
+    smarks.appendChild(el('rect', { x: x - 4, y: 104 - h, width: 8, height: h, fill: col }));
+    smarks.appendChild(el('text', {
+      x, y: 96 - h, 'text-anchor': 'middle', 'font-size': 11, fill: 'var(--raw-text-primary)',
+      'font-family': 'ui-monospace, monospace',
+    }, s.msgs));
+  }
+  if (s.open) {
+    smarks.appendChild(el('circle', { cx: x, cy: 104 - h - 26, r: 4, fill: 'var(--raw-state-ready)', class: 'td-signal' }));
+  }
+});
+
+document.getElementById('session-table').innerHTML =
+  SESSIONS.map((s) => {
+    const col = HOST_HUE[s.host] || 'var(--raw-text-muted)';
+    const msgs = s.msgs == null
+      ? '<span style="color:var(--raw-state-unknown)">unrecorded</span>'
+      : s.msgs;
+    return `<tr class="rowline">
+      <td style="padding:7px 0 7px 20px;width:16px"><span style="display:block;width:3px;height:12px;background:${col}"></span></td>
+      <td class="td-value" style="padding:7px 16px 7px 8px">${s.title}${s.open ? ' <span class="td-legend" style="color:var(--raw-state-ready)">open</span>' : ''}</td>
+      <td class="td-legend" style="padding:7px 16px;width:120px;text-transform:none;letter-spacing:normal">${s.host}</td>
+      <td class="td-value" style="padding:7px 16px;width:120px;color:var(--raw-text-muted);font-size:11px">${s.date}</td>
+      <td class="td-value" style="padding:7px 16px;width:100px;color:var(--raw-text-muted);font-size:11px">${s.days === 0 ? 'today' : s.days + 'd ago'}</td>
+      <td class="td-value" style="padding:7px 20px 7px 16px;width:130px;text-align:right">${msgs}<span class="td-unit" style="margin-left:5px">msg</span></td>
+      <td class="td-legend" style="padding:7px 20px 7px 0;width:96px;text-align:right;color:var(--raw-accent)">open thread →</td>
+    </tr>`;
+  }).join('');
+
+/* ---- facts ------------------------------------------------------------ */
+document.getElementById('fact-table').innerHTML =
+  FACTS.map((f) => {
+    const pct = Math.round(f.trust * 100);
+    const weak = f.trust < 0.5;
+    return `<tr class="rowline">
+      <td style="padding:9px 0 9px 20px;width:150px;vertical-align:top">
+        <div class="td-value" style="font-size:13px;${weak ? 'color:var(--raw-state-partial)' : ''}">${f.trust.toFixed(2)}</div>
+        <div style="margin-top:5px;height:4px;width:110px;background:var(--raw-well);box-shadow:var(--shadow-well)">
+          <div style="height:4px;width:${pct}%;background:${weak ? 'var(--raw-state-partial)' : 'var(--raw-accent)'}"></div>
+        </div>
+        <div class="td-legend" style="margin-top:6px">${f.kind}</div>
+      </td>
+      <td style="padding:9px 20px 9px 14px;color:var(--raw-text-secondary);line-height:1.45;font-size:12px">${f.text}</td>
+    </tr>`;
+  }).join('');
+
+/* ---- tests ------------------------------------------------------------ */
+const TEST_COLOR = {
+  green: 'var(--raw-state-ready)',
+  stale: 'var(--raw-state-stale)',
+  uncovered: 'var(--raw-text-muted)',
+};
+document.getElementById('test-table').innerHTML =
+  TESTS.map((t) => {
+    const uncovered = t.state === 'uncovered';
+    return `<tr class="rowline">
+      <td style="padding:8px 0 8px 20px;width:16px">
+        <span style="display:block;width:9px;height:9px;border-radius:50%;
+          ${uncovered ? 'border:1px dashed var(--raw-text-muted)' : 'background:' + TEST_COLOR[t.state]}"></span>
+      </td>
+      <td class="td-value" style="padding:8px 10px;font-size:12px;${uncovered ? 'color:var(--raw-text-muted);font-style:italic' : ''}">${t.name}</td>
+      <td class="td-legend" style="padding:8px 12px;width:110px;text-align:right;color:${TEST_COLOR[t.state]}">${t.state}</td>
+      <td class="td-value" style="padding:8px 20px 8px 0;width:100px;text-align:right;font-size:11px;color:var(--raw-text-muted)">${t.ran}</td>
+    </tr>`;
+  }).join('');
+</script>
+</body>
+</html>
