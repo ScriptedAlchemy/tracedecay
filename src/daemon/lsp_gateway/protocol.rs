@@ -1106,6 +1106,7 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
+        self.discard_document_context(&uri);
         self.native_upstream.remove(&uri);
         self.control.supersede_document(&uri, snapshot.version);
         if !self
@@ -1126,6 +1127,7 @@ where
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
         let closed = self.overlays.close(&uri).map_err(overlay_failure)?;
+        self.discard_document_context(&uri);
         self.native_upstream.remove(&uri);
         self.control
             .supersede_document(&uri, closed.version.saturating_add(1));
@@ -1143,6 +1145,7 @@ where
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
+        self.discard_document_context(&uri);
         if matches!(
             self.gateway.document_saved(uri.clone()),
             FeedbackCycleResponse::Accepted
@@ -2010,6 +2013,9 @@ where
             ));
         }
         self.context_subscriptions = subscriptions;
+        if let Some(context) = &self.context {
+            context.update_subscriptions(self.gateway.root(), &self.context_subscriptions);
+        }
         Ok(json!({
             "projections": self.context_subscriptions.iter().collect::<Vec<_>>(),
         }))
@@ -2791,6 +2797,7 @@ where
     }
 
     fn discard_document_publications(&mut self, uri: &str) {
+        self.discard_document_context(uri);
         self.active_diagnostic_refreshes.remove(uri);
         let mut retained = VecDeque::with_capacity(self.outbound.len());
         let mut index = 0_usize;
@@ -2813,6 +2820,11 @@ where
         self.outbound = retained;
         self.control.remove_publication(uri);
         self.published.remove(uri);
+    }
+
+    fn discard_document_context(&mut self, uri: &str) {
+        self.context_currentness
+            .retain(|(_, document_uri), _| document_uri.as_deref() != Some(uri));
     }
 
     fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {
@@ -3261,6 +3273,46 @@ mod tests {
             }))
             .is_err(),
             "clients cannot supply the trusted overlay digest"
+        );
+    }
+
+    #[test]
+    fn document_change_invalidates_context_currentness_before_expansion() {
+        let document_uri = "file:///root/a.rs";
+        let mut session = session();
+        initialize(&mut session);
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":1,"text":"fn a() {}"}}}"#,
+            1,
+        );
+        session.context_currentness.insert(
+            (
+                ContextProjectionKind::test_run_results(),
+                Some(document_uri.to_owned()),
+            ),
+            ContextProjectionCurrentness {
+                generation: 7,
+                identity: ContextProjectionIdentity {
+                    head_commit_id: "0123456789abcdef".to_owned(),
+                    code_generation_id: "generation:7".to_owned(),
+                    snapshot_digest: format!("sha256:{}", "a".repeat(64)),
+                    invalidation_digest: format!("sha256:{}", "b".repeat(64)),
+                    snapshot_content_digest: format!("sha256:{}", "c".repeat(64)),
+                    document_content_digest: Some(format!("sha256:{}", "d".repeat(64))),
+                },
+            },
+        );
+
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///root/a.rs","version":2},"contentChanges":[{"text":"fn b() {}"}]}}"#,
+            2,
+        );
+
+        assert!(
+            !session
+                .context_currentness
+                .keys()
+                .any(|(_, uri)| uri.as_deref() == Some(document_uri))
         );
     }
 
