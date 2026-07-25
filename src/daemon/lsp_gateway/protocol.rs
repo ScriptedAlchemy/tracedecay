@@ -2175,7 +2175,10 @@ where
         let value = document_diagnostic_report_value(
             DocumentDiagnosticReport::full(
                 result_id.clone(),
-                self.visible_diagnostics(merged.items),
+                self.visible_diagnostics(
+                    merged.items,
+                    self.gateway.capabilities().document_diagnostics_data,
+                ),
             ),
             DiagnosticSerializationCapabilities::pull(self.gateway.capabilities()),
         );
@@ -2365,7 +2368,10 @@ where
                 uri,
                 version,
                 generation,
-                self.visible_diagnostics(merged.items),
+                self.visible_diagnostics(
+                    merged.items,
+                    self.gateway.capabilities().publish_diagnostics_data,
+                ),
             )
         {
             return false;
@@ -2396,18 +2402,19 @@ where
     fn visible_diagnostics(
         &self,
         mut diagnostics: Vec<GatewayDiagnostic>,
+        supports_diagnostic_data: bool,
     ) -> Vec<GatewayDiagnostic> {
         for diagnostic in &mut diagnostics {
             diagnostic
                 .related_information
                 .retain(|related| self.gateway.root().contains_document(&related.uri));
         }
-        if !self.cursor_native_mode {
-            return diagnostics;
-        }
         diagnostics
             .into_iter()
-            .filter(|diagnostic| diagnostic.source.is_tracedecay())
+            .filter(|diagnostic| {
+                (!self.cursor_native_mode || diagnostic.source.is_tracedecay())
+                    && (supports_diagnostic_data || !diagnostic.source.is_tracedecay())
+            })
             .collect()
     }
 
@@ -3150,9 +3157,6 @@ mod tests {
                 publish_diagnostics_code_description: true,
                 publish_diagnostics_data: true,
                 supports_document_diagnostics: true,
-                document_diagnostics_related_information: true,
-                document_diagnostics_code_description: true,
-                document_diagnostics_data: true,
                 workspace_diagnostic_refresh_support: true,
                 semantic: SemanticCapability::ALL.into_iter().collect(),
                 ..ClientCapabilities::default()
@@ -3551,12 +3555,48 @@ mod tests {
             data: None,
         };
 
-        let visible = session.visible_diagnostics(vec![diagnostic]);
+        let visible = session.visible_diagnostics(vec![diagnostic], true);
         assert_eq!(visible[0].related_information.len(), 1);
         assert_eq!(
             visible[0].related_information[0].uri,
             "file:///root/caller.rs"
         );
+    }
+
+    #[test]
+    fn managed_diagnostics_require_negotiated_data_identity() {
+        let session = session();
+        let diagnostic = |source| GatewayDiagnostic {
+            uri: "file:///root/a.rs".to_owned(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: Some(DiagnosticSeverity::Information),
+            code: Some("finding".to_owned()),
+            code_description_uri: None,
+            message: "finding".to_owned(),
+            source,
+            related_information: Vec::new(),
+            data: None,
+        };
+
+        let visible = session.visible_diagnostics(
+            vec![
+                diagnostic(DiagnosticSource::Upstream),
+                diagnostic(DiagnosticSource::TraceDecayGitHub),
+            ],
+            false,
+        );
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].source, DiagnosticSource::Upstream);
     }
 
     #[test]
