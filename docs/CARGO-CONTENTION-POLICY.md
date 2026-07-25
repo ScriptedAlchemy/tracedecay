@@ -1,8 +1,7 @@
 # Cargo build-directory policy
 
-TraceDecay development supports stock Cargo 1.97.1 and transparent local Cargo
-shims. A normal checkout builds final artifacts into its own repo-local
-`target/` directory:
+TraceDecay development uses ordinary stock Cargo. A normal checkout builds
+artifacts into its repo-local `target/` directory:
 
 ```sh
 cargo check
@@ -10,35 +9,18 @@ cargo test
 cargo clippy --workspace --all-targets
 ```
 
-This default is portable and keeps separate worktrees isolated. Cargo safely
-serializes concurrent commands that share a target directory, so a
+This default is portable. Cargo safely serializes concurrent commands that
+share a target directory, so a
 `Blocking waiting for file lock on build directory` message means another
 build owns that directory; it does not indicate database corruption or a
 stalled TraceDecay process.
 
-On machines with cargo-slot installed, the shim may place Cargo's intermediate
-build directory in a leased fast-cache slot. It must leave final artifacts and
-repo-relative configuration outputs in this checkout's `target/` directory,
-must not append wrapper options to `cargo xtask` or other subcommand arguments,
-and must not forward rustc-only path-remapping flags to rustdoc. An explicit
-`CARGO_TARGET_DIR` or `--target-dir` remains authoritative and bypasses slot
-allocation.
-
 ## Contended checkouts
 
-Prefer running each independent task in its own checkout or worktree. Its
-repo-local `target/` then remains both isolated and reusable.
-
-If two builds must run concurrently from one checkout, give one invocation a
-private target directory with Cargo's standard `CARGO_TARGET_DIR` variable:
-
-```sh
-CARGO_TARGET_DIR=../tracedecay-target-review cargo check
-```
-
-Choose a writable path appropriate for the host. Reuse it for related commands
-to preserve incremental artifacts, and remove it when that cache is no longer
-useful. Do not point two concurrent tasks at the same fallback directory.
+Let Cargo wait for its build-directory lock when commands overlap. Do not
+redirect `CARGO_TARGET_DIR` or `TRACEDECAY_DATA_DIR` merely to avoid contention;
+doing so fragments incremental artifacts and can bypass the repository's
+test-profile isolation.
 
 TraceDecay diagnostic commands manage their own private target directories.
 Do not reuse or delete those directories while a diagnostic command is active.
@@ -50,7 +32,7 @@ Do not reuse or delete those directories while a diagnostic command is active.
 - Keep `.cargo/config.toml` portable. Its checked-in `target-dir = "target"`
   is relative to each checkout.
 - Source, tests, documentation, and CI must invoke ordinary Cargo commands and
-  must not require a developer-specific wrapper.
+  must not require a developer-specific wrapper or shim.
 - CI may select a runner-local target directory or cache through its own
   environment; that configuration must not leak into published packages or
   contributor setup.

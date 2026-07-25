@@ -5,8 +5,8 @@
 PR8 is complete. PR9 and PR10 have callable code-index, lexical/graph, vector-
 generation, FastEmbed, exact-flat, calibration, and fallback implementations;
 their direct quality/resource evaluation is now recorded (2026-07-23) in the
-single benchmarks/search-quality record — an offline direct evaluation, with
-no receipts and no locked gates. PR11's application,
+single benchmarks/search-quality record — an offline direct evaluation with no
+PR acceptance receipts or locked gates. PR11's application,
 policy, catalog, configuration, Git, and feedback-cycle core is implemented.
 The current delivery slice closes PR12/PR13 production reachability, host
 delivery, all-feature distribution, and the incremental indexing behavior
@@ -33,6 +33,17 @@ Ship one production path in which:
 
 PR14 remains blocked until PR12/PR13 production contracts, direct tests, and
 normal CI are stable.
+
+The 2026-07-25 PR14 integration checkpoint is nevertheless implemented and
+must not be replanned as missing: the real `app-dist` application serves `/`
+and the legacy placeholder is isolated at `/legacy`; real Settings capability
+state, storage budget/unreadable-role findings, truthful graph failure states,
+the Explorer coordinator and source-local/LCM read path, Loom time boundaries,
+Delivery, Doctor, storage telemetry, asset serving, and feedback observation
+wiring are present. This is not acceptance. The Rust `dashboard_api_test`
+suite has not completed successfully, so Settings CAS, Delivery, Explorer
+routes, Doctor, storage telemetry, Loom, and asset serving are implemented but
+unverified.
 
 ## Worktree-aware incremental indexing contract
 
@@ -152,8 +163,9 @@ normal CI are stable.
    the temporal, summary, Fact (including retrieval anchors), Diagnostics, and
    Configuration families, with a column-coverage guard, exact-digest oracles,
    a shared fixture DDL, and compiler-enforced exhaustive daemon shape checks;
-   its evidence is copied-bytes self-consistency, not byte-identical-vs-libsql,
-   and one known caveat is `configuration_entries.layer_id` being
+   its evidence is copied-bytes self-consistency, not byte identity against the
+   retired libSQL implementation, and one known caveat is
+   `configuration_entries.layer_id` being
    nullable-but-keyset-bearing. Config authority resolves-and-pins on demand at
    open — cold-cache/restart safe — and read-only opens of unseeded stores
    serve registry defaults. Dead-code allow remediation is complete and the

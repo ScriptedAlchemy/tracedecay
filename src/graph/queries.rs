@@ -22,6 +22,14 @@ pub struct NodeMetrics {
     pub depth: usize,
 }
 
+/// Bounded whole-graph file adjacency plus the rows examined to build it.
+#[derive(Debug)]
+pub struct FileAdjacencyScan {
+    pub adjacency: HashMap<String, HashSet<String>>,
+    pub files_examined: usize,
+    pub dependency_edges_examined: usize,
+}
+
 /// Provides analytical query operations over the code graph.
 pub struct GraphQueryManager<'a> {
     db: &'a Database,
@@ -526,6 +534,123 @@ impl<'a> GraphQueryManager<'a> {
         }
 
         Ok(adj)
+    }
+
+    /// Builds the file dependency adjacency while enforcing hard response-path
+    /// budgets. The extra row requested from each query proves whether the
+    /// result exceeded its budget; over-budget reads fail instead of returning
+    /// a partial graph that could be mistaken for a complete measurement.
+    pub async fn build_file_adjacency_bounded(
+        &self,
+        max_files: usize,
+        max_dependency_edges: usize,
+    ) -> Result<FileAdjacencyScan> {
+        let file_limit = i64::try_from(max_files.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut file_rows = self
+            .db
+            .conn()
+            .query(
+                "SELECT path FROM files ORDER BY path LIMIT ?1",
+                [file_limit],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query bounded file set: {error}"),
+                operation: "build_file_adjacency_bounded".to_string(),
+            })?;
+        let mut files = Vec::new();
+        while let Some(row) = file_rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read bounded file row: {error}"),
+                operation: "build_file_adjacency_bounded".to_string(),
+            })?
+        {
+            files.push(
+                row.get::<String>(0)
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("invalid bounded file row: {error}"),
+                        operation: "build_file_adjacency_bounded".to_string(),
+                    })?,
+            );
+        }
+        if files.len() > max_files {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "file adjacency exceeds the {max_files}-file dashboard scan budget"
+                ),
+            });
+        }
+
+        let edge_limit = i64::try_from(max_dependency_edges.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut edge_rows = self
+            .db
+            .conn()
+            .query(
+                "SELECT DISTINCT n1.file_path AS src_file, n2.file_path AS tgt_file
+                 FROM edges e
+                 JOIN nodes n1 ON e.source = n1.id
+                 JOIN nodes n2 ON e.target = n2.id
+                 WHERE e.kind IN ('calls', 'uses')
+                   AND n1.file_path != n2.file_path
+                 LIMIT ?1",
+                [edge_limit],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query bounded file adjacency: {error}"),
+                operation: "build_file_adjacency_bounded".to_string(),
+            })?;
+        let mut dependencies = Vec::new();
+        while let Some(row) = edge_rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read bounded adjacency row: {error}"),
+                operation: "build_file_adjacency_bounded".to_string(),
+            })?
+        {
+            let source = row
+                .get::<String>(0)
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("invalid bounded adjacency source: {error}"),
+                    operation: "build_file_adjacency_bounded".to_string(),
+                })?;
+            let target = row
+                .get::<String>(1)
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("invalid bounded adjacency target: {error}"),
+                    operation: "build_file_adjacency_bounded".to_string(),
+                })?;
+            dependencies.push((source, target));
+        }
+        if dependencies.len() > max_dependency_edges {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "file adjacency exceeds the {max_dependency_edges}-edge dashboard scan budget"
+                ),
+            });
+        }
+
+        let mut adjacency: HashMap<String, HashSet<String>> = files
+            .iter()
+            .cloned()
+            .map(|path| (path, HashSet::new()))
+            .collect();
+        for (source, target) in &dependencies {
+            adjacency
+                .entry(source.clone())
+                .or_default()
+                .insert(target.clone());
+            adjacency.entry(target.clone()).or_default();
+        }
+
+        Ok(FileAdjacencyScan {
+            adjacency,
+            files_examined: files.len(),
+            dependency_edges_examined: dependencies.len(),
+        })
     }
 
     // -----------------------------------------------------------------------

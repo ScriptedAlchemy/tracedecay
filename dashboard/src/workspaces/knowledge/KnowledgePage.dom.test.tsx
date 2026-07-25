@@ -81,7 +81,87 @@ describe('KnowledgePage fact detail', () => {
     expect(await screen.findByText('full authoritative fact detail')).toBeTruthy();
     expect(calls.some((url) => url.includes('/api/plugins/holographic/fact/7'))).toBe(true);
   });
+
+  it('does not render a failed fact sub-read as an empty memory store', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/status')) return jsonResponse({ exists: true, memory: {} });
+        return jsonResponse({
+          query: '',
+          limit: 100,
+          holographic: {
+            exists: true,
+            error: '',
+            overview: { facts: 42, entities: 0 },
+            facts: [],
+            entities: [],
+            reads: {
+              facts: { state: 'error', error: 'facts query failed' },
+              entities: { state: 'ready' },
+              graph: { state: 'ready' },
+            },
+          },
+        });
+      }),
+    );
+    renderKnowledge();
+
+    expect(await screen.findByText(/fact list read failed/i)).toBeTruthy();
+    expect(screen.queryByText(/no facts recorded/i)).toBeNull();
+  });
+
+  it('labels a negative query as bounded to the loaded top-100 slice', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/status')) return jsonResponse({ exists: true, memory: {} });
+        return jsonResponse({
+          query: url.includes('q=needle') ? 'needle' : '',
+          limit: 100,
+          holographic: {
+            exists: true,
+            error: '',
+            overview: { facts: 420, entities: 0 },
+            facts: [],
+            entities: [],
+            reads: {
+              facts: { state: 'ready' },
+              entities: { state: 'ready' },
+              graph: { state: 'ready' },
+            },
+            facts_coverage: {
+              completeness: 'bounded',
+              limit: 100,
+              query_applied_after_limit: true,
+            },
+          },
+        });
+      }),
+    );
+    renderKnowledge();
+
+    const input = await screen.findByLabelText('Search facts');
+    await userEvent.type(input, 'needle');
+    await userEvent.keyboard('{Enter}');
+
+    expect(await screen.findByText(/no match in the loaded top-100 slice/i)).toBeTruthy();
+    expect(screen.queryByText(/no facts match/i)).toBeNull();
+  });
 });
+
+function renderKnowledge() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <KnowledgePage />
+    </QueryClientProvider>,
+  );
+}
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {

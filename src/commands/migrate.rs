@@ -65,6 +65,13 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             )
             .await
         }
+        MigrateAction::MemoryCutover {
+            project,
+            profile_root,
+            apply,
+            confirm_token,
+            json,
+        } => handle_memory_cutover(project, profile_root, apply, confirm_token, json).await,
         MigrateAction::Plan {
             roots,
             include_all_registered,
@@ -128,6 +135,54 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             confirm_token,
         } => handle_migrate_cleanup_sources(manifest, confirm_token),
     }
+}
+
+async fn handle_memory_cutover(
+    project: String,
+    profile_root: Option<String>,
+    apply: bool,
+    confirm_token: Option<String>,
+    json: bool,
+) -> tracedecay::errors::Result<()> {
+    let profile_root = profile_root.map_or_else(
+        || {
+            tracedecay::config::user_data_dir().ok_or_else(|| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: "could not determine TraceDecay profile root".to_string(),
+                }
+            })
+        },
+        |value| Ok(PathBuf::from(value)),
+    )?;
+    let options = tracedecay::migrate::memory_cutover::MemoryCutoverOptions {
+        project_root: PathBuf::from(project),
+        profile_root,
+    };
+    let report = if apply {
+        let token = confirm_token.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "--confirm-token is required with --apply".to_string(),
+        })?;
+        tracedecay::migrate::memory_cutover::apply(&options, &token).await?
+    } else {
+        tracedecay::migrate::memory_cutover::plan(&options).await?
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "project memory cutover: {} branch store(s), applied={}",
+            report.sources.len(),
+            report.applied
+        );
+        println!("project graph: {}", report.project_graph.display());
+        if report.applied {
+            println!("cutover passes: {}", report.cutover_passes);
+        } else {
+            println!("confirmation token: {}", report.confirmation_token);
+            println!("No files changed.");
+        }
+    }
+    Ok(())
 }
 
 async fn handle_migrate_consolidate(
@@ -289,13 +344,22 @@ async fn handle_migrate_plan(
             report.stores.len(),
             report.skipped.len()
         );
+        for store in &report.stores {
+            if store.statuses != [tracedecay::migrate::inventory::StoreStatus::Ok] {
+                println!("store {}: {:?}", store.data_dir.display(), store.statuses);
+            }
+        }
         if let Some(global) = report.global_db {
             println!(
-                "global db: {} (projects: {}, sessions: {})",
+                "global db: {} (projects: {}, sessions: {}, integrity: {:?})",
                 global.path.display(),
                 global.project_count,
-                global.session_count
+                global.session_count,
+                global.integrity
             );
+            for warning in global.warnings {
+                println!("global db warning: {warning}");
+            }
         }
     }
     Ok(())

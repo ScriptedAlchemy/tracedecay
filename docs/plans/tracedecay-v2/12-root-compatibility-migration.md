@@ -152,10 +152,10 @@ implementation or a permanent migration runtime.
 - Doctor reports actionable preflight, lock, version, corruption, incomplete
   migration, archive, and recovery states and performs only explicitly selected
   safe repairs.
-- One aggregate repository gate passes after the journey tests. PR19 leaves no
-  dual-write/read path, lazy migration, reverse cutover, direct writable
-  client, skipped family, migration TODO, generated inventory, or
-  migration-only implementation.
+- Ordinary aggregate repository checks pass after the journey tests; no
+  separate acceptance gate is created. PR19 leaves no dual-write/read path,
+  lazy migration, reverse cutover, direct writable client, skipped family,
+  migration TODO, generated inventory, or migration-only implementation.
 
 ## Not in PR19
 

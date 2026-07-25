@@ -58,8 +58,8 @@ instead of 310. The `IN (...)` clause is bounded by `opts.limit`.
 ### Implementation notes
 
 - Build the `IN` placeholders dynamically from the frontier `Vec<String>`.
-- libsql supports up to `SQLITE_MAX_VARIABLE_NUMBER` (default 32766) bind
-  parameters, which is well above any realistic frontier size.
+- SQLite's configured `SQLITE_MAX_VARIABLE_NUMBER` limit applies; keep
+  frontiers bounded below the connection's runtime limit.
 - For the DFS variant, collect the full stack snapshot before issuing queries
   and process results in stack order.
 - The `Both` direction variant in `get_edges_for_direction` should issue a

@@ -248,6 +248,22 @@ pub(crate) async fn overview(
     obj.insert("entities".into(), json!([]));
     obj.insert("graph".into(), json!({ "nodes": [], "edges": [] }));
     obj.insert("error".into(), json!(""));
+    obj.insert(
+        "reads".into(),
+        json!({
+            "facts": {"state": "pending"},
+            "entities": {"state": "pending"},
+            "graph": {"state": "pending"},
+        }),
+    );
+    obj.insert(
+        "facts_coverage".into(),
+        json!({
+            "completeness": "bounded",
+            "limit": limit,
+            "query_applied_after_limit": !params.q.is_empty(),
+        }),
+    );
     match memory_service::overview_payload(&state).await {
         Ok(payload) => {
             obj.insert("overview".into(), payload);
@@ -256,14 +272,32 @@ pub(crate) async fn overview(
             obj.insert("error".into(), json!(e));
         }
     }
-    if let Ok(facts) = memory_service::fetch_facts(&state, &params.q, limit).await {
-        obj.insert("facts".into(), json!(facts));
+    match memory_service::fetch_facts(&state, &params.q, limit).await {
+        Ok(facts) => {
+            obj.insert("facts".into(), json!(facts));
+            obj["reads"]["facts"] = json!({"state": "ready"});
+        }
+        Err(error) => {
+            obj["reads"]["facts"] = json!({"state": "error", "error": error});
+        }
     }
-    if let Ok(entities) = memory_service::fetch_entities(&state, limit).await {
-        obj.insert("entities".into(), json!(entities));
+    match memory_service::fetch_entities(&state, limit).await {
+        Ok(entities) => {
+            obj.insert("entities".into(), json!(entities));
+            obj["reads"]["entities"] = json!({"state": "ready"});
+        }
+        Err(error) => {
+            obj["reads"]["entities"] = json!({"state": "error", "error": error});
+        }
     }
-    if let Ok(graph) = memory_service::graph_payload(&state, &params.q, graph_limit).await {
-        obj.insert("graph".into(), graph);
+    match memory_service::graph_payload(&state, &params.q, graph_limit).await {
+        Ok(graph) => {
+            obj.insert("graph".into(), graph);
+            obj["reads"]["graph"] = json!({"state": "ready"});
+        }
+        Err(error) => {
+            obj["reads"]["graph"] = json!({"state": "error", "error": error});
+        }
     }
     let holographic = Value::Object(obj);
 

@@ -217,8 +217,8 @@ state; it never contains the result of work started by that hook.
 - Host adapters never open a TraceDecay database, run synchronization, invoke
   Git/GitHub/CI, write another worktree, schedule work, or continue an agent.
 - The relevant host-hook integration tests plus the repository documentation
-  review are the PR13 aggregate gate; no standalone benchmark packet is an
-  acceptance artifact.
+  review run through ordinary repository checks, not a PR13 acceptance gate;
+  no standalone benchmark packet is an acceptance artifact.
 
 ## Later callable extensions
 

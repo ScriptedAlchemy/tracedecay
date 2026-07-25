@@ -1,6 +1,18 @@
 # tracedecay Dashboard
 
-The tracedecay dashboard is a local web interface for exploring your project's holographic memory, LCM (Lossless Context Management) session data, indexed code graph, and token savings / session cost accounting. It runs entirely on your machine — no external services or API keys required (the Savings & Cost tab optionally refreshes public model prices in the background; everything else is fully offline).
+The TraceDecay dashboard is a local single-page application with twelve
+workspaces: Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery,
+Automations, Observatory, Costs, and Settings. The real `dashboard/app-dist`
+bundle is served at `/`; the retired plugin-shell placeholder is isolated at
+`/legacy` for compatibility and is not the product dashboard. The dashboard
+runs locally; public model-price refreshes are the only optional network access
+used by the Costs workspace.
+
+Delivery, Explorer, Loom, Settings, Doctor/Observatory, storage telemetry, and
+bundled app serving are implemented in the Rust API. They remain **unverified
+by the aggregate `dashboard_api_test` suite**, which has not completed
+successfully on this branch; implementation and verification status must not
+be conflated.
 
 ---
 
@@ -1002,13 +1014,15 @@ Routes under `/api/settings` back the Settings tab.
 
 #### `GET /api/settings`
 
-Aggregated settings payload: `project` (the indexing `config.json` —
+Aggregated settings payload: `project` (the pinned runtime configuration —
 include/exclude globs, `max_file_size`, `extract_docstrings`,
-`track_call_sites`, `git_ignore` — plus its path and the `.tracedecay/`
-gitignore status), `user` (editable user-level settings from
-`~/.tracedecay/config.toml`: `upload_enabled`, `watcher_debounce`,
-`extraction_timeout_secs`), `automation` (read-only summary linking to the
-existing editor at `/api/plugins/holographic/curation/config`),
+`track_call_sites`, `git_ignore`, `telemetry.timings`, and
+`sync.auto_track_pr_branches` / `sync.auto_track_pr_poll_secs`; the legacy
+`config.json` path is exposed as read-only), `user` (editable user-level
+settings from `~/.tracedecay/config.toml`: `upload_enabled`,
+`watcher_debounce`, `extraction_timeout_secs`), `automation` (read-only summary
+linking to the existing editor at
+`/api/plugins/holographic/curation/config`),
 `environment` (read-only env-var gate verdicts with explanations),
 `storage` (resolved store paths), and `version` (version + update channel).
 The project object carries `configuration_revision_id`; the user object carries
@@ -1016,12 +1030,15 @@ the independent content-derived `user_settings_revision_id`.
 
 #### `PATCH /api/settings/project`
 
-Partial update of the project indexing config. Validates glob patterns and
-`max_file_size >= 1`; rejects unknown fields. Errors follow the automation
-config contract (`validation_errors` array with `field` + `message`). The
-response includes `resync_recommended: true` when any indexing field
-changed — the endpoint never auto-runs a sync. Every request must include the
-`expected_revision_id` returned as `project.configuration_revision_id` by GET.
+Partial update of the project runtime configuration, including the telemetry
+and PR-auto-track fields listed above. It validates glob patterns,
+`max_file_size >= 1`, and the minimum PR polling interval, and rejects unknown
+fields. Errors follow the automation config contract (`validation_errors`
+array with `field` + `message`). The response includes
+`resync_recommended: true` when the project configuration changed — the
+endpoint never auto-runs a sync. Every request must include the
+`expected_revision_id` returned as `project.configuration_revision_id` by GET;
+this project-resource revision is independent of the user-settings revision.
 A stale revision returns HTTP 409:
 
 ```json
@@ -1100,108 +1117,54 @@ The dashboard frontend source lives in `dashboard/`:
 
 | Directory | Contents |
 |-----------|----------|
-| `dashboard/shell/` | Standalone host shell (React 19, Hermes-compatible SDK) |
-| `dashboard/holographic/` | Holographic memory plugin bundle (Tailwind v4) |
-| `dashboard/lcm/` | LCM plugin bundle (TSX) |
-| `dashboard/graph/` | Code Graph explorer plugin bundle |
-| `dashboard/savings/` | Savings & Cost plugin bundle |
-| `dashboard/settings/` | Settings plugin bundle (project/user config editor) |
-| `dashboard/hermes-wrapper/` | Hermes-side thin wrapper (concatenated child bundles) |
-| `dashboard/lib/` | Shared plugin shims (React/JSX-runtime shims), shared UI primitives (`primitives.tsx` / `primitives.css`), and the canonical `cn.ts` classname helper |
-| `dashboard/dev/` | Rsbuild HMR dev server entry |
+| `dashboard/src/app/` | Single-app entry point, router, and product shell |
+| `dashboard/src/workspaces/` | The twelve product workspaces |
+| `dashboard/src/ui/` | Shared states, controls, and workspace archetypes |
+| `dashboard/src/data/` | API queries, scope, and event-stream clients |
+| `dashboard/src/viz/` | Shared chart and graph renderers |
+| `dashboard/stories/` | Fixture-backed visual and accessibility audits |
+| `dashboard/codegen/` | Rust-contract-to-TypeScript generation and checks |
+| `dashboard/app-dist/` | Rsbuild output embedded and served at `/` |
 
 ### Building
 
 ```bash
 cd dashboard
-npm install
+npm ci
+npm run typecheck
+npm test
 npm run build
 ```
 
-`npm run build` runs `node build.mjs`, which builds every artifact with
-**Rspack** (`@rspack/core`, using the built-in SWC loader for TS/TSX/JSX):
+`npm run build` invokes Rsbuild using `dashboard/rsbuild.config.ts`, with
+`dashboard/src/app/main.tsx` as the entry point and `dashboard/app-dist/` as
+the output. The legacy `dashboard/{shell,holographic,lcm,graph,...}/dist`
+bundles are compatibility assets for `/legacy` and the Hermes wrapper; they are
+not the production `/` application.
 
-1. **Shell** — the React 19 host (`shell/dist/shell.js` + `shell.css`).
-2. **Plugins** — holographic, graph, savings, and lcm, each built from its
-   `src/entry.tsx` into a single-file IIFE at `<plugin>/dist/index.js`. Each
-   plugin **externalizes React onto the host SDK** via in-tree shims
-   (`react`, `react/jsx-runtime`, `react/jsx-dev-runtime` → `dashboard/lib/*`),
-   so every plugin shares the single React instance the shell/wrapper
-   provides rather than bundling its own.
-3. **Holographic styles** are compiled with **real Tailwind v4**
-   (`@tailwindcss/node` + `@tailwindcss/oxide`, invoked programmatically in
-   `build.mjs`): it scans `holographic/src` for class candidates, strips
-   `@layer theme` and `@layer base` so the plugin never clobbers the host's
-   `:root` theme vars or preflight, wraps the output in
-   `@layer hermes-plugin`, and minifies it to `holographic/dist/style.css`.
-   (graph/savings/lcm ship hand-rolled CSS in `src/styles.css`, copied to
-   `dist/style.css`; each primitives-consuming plugin additionally gets
-   `lib/primitives.css` prepended — see
-   [Shared UI primitives](#shared-ui-primitives).)
-4. **LCM** is a regular TSX plugin bundle (built like the others), replacing
-   the old hand-written vanilla-JS IIFE.
-5. **Hermes wrapper** — `build.mjs` assembles `hermes-wrapper/dist/` by
-   concatenating the child plugin bundles (`holographic.js`, `lcm.js`,
-   `graph.js`, `savings.js`) and merging all plugin stylesheets into a single
-   `style.css`.
+### Frontend verification
 
-The production dashboard build now flows through `dashboard/build.mjs`: Rspack
-bundles the shell/plugins, holographic styles compile with Tailwind v4, and the
-resulting `dist/` assets are what the Rust binary embeds.
-
-### Shared UI primitives
-
-`dashboard/lib/primitives.tsx` exports a small set of theme-aware UI building
-blocks in the `tdp-*` class namespace — `EmptyState`, `ErrorPanel`,
-`SkeletonLines`, `Stat`, and `BarList`. They are built on the host-SDK
-design-system components (Button, etc.) and resolve every color through the
-host `--color-*` CSS variables, so they theme correctly in both the standalone
-tracedecay shell (which aliases `--color-*` to its `--ts-*` tokens) and the
-Hermes dashboard (whose shadcn palette defines the same `--color-*` names).
-The matching stylesheet is `dashboard/lib/primitives.css`. The canonical
-classname-join helper used throughout is `dashboard/lib/cn.ts`
-(`cn(...args)` — flattens arrays/strings, drops falsy).
-
-A plugin opts into the primitives CSS via the `buildPlugin` `primitives: true`
-option in `build.mjs`, which prepends `lib/primitives.css` to that plugin's
-`dist/style.css`. The prepend (rather than a separate file) is deliberate:
-both hosts load a single per-plugin stylesheet — the standalone shell serves
-`<plugin>/dist/style.css`, and the Hermes wrapper concatenates the same files
-into one `style.css` — so prepending is the only way the `tdp-*` classes reach
-both hosts without a second `<link>`.
-
-Current adoption:
-
-- **graph**, **savings**, and **lcm** consume the shared `tdp-*` primitives and
-  build with `primitives: true`, so each plugin's `dist/style.css` includes
-  `lib/primitives.css`.
-- **holographic** stays self-contained (its own `holographic/src/ui.ts`
-  primitives layered over Tailwind utilities).
-
-### Smoke Testing
-
-Playwright-based smoke tests verify tab rendering, search interaction, and viewport responsiveness. Unless `--url=` points at an already-running server, the smoke script is hermetic: it creates a throwaway temp project, runs `tracedecay init` on it, and serves the dashboard from there — so it works on fresh checkouts (and CI) with no pre-existing `.tracedecay/` index:
+Vitest covers workspace models and DOM behavior. The Playwright visual audit
+walks the story registry at 320, 768, and 1440 pixel widths in both themes and
+records axe results:
 
 ```bash
-# Empty-state LCM (default global.db has no LCM data)
-TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-empty.db npm run smoke -- --expect-lcm=empty
-
-# Non-empty LCM (requires seeded database)
-TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-nonempty.db npm run smoke -- --expect-lcm=non-empty
+cd dashboard
+npm test
+npm run visual:audit
 ```
+
+These frontend checks do not verify the Rust routes. The aggregate Rust
+`dashboard_api_test` suite is currently unverified as noted at the top of this
+document.
 
 ### Asset Embedding
 
-The shipped binary has **no Node or Rspack dependency at launch**: Rspack runs
-only at build time, and the resulting `dist/` files are embedded at compile
-time via `include_bytes!` / `include_str!` in `src/dashboard/assets.rs`. The
-embedded paths are:
-
-- `dashboard/shell/dist/shell.js`, `shell.css`
-- `dashboard/holographic/dist/index.js`, `style.css`
-- `dashboard/lcm/dist/index.js`, `style.css`
-- `dashboard/graph/dist/index.js`, `style.css`
-- `dashboard/savings/dist/index.js`, `style.css`
+The shipped binary has no Node or Rsbuild dependency at launch. `build.rs`
+generates a Rust manifest for every file under `dashboard/app-dist/`, and
+`src/dashboard/assets.rs` serves that embedded manifest at `/` and
+`/static/**`. The old shell and plugin bundles remain separately embedded for
+`/legacy` and compatibility wrappers.
 
 After rebuilding the frontend you must rebuild the Rust binary to pick up the
 new assets:
@@ -1213,15 +1176,16 @@ cd .. && cargo build --bin tracedecay
 
 The `build.rs` script emits `cargo::rerun-if-changed` directives for all embedded assets, so the binary automatically rebuilds when dist files change.
 
-When the dist files are missing entirely (fresh checkout, `cargo install
---path .`), `build.rs` builds them automatically: it runs `npm ci` (falling
-back to `npm install`) and `npm run build` in `dashboard/` and embeds the
-result. If npm is not on PATH, the build fails fast with instructions instead.
+When `app-dist` is missing or stale in a source checkout, `build.rs` runs
+`npm ci` when needed and then `npm run build`. Packaged crates contain the
+prebuilt app and do not include the frontend source, so registry installs do
+not invoke npm.
 
 ### Packaging / crates.io
 
 `Cargo.toml` uses an explicit `package.include` whitelist that ships the
-**prebuilt** `dashboard/*/dist` bundles inside the crate package. This means:
+prebuilt `dashboard/app-dist` bundle and the legacy compatibility assets. This
+means:
 
 - `cargo package` / `cargo publish` must be run after `cd dashboard && npm ci
   && npm run build` (the release workflow does this); the package verify step
@@ -1234,48 +1198,20 @@ result. If npm is not on PATH, the build fails fast with instructions instead.
 For fast frontend iteration use the dev server (HMR, no Rust rebuild):
 
 ```bash
-# Terminal 1: keep the real backend running (it owns the data APIs)
-tracedecay dashboard                 # listens on http://127.0.0.1:7341/
+# Terminal 1: run the API on the proxy target from rsbuild.config.ts
+tracedecay dashboard --port 8321
 
-# Terminal 2: Rsbuild dev server with HMR, proxies /api/* to the backend
-cd dashboard && npm run dev          # listens on http://127.0.0.1:7342/
+# Terminal 2: run the single-app Rsbuild dev server
+cd dashboard && npm run dev          # http://127.0.0.1:5173/
 ```
 
-`npm run dev` (`dashboard/dev/run.mjs`) starts an **Rsbuild** dev server that:
-
-- Serves the shell + every plugin from source with hot-module replacement.
-- Proxies `/api/*` to a running `tracedecay dashboard` instance, configured by
-  `TRACEDECAY_DEV_API` (default `http://127.0.0.1:7341`).
-- Listens on `TRACEDECAY_DEV_PORT` (default `7342`), and on success prints the
-  stable line `tracedecay dev listening on http://127.0.0.1:7342/`.
-- Imports the plugin entries directly (no `/api/dashboard/plugins` fetch in
-  dev), and builds the SDK on `window.__HERMES_PLUGIN_SDK__` before any plugin
-  entry runs, mirroring the prod shell.
-- Compiles the holographic plugin's Tailwind v4 stylesheet once with the same
-  programmatic compiler used by production, writes
-  `dashboard/holographic/dist/style.css`, and imports that generated CSS into
-  the dev entry before Rsbuild starts.
-
-Note that in **dev** React is *not* aliased onto the window-SDK shim — a single
-Rsbuild bundle already shares one real React instance, and `react-dom/client`
-needs the real `react` module — so the per-plugin React externalization is a
-**prod** concern only.
-
-The dev server intentionally does **not** install Tailwind as an Rsbuild
-plugin. In some sandboxes both Tailwind-v4 integrations Rsbuild documents —
-`@rsbuild/plugin-tailwindcss` and `@tailwindcss/postcss` wired through
-`tools.postcss` — segfault natively inside `createRsbuild()` (hard native
-crash, no stdout/stderr), while `pluginReact()` alone and the
-`@rspack/core`-based prod build run fine. To keep HMR usable without native
-crashes, `dashboard/dev/run.mjs` performs the Tailwind compile as a preflight
-step and the dev entry imports the generated `holographic/dist/style.css`.
-That keeps holographic styled in dev while preserving production as the source
-of truth for the embedded dashboard assets.
+`dashboard/rsbuild.config.ts` owns the dev-server configuration. Set
+`TRACEDECAY_DASHBOARD_API` to override its default API target.
 
 To validate the production build (the shipped UI is always embedded bytes):
 
 ```bash
-cd dashboard && npm run build        # Rspack → dist/
+cd dashboard && npm run build        # Rsbuild → app-dist/
 cd .. && cargo run -- dashboard      # rebuild Rust to embed the new assets
 ```
 
@@ -1364,20 +1300,17 @@ If the config shows `enabled: false`, `backend: "disabled"`, `host_mode: "delega
 
 cd dashboard && npm run build
 cd .. && cargo build --bin tracedecay
-
-# Or touch the assets file to force re-embedding:
-touch src/dashboard/assets.rs && cargo build
 ```
 
 ### Build Errors: Dashboard Assets Missing
 
 ```bash
-# Error: missing dashboard dist assets ... npm was not found on PATH
+# Error: dashboard app-dist is missing or stale and npm was not found
 
-# build.rs builds missing assets automatically when npm is available.
+# build.rs builds app-dist automatically when npm is available.
 # This error means npm is not installed; install Node.js 22+, or build
 # the frontend manually before the Rust binary:
-cd dashboard && npm install && npm run build
+cd dashboard && npm ci && npm run build
 cd .. && cargo build --bin tracedecay
 ```
 
@@ -1424,10 +1357,14 @@ The dashboard architecture follows these principles:
 
 1. **Canonical Implementation**: The tracedecay dashboard is the source of truth. The Hermes wrapper is a thin reverse proxy, never a fork.
 
-2. **UI Bundle Portability**: Both the standalone shell and the Hermes wrapper provide a compatible SDK so the same plugin bundles work in both hosts.
+2. **Product bundle isolation**: The single-app `app-dist` bundle owns `/`.
+   Legacy shell/plugin assets are isolated at `/legacy` and retained only for
+   compatibility.
 
 3. **Feature Detection**: The UI probes `/api/capabilities` to decide which features to enable, allowing graceful degradation when features are unavailable.
 
-4. **Hermes Integration**: The wrapper uses a `new Function()` + Proxy evaluation strategy so child bundles don't pollute the global scope for concurrent Hermes plugins.
+4. **Hermes Integration**: The compatibility wrapper remains separate from the
+   single-app product frontend.
 
-For full architectural details, see `docs/dashboard-port-handoff.md` (internal documentation).
+`docs/dashboard-port-handoff.md` is a historical record of the retired
+multi-plugin architecture, not current implementation guidance.
