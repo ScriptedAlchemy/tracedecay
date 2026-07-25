@@ -333,6 +333,17 @@ pub trait AgentIntegration {
         self.primary_config_path(home).into_iter().collect()
     }
 
+    /// Mutable registration paths for the exact selected components. Hosts
+    /// with disjoint component ownership override this so a companion
+    /// transaction never snapshots or restores another component's state.
+    fn host_component_registration_paths(
+        &self,
+        _components: &[host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        self.host_registration_paths(home)
+    }
+
     /// Re-activate host-native registration for already-deployed component
     /// assets without rendering or copying those assets again.
     fn activate_deployed_host_registration(&self, _ctx: &InstallContext) -> Result<()> {
