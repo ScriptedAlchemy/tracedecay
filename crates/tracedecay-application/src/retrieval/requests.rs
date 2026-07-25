@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, Pr9FallbackSubpayload,
     RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
+    TestAttributionEvidenceClassV1,
 };
 
 use crate::error::ApplicationContractError;
@@ -173,8 +174,19 @@ pub struct AffectedTestsRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct AffectedTestAttributionV1 {
+    pub test: SymbolOccurrenceId,
+    pub evidence_class: TestAttributionEvidenceClassV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AffectedTestsResult {
     pub tests: Vec<SymbolOccurrenceId>,
+    /// Exact class reported by the generation-bound attribution authority.
+    /// `tests` remains the compatibility projection of current candidates.
+    #[serde(default)]
+    pub attributions: Vec<AffectedTestAttributionV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

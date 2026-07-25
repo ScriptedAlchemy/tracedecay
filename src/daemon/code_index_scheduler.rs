@@ -518,6 +518,15 @@ impl LatestCompleteCodeIndexV1 {
         &self.generation.manifest().snapshot_digest
     }
 
+    pub(in crate::daemon) fn test_attribution_authority(
+        &self,
+    ) -> Result<
+        crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
+        crate::code_index::production::CodeIndexProductionErrorV1,
+    > {
+        self.generation.test_attribution_authority()
+    }
+
     pub fn exact(
         &self,
     ) -> Result<
