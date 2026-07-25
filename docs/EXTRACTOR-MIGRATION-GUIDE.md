@@ -52,7 +52,6 @@ For each future extractor migration:
 Validation commands used for the C/C++ pilot:
 
 ```sh
-export CARGO_TARGET_DIR="$PWD/.tracedecay/target/<task-or-lane>"
 cargo nextest run --lib --no-default-features extraction::traversal::tests
 cargo nextest run --no-default-features -E 'binary(=extraction_suite) and test(/^c::/)'
 cargo nextest run --no-default-features -E 'binary(=extraction_suite) and test(/^cpp::/)'

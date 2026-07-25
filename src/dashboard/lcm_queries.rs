@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::db::engine::{QueryExecutor, Value as DbValue, params};
 
-use super::util::{qmarks, query_i64, query_rows};
+use super::util::{qmarks, query_i64, query_i64_result, query_rows};
 
 pub(crate) const MESSAGE_TOKEN_ESTIMATE_EXPR: &str =
     "(LENGTH(COALESCE(content, snippet_text, '')) + 3) / 4";
@@ -459,19 +459,45 @@ pub(crate) async fn timeline_message_buckets(
         "WHERE timestamp IS NOT NULL"
     };
     let sql = format!(
-        "SELECT strftime('{fmt}', timestamp, 'unixepoch') AS bucket,
-                COUNT(*) AS count,
-                COALESCE(SUM({MESSAGE_TOKEN_ESTIMATE_EXPR}), 0) AS token_estimate
-         FROM lcm_raw_messages
-         {msg_where}
-         GROUP BY bucket
-         ORDER BY bucket ASC
-         LIMIT ?1"
+        "SELECT bucket, count, token_estimate
+         FROM (
+             SELECT strftime('{fmt}', timestamp, 'unixepoch') AS bucket,
+                    COUNT(*) AS count,
+                    COALESCE(SUM({MESSAGE_TOKEN_ESTIMATE_EXPR}), 0) AS token_estimate
+             FROM lcm_raw_messages
+             {msg_where}
+             GROUP BY bucket
+             ORDER BY bucket DESC
+             LIMIT ?1
+         )
+         ORDER BY bucket ASC"
     );
     if let Some(session_id) = session_id {
         query_rows(conn, &sql, params![limit, session_id.to_string()]).await
     } else {
         query_rows(conn, &sql, params![limit]).await
+    }
+}
+
+pub(crate) async fn timeline_message_bucket_count(
+    conn: &(impl QueryExecutor + ?Sized),
+    fmt: &str,
+    session_id: Option<&str>,
+) -> Result<i64, String> {
+    let msg_where = if session_id.is_some() {
+        "WHERE timestamp IS NOT NULL AND session_id = ?1"
+    } else {
+        "WHERE timestamp IS NOT NULL"
+    };
+    let sql = format!(
+        "SELECT COUNT(DISTINCT strftime('{fmt}', timestamp, 'unixepoch'))
+         FROM lcm_raw_messages
+         {msg_where}"
+    );
+    if let Some(session_id) = session_id {
+        query_i64_result(conn, &sql, params![session_id.to_string()]).await
+    } else {
+        query_i64_result(conn, &sql, ()).await
     }
 }
 

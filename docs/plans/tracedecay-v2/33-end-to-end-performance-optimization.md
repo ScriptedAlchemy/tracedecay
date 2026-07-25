@@ -142,9 +142,10 @@ sentinel values.
 
 #### Database and synchronization
 
-- Inspect production SQLite/libSQL plans for measured hot statements. Add or
-  remove indexes only for named statements with before/after evidence; table
-  size or a full scan alone does not choose a change.
+- Inspect production SQLite/rusqlite plans for measured hot statements. The
+  retired libSQL implementation is not a benchmark target or runtime to
+  recreate. Add or remove indexes only for named statements with before/after
+  evidence; table size or a full scan alone does not choose a change.
 - Bound transaction size, lock hold, connection work, checkpoint cadence, WAL
   growth, vacuum/reclamation, temporary space, and write amplification without
   weakening sole-writer or atomic progress contracts.
@@ -172,8 +173,9 @@ sentinel values.
   SQLite page cache/mmap, statement/connection cache, immutable application
   generations, and model/vector cache; “cold” and “warm” require exact
   preparation.
-- Maintained views preserve signed insert/update/delete/retraction deltas and
-  watermark identity. Compare full, incremental, and batched recomputation
+- Maintained views preserve signed (positive/negative) insert/update/delete/
+  retraction deltas and watermark identity; "signed" here is arithmetic, not
+  cryptographic signing. Compare full, incremental, and batched recomputation
   across change fraction, fan-out, read/write ratio, state bytes, and
   freshness. Mixed deltas equal clean recomputation; incompatible or
   over-break-even frontiers use bounded rebuild rather than a new generic

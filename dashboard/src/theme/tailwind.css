@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import './fonts.css';
 @import './tokens.css';
 
 /* Non-inline @theme: semantic tokens reference the runtime CSS variables so
@@ -46,8 +47,20 @@
   --color-well: var(--raw-well);
   --color-raised: var(--raw-raised);
 
-  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
-  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
+  /* Three faces, three jobs (see fonts.css for the vendored files and
+   * licenses). The old stack was Inter for everything with an unstyled system
+   * fallback for mono, which is the default voice of every technical dashboard
+   * ever shipped and left the display tier and the mono tier undesigned.
+   *
+   * `Inter Variable` stays in the sans chain on purpose, and is not dead
+   * weight: the Plex faces are vendored Latin + Latin-Extended only, so Inter
+   * (which ships every subset) is what actually renders Cyrillic, Greek and
+   * Vietnamese session text. */
+  --font-sans: 'IBM Plex Sans Variable', 'Inter Variable', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
+  /* The engraved tier. Only ever reached through this token — never a
+   * hard-coded family in a component. */
+  --font-display: 'Archivo Variable', 'IBM Plex Sans Variable', system-ui, sans-serif;
 
   /* Instrument type scale. `3xs` is the annotation size — used only for
    * letterspaced uppercase legends and units, never for prose.
@@ -83,6 +96,16 @@
   body {
     font-variant-numeric: tabular-nums;
   }
+  /* The named-region tier. Workspace pages set their own size and weight on
+   * these; the face is the one thing the design system owns centrally, so a
+   * page never has to know which family the display tier is. Sentence-case
+   * headings stay at normal width — the expansion is specific to the uppercase
+   * letterspaced tiers, and `.td-title` (a class) outranks this for the
+   * headings that are both. */
+  h1,
+  h2 {
+    font-family: var(--font-display);
+  }
   [data-cell='numeric'],
   .tabular {
     font-variant-numeric: tabular-nums;
@@ -96,13 +119,28 @@
 
 @layer components {
   /* The engraved legend: every panel, region and column header in the app
-   * wears this — small, letterspaced, uppercase, quiet. */
+   * wears this — small, letterspaced, uppercase, quiet.
+   *
+   * This is where the display face earns its keep. At 10px uppercase almost
+   * nothing of a face's personality survives except weight and WIDTH, so the
+   * display tier is set expanded: an expanded grotesque under heavy tracking is
+   * the faceplate-legend idiom, and it is the one register the body face cannot
+   * reach. The expansion is capped at `--display-width` because it is paid for
+   * in horizontal room — measured across all twelve surfaces at 1440 and 768,
+   * 112% costs one extra clipped label out of 464 while 125% costs thirteen,
+   * and a clipped label is lost information, which outranks the flourish. */
   .td-legend {
+    font-family: var(--font-display);
+    font-stretch: var(--display-width);
     font-size: var(--text-3xs);
     line-height: 1;
     letter-spacing: 0.16em;
     text-transform: uppercase;
     font-weight: 500;
+    /* Legends carry digits (nav channel numbers, `SAVED 7D` vs `SAVED 30D`),
+     * so they hold the same tabular figures as the readouts they label. */
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
     color: var(--raw-text-muted);
     white-space: nowrap;
   }
@@ -150,11 +188,15 @@
    * opposed to `.td-legend`, which annotates a cell. Sized and weighted to sit
    * clearly above the legend without shouting. */
   .td-title {
+    font-family: var(--font-display);
+    font-stretch: var(--display-width);
     font-size: var(--text-2xs);
     line-height: 1;
     letter-spacing: 0.13em;
     text-transform: uppercase;
     font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
     color: var(--raw-text-secondary);
   }
 

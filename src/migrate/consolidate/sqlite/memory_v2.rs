@@ -197,10 +197,12 @@ pub(super) async fn merge_memory_v2_authority(conn: &impl Executor) -> Result<()
 
          INSERT OR IGNORE INTO memory_v2_fact_relations(
              owner_kind, project_id, source_fact_id, target_fact_id, relation,
-             confidence, source_label, evidence_fact_ids_json, occurred_at, updated_at
+             confidence, source_label, provenance_json, evidence_fact_ids_json,
+             occurred_at, updated_at
          )
          SELECT owner_kind, project_id, source_fact_id, target_fact_id, relation,
-                confidence, source_label, evidence_fact_ids_json, occurred_at, updated_at
+                confidence, source_label, provenance_json, evidence_fact_ids_json,
+                occurred_at, updated_at
          FROM source.memory_v2_fact_relations;
 
          INSERT OR IGNORE INTO memory_v2_proposals(

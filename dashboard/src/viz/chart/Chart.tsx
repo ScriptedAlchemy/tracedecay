@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import type { EChartsOption, ECharts } from 'echarts';
+import { useReducedMotion } from '../trace/reducedMotion.ts';
 
 /** Resolve the live theme into the chart's own styling. Canvas renderers
  * cannot consume CSS variables, so the tokens are sampled off the container
  * every time the option is (re)applied. */
-function themedOption(container: HTMLElement, option: EChartsOption): EChartsOption {
+function themedOption(
+  container: HTMLElement,
+  option: EChartsOption,
+  reducedMotion: boolean,
+): EChartsOption {
   const style = getComputedStyle(container);
   const token = (name: string, fallback: string) =>
     style.getPropertyValue(name).trim() || fallback;
@@ -12,11 +17,19 @@ function themedOption(container: HTMLElement, option: EChartsOption): EChartsOpt
   const muted = token('--raw-text-muted', '#8a90a0');
   const edge = token('--raw-edge-subtle', '#333a46');
   const accent = token('--raw-accent', '#7aa2f7');
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // The chart's type has to come from the same token as the rest of the app.
+  // This used to name Inter directly, which meant a chart axis silently kept
+  // typing in the old face after the design system changed its body face --
+  // exactly the drift a token layer exists to prevent.
+  const sans = token('--font-sans', 'system-ui, sans-serif');
   return {
     color: [accent],
+    // `false`, not a shortened duration: ECharts' entry animation grows bars and
+    // sweeps lines from zero toward their real value, which on a chart of
+    // measured quantities is a sequence of numbers the daemon never reported.
+    // Turning it off draws the reading, once, correctly.
     animation: !reducedMotion,
-    textStyle: { color: text, fontFamily: 'Inter Variable, system-ui, sans-serif' },
+    textStyle: { color: text, fontFamily: sans },
     axisPointer: { lineStyle: { color: edge } },
     xAxis: undefined,
     yAxis: undefined,
@@ -75,6 +88,12 @@ export function Chart({
   const chartRef = useRef<ECharts | null>(null);
   const [themeRevision, setThemeRevision] = useState(0);
   const [ready, setReady] = useState(false);
+  // The app's own three-state control (system / reduced / full), which persists
+  // across visits. This used to read `prefers-reduced-motion` directly, so a
+  // reader who pinned "Reduced" on a machine whose OS says otherwise got no
+  // effect here at all — and a reader who pinned "Full" was overridden by the
+  // OS. The media query is one input to that decision, not the decision.
+  const { reduced } = useReducedMotion();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -110,8 +129,8 @@ export function Chart({
     const container = containerRef.current;
     const chart = chartRef.current;
     if (!container || !chart) return;
-    chart.setOption(themedOption(container, option), { notMerge: true });
-  }, [option, themeRevision, ready]);
+    chart.setOption(themedOption(container, option, reduced), { notMerge: true });
+  }, [option, themeRevision, ready, reduced]);
 
   return <div ref={containerRef} style={{ height }} role="img" aria-label={ariaLabel} />;
 }

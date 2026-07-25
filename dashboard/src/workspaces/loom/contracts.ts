@@ -1,11 +1,11 @@
 import { z } from 'zod';
+import { EnvelopeSchema } from '../../contracts/wire.ts';
 
 /**
  * Wire-true shapes for the Loom weave.
  *
- * The endpoint recon behind these schemas (run against the real daemon on
- * 2026-07-25, `tracedecay dashboard --port 7341`) is what decides the whole
- * surface, so it is recorded here rather than in a commit message:
+ * The endpoint boundaries behind these schemas decide what the surface may
+ * claim:
  *
  *   GET /api/plugins/hermes-lcm/overview   → HTTP 500, persistently.
  *       The handler (src/dashboard/lcm_api.rs::overview) computes a perfectly
@@ -16,10 +16,10 @@ import { z } from 'zod';
  *       therefore does not read `overview` at all — a surface may not be
  *       hostage to an enrichment field it never draws.
  *
- *   GET /api/plugins/savings/sessions      → 200. THE thread source.
- *       Per session: session_id, provider, title, started_at, last_message_at,
- *       messages, is_subagent, models[]. This is the only endpoint that serves
- *       a per-session start time, so it is the weave's warp.
+ *   GET /api/loom/temporal                 → THE thread and causal source.
+ *       Sessions include recorded ends plus message/model rollups. Commit
+ *       attributions, edited-file rollups and branch/worktree spans retain
+ *       provider, source granularity and explicit coverage.
  *
  *   GET /api/plugins/hermes-lcm/session/{id} → 200. THE chain source.
  *       Per message: ordinal, role, tool_name, token_estimate, content.
@@ -30,19 +30,17 @@ import { z } from 'zod';
  *   GET /api/plugins/hermes-lcm/timeline   → 200. Day buckets {count,
  *       token_estimate}: real message density to rule the time axis against.
  *
- * What is NOT served, and therefore is not drawn (see `WEFT_SOURCES` in
- * weave.ts): session↔commit correlation, session→file edits, branch/PR/CI
- * events. Those exist in the store but no dashboard route exposes them.
+ * PR/review/CI/release outcomes remain Delivery-owned. Until
+ * `GET /api/delivery/overview` exposes session-linked rows, Loom receives a
+ * typed unsupported status naming that exact required authority.
  */
 
-/** One model's accounting inside a session row (savings_api.rs). Only `model`
- * is read by the weave; the token blocks stay unvalidated passthrough so a
- * daemon that grows a field cannot fail the decode. */
+/** One model named by the Loom temporal projection. */
 export const SessionModelSchema = z
   .object({ model: z.string().nullable().optional() })
   .passthrough();
 
-/** One session row from `GET /api/plugins/savings/sessions`.
+/** One session row from `GET /api/loom/temporal`.
  *
  * `started_at` is nullable because the all-range backend deliberately includes
  * sessions with no usable timestamp. `last_message_at` is also nullable and,
@@ -55,17 +53,18 @@ export const LoomSessionSchema = z
     provider: z.string(),
     title: z.string().nullable().optional(),
     started_at: z.number().nullable(),
+    ended_at: z.number().nullable().optional(),
     last_message_at: z.number().nullable().optional(),
-    messages: z.number(),
+    messages: z.number().int().nonnegative(),
     is_subagent: z.boolean().optional(),
+    edited_files_recorded: z.boolean().optional(),
     models: z.array(SessionModelSchema).optional(),
   })
   .passthrough();
 export type LoomSession = z.infer<typeof LoomSessionSchema>;
 
-/** Full `GET /api/plugins/savings/sessions` body. `available:false` is the
- * daemon's own typed "this store is not readable", distinct from an empty
- * `sessions` array, which means "readable and genuinely zero". */
+/** Legacy savings-session decoder retained for shared endpoint fixture
+ * coverage. Loom itself reads `LoomTemporalPayloadSchema`. */
 export const LoomSessionsPayloadSchema = z
   .object({
     available: z.boolean().optional(),
@@ -73,8 +72,7 @@ export const LoomSessionsPayloadSchema = z
     scope: z.string().optional(),
     range: z.string().optional(),
     since: z.number().optional(),
-    /** Sessions in the whole store, which is far more than are returned. */
-    total: z.number().optional(),
+    total: z.number().int().nonnegative().optional(),
     sessions: z.array(LoomSessionSchema).optional(),
   })
   .passthrough();
@@ -136,3 +134,94 @@ export const LoomTimelinePayloadSchema = z
   })
   .passthrough();
 export type LoomTimelinePayload = z.infer<typeof LoomTimelinePayloadSchema>;
+
+export const LoomSourceIdSchema = z.enum([
+  'session_commit',
+  'session_file',
+  'branch_worktree',
+  'delivery_outcomes',
+]);
+export type LoomSourceId = z.infer<typeof LoomSourceIdSchema>;
+
+const LoomReadStateSchema = z.enum(['ready', 'partial', 'unknown', 'unsupported']);
+
+export const LoomSourceStatusSchema = z.object({
+  id: LoomSourceIdSchema,
+  label: z.string(),
+  state: LoomReadStateSchema,
+  authority: z.string().nullable(),
+  granularity: z.string(),
+  providers: z.array(z.string()),
+  item_count: z.number().int().nonnegative().nullable(),
+  reason: z.string().nullable(),
+  required_authority: z.string().nullable(),
+  coverage: z.object({
+    completeness: z.enum(['complete', 'partial', 'unknown', 'unsupported']),
+    eligible: z.number().int().nonnegative().nullable(),
+    examined: z.number().int().nonnegative().nullable(),
+    matched: z.number().int().nonnegative().nullable(),
+    omitted: z.number().int().nonnegative().nullable(),
+    unit: z.string().nullable(),
+    reason: z.string(),
+  }),
+});
+export type LoomSourceStatus = z.infer<typeof LoomSourceStatusSchema>;
+
+export const LoomCommitSchema = z.object({
+  provider: z.string(),
+  session_id: z.string(),
+  commit_sha: z.string(),
+  committed_at: z.number().int(),
+  branch: z.string().nullable(),
+  worktree: z.string().nullable(),
+  relation: z.string(),
+  evidence: z.string(),
+  confidence: z.number().min(0).max(100),
+  span_overlap_kind: z.string().nullable(),
+});
+export type LoomCommit = z.infer<typeof LoomCommitSchema>;
+
+export const LoomEditedFileSchema = z.object({
+  provider: z.string(),
+  session_id: z.string(),
+  path: z.string(),
+  change_type: z.string().nullable(),
+  hunks: z.number().int().nonnegative().nullable(),
+});
+export type LoomEditedFile = z.infer<typeof LoomEditedFileSchema>;
+
+export const LoomBranchSpanSchema = z.object({
+  provider: z.string(),
+  session_id: z.string(),
+  branch: z.string().nullable(),
+  worktree: z.string(),
+  first_at: z.number().int(),
+  last_at: z.number().int(),
+  event_count: z.number().int().positive(),
+  source: z.string(),
+}).refine((span) => span.last_at >= span.first_at, {
+  message: 'branch span last_at must not precede first_at',
+});
+export type LoomBranchSpan = z.infer<typeof LoomBranchSpanSchema>;
+
+export const LoomTemporalRefreshSchema = z.object({
+  state: LoomReadStateSchema,
+  active_generations: z.number().int().nonnegative(),
+  latest_activated_at_micros: z.number().int().nullable(),
+  authority: z.string(),
+});
+export type LoomTemporalRefresh = z.infer<typeof LoomTemporalRefreshSchema>;
+
+export const LoomTemporalPayloadSchema = z.object({
+  available: z.boolean(),
+  total: z.number().int().nonnegative(),
+  sessions: z.array(LoomSessionSchema),
+  source_statuses: z.array(LoomSourceStatusSchema),
+  commits: z.array(LoomCommitSchema),
+  edited_files: z.array(LoomEditedFileSchema),
+  branch_spans: z.array(LoomBranchSpanSchema),
+  temporal_refresh: LoomTemporalRefreshSchema,
+});
+export type LoomTemporalPayload = z.infer<typeof LoomTemporalPayloadSchema>;
+
+export const LoomTemporalEnvelopeSchema = EnvelopeSchema(LoomTemporalPayloadSchema);

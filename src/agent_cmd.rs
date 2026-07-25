@@ -2432,9 +2432,7 @@ mod tests {
         canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
     };
 
-    fn seed_opencode_non_context_state(
-        home: &std::path::Path,
-    ) -> (PathBuf, PathBuf, PathBuf) {
+    fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
         let config_path = home.join(".config/opencode/opencode.json");
         let core_path = home.join(".config/opencode/plugins/tracedecay.ts");
         let agent_set = canonical_host_component_set(
