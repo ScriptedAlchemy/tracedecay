@@ -516,9 +516,10 @@ pub(crate) async fn build_selected_project_state(
         false,
         None,
         Arc::clone(&active.automation_writer),
-        // The active reader is bound to the active project's exact scope.
-        // Never reuse it for a selected project without a separately admitted
-        // daemon owner for that project's identity.
+        // Doctor authority is bound to the active project's exact scope.
+        // Freshness is different: its daemon registry reader resolves the
+        // selected state's exact canonical root and returns only a mounted
+        // scheduler, so the root-addressed read port is safe to reuse.
         None,
         None,
         active.code_index_freshness_reader.clone(),

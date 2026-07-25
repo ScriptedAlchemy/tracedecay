@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ignore::overrides::OverrideBuilder;
+use sha2::{Digest, Sha256};
 use tracedecay_application::retrieval::grep_analysis::{
     GrepAnalysisProblemV1, GrepHitV1, GrepRequestV1, GrepResultV1, LexicalGrepAuthorityV1,
     PrimitiveCoverageV1, PrimitiveFutureV1, PrimitiveOutcomeV1, PrimitivePageV1,
@@ -919,6 +920,20 @@ fn storage_status_history_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn storage_status_history_path(
+    data_root: &Path,
+    project_id: Option<&str>,
+    store_path: &str,
+) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(project_id.unwrap_or_default().as_bytes());
+    digest.update([0]);
+    digest.update(store_path.as_bytes());
+    data_root
+        .join("storage-status-history-v1")
+        .join(format!("{}.json", hex::encode(digest.finalize())))
+}
+
 fn update_storage_status_history(
     history_path: &Path,
     project_id: Option<String>,
@@ -935,9 +950,10 @@ fn update_storage_status_history(
             "current_sample_only_history_lock_failed".to_owned(),
         );
     };
-    let restored = std::fs::read(history_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<DurableStorageStatusHistoryV1>(&bytes).ok())
+    let stored = std::fs::read(history_path).ok();
+    let restored = stored
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<DurableStorageStatusHistoryV1>(bytes).ok())
         .filter(|durable| {
             durable.revision == STORAGE_STATUS_HISTORY_REVISION_V1
                 && durable.project_id == project_id
@@ -947,7 +963,14 @@ fn update_storage_status_history(
                     .windows(2)
                     .all(|pair| pair[0].observed_at <= pair[1].observed_at)
         });
+    let invalid_stored_history = stored.is_some() && restored.is_none();
     let mut history = restored.map_or_else(Vec::new, |durable| durable.samples);
+    let clock_regressed = history
+        .last()
+        .is_some_and(|sample| sample.observed_at > observed_at);
+    if clock_regressed {
+        history.clear();
+    }
     history.push(StorageStatusHistoryPointV1 {
         observed_at,
         database_bytes,
@@ -966,10 +989,14 @@ fn update_storage_status_history(
         let temp = history_path.with_extension(format!("tmp-{}-{observed_at}", std::process::id()));
         crate::storage::PrivateStoreIo::write_file_atomically(history_path, &temp, &bytes).ok()
     });
-    let coverage = if persisted.is_some() {
-        "durable_project_store_history"
-    } else {
+    let coverage = if persisted.is_none() {
         "current_sample_only_history_persistence_failed"
+    } else if invalid_stored_history {
+        "durable_project_store_history_reset_invalid"
+    } else if clock_regressed {
+        "durable_project_store_history_reset_clock_regression"
+    } else {
+        "durable_project_store_history"
     };
     (history, coverage.to_owned())
 }
@@ -977,18 +1004,26 @@ fn update_storage_status_history(
 /// Canonical storage-status owner used by the application operation and its
 /// dashboard projection. History is durable and scope-bound, so growth does
 /// not reset when the daemon or dashboard restarts.
-pub(crate) fn canonical_storage_status(
+pub(crate) async fn canonical_storage_status(
     graph: &TraceDecay,
     include_details: bool,
 ) -> StorageStatusPrimitiveResult {
     let branch = graph.branch_diagnostics();
     let read_only = graph.is_read_only();
     let store_path = graph.db_path().display().to_string();
-    let database_bytes = graph
+    let file_bytes = graph
         .db_path()
         .metadata()
         .ok()
         .map(|metadata| metadata.len());
+    let page_counts = graph.storage_page_counts().await.ok();
+    let page_size_bytes = page_counts.and_then(|(page_size, _, _)| u32::try_from(page_size).ok());
+    let page_count = page_counts.map(|(_, page_count, _)| page_count);
+    let freelist_pages = page_counts.map(|(_, _, freelist_pages)| freelist_pages);
+    let database_bytes = page_size_bytes
+        .zip(page_count)
+        .map(|(page_size, pages)| u64::from(page_size).saturating_mul(pages))
+        .or(file_bytes);
     let project_id = graph.store_layout().identity.project_id.clone();
     let status = if branch.serving_db_exists {
         if branch.is_fallback { "degraded" } else { "ok" }
@@ -1002,10 +1037,11 @@ pub(crate) fn canonical_storage_status(
             details.push(warning);
         }
     }
-    let history_path = graph
-        .store_layout()
-        .data_root
-        .join("storage-status-history-v1.json");
+    let history_path = storage_status_history_path(
+        &graph.store_layout().data_root,
+        project_id.as_deref(),
+        &store_path,
+    );
     let (history, history_coverage) = database_bytes.map_or_else(
         || (Vec::new(), "current_sample_unavailable".to_owned()),
         |bytes| {
@@ -1022,6 +1058,9 @@ pub(crate) fn canonical_storage_status(
         status: status.to_owned(),
         read_only,
         database_bytes,
+        page_size_bytes,
+        page_count,
+        freelist_pages,
         details,
         project_id,
         store_path: Some(store_path),
@@ -1227,7 +1266,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
     ) -> Pr12ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
         Box::pin(async move {
             completed(
-                canonical_storage_status(self.graph.as_ref(), request.include_details),
+                canonical_storage_status(self.graph.as_ref(), request.include_details).await,
                 EvidenceDomain::Operational,
                 now_observed(),
             )
@@ -2534,5 +2573,41 @@ mod affected_tests_tests {
         assert_eq!(second[0].database_bytes, 4096);
         assert_eq!(second[1].database_bytes, 8192);
         assert_eq!(second_coverage, "durable_project_store_history");
+    }
+
+    #[test]
+    fn storage_status_history_paths_are_store_scope_isolated() {
+        let root = Path::new("/profile/projects/project.storage-status");
+        let first = storage_status_history_path(
+            root,
+            Some("project.storage-status"),
+            "/project/branches/main/graph.db",
+        );
+        let second = storage_status_history_path(
+            root,
+            Some("project.storage-status"),
+            "/project/branches/topic/graph.db",
+        );
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), second.parent());
+    }
+
+    #[test]
+    fn invalid_storage_status_history_is_reset_without_claiming_full_history() {
+        let directory = tempfile::tempdir().expect("history tempdir");
+        let history_path = directory.path().join("storage-status-history-v1.json");
+        std::fs::write(&history_path, b"{not-json").expect("invalid history");
+
+        let (history, coverage) = update_storage_status_history(
+            &history_path,
+            Some("project.storage-status".to_owned()),
+            "/project/.tracedecay/graph.db".to_owned(),
+            4096,
+            1,
+        );
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(coverage, "durable_project_store_history_reset_invalid");
     }
 }
