@@ -10,6 +10,13 @@ use tracedecay_domain::feedback::{
 use tracedecay_domain::{CommitId, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_tool_catalog::BindingSurface;
 
+const PR13_TRANSPORT_AND_LSP: [BindingSurface; 4] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+    BindingSurface::Lsp,
+];
+
 fn scope() -> FeedbackScopeV1 {
     FeedbackScopeV1 {
         project_id: ProjectId::new("project.pr13.runtime").unwrap(),
