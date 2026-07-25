@@ -47,6 +47,16 @@ struct HintCounts {
 /// `GET /api/plugins/analytics/overview`
 pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
+    let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
+    let observatory = match state.savings_db.as_deref() {
+        Some(db) => {
+            crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
+                .await
+                .ok()
+        }
+        None => None,
+    };
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let usage = usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
@@ -62,7 +72,25 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         "agents": agents,
         "diagnostics": diagnostics,
         "underused_tool_families": underused,
+        "observatory": observatory,
     }))
+}
+
+/// Canonical Plan 26 Observatory read model. CLI/MCP call the same application
+/// composer instead of re-deriving these values in their adapters.
+pub(crate) async fn observatory(State(state): State<DashboardState>) -> Json<Value> {
+    let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
+    let value = match state.savings_db.as_deref() {
+        Some(db) => serde_json::to_value(
+            crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
+                .await
+                .ok(),
+        )
+        .unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+    Json(value)
 }
 
 async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {

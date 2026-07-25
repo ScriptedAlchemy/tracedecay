@@ -474,6 +474,8 @@ async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Value {
         .token_breakdown_since(today_since)
         .await
         .unwrap_or((0, 0, 0));
+    let costs =
+        crate::application::observability::costs_read_model(global_db, None, since as i64).await;
     json!({
         "range": range,
         "ingest": {
@@ -497,6 +499,7 @@ async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Value {
             "output_tokens": today_breakdown.1,
             "cache_read_tokens": today_breakdown.2,
         },
+        "costs": costs,
     })
 }
 
