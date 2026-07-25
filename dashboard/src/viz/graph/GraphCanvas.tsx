@@ -8,6 +8,7 @@ import {
   cssColorToRgb,
   lerpRgb,
   lerpRgbTuple,
+  restingNodeTint,
   settled,
 } from './activation.ts';
 import { cn } from '../../ui/cn';
@@ -149,6 +150,7 @@ export function GraphCanvas({
   height = 320,
   fill = false,
   activation,
+  canvasClassName,
 }: {
   nodes: GraphCanvasNode[];
   edges: GraphCanvasEdge[];
@@ -161,6 +163,11 @@ export function GraphCanvas({
   /** External synapse field; when omitted the canvas owns a local one fed by
    * selection strikes. */
   activation?: ActivationField;
+  /** Extra classes merged onto the canvas element itself (not the figure) --
+   * for a caller that needs to guarantee a minimum rendered height on a
+   * breakpoint where its own flex ancestors would otherwise squeeze a `fill`
+   * canvas toward zero. */
+  canvasClassName?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sigmaRef = useRef<Sigma | null>(null);
@@ -250,14 +257,29 @@ export function GraphCanvas({
       iterations: 200,
       // Small graphs over-spread with inferred gravity; pull clusters in so
       // the tissue reads dense, not lost in the void.
-      settings: { ...fa2, gravity: (fa2.gravity ?? 1) * (nodes.length < 60 ? 8 : 2), scalingRatio: 4 },
+      settings: {
+        ...fa2,
+        gravity:
+          (fa2.gravity ?? 1) *
+          (nodes.length < 60 ? Math.max(8, 200 / nodes.length) : 2),
+        scalingRatio: 4,
+      },
     });
-    // Constellation composure: FA2 lets disconnected components drift apart.
-    // For larger graphs, re-center each component onto a ring sized from the
-    // measured component extents (FA2's own coordinate scale) so separate
-    // clusters compose like one constellation. The frozen bbox below is
-    // computed after this pass, so the camera always frames the result.
-    if (graph.order >= 30) {
+    // Constellation composure: FA2 lets disconnected components drift apart
+    // under nothing but mutual repulsion and per-node gravity, which pulls
+    // each node toward the origin independently of which component it is
+    // in -- it does not pull components toward EACH OTHER. On a small graph
+    // (a handful of repos, each an isolated hub-and-spokes component) that
+    // reliably produces two or three tight clumps separated by a gap several
+    // times their own size: exactly the "vast dead field" the camera then
+    // faithfully frames, because there is nothing wrong with the frame, only
+    // with how far apart the content drifted before it was fit. Re-center
+    // each component onto a ring sized from the measured component extents
+    // (FA2's own coordinate scale) so separate clusters compose like one
+    // constellation regardless of graph size. A single connected component is
+    // a no-op here. The frozen bbox below is computed after this pass, so the
+    // camera always frames the composed result, not the raw FA2 scatter.
+    {
       const componentOf = new Map<string, number>();
       let componentCount = 0;
       for (const start of graph.nodes()) {
@@ -290,7 +312,18 @@ export function GraphCanvas({
           const ey = Math.abs((graph.getNodeAttribute(node, 'y') as number) - c.y / c.n);
           maxExtent = Math.max(maxExtent, ex, ey);
         }
-        const ring = maxExtent * 1.5;
+        // The ring only needs to be as large as geometry actually requires:
+        // adjacent components sit `2π/N` apart in angle, so the chord between
+        // two neighbouring centroids is `2·ring·sin(π/N)`, and that chord must
+        // clear twice each component's own extent for their (roughly
+        // circular) footprints not to overlap. Solving for ring gives exactly
+        // the radius non-overlap needs -- smaller for few components (which a
+        // flat multiplier was over-spacing, leaving a "vast dead field"
+        // around two or three tight clumps) and larger for many (which the
+        // same flat multiplier under-spaced, risking real overlap). A small
+        // safety factor covers the gap between "roughly circular" and the
+        // true, possibly elongated, per-component footprint.
+        const ring = (maxExtent / Math.sin(Math.PI / componentCount)) * 1.15;
         for (const [node, component] of componentOf) {
           const c = centroids[component]!;
           const angle = (component / componentCount) * Math.PI * 2;
@@ -413,7 +446,7 @@ export function GraphCanvas({
         const [kr, kg, kb] = (data['kindRgb'] as [number, number, number] | undefined) ?? [
           149, 152, 157,
         ];
-        let tint = lerpRgbTuple(colors.substrate, [kr, kg, kb], 0.34 + 0.66 * vitality);
+        let tint = restingNodeTint(colors.substrate, [kr, kg, kb], vitality, colors.light);
         if (dim > 0) tint = lerpRgbTuple(tint, colors.dim, dim);
         const color =
           isSelected || isHovered
@@ -469,8 +502,12 @@ export function GraphCanvas({
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
       }
-      const padX = (maxX - minX || 1) * 0.11;
-      const padY = (maxY - minY || 1) * 0.11;
+      // ~15% margin so the constellation fills the viewport instead of
+      // floating in an over-large frame, with enough slack left over that a
+      // label overhanging its node (rendered outside the node's own radius)
+      // never clips at the canvas edge.
+      const padX = (maxX - minX || 1) * 0.15;
+      const padY = (maxY - minY || 1) * 0.15;
       renderer.setCustomBBox({
         x: [minX - padX, maxX + padX],
         y: [minY - padY, maxY + padY],
@@ -532,10 +569,19 @@ export function GraphCanvas({
           // body instead of a second object beside it -- and a strike still
           // has all the room it needs to swell.
           const glow = colors.glowScale;
+          // A hairline for the ember: on paper a fully-dormant body's own
+          // fill is deliberately close to the substrate (see
+          // `restingNodeTint`), so without help its halo -- which scales
+          // with vitality -- would fade to nothing at exactly the moment the
+          // body needs it most. The floor only ever raises the light-theme
+          // halo of a low-vitality node; a live node's own (already larger)
+          // vitality term dominates, and the dark theme's halo already has
+          // plenty of headroom, so this is a no-op there.
+          const dormantRingFloor = colors.light ? 0.16 * (1 - vitality) : 0;
           upsert(graph, haloId, {
             ...shared,
             size: size * (1.38 + 1.0 * heat),
-            color: rgba(lit, (0.05 + 0.1 * vitality) * glow + 0.26 * heat),
+            color: rgba(lit, Math.max((0.05 + 0.1 * vitality) * glow, dormantRingFloor) + 0.26 * heat),
             zIndex: 1,
           });
           upsert(graph, bloomId, {
@@ -739,6 +785,7 @@ export function GraphCanvas({
           'td-scanlines [background:var(--raw-graph-field)]',
           'shadow-[inset_0_1px_0_0_var(--raw-membrane-lift),0_18px_44px_-28px_var(--raw-depth)]',
           fill && 'min-h-0 flex-1',
+          canvasClassName,
         )}
         role="img"
         aria-label={`Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`}

@@ -144,3 +144,58 @@ export function lerpRgbTuple(
   const mix = (a: number, b: number) => Math.round(a + (b - a) * t);
   return [mix(from[0], to[0]), mix(from[1], to[1]), mix(from[2], to[2])];
 }
+
+/** ITU-R BT.601 luma, 0..255. Matches the medium check GraphCanvas's
+ * `palette()` already does on the substrate token, so resting-colour logic
+ * and "which side of the substrate is this" always agree. */
+export function luma([r, g, b]: [number, number, number]): number {
+  return (r * 299 + g * 587 + b * 114) / 1000;
+}
+
+/** Comfortably above the local swing of the graph field's vignette gradient
+ * (the token the substrate is measured from is a flat surface color, but the
+ * canvas itself is lit unevenly) -- a real minimum offset, not a hairline
+ * margin that a bright spot in the field could still swallow. */
+const MIN_RESTING_LUMA_OFFSET = 42;
+
+/**
+ * A node's RESTING colour: real vitality lerped from the substrate (fully
+ * dormant) toward the node's kind hue (fully alive) -- the deliberate "fades
+ * into the medium" design.
+ *
+ * Fading must saturate before invisibility. On a near-black dark
+ * substrate the lerp has enormous headroom before a node clips to pure
+ * black, so a fixed mix floor already reads as a dim ember with no further
+ * help. On a near-white light substrate the identical mix can land within a
+ * few luma units of the paper -- not merely dim, but gone, and a cluster of
+ * them accumulates into an undifferentiated white field.
+ *
+ * `light` is the same luma measurement {@link luma} above performs on the
+ * substrate elsewhere (see `palette()` in GraphCanvas) -- never a hardcoded
+ * theme check, so a future theme still resolves correctly. When the mixed
+ * tint does not clear a minimum luma offset from the substrate on the
+ * correct side (darker on paper, lighter on a dark field -- an ember never
+ * dims past its own background), it is nudged toward black or white until it
+ * does. On the dark theme, where the floor mix already clears the offset for
+ * every realistic vitality, this is a no-op and the existing look is
+ * unchanged.
+ */
+export function restingNodeTint(
+  substrate: [number, number, number],
+  kindRgb: [number, number, number],
+  vitality: number,
+  light: boolean,
+): [number, number, number] {
+  const mix = 0.34 + 0.66 * Math.max(0, Math.min(1, vitality));
+  const tint = lerpRgbTuple(substrate, kindRgb, mix);
+  const substrateLuma = luma(substrate);
+  const tintLuma = luma(tint);
+  const offset = light ? substrateLuma - tintLuma : tintLuma - substrateLuma;
+  if (offset >= MIN_RESTING_LUMA_OFFSET) return tint;
+  const anchor: [number, number, number] = light ? [0, 0, 0] : [255, 255, 255];
+  const anchorLuma = luma(anchor);
+  const span = Math.abs(anchorLuma - tintLuma) || 1;
+  const shortfall = MIN_RESTING_LUMA_OFFSET - offset;
+  const t = Math.max(0, Math.min(1, shortfall / span));
+  return lerpRgbTuple(tint, anchor, t);
+}
