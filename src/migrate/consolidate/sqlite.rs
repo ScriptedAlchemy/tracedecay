@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::runtime::{ConsolidationArtifactAuthorityV1, ConsolidationAttachTokenV1};
 use crate::db::Database;
-use crate::db::engine::{Executor, QueryExecutor, params};
+use crate::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, params};
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 
@@ -30,30 +30,33 @@ pub(super) use verify::verify_session_union_sql;
 
 #[cfg(test)]
 pub(super) async fn verify_projection_plan_for_test(
-    conn: &impl Executor,
+    database: &crate::global_db::RegisteredGlobalDb,
     source: &Path,
     target_input: &Path,
     source_project_id: &str,
 ) -> Result<()> {
-    attach_as(conn, source, "source_input").await?;
-    attach_as(conn, target_input, "target_input").await?;
+    let conn = database.begin_write_transaction().await?;
+    attach_as(&conn, source, "source_input").await?;
+    attach_as(&conn, target_input, "target_input").await?;
     let result = match build_consolidation_message_map(
-        conn,
+        &conn,
         "source_input",
         "target_input",
         source_project_id,
     )
     .await
     {
-        Ok(()) => match projection::materialize(conn, "target_input", "source_input").await {
-            Ok(()) => projection::verify(conn).await,
+        Ok(()) => match projection::materialize(&conn, "target_input", "source_input").await {
+            Ok(()) => projection::verify(&conn).await,
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
     };
-    let _ = conn.execute("DETACH DATABASE source_input", ()).await;
-    let _ = conn.execute("DETACH DATABASE target_input", ()).await;
-    result
+    let rollback = conn
+        .rollback()
+        .await
+        .map_err(|error| db_error("verify_projection_plan_for_test", error));
+    result.and(rollback)
 }
 
 #[cfg(test)]
@@ -192,14 +195,12 @@ pub(super) async fn merge_registered_graph_facts(
             .map_err(|error| db_error("merge_graph_facts", error))?;
         if let Err(error) = merge_one_graph_tx(&transaction, offset).await {
             let _ = transaction.rollback().await;
-            let _ = detach_graph_source(target).await;
             return Err(error);
         }
         transaction
             .commit()
             .await
             .map_err(|error| db_error("merge_graph_facts", error))?;
-        detach_graph_source(target).await?;
     }
     let transaction = target
         .begin_memory_write_transaction("rebuild merged memory banks")
@@ -208,16 +209,6 @@ pub(super) async fn merge_registered_graph_facts(
         .rebuild_all_banks()
         .await?;
     transaction.commit().await
-}
-
-async fn detach_graph_source(target: &Database) -> Result<()> {
-    target
-        .writer_connection("detach consolidation graph source")
-        .await?
-        .execute("DETACH DATABASE source", ())
-        .await
-        .map(|_| ())
-        .map_err(|error| db_error("merge_graph_facts", error))
 }
 
 async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) -> Result<()> {
@@ -769,8 +760,7 @@ pub(super) async fn build_consolidation_message_map(
     source_project_id: &str,
 ) -> Result<()> {
     conn.execute_batch(
-        "PRAGMA query_only = OFF;
-         CREATE TEMP TABLE IF NOT EXISTS consolidation_message_map(
+        "CREATE TEMP TABLE IF NOT EXISTS consolidation_message_map(
              provider TEXT NOT NULL,
              original_id TEXT NOT NULL,
              mapped_id TEXT NOT NULL,
@@ -867,7 +857,7 @@ pub(super) async fn build_consolidation_message_map(
     let target_session_parents = scalar_parent_rows_sql(&target, "session_messages", false);
     let source_raw_parents = scalar_parent_rows_sql(&source, "lcm_raw_messages", false);
     let target_raw_parents = scalar_parent_rows_sql(&target, "lcm_raw_messages", false);
-    let reserved_references_sql = format!(
+    let mut reserved_references_sql = format!(
         "INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
              SELECT provider, message_id FROM {source}.session_messages;
          INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
@@ -880,10 +870,6 @@ pub(super) async fn build_consolidation_message_map(
              SELECT provider, message_id FROM {source}.lcm_external_payloads;
          INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
              SELECT provider, message_id FROM {target}.lcm_external_payloads;
-         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
-             SELECT provider, message_id FROM {source}.dashboard_token_counts;
-         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
-             SELECT provider, message_id FROM {target}.dashboard_token_counts;
          INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
              SELECT provider, evidence_message_id FROM {source}.commit_sessions
              WHERE evidence_message_id IS NOT NULL;
@@ -903,6 +889,14 @@ pub(super) async fn build_consolidation_message_map(
          INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
              SELECT '', message_id FROM {target}.turns;"
     );
+    for (schema, quoted) in [(source_schema, &source), (target_schema, &target)] {
+        if table_exists(conn, schema, "dashboard_token_counts").await? {
+            reserved_references_sql.push_str(&format!(
+                "INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+                     SELECT provider, message_id FROM {quoted}.dashboard_token_counts;"
+            ));
+        }
+    }
     conn.execute_batch(&reserved_references_sql)
         .await
         .map_err(|error| db_error("message_reserved_references_fill", error))?;
@@ -1257,22 +1251,20 @@ async fn merge_sessions_tx(conn: &impl Executor, offsets: &SessionMergeOffsets) 
 }
 
 #[cfg(test)]
-async fn attach_as(conn: &impl Executor, path: &Path, alias: &str) -> Result<()> {
-    let sql = format!("ATTACH DATABASE ?1 AS {}", quote_identifier(alias));
-    conn.execute(&sql, params![path.to_string_lossy().to_string()])
+async fn attach_as(conn: &impl DatabaseAttachmentExecutor, path: &Path, alias: &str) -> Result<()> {
+    conn.attach_database(path, alias)
         .await
         .map_err(|error| db_error("attach_database", error))?;
     Ok(())
 }
 
 async fn attach_token_as(
-    conn: &impl Executor,
+    conn: &impl DatabaseAttachmentExecutor,
     token: ConsolidationAttachTokenV1,
     alias: &str,
 ) -> Result<()> {
     let path = token.into_verified_path()?;
-    let sql = format!("ATTACH DATABASE ?1 AS {}", quote_identifier(alias));
-    conn.execute(&sql, params![path.to_string_lossy().to_string()])
+    conn.attach_database(&path, alias)
         .await
         .map_err(|error| db_error("attach_database", error))?;
     Ok(())
@@ -1286,8 +1278,14 @@ pub(super) async fn attach_snapshot_as(
     let path = token
         .verified_path()
         .map_err(|error| db_error("attach_snapshot", error))?;
+    let filename = path.to_str().ok_or_else(|| {
+        db_message(
+            "attach_snapshot",
+            "verified SQLite snapshot path is not valid UTF-8",
+        )
+    })?;
     let sql = format!("ATTACH DATABASE ?1 AS {}", quote_identifier(alias));
-    conn.execute(&sql, params![path.to_string_lossy().to_string()])
+    conn.execute(&sql, params![filename])
         .await
         .map_err(|error| db_error("attach_snapshot", error))?;
     Ok(())

@@ -1,6 +1,11 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
-use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlTransaction as RuntimeTransaction;
+use tracedecay_rusqlite_runtime::migration_sql::{
+    MigrationSqlAttachment, MigrationSqlTransaction as RuntimeTransaction,
+};
 
 use super::{
     IntoParams, Result, Rows, Statement, Value,
@@ -45,6 +50,24 @@ impl Transaction {
         .await
         .map_err(join_error)?
         .map(|result| result.changed_rows as u64)
+    }
+
+    pub(crate) async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
+        let runtime = Arc::clone(&self.runtime);
+        let filename = path.to_str().ok_or_else(|| {
+            super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
+        })?;
+        let attachment =
+            MigrationSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
+        tokio::task::spawn_blocking(move || {
+            lock_runtime(&runtime)?
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .attach_database(attachment)
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)?
     }
 
     pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>

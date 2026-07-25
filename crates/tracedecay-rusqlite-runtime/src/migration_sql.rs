@@ -19,6 +19,7 @@ use std::{
 use rusqlite::{
     Connection, Transaction, TransactionBehavior,
     hooks::{Action, AuthAction, Authorization},
+    limits::Limit,
     params_from_iter,
     types::{Value, ValueRef},
 };
@@ -38,6 +39,7 @@ const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SQL_BYTES: usize = 1024 * 1024;
 const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MIGRATION_ATTACHMENTS: i32 = 4;
 const MIGRATION_SQL_PROGRESS_INTERVAL_OPS: i32 = 1_000;
 #[cfg(not(test))]
 const MIGRATION_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
@@ -59,6 +61,12 @@ const CELL_ALLOCATION_OVERHEAD: usize = std::mem::size_of::<MigrationSqlValue>()
 struct InsertTracker {
     authorized_tables: Mutex<BTreeSet<String>>,
     applied: AtomicBool,
+}
+
+#[derive(Clone)]
+enum AuthorizedDatabaseOperation {
+    Attach,
+    Detach(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +156,50 @@ impl MigrationSqlStatement {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationSqlAttachment {
+    filename: String,
+    database_name: String,
+}
+
+impl MigrationSqlAttachment {
+    pub fn new(
+        filename: impl Into<String>,
+        database_name: impl Into<String>,
+    ) -> Result<Self, MigrationSqlError> {
+        let filename = filename.into();
+        let database_name = database_name.into();
+        if filename.is_empty()
+            || filename.len() > MAX_SQL_BYTES
+            || !valid_database_name(&database_name)
+        {
+            return Err(MigrationSqlError::InvalidAttachment);
+        }
+        Ok(Self {
+            filename,
+            database_name,
+        })
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn database_name(&self) -> &str {
+        &self.database_name
+    }
+}
+
+fn valid_database_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && !value.eq_ignore_ascii_case("main")
+        && !value.eq_ignore_ascii_case("temp")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -240,6 +292,7 @@ pub trait MigrationSqlWriteAuthority: Send + Sync {
 pub enum MigrationSqlError {
     AuthorityMismatch,
     AuthorityDenied(String),
+    InvalidAttachment,
     InvalidStatement,
     RequestLimitExceeded,
     TransactionControlDenied,
@@ -266,6 +319,7 @@ impl fmt::Display for MigrationSqlError {
             Self::AuthorityDenied(reason) => {
                 write!(formatter, "migration SQL write authority denied: {reason}")
             }
+            Self::InvalidAttachment => formatter.write_str("migration SQL attachment is invalid"),
             Self::InvalidStatement => formatter.write_str("migration SQL statement is empty"),
             Self::RequestLimitExceeded => {
                 formatter.write_str("migration SQL request exceeded its admission limit")
@@ -678,6 +732,23 @@ pub struct MigrationSqlTransaction {
 }
 
 impl MigrationSqlTransaction {
+    pub fn attach_database(
+        &self,
+        attachment: MigrationSqlAttachment,
+    ) -> Result<(), MigrationSqlError> {
+        let sender = self
+            .commands
+            .as_ref()
+            .ok_or(MigrationSqlError::TransactionClosed)?;
+        let (reply, response) = mpsc::sync_channel(1);
+        sender
+            .try_send(TransactionCommand::Attach { attachment, reply })
+            .map_err(|error| map_transaction_send_error(error, &self.expired))?;
+        response
+            .recv()
+            .map_err(|_| transaction_terminal_error(&self.expired))?
+    }
+
     pub fn validate(&self, statement: MigrationSqlStatement) -> Result<(), MigrationSqlError> {
         match self.dispatch(MigrationSqlRequest::Validate(statement))? {
             MigrationSqlResult::Validated => Ok(()),
@@ -843,6 +914,10 @@ pub(crate) enum WriterCommand {
 }
 
 pub(crate) enum TransactionCommand {
+    Attach {
+        attachment: MigrationSqlAttachment,
+        reply: SyncSender<Result<(), MigrationSqlError>>,
+    },
     Dispatch {
         request: MigrationSqlRequest,
         step_policy: MigrationSqlStepPolicy,
@@ -911,26 +986,28 @@ pub(crate) fn run_writer_command(
                 let _ = reply.send(Err(error));
                 return;
             }
-            let before = connection.total_changes();
-            let transaction = connection.transaction_with_behavior(behavior);
-            match transaction {
-                Ok(transaction) => {
-                    if reply.send(Ok(())).is_ok() {
-                        run_transaction(
-                            transaction,
-                            receiver,
-                            before,
-                            shutdown_requested,
-                            &last_insert_rowid,
-                            &expired,
-                            authority,
-                            policy,
-                        );
+            let completion = {
+                let before = connection.total_changes();
+                match connection.transaction_with_behavior(behavior) {
+                    Ok(transaction) if reply.send(Ok(())).is_ok() => Some(run_transaction(
+                        transaction,
+                        receiver,
+                        before,
+                        shutdown_requested,
+                        &last_insert_rowid,
+                        &expired,
+                        authority,
+                        policy,
+                    )),
+                    Ok(_) => None,
+                    Err(error) => {
+                        let _ = reply.send(Err(sqlite_error("begin migration transaction", error)));
+                        None
                     }
                 }
-                Err(error) => {
-                    let _ = reply.send(Err(sqlite_error("begin migration transaction", error)));
-                }
+            };
+            if completion.is_some_and(|completion| completion.finish(connection).is_err()) {
+                shutdown_requested.store(true, Ordering::Release);
             }
         }
         WriterCommand::CheckpointWalTruncate { reply, authority } => {
@@ -954,6 +1031,7 @@ pub(crate) fn run_writer_command(
                 None,
                 crate::connection::authorize_writer,
                 false,
+                None,
                 None,
                 || execute_query_unchecked(connection, statement),
             );
@@ -986,19 +1064,21 @@ fn run_transaction(
     expired: &AtomicBool,
     authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
     policy: MigrationSqlTransactionPolicy,
-) {
+) -> TransactionCompletion {
+    let mut attachments = Vec::new();
+    let mut previous_attachment_limit = None;
     let mut idle_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
     let mut transaction_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_LIMIT;
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
             let _ = transaction.rollback();
-            return;
+            return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
         }
         let now = Instant::now();
         if now >= idle_deadline || now >= transaction_deadline {
             expired.store(true, Ordering::Release);
             let _ = transaction.rollback();
-            return;
+            return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
         }
         let wait = idle_deadline
             .saturating_duration_since(now)
@@ -1007,9 +1087,86 @@ fn run_transaction(
         let command = match receiver.recv_timeout(wait) {
             Ok(command) => command,
             Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
+            }
         };
         match command {
+            TransactionCommand::Attach { attachment, reply } => {
+                if Instant::now() >= transaction_deadline {
+                    expired.store(true, Ordering::Release);
+                    let _ = transaction.rollback();
+                    let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
+                }
+                if attachments.iter().any(|attached: &MigrationSqlAttachment| {
+                    attached
+                        .database_name()
+                        .eq_ignore_ascii_case(attachment.database_name())
+                }) {
+                    let _ = reply.send(Err(MigrationSqlError::InvalidAttachment));
+                    continue;
+                }
+                if let Err(error) =
+                    verify_write_authority(authority.as_deref(), MigrationSqlWriteIntent::Execute)
+                {
+                    let _ = transaction.rollback();
+                    let _ = reply.send(Err(error));
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
+                }
+                if previous_attachment_limit.is_none() {
+                    match transaction
+                        .set_limit(Limit::SQLITE_LIMIT_ATTACHED, MAX_MIGRATION_ATTACHMENTS)
+                    {
+                        Ok(previous) => previous_attachment_limit = Some(previous),
+                        Err(error) => {
+                            let _ = transaction.rollback();
+                            let _ = reply
+                                .send(Err(sqlite_error("open migration attachment limit", error)));
+                            return TransactionCompletion::abandoned(attachments, None);
+                        }
+                    }
+                }
+                let result = attach_database(
+                    &transaction,
+                    &attachment,
+                    true,
+                    Some(Arc::clone(shutdown_requested)),
+                    Some(transaction_deadline),
+                );
+                match result {
+                    Ok(()) => {
+                        attachments.push(attachment);
+                        if let Err(error) = verify_write_authority(
+                            authority.as_deref(),
+                            MigrationSqlWriteIntent::Execute,
+                        ) {
+                            let _ = transaction.rollback();
+                            let _ = reply.send(Err(error));
+                            return TransactionCompletion::abandoned(
+                                attachments,
+                                previous_attachment_limit,
+                            );
+                        }
+                        let _ = reply.send(Ok(()));
+                        idle_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
+                    }
+                    Err(error) => {
+                        let _ = transaction.rollback();
+                        let _ = reply.send(Err(error));
+                        return TransactionCompletion::abandoned(
+                            attachments,
+                            previous_attachment_limit,
+                        );
+                    }
+                }
+            }
             TransactionCommand::Dispatch {
                 request,
                 step_policy,
@@ -1019,12 +1176,18 @@ fn run_transaction(
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(error));
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 if step_policy == MigrationSqlStepPolicy::AuthorizedLongSchema
                     && policy != MigrationSqlTransactionPolicy::SchemaMigration
@@ -1057,17 +1220,26 @@ fn run_transaction(
                 if shutdown_requested.load(Ordering::Acquire) {
                     let _ = transaction.rollback();
                     let _ = reply.send(result);
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), intent) {
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(error));
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 if matches!(&result, Err(MigrationSqlError::AuthorityDenied(_))) {
                     let _ = transaction.rollback();
                     let _ = reply.send(result);
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 if step_policy == MigrationSqlStepPolicy::Bounded
                     && Instant::now() >= transaction_deadline
@@ -1075,7 +1247,10 @@ fn run_transaction(
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 publish_last_insert_rowid(
                     &mut result,
@@ -1098,22 +1273,31 @@ fn run_transaction(
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 if let Err(error) =
                     verify_write_authority(authority.as_deref(), MigrationSqlWriteIntent::Commit)
                 {
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(error));
-                    return;
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
                 }
                 let changed_rows = transaction.total_changes().saturating_sub(before);
                 let result = transaction
                     .commit()
                     .map(|()| MigrationSqlCommitReceipt { changed_rows })
                     .map_err(|error| sqlite_error("commit immediate transaction", error));
-                let _ = reply.send(result);
-                return;
+                return TransactionCompletion {
+                    attachments,
+                    previous_attachment_limit,
+                    terminal: Some(TransactionTerminal::Commit { reply, result }),
+                };
             }
             TransactionCommand::Rollback { reply } => {
                 let discarded_changed_rows = transaction.total_changes().saturating_sub(before);
@@ -1123,10 +1307,78 @@ fn run_transaction(
                         discarded_changed_rows,
                     })
                     .map_err(|error| sqlite_error("rollback immediate transaction", error));
-                let _ = reply.send(result);
-                return;
+                return TransactionCompletion {
+                    attachments,
+                    previous_attachment_limit,
+                    terminal: Some(TransactionTerminal::Rollback { reply, result }),
+                };
             }
         }
+    }
+}
+
+struct TransactionCompletion {
+    attachments: Vec<MigrationSqlAttachment>,
+    previous_attachment_limit: Option<i32>,
+    terminal: Option<TransactionTerminal>,
+}
+
+enum TransactionTerminal {
+    Commit {
+        reply: SyncSender<Result<MigrationSqlCommitReceipt, MigrationSqlError>>,
+        result: Result<MigrationSqlCommitReceipt, MigrationSqlError>,
+    },
+    Rollback {
+        reply: SyncSender<Result<MigrationSqlRollbackReceipt, MigrationSqlError>>,
+        result: Result<MigrationSqlRollbackReceipt, MigrationSqlError>,
+    },
+}
+
+impl TransactionCompletion {
+    fn abandoned(
+        attachments: Vec<MigrationSqlAttachment>,
+        previous_attachment_limit: Option<i32>,
+    ) -> Self {
+        Self {
+            attachments,
+            previous_attachment_limit,
+            terminal: None,
+        }
+    }
+
+    fn finish(self, connection: &Connection) -> Result<(), MigrationSqlError> {
+        let mut cleanup_error = None;
+        for attachment in self.attachments.into_iter().rev() {
+            if let Err(error) = detach_database(connection, attachment.database_name(), None) {
+                if cleanup_error.is_none() {
+                    cleanup_error = Some(error);
+                }
+            }
+        }
+        if let Some(previous) = self.previous_attachment_limit
+            && let Err(error) = connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, previous)
+            && cleanup_error.is_none()
+        {
+            cleanup_error = Some(sqlite_error("restore migration attachment limit", error));
+        }
+        match self.terminal {
+            Some(TransactionTerminal::Commit { reply, result }) => {
+                let response = match (result, cleanup_error.as_ref()) {
+                    (Ok(_), Some(error)) => Err(error.clone()),
+                    (result, _) => result,
+                };
+                let _ = reply.send(response);
+            }
+            Some(TransactionTerminal::Rollback { reply, result }) => {
+                let response = match (result, cleanup_error.as_ref()) {
+                    (Ok(_), Some(error)) => Err(error.clone()),
+                    (result, _) => result,
+                };
+                let _ = reply.send(response);
+            }
+            None => {}
+        }
+        cleanup_error.map_or(Ok(()), Err)
     }
 }
 
@@ -1152,6 +1404,7 @@ fn execute_request(
         repeated_authority,
         crate::connection::authorize_writer,
         true,
+        None,
         Some(Arc::clone(&insert_tracker)),
         || match request {
             MigrationSqlRequest::Validate(statement) => connection
@@ -1238,6 +1491,59 @@ fn execute_statement(
     })
 }
 
+fn attach_database(
+    connection: &Connection,
+    attachment: &MigrationSqlAttachment,
+    pinned_transaction: bool,
+    shutdown_requested: Option<Arc<AtomicBool>>,
+    execution_deadline: Option<Instant>,
+) -> Result<(), MigrationSqlError> {
+    let sql = format!("ATTACH DATABASE ?1 AS \"{}\"", attachment.database_name());
+    let statement = MigrationSqlStatement::new(
+        sql,
+        vec![MigrationSqlValue::Text(attachment.filename().to_owned())],
+    )?;
+    with_migration_guard(
+        connection,
+        pinned_transaction,
+        shutdown_requested,
+        execution_deadline,
+        true,
+        None,
+        crate::connection::authorize_writer,
+        true,
+        Some(AuthorizedDatabaseOperation::Attach),
+        None,
+        || execute_statement(connection, statement).map(|_| ()),
+    )
+}
+
+fn detach_database(
+    connection: &Connection,
+    database_name: &str,
+    shutdown_requested: Option<Arc<AtomicBool>>,
+) -> Result<(), MigrationSqlError> {
+    if !valid_database_name(database_name) {
+        return Err(MigrationSqlError::InvalidAttachment);
+    }
+    let sql = format!("DETACH DATABASE \"{database_name}\"");
+    with_migration_guard(
+        connection,
+        false,
+        shutdown_requested,
+        None,
+        true,
+        None,
+        crate::connection::authorize_writer,
+        true,
+        Some(AuthorizedDatabaseOperation::Detach(
+            database_name.to_owned(),
+        )),
+        None,
+        || execute_batch(connection, &sql).map(|_| ()),
+    )
+}
+
 fn execute_batch(
     connection: &Connection,
     sql: &str,
@@ -1262,6 +1568,7 @@ fn with_migration_guard<T, F>(
     repeated_authority: Option<(Arc<dyn MigrationSqlWriteAuthority>, MigrationSqlWriteIntent)>,
     canonical_authorizer: for<'a> fn(rusqlite::hooks::AuthContext<'a>) -> Authorization,
     migration_writer: bool,
+    database_operation: Option<AuthorizedDatabaseOperation>,
     insert_tracker: Option<Arc<InsertTracker>>,
     operation: F,
 ) -> Result<T, MigrationSqlError>
@@ -1271,6 +1578,7 @@ where
     let denied = Arc::new(AtomicBool::new(false));
     let hook_denied = Arc::clone(&denied);
     let authorizer_tracker = insert_tracker.clone();
+    let authorized_database_operation = database_operation.clone();
     connection
         .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
             if context.accessor.is_none()
@@ -1291,7 +1599,7 @@ where
                 hook_denied.store(true, Ordering::Release);
                 Authorization::Deny
             } else if migration_writer {
-                authorize_migration_writer(context)
+                authorize_migration_writer(context, authorized_database_operation.as_ref())
             } else {
                 canonical_authorizer(context)
             }
@@ -1402,9 +1710,48 @@ where
 /// Temporary **triggers and views** stay denied. A temp trigger can fire on a
 /// durable table and mutate it outside the invariant trigger contract, which
 /// is exactly the authority this channel must not hand out; temp views have no
-/// caller. `ATTACH`/`DETACH`, `load_extension`, unrecognized actions, and
-/// non-allowlisted pragmas remain denied unconditionally.
-fn authorize_migration_writer(context: rusqlite::hooks::AuthContext<'_>) -> Authorization {
+/// caller. `ATTACH`/`DETACH` are allowed only while the writer actor runs its
+/// fixed attachment lifecycle operations; caller-provided SQL cannot enable
+/// them. `load_extension`, unrecognized actions, and non-allowlisted pragmas
+/// remain denied unconditionally.
+fn authorize_migration_writer(
+    context: rusqlite::hooks::AuthContext<'_>,
+    database_operation: Option<&AuthorizedDatabaseOperation>,
+) -> Authorization {
+    match context.action {
+        AuthAction::Attach { .. }
+            if matches!(
+                database_operation,
+                Some(AuthorizedDatabaseOperation::Attach)
+            ) =>
+        {
+            return Authorization::Allow;
+        }
+        // SQLite supplies a null authorizer filename when ATTACH binds its
+        // filename parameter. rusqlite preserves that action as Unknown.
+        AuthAction::Unknown {
+            code,
+            arg1: None,
+            arg2: None,
+        } if code == rusqlite::ffi::SQLITE_ATTACH
+            && matches!(
+                database_operation,
+                Some(AuthorizedDatabaseOperation::Attach)
+            ) =>
+        {
+            return Authorization::Allow;
+        }
+        AuthAction::Detach { database_name }
+            if matches!(
+                database_operation,
+                Some(AuthorizedDatabaseOperation::Detach(expected))
+                    if database_name.eq_ignore_ascii_case(expected)
+            ) =>
+        {
+            return Authorization::Allow;
+        }
+        _ => {}
+    }
     if matches!(
         context.action,
         AuthAction::Attach { .. }
@@ -1513,6 +1860,7 @@ pub(crate) fn execute_query(
         None,
         crate::connection::authorize_reader,
         false,
+        None,
         None,
         || execute_query_unchecked(connection, request),
     )
@@ -2388,6 +2736,76 @@ mod tests {
     }
 
     #[test]
+    fn transaction_attachment_is_exact_and_auto_detached() {
+        let fixture = fixture('a', 'a');
+        let source_path = fixture._directory.path().join("source.sqlite3");
+        rusqlite::Connection::open(&source_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE source_rows(value INTEGER NOT NULL);
+                 INSERT INTO source_rows VALUES (7);",
+            )
+            .unwrap();
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+        let attachment =
+            || MigrationSqlAttachment::new(source_path.to_string_lossy(), "source_input").unwrap();
+
+        let transaction = channel.begin_immediate().unwrap();
+        transaction.attach_database(attachment()).unwrap();
+        let rows = transaction
+            .query(statement(
+                "SELECT value FROM source_input.source_rows",
+                vec![],
+            ))
+            .unwrap();
+        assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(7)]);
+        transaction.commit().unwrap();
+
+        let transaction = channel.begin_immediate().unwrap();
+        transaction
+            .attach_database(attachment())
+            .expect("commit must detach the prior exact input");
+        transaction.rollback().unwrap();
+
+        let transaction = channel.begin_immediate().unwrap();
+        transaction
+            .attach_database(attachment())
+            .expect("rollback must detach the prior exact input");
+        drop(transaction);
+
+        let transaction = channel.begin_immediate().unwrap();
+        transaction
+            .attach_database(attachment())
+            .expect("dropping a transaction must detach the prior exact input");
+        transaction.rollback().unwrap();
+    }
+
+    #[test]
+    fn caller_sql_cannot_attach_database() {
+        let fixture = fixture('a', 'a');
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+
+        channel
+            .execute(statement(
+                "ATTACH DATABASE ?1 AS caller_input",
+                vec![MigrationSqlValue::Text(":memory:".to_owned())],
+            ))
+            .unwrap_err();
+        let databases = channel
+            .query(
+                statement("PRAGMA database_list", vec![]),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert!(databases.rows.iter().all(|row| {
+            !matches!(
+                row.values.get(1),
+                Some(MigrationSqlValue::Text(name)) if name == "caller_input"
+            )
+        }));
+    }
+
+    #[test]
     fn immediate_transaction_rollback_reports_after_rollback_and_discards_rows() {
         let fixture = fixture('a', 'a');
         let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -2705,6 +3123,7 @@ mod tests {
             crate::connection::authorize_writer,
             true,
             None,
+            None,
             || {
                 connection
                     .execute_batch("DROP TABLE protected")
@@ -2736,6 +3155,7 @@ mod tests {
                 None,
                 crate::connection::authorize_writer,
                 true,
+                None,
                 None,
                 || panic!("migration operation panic"),
             );

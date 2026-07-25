@@ -313,9 +313,8 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     )
     .await
     .unwrap();
-    let merged = target.database().writer_connection().unwrap();
     sqlite::verify_projection_plan_for_test(
-        &merged,
+        target.database(),
         &source_path,
         &target_input_path,
         "proj_source",
@@ -348,7 +347,7 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     .await
     .unwrap();
     sqlite::verify_projection_plan_for_test(
-        &merged,
+        target.database(),
         &source_path,
         &target_input_path,
         "proj_source",
@@ -371,7 +370,6 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     assert_message_text(target.database(), remapped_message_id, "newer source body").await;
     assert_no_orphaned_projection_provenance(target.database()).await;
 
-    drop(merged);
     let rebuilt = target
         .database()
         .observation_store()

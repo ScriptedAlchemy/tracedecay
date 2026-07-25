@@ -5,6 +5,7 @@ use crate::db::engine::Executor;
 use super::{
     SessionMergeOffsets, attach_snapshot_as, build_consolidation_message_map, db_error, db_message,
     mapped_parent_metadata, mapped_turn_message_id, observation, projection, query_i64,
+    table_exists,
 };
 use crate::errors::Result;
 
@@ -32,9 +33,13 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
         )
     })?;
     let conn = conn.connection();
-    conn.execute_batch("PRAGMA temp_store=FILE; PRAGMA cache_size=-32768;")
-        .await
-        .map_err(|error| db_error("verify_consolidation", error))?;
+    conn.execute_batch(
+        "PRAGMA query_only=OFF;
+         PRAGMA temp_store=FILE;
+         PRAGMA cache_size=-32768;",
+    )
+    .await
+    .map_err(|error| db_error("verify_consolidation", error))?;
     let source = input_snapshots
         .get(source)
         .map_err(|error| db_error("verify_consolidation", error))?;
@@ -66,7 +71,15 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
 }
 
 async fn verify_attached_tables(conn: &impl Executor, offsets: &SessionMergeOffsets) -> Result<()> {
-    for spec in verification_specs(offsets) {
+    let target_has_session_backfill_meta =
+        table_exists(conn, "target_input", "session_backfill_meta").await?;
+    let target_has_dashboard_token_counts =
+        table_exists(conn, "target_input", "dashboard_token_counts").await?;
+    for spec in verification_specs(
+        offsets,
+        target_has_session_backfill_meta,
+        target_has_dashboard_token_counts,
+    ) {
         verify_table(conn, &spec).await?;
     }
     observation::verify_observation_union(conn, "target_input", "source_input").await?;
@@ -145,7 +158,11 @@ async fn verify_table(conn: &impl Executor, spec: &TableVerification) -> Result<
     Ok(())
 }
 
-fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
+fn verification_specs(
+    offsets: &SessionMergeOffsets,
+    target_has_session_backfill_meta: bool,
+    target_has_dashboard_token_counts: bool,
+) -> Vec<TableVerification> {
     let turn_message_id = mapped_turn_message_id("s");
     let session_metadata = mapped_parent_metadata("s", false);
     let raw_metadata = mapped_parent_metadata("s", true);
@@ -419,7 +436,18 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
         ),
         commit_sessions(offsets.span),
         max_meta("git correlation metadata", "git_correlation_meta"),
-        max_meta("session backfill metadata", "session_backfill_meta"),
+    ]);
+    specs.push(if target_has_session_backfill_meta {
+        max_meta("session backfill metadata", "session_backfill_meta")
+    } else {
+        custom(
+            "session backfill metadata",
+            "session_backfill_meta",
+            "key, value, updated_at",
+            "SELECT key, value, updated_at FROM source_input.session_backfill_meta",
+        )
+    });
+    specs.push(if target_has_dashboard_token_counts {
         custom(
             "dashboard token count",
             "dashboard_token_counts",
@@ -437,8 +465,19 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
                  WHERE t.store=s.store AND t.provider=s.provider
                    AND t.message_id=s.message_id
              )",
-        ),
-    ]);
+        )
+    } else {
+        custom(
+            "dashboard token count",
+            "dashboard_token_counts",
+            "store, provider, message_id, text_len, encoder, token_count, computed_at",
+            "SELECT s.store, s.provider, COALESCE(m.mapped_id, s.message_id),
+                    s.text_len, s.encoder, s.token_count, s.computed_at
+             FROM source_input.dashboard_token_counts s
+             LEFT JOIN consolidation_message_map m
+               ON m.provider=s.provider AND m.original_id=s.message_id",
+        )
+    });
     specs
 }
 
