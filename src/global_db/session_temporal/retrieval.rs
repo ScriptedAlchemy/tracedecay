@@ -52,6 +52,12 @@ fn observation_matches_filter(
     }
     let observation: DurableObservationV1 =
         serde_json::from_str(encoded).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+    if let Some(source) = filter.source.as_deref()
+        && observation.source().provider().as_str() != source
+        && observation.source().source_key().as_str() != source
+    {
+        return Ok(false);
+    }
     let envelope: CanonicalObservationEnvelopeV1 =
         serde_json::from_value(observation.payload().clone())
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
@@ -130,6 +136,17 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         candidate: &RankingCandidate,
         filter: &TemporalCandidateFilterV1,
     ) -> Result<bool, TemporalPortError> {
+        if candidate.channel == CandidateChannel::Summary {
+            if !filter.include_summaries
+                || !filter.roles.is_empty()
+                || filter.message_type != TemporalMessageTypeFilterV1::All
+                || filter.start_time.is_some()
+                || filter.end_time.is_some()
+                || filter.goals
+            {
+                return Ok(false);
+            }
+        }
         if filter.is_empty() {
             return Ok(true);
         }
@@ -150,6 +167,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             return Ok(false);
         }
         if !filter.goals
+            && filter.source.is_none()
             && filter.roles.is_empty()
             && filter.message_type == TemporalMessageTypeFilterV1::All
             && filter.start_time.is_none()

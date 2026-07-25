@@ -205,7 +205,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 "include_summaries": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Canonical compatibility retrieval currently supports raw occurrences only. true returns a typed unsupported_filter response."
+                    "description": "Include eligible canonical summary nodes alongside raw occurrences. Current/as-of/evolution supersession and source-horizon rules are applied before ranking."
                 },
                 "sort": {
                     "type": "string",
@@ -215,7 +215,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Optional source/platform filter from raw-message metadata."
+                    "description": "Optional canonical observation source id or provider filter. Summary nodes match when an eligible retained source matches."
                 },
                 "role": {
                     "type": "string",
