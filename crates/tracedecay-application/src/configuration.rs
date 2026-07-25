@@ -153,10 +153,11 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_audit",
 ];
 
-const CONFIGURATION_SURFACES: [BindingSurface; 3] = [
+const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
+    BindingSurface::Dashboard,
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -398,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_surface_exposes_only_pre_dashboard_transports() {
+    fn configuration_surface_exposes_the_pr14_dashboard_transport() {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
         let surfaces = contribution
             .bindings()
@@ -412,13 +413,8 @@ mod tests {
                 BindingSurface::Cli,
                 BindingSurface::Mcp,
                 BindingSurface::Http,
+                BindingSurface::Dashboard,
             ])
-        );
-        assert!(
-            contribution
-                .bindings()
-                .iter()
-                .all(|binding| binding.surface() != BindingSurface::Dashboard)
         );
     }
 
