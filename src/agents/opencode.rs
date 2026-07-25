@@ -302,9 +302,7 @@ fn opencode_plugin_path(home: &Path) -> std::path::PathBuf {
 /// installer, so any rendering drift between the two writers fails installs
 /// with `ArtifactContentMismatch` — and, before the convergent rollback rules,
 /// wedged the shared component-set journal.
-pub(crate) fn rendered_plugin_files(
-    tracedecay_bin: &str,
-) -> Result<Vec<(&'static str, String)>> {
+pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     let encoded = serde_json::to_string(tracedecay_bin)?;
     Ok(vec![(
         OPENCODE_PLUGIN_RELATIVE,

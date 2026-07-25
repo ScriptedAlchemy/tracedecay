@@ -736,7 +736,8 @@ mod tests {
         let running = std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let installed = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let installed =
+            super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         assert_eq!(assets.len(), 1);
         let body = String::from_utf8(assets[0].1.clone()).unwrap();
         assert!(
