@@ -585,25 +585,38 @@ fn feedback_identity_evidence(
 
 fn advisory_feedback_finding(
     read: &AdvisoryFeedbackFindingReadV1,
+    summary: &AdvisoryFeedbackSummaryReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let count_coverage = feedback_counts_coverage(
         read.total_findings,
         read.returned_findings,
         read.omitted_findings,
     );
+    let providers_complete = !summary.provider_states.is_empty()
+        && summary
+            .provider_states
+            .iter()
+            .all(|state| *state == ProviderEvaluationStateV1::SupportedCompletedComplete);
     let coverage_complete = read.generation_current
         && count_coverage == DoctorCoverageCompletenessV1::Complete
-        && read.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete;
-    let completeness = if count_coverage == DoctorCoverageCompletenessV1::Unknown {
+        && providers_complete;
+    let completeness = if count_coverage == DoctorCoverageCompletenessV1::Unknown
+        || summary.provider_states.is_empty()
+    {
         DoctorCoverageCompletenessV1::Unknown
     } else if coverage_complete {
         DoctorCoverageCompletenessV1::Complete
     } else {
         DoctorCoverageCompletenessV1::Partial
     };
-    let state = if !read.generation_current {
+    let state = if !read.generation_current
+        || summary.termination == FeedbackCycleTerminationV1::StaleReplanRequired
+        || summary
+            .provider_states
+            .contains(&ProviderEvaluationStateV1::Stale)
+    {
         DoctorEvidenceStateV1::Stale
-    } else if count_coverage == DoctorCoverageCompletenessV1::Unknown {
+    } else if completeness == DoctorCoverageCompletenessV1::Unknown {
         DoctorEvidenceStateV1::Unknown
     } else {
         match read.provider_state {
@@ -613,9 +626,12 @@ fn advisory_feedback_finding(
                     FeedbackFindingLifecycleV1::Resolved
                         | FeedbackFindingLifecycleV1::Cleared
                         | FeedbackFindingLifecycleV1::Superseded
-                ) && coverage_complete
-                {
-                    DoctorEvidenceStateV1::HealthyCompleteCoverage
+                ) {
+                    if coverage_complete {
+                        DoctorEvidenceStateV1::HealthyCompleteCoverage
+                    } else {
+                        DoctorEvidenceStateV1::Partial
+                    }
                 } else {
                     DoctorEvidenceStateV1::Degraded
                 }
@@ -771,6 +787,7 @@ fn advisory_feedback_observation_is_consistent(
                 && finding.cycle_id == summary.cycle_id
                 && finding.scope == summary.scope
                 && finding.generation_id == summary.generation_id
+                && finding.generation_current == summary.generation_current
                 && finding.total_findings == summary.total_findings
                 && finding.returned_findings == summary.returned_findings
                 && finding.omitted_findings == summary.omitted_findings
@@ -793,7 +810,10 @@ pub fn advisory_feedback_findings(
             if findings.is_empty() {
                 Ok(vec![advisory_feedback_summary_finding(summary)?])
             } else {
-                findings.iter().map(advisory_feedback_finding).collect()
+                findings
+                    .iter()
+                    .map(|finding| advisory_feedback_finding(finding, summary))
+                    .collect()
             }
         }
         AdvisoryFeedbackReadV1::Absent => Ok(vec![unobservable_finding(
