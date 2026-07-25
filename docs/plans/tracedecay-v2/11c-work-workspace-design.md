@@ -80,6 +80,17 @@ reduced-motion static path that produces identical final order.
 - Delegation trees show unattributed work as hollow (the executor the store
   cannot name is not guessed).
 
+## Reference images
+
+The grammars this doc inherits are visual; read them as pictures, not prose.
+The authoritative sheet per grammar is indexed in
+[11b — Visual artifact index](11b-structure-visualization.md#visual-artifact-index-reference-images):
+measured columns → the shipped Brain baselines (`dashboard/audit-baselines/`),
+strata → the transit sheet, weave → the TRACE prototype + the PR-421 weave,
+disagreement → the disagreement-field sheet, cortex aggregation → the CORTEX
+sheet, zoom-as-position → the LENS sheet. A PR17 implementer should open the
+sheet beside this doc before writing any layout code.
+
 ## Dependencies and sequencing
 
 1. Plan 24 task/plan stores + executor semantics (owner: Plan 24) — blocking.
