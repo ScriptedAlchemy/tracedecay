@@ -16,18 +16,7 @@ use tracedecay_domain::{
 use tracedecay_policy::analyzer::{
     AnalyzerAdmissionEvaluatorV1, AnalyzerAdmissionInputV1, AnalyzerAdmissionSnapshotV1,
 };
-use tracedecay_policy::authorization::{
-    PolicyIdentifierV1, SourceAuthorizationDecisionV1, SourceAuthorizationEvaluator,
-    SourceAuthorizationEvaluatorV1, SourceAuthorizationInputV1, SourceOwnerV1,
-};
-use tracedecay_policy::configuration::{
-    ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluator,
-    ConfigurationMutationPolicyEvaluatorV1, ConfigurationMutationRecheckDispositionV1,
-    ConfigurationMutationRecheckInputV1,
-};
-use tracedecay_policy::git::{
-    GitEffectClassificationInputV1, GitEffectClassifier, GitEffectClassifierV1, GitEffectDecisionV1,
-};
+use tracedecay_policy::authorization::PolicyIdentifierV1;
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRouteCandidateV1,
     CapabilityRoutingCancellationV1, CapabilityRoutingDecisionV1, CapabilityRoutingEvaluator,
@@ -56,23 +45,8 @@ const POLICY_ROUTING_CATALOG_REVISION: u64 = 1;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyConsumerV1 {
-    CapabilityRouting,
     AnalyzerAdmission,
-    SourceAuthorization,
-    ConfigurationPolicy,
-    HintRouting,
-    RetrievalRouting,
     LocalLiveCorrelation,
-    DiagnosticsCuration,
-    MemoryRouting,
-    ConflictRouting,
-    ExperimentRouting,
-}
-
-impl PolicyConsumerV1 {
-    const fn uses_capability_routing(self) -> bool {
-        matches!(self, Self::CapabilityRouting | Self::RetrievalRouting)
-    }
 }
 
 /// Explicit relation between local/session and live-Git evidence.
@@ -257,15 +231,6 @@ pub struct PolicyEvaluatorCompositionV1 {
     catalog_digest: ManifestDigest,
     routing: CapabilityRoutingEvaluatorV1,
     analyzer: AnalyzerAdmissionEvaluatorV1,
-    source_authorization: SourceAuthorizationEvaluatorV1,
-    configuration: ConfigurationMutationPolicyEvaluatorV1,
-    git: GitEffectClassifierV1,
-    hint: HintPolicyEvaluatorV1,
-    correlation: CorrelationPolicyEvaluatorV1,
-    diagnostics_curation: DiagnosticsCurationPolicyEvaluatorV1,
-    memory_proposal: MemoryProposalPolicyEvaluatorV1,
-    conflict_arbitration: ConflictArbitrationPolicyEvaluatorV1,
-    experiment_routing: ExperimentRoutingPolicyEvaluatorV1,
 }
 
 impl PolicyEvaluatorCompositionV1 {
@@ -326,15 +291,6 @@ impl PolicyEvaluatorCompositionV1 {
             catalog_digest,
             routing: CapabilityRoutingEvaluatorV1::default(),
             analyzer: AnalyzerAdmissionEvaluatorV1::default(),
-            source_authorization: SourceAuthorizationEvaluatorV1::default(),
-            configuration: ConfigurationMutationPolicyEvaluatorV1,
-            git: GitEffectClassifierV1::default(),
-            hint: HintPolicyEvaluatorV1::default(),
-            correlation: CorrelationPolicyEvaluatorV1::default(),
-            diagnostics_curation: DiagnosticsCurationPolicyEvaluatorV1::default(),
-            memory_proposal: MemoryProposalPolicyEvaluatorV1::default(),
-            conflict_arbitration: ConflictArbitrationPolicyEvaluatorV1::default(),
-            experiment_routing: ExperimentRoutingPolicyEvaluatorV1::default(),
         })
     }
 
@@ -408,16 +364,20 @@ impl PolicyEvaluatorCompositionV1 {
         })
     }
 
-    pub fn route(
+    pub fn route_local_live(
         &self,
-        consumer: PolicyConsumerV1,
         context: &PolicyEvaluationContextV1,
         request: &CapabilityRoutingRequestV1,
-        evidence_horizon: Option<PolicyEvidenceHorizonV1>,
+        evidence_horizon: PolicyEvidenceHorizonV1,
     ) -> Result<PolicyEvaluationV1<CapabilityRoutingDecisionV1>, ApplicationContractError> {
-        if !consumer.uses_capability_routing() || evidence_horizon.is_some() {
+        let state = evidence_horizon.routing_state();
+        if request
+            .candidates
+            .iter()
+            .any(|candidate| candidate.truth_source_state != state)
+        {
             return Err(ApplicationContractError::Inconsistent {
-                field: "policy routing consumer",
+                field: "local/live policy routing state",
             });
         }
         context.validate_common(
@@ -427,27 +387,18 @@ impl PolicyEvaluatorCompositionV1 {
         )?;
         self.validate_route_request(context, request)?;
         Ok(PolicyEvaluationV1 {
-            consumer,
+            consumer: PolicyConsumerV1::LocalLiveCorrelation,
             context: context.clone(),
-            evidence_horizon,
+            evidence_horizon: Some(evidence_horizon),
             decision: self.routing.evaluate(request),
         })
     }
 
     pub fn admit_analyzer(
         &self,
-        consumer: PolicyConsumerV1,
         context: &PolicyEvaluationContextV1,
         input: &AnalyzerAdmissionInputV1,
     ) -> Result<PolicyEvaluationV1<AnalyzerAdmissionSnapshotV1>, ApplicationContractError> {
-        if !matches!(
-            consumer,
-            PolicyConsumerV1::AnalyzerAdmission | PolicyConsumerV1::DiagnosticsCuration
-        ) {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "analyzer policy consumer",
-            });
-        }
         context.validate_common(
             input.policy_revision,
             &input.policy_digest,
@@ -459,199 +410,10 @@ impl PolicyEvaluatorCompositionV1 {
             });
         }
         Ok(PolicyEvaluationV1 {
-            consumer,
+            consumer: PolicyConsumerV1::AnalyzerAdmission,
             context: context.clone(),
             evidence_horizon: None,
             decision: self.analyzer.snapshot(input),
-        })
-    }
-
-    pub fn authorize_source(
-        &self,
-        consumer: PolicyConsumerV1,
-        context: &PolicyEvaluationContextV1,
-        input: &SourceAuthorizationInputV1,
-    ) -> Result<PolicyEvaluationV1<SourceAuthorizationDecisionV1>, ApplicationContractError> {
-        if !matches!(
-            consumer,
-            PolicyConsumerV1::SourceAuthorization
-                | PolicyConsumerV1::HintRouting
-                | PolicyConsumerV1::RetrievalRouting
-                | PolicyConsumerV1::MemoryRouting
-        ) {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source authorization policy consumer",
-            });
-        }
-        context.validate_common(
-            input.policy_revision,
-            &input.policy_digest,
-            &input.configuration_digest,
-        )?;
-        if context.request.admission_at(input.evaluated_at) != RequestAdmission::Admitted
-            || input.requester != *context.request.actor()
-            || input.resolved_owner_scope.owner
-                != SourceOwnerV1::Project(context.scope().project_id.clone())
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source authorization application scope",
-            });
-        }
-        Ok(PolicyEvaluationV1 {
-            consumer,
-            context: context.clone(),
-            evidence_horizon: None,
-            decision: self.source_authorization.evaluate(input),
-        })
-    }
-
-    pub fn recheck_configuration(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        current: &ConfigurationMutationGrantSnapshotV1,
-        input: ConfigurationMutationRecheckInputV1<'_>,
-    ) -> Result<
-        PolicyEvaluationV1<ConfigurationMutationRecheckDispositionV1>,
-        ApplicationContractError,
-    > {
-        context.validate()?;
-        if context.request.admission_at(input.evaluated_at) != RequestAdmission::Admitted
-            || current.actor_id != *context.request.actor()
-            || current.scope_digest != context.scope().scope_digest
-            || current.expected_configuration_revision != context.configuration_revision
-            || current.policy_epoch != context.policy_revision
-            || current.policy_digest.as_str() != context.policy_digest.as_str()
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "configuration policy application scope",
-            });
-        }
-        Ok(PolicyEvaluationV1 {
-            consumer: PolicyConsumerV1::ConfigurationPolicy,
-            context: context.clone(),
-            evidence_horizon: None,
-            decision: self.configuration.evaluate(current, input),
-        })
-    }
-
-    pub fn classify_git_conflict(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        input: &GitEffectClassificationInputV1,
-    ) -> Result<PolicyEvaluationV1<GitEffectDecisionV1>, ApplicationContractError> {
-        context.validate_common(
-            input.policy_revision,
-            &input.policy_digest,
-            &input.configuration_digest,
-        )?;
-        if context.request.admission_at(input.evaluated_at) != RequestAdmission::Admitted {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "Git policy request authority",
-            });
-        }
-        Ok(PolicyEvaluationV1 {
-            consumer: PolicyConsumerV1::ConflictRouting,
-            context: context.clone(),
-            evidence_horizon: None,
-            decision: self.git.evaluate(input),
-        })
-    }
-
-    pub fn evaluate_hint(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        input: &RetainedPolicyInputV1,
-    ) -> Result<PolicyEvaluationV1<RetainedPolicyDecisionV1>, ApplicationContractError> {
-        self.evaluate_retained(PolicyConsumerV1::HintRouting, &self.hint, context, input)
-    }
-
-    pub fn correlate_local_live(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        input: &RetainedPolicyInputV1,
-    ) -> Result<PolicyEvaluationV1<RetainedPolicyDecisionV1>, ApplicationContractError> {
-        self.evaluate_retained(
-            PolicyConsumerV1::LocalLiveCorrelation,
-            &self.correlation,
-            context,
-            input,
-        )
-    }
-
-    pub fn curate_diagnostics(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        input: &RetainedPolicyInputV1,
-    ) -> Result<PolicyEvaluationV1<RetainedPolicyDecisionV1>, ApplicationContractError> {
-        self.evaluate_retained(
-            PolicyConsumerV1::DiagnosticsCuration,
-            &self.diagnostics_curation,
-            context,
-            input,
-        )
-    }
-
-    pub fn propose_memory(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        input: &RetainedPolicyInputV1,
-    ) -> Result<PolicyEvaluationV1<RetainedPolicyDecisionV1>, ApplicationContractError> {
-        self.evaluate_retained(
-            PolicyConsumerV1::MemoryRouting,
-            &self.memory_proposal,
-            context,
-            input,
-        )
-    }
-
-    pub fn arbitrate_conflict(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        input: &RetainedPolicyInputV1,
-    ) -> Result<PolicyEvaluationV1<RetainedPolicyDecisionV1>, ApplicationContractError> {
-        self.evaluate_retained(
-            PolicyConsumerV1::ConflictRouting,
-            &self.conflict_arbitration,
-            context,
-            input,
-        )
-    }
-
-    pub fn route_experiment(
-        &self,
-        context: &PolicyEvaluationContextV1,
-        input: &RetainedPolicyInputV1,
-    ) -> Result<PolicyEvaluationV1<RetainedPolicyDecisionV1>, ApplicationContractError> {
-        self.evaluate_retained(
-            PolicyConsumerV1::ExperimentRouting,
-            &self.experiment_routing,
-            context,
-            input,
-        )
-    }
-
-    fn evaluate_retained(
-        &self,
-        consumer: PolicyConsumerV1,
-        evaluator: &impl RetainedPolicyEvaluator,
-        context: &PolicyEvaluationContextV1,
-        input: &RetainedPolicyInputV1,
-    ) -> Result<PolicyEvaluationV1<RetainedPolicyDecisionV1>, ApplicationContractError> {
-        context.validate_common(
-            input.policy_revision,
-            &input.policy_digest,
-            &input.configuration_digest,
-        )?;
-        if context.request.admission_at(input.evaluated_at) != RequestAdmission::Admitted {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "retained policy request authority",
-            });
-        }
-        Ok(PolicyEvaluationV1 {
-            consumer,
-            context: context.clone(),
-            evidence_horizon: None,
-            decision: evaluator.evaluate(input),
         })
     }
 
