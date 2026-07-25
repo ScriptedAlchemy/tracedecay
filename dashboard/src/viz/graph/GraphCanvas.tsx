@@ -12,6 +12,8 @@ import {
   settled,
 } from './activation.ts';
 import { kindColor } from './kindColor.ts';
+import { useReducedMotion } from '../trace/reducedMotion.ts';
+import { EvidencePattern } from '../../ui/EvidencePattern';
 import { cn } from '../../ui/cn';
 
 export interface GraphCanvasNode {
@@ -92,6 +94,13 @@ function palette(element: HTMLElement) {
     hot: token('--raw-graph-accent', '#5de7ff'),
     edge: token('--raw-graph-edge', '#375372'),
     label: token('--raw-graph-text', '#c4d4e8'),
+    /* A node label is a code symbol, so it belongs to the same mono face as
+     * every other symbol, path and measured value in the app — read from the
+     * token rather than named here, because a canvas that hard-codes its own
+     * family is a canvas that quietly stops matching the design system. Kept as
+     * a raw string: unlike the colors above it is not a color to normalize. */
+    labelFont:
+      style.getPropertyValue('--font-mono').trim() || 'ui-monospace, monospace',
     /** What a node fades INTO as its signal decays: the substrate itself. */
     substrate,
     dim: token('--raw-graph-dim', '#26374c'),
@@ -213,6 +222,17 @@ export function GraphCanvas({
   selectedIdRef.current = selectedId;
   const onSelectRef = useRef<((id: string | null) => void) | undefined>(onSelect);
   onSelectRef.current = onSelect;
+  // The app's persisted three-state motion control, not the bare OS query this
+  // used to read: pinning "Reduced" had no effect on the field, which is the one
+  // surface in the product where motion is actually the point. Held in a ref for
+  // the same reason selection is — the renderer costs a 200-iteration
+  // ForceAtlas2 layout to build, so a preference flip must reach the live render
+  // loop without tearing the field down and re-laying it out.
+  const { reduced } = useReducedMotion();
+  const reducedRef = useRef(reduced);
+  reducedRef.current = reduced;
+  /** Set by the mount effect; stops the loop and asserts the resting field. */
+  const settleRef = useRef<(() => void) | null>(null);
 
   // Selection is a static repaint, not an animation: recolour once and leave
   // the loop asleep.
@@ -550,7 +570,9 @@ export function GraphCanvas({
     let hovered: string | null = null;
     let lastFrame = 0;
     const field = fieldRef.current ?? new ActivationField();
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Read per call, never captured: the reader can change this while the field
+    // is on screen and every decision below must see the new answer.
+    const isReduced = () => reducedRef.current;
     const roomyDenseField = denseField && roominess >= 0.8;
 
     const renderer = new Sigma(graph, container, {
@@ -564,7 +586,7 @@ export function GraphCanvas({
             : 8,
       labelDensity: 1,
       labelGridCellSize: roomyDenseField ? 90 : 100,
-      labelFont: 'ui-monospace, monospace',
+      labelFont: colors.labelFont,
       labelSize: roomyDenseField ? 12 : 11,
       labelColor: { color: rgb(colors.label) },
       defaultEdgeColor: rgba(colors.edge, 0.9),
@@ -692,7 +714,10 @@ export function GraphCanvas({
       // fires one synaptic delay later (real caller/reference edges only).
       field.strike([node], 1);
       const neighbors = neighborsOf.get(node) ?? [];
-      if (reducedMotion) field.strike(neighbors, 0.55);
+      // Under reduced motion the synaptic delay collapses: the neighbourhood is
+      // lit in the same paint as the struck node, so the propagation is still
+      // fully legible as a state without anything travelling across the screen.
+      if (isReduced()) field.strike(neighbors, 0.55);
       else setTimeout(() => { field.strike(neighbors, 0.55); wake(); }, 140);
       wake();
     });
@@ -782,7 +807,7 @@ export function GraphCanvas({
         const heatTo = field.heatOf(strand.to);
         const travel = Math.max(heatFrom, heatTo);
         const pulseId = `${PULSE}${index}`;
-        if (travel > 0.18 && !reducedMotion) {
+        if (travel > 0.18 && !isReduced()) {
           const forward = heatFrom >= heatTo;
           const points = strand.points;
           const spans = points.length - 1;
@@ -829,16 +854,33 @@ export function GraphCanvas({
       }
       renderer.refresh();
       const keepGoing = warm || !focusSettled;
-      raf = keepGoing && !reducedMotion ? requestAnimationFrame(step) : 0;
+      raf = keepGoing && !isReduced() ? requestAnimationFrame(step) : 0;
       if (!keepGoing) lastFrame = 0;
     };
+    /** The no-motion composition: jump every eased quantity to its destination,
+     * remove the travelling light entirely, and paint once. Nothing here is
+     * "faster" — the intermediate frames do not exist. */
+    const settle = () => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      lastFrame = 0;
+      field.tick(performance.now());
+      hoverT = hoverTarget;
+      if (hoverTarget === 0) hovered = null;
+      // A pulse is pure travel, so under reduced motion it has no resting form
+      // to snap to; it is dropped rather than parked somewhere along its curve.
+      for (const node of [...graph.nodes()]) {
+        if (node.startsWith(PULSE)) graph.dropNode(node);
+      }
+      syncGlow();
+      renderer.refresh();
+    };
+    settleRef.current = settle;
     const wake = () => {
-      if (reducedMotion) {
-        field.tick(performance.now());
-        hoverT = hoverTarget;
-        if (hoverTarget === 0) hovered = null;
-        syncGlow();
-        renderer.refresh();
+      if (isReduced()) {
+        settle();
         return;
       }
       if (!raf) {
@@ -891,12 +933,21 @@ export function GraphCanvas({
 
     return () => {
       if (raf) cancelAnimationFrame(raf);
+      settleRef.current = null;
       unsubscribeField();
       themeObserver.disconnect();
       renderer.kill();
       sigmaRef.current = null;
     };
   }, [nodes, edges, extent]);
+
+  // Turning motion off has to take effect on the field the reader is looking at,
+  // not merely on the next one they open: a loop already running keeps running
+  // until something stops it. Turning it back on needs no counterpart — the next
+  // real event wakes the loop through `wake`.
+  useEffect(() => {
+    if (reduced) settleRef.current?.();
+  }, [reduced]);
 
   if (nodes.length === 0) {
     return (
@@ -911,10 +962,10 @@ export function GraphCanvas({
   // symbol list beside the canvas remains the accessible equivalent.
   if (!webglRef.current) {
     return (
-      <p className="p-6 text-center text-sm text-text-muted">
+      <GraphUnavailable>
         this browser has no WebGL context, so the {nodes.length.toLocaleString()}-symbol
         graph canvas cannot draw — the symbol list carries the same relations
-      </p>
+      </GraphUnavailable>
     );
   }
   // Scale tier guard (plan 11a graph tiers): this Sigma canvas owns graphs up
@@ -923,11 +974,11 @@ export function GraphCanvas({
   // tab pretending to cope.
   if (nodes.length > 5_000) {
     return (
-      <p className="p-6 text-center text-sm text-text-muted">
+      <GraphUnavailable>
         {nodes.length.toLocaleString()} symbols exceeds this renderer's tier —
         the GPU canvas (cosmos.gl adapter) owns brains this large; narrow the
         neighborhood to explore here
-      </p>
+      </GraphUnavailable>
     );
   }
   return (
@@ -937,11 +988,15 @@ export function GraphCanvas({
         style={fill ? undefined : { height }}
         className={cn(
           'relative overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60',
-          // The bezel screen ruling belongs to the chassis; the nebula field
-          // behind it belongs to the network. Together the canvas reads as a
-          // lit instrument screen rather than a picture pasted onto a panel.
-          'td-graph-field td-scanlines',
-          'shadow-[inset_0_1px_0_0_var(--raw-membrane-lift),0_18px_44px_-28px_var(--raw-depth)]',
+          // Three composed layers, none of which draws an entity: the nebula
+          // field belongs to the network, the grain denies it a perfectly even
+          // surface, and the bezel screen ruling belongs to the chassis.
+          // Together the canvas reads as a lit instrument screen rather than a
+          // picture pasted onto a panel.
+          'td-graph-field td-grain td-scanlines',
+          // The aperture's own depth, now a design-system token rather than an
+          // arbitrary value spelled out here.
+          'shadow-[var(--shadow-field)]',
           fill && 'min-h-0 flex-1',
           canvasClassName,
         )}
@@ -954,10 +1009,22 @@ export function GraphCanvas({
       <figcaption className="flex flex-col gap-1.5 text-2xs text-text-muted">
         <GraphEncodingKey encoding={encoding} />
         {unknownDegreeCount > 0 ? (
-          <p data-state="partial" className="text-3xs leading-relaxed text-text-muted">
-            Connectedness is absent for {unknownDegreeCount}{' '}
-            {unknownDegreeCount === 1 ? 'symbol' : 'symbols'}; each uses the
-            minimum marker, not zero.
+          // Provenance is carried by the shared evidence PATTERN axis, not by
+          // prose alone: the dashed `unknown` swatch says "this quantity was
+          // never measured" in the same visual language the rest of the app
+          // uses, and it survives monochrome and forced-colors. The sentence
+          // stays, because the pattern says which class of evidence this is and
+          // only the sentence says what was missing.
+          <p
+            data-state="partial"
+            className="flex flex-wrap items-center gap-x-2 gap-y-0.5 leading-relaxed text-text-muted"
+          >
+            <EvidencePattern quality="unknown" />
+            <span className="text-3xs">
+              Connectedness is absent for {unknownDegreeCount}{' '}
+              {unknownDegreeCount === 1 ? 'symbol' : 'symbols'}; each uses the
+              minimum marker, not zero.
+            </span>
           </p>
         ) : null}
         <div>
@@ -971,6 +1038,35 @@ export function GraphCanvas({
         </div>
       </figcaption>
     </figure>
+  );
+}
+
+/** A field that could NOT be drawn — no WebGL context, or a graph past this
+ * renderer's tier.
+ *
+ * Distinct from an empty field on purpose, and the distinction has to be visible
+ * rather than only readable: "nothing is here" and "this could not be rendered"
+ * are different claims, and a quiet line of muted prose reads as the first.
+ * Wearing the dashed `unknown` evidence pattern states in the app's own visual
+ * language that no measurement backs this region, so it can never be mistaken
+ * for a drawn graph that happens to be sparse. Deliberately NOT given the
+ * atmospheric graph field: the aperture treatment is what a rendered field
+ * looks like, and lending it to a failure is exactly the kind of beautiful
+ * smoothing-over that would make a failure look like data. */
+function GraphUnavailable({ children }: { children: ReactNode }) {
+  return (
+    <div
+      data-state="unavailable"
+      className="flex flex-col items-center gap-2 border-y border-dashed border-edge-strong bg-surface-1 p-6 text-center"
+    >
+      <span
+        aria-hidden
+        className="h-1 w-full max-w-40 opacity-70"
+        style={{ backgroundImage: 'var(--ev-unknown)' }}
+      />
+      <p className="text-sm text-text-secondary">{children}</p>
+      <EvidencePattern quality="unknown" />
+    </div>
   );
 }
 

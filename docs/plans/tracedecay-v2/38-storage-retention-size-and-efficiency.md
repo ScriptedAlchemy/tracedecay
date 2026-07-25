@@ -6,6 +6,15 @@ TraceDecay store. It is grounded in measured dogfood evidence from
 2026-07-23, when one owner profile reached **256 GB** and was reduced to
 ~75 GB purely by removing data the product should never have retained.
 
+## Status
+
+All seven product-contract sections are implemented. Commits `4444833b8` and
+`76895d201` additionally wire real storage-budget findings and preserve
+unreadable storage roles instead of converting them to clean zeros. This
+dashboard/API checkpoint is **implemented but unverified** because the Rust
+`dashboard_api_test` suite has not completed successfully; do not replan the
+behavior as absent and do not report it as verified.
+
 ## Measured failure classes (evidence, one dogfood profile)
 
 1. **Branch graph-DB copies, never collected — 40 GB in one project.**
@@ -65,15 +74,17 @@ TraceDecay store. It is grounded in measured dogfood evidence from
 
 ## Delivery
 
-- Doctor storage finding family lands with the PR14 Doctor slice (plan 09)
-  over the Plan 26 observability read models.
-- Branch lifecycle + registry orphan collection land with the storage
-  runtime work (S11 window) since both route through daemon-owned stores.
-- Session retention/offload extends the LCM GC follow-up cards already
-  staged in `sessions/lcm/schema.rs`.
+- The Doctor storage finding family is implemented through the PR14 Doctor
+  slice (Plan 09) over Plan 26 observability read models; route verification
+  remains pending as recorded above.
+- Branch lifecycle and registry orphan collection are implemented through
+  daemon-owned storage runtime work.
+- Session retention/offload and disposition-scoped evidence release are
+  implemented through the LCM/storage owners.
 - Direct tests only: seeded stores with stale branches/orphans/debris must
   produce the findings and the collections; retention windows must be
-  provable with ordinary tests. No locked gates, no receipts.
+  provable with ordinary tests. They create no locked gate or PR acceptance
+  receipt; required daemon/runtime receipts remain owned by their effects.
 
 ## Non-goals
 

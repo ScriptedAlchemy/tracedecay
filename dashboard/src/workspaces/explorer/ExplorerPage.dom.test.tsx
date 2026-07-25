@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ExplorerPage } from './ExplorerPage.tsx';
@@ -256,19 +256,186 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function unavailable(sourceId: 'code_graph' | 'sessions' | 'knowledge', code: string, message: string) {
+  const base = source(sourceId, [], 0);
+  return {
+    ...base,
+    outcome: 'unavailable',
+    completed_units: null,
+    total_units: null,
+    coverage: {
+      ...base.coverage,
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      denominator: null,
+    },
+    error_code: code,
+    message,
+    page: null,
+  };
+}
+
+describe('ExplorerPage no-falsified-UI invariant', () => {
+  it('never counts a source that did not answer in the result caption', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [
+            source('code_graph', [CODE_ROW], 1),
+            source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
+            unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
+          ],
+          'partial',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: /graph_search/ });
+
+    // Three rows arrived, but only two of the three memories answered. The
+    // caption must not present the result set as spanning all three.
+    expect(screen.queryByText(/across three memories/)).toBeNull();
+    expect(screen.getByText(/across 2 of 3 memories/)).toBeTruthy();
+  });
+
+  it('refuses a confirmed-absence claim when a source reports unknown coverage', async () => {
+    const knowledgeUnknownCoverage = {
+      ...source('knowledge', [], null),
+      coverage: {
+        ...source('knowledge', [], null).coverage,
+        completeness: 'unknown',
+        denominator: null,
+      },
+    };
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: {
+          ...plannerEnvelope(
+            [
+              source('code_graph', [], 0),
+              source('sessions', [], 0),
+              knowledgeUnknownCoverage,
+            ],
+            'completed',
+            'missing',
+          ),
+          // A coordinator that over-claims canonical finality while one of its
+          // own sources reports unknown coverage. The client carries the
+          // contradicting evidence in the same payload, so it must not print a
+          // global-absence claim on the strength of the scalar alone.
+          payload: {
+            ...plannerEnvelope(
+              [
+                source('code_graph', [], 0),
+                source('sessions', [], 0),
+                knowledgeUnknownCoverage,
+              ],
+              'completed',
+              'missing',
+            ).payload,
+            finality: 'complete',
+            state: 'completed',
+          },
+        },
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'missing');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText(/No rows loaded for/)).toBeTruthy();
+    expect(screen.queryByText(/No source matched/)).toBeNull();
+    expect(screen.queryByText(/completed with known coverage/)).toBeNull();
+  });
+
+  it('never renders a count for a source that did not answer', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [
+            source('code_graph', [CODE_ROW], 1),
+            source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
+            unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
+          ],
+          'partial',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: /graph_search/ });
+
+    const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
+    expect(knowledge.textContent).not.toMatch(/\b0\b/);
+    expect(knowledge.textContent).toMatch(/no count reported/);
+  });
+});
+
 describe('ExplorerPage', () => {
   it('keeps every definition term and description in a valid definition-list group', async () => {
     const { container } = renderExplorer(SEARCH_ROUTES);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+    // Drive to the inspector so the session-context and payload-provenance
+    // lists are mounted too: the axe `dlitem` / `definition-list` failures this
+    // locks down were reachable in every one of those states, so scanning only
+    // the browse state would let two thirds of them back in.
+    await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
+    expect(await screen.findByText('Session context')).toBeTruthy();
+    expect(screen.getByText('What each lane searches')).toBeTruthy();
 
-    expect(await screen.findByText('What each lane searches')).toBeTruthy();
-    const items = [...container.querySelectorAll('dl dt, dl dd')];
+    // Deliberately unscoped: a `dl dt` selector can only ever see terms that
+    // are already inside a list, which is precisely the defect it is supposed
+    // to detect. Every `dt`/`dd` in the tree has to be accounted for.
+    const items = [...container.querySelectorAll('dt, dd')];
     expect(items.length).toBeGreaterThan(0);
-    expect(
-      items.every((item) => {
-        const parent = item.parentElement;
-        return parent?.tagName === 'DL' || parent?.parentElement?.tagName === 'DL';
-      }),
-    ).toBe(true);
+    for (const item of items) {
+      const parent = item.parentElement;
+      const grouped =
+        parent?.tagName === 'DL' ||
+        (parent?.tagName === 'DIV' && parent.parentElement?.tagName === 'DL');
+      expect(grouped, `${item.tagName} outside a dl: ${item.outerHTML.slice(0, 120)}`).toBe(true);
+    }
+
+    // axe `definition-list`: a dl may directly contain only dt, dd, div,
+    // script and template.
+    const lists = [...container.querySelectorAll('dl')];
+    expect(lists.length).toBeGreaterThan(0);
+    for (const list of lists) {
+      for (const child of [...list.children]) {
+        expect(
+          ['DT', 'DD', 'DIV', 'SCRIPT', 'TEMPLATE'].includes(child.tagName),
+          `<dl> directly contains <${child.tagName.toLowerCase()}>`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('derives lane readout names from visible text rather than an aria-label', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+
+    const sessions = await screen.findByRole('button', {
+      name: /Sessions\s*2\s*loaded\s*of 2 matching rows reported/,
+    });
+    // An `aria-label` here would silently replace the computed name, letting
+    // the visible label drift out of the accessible name (WCAG 2.5.3). The
+    // readout has to say the same sentence to both readers.
+    expect(sessions.getAttribute('aria-label')).toBeNull();
+    expect(sessions.textContent).toContain('loaded of 2 matching rows reported');
   });
 
   it('renders every result family from the real graph, LCM, and memory shapes', async () => {
@@ -420,16 +587,20 @@ describe('ExplorerPage', () => {
     await user.keyboard('{Enter}');
     await user.click(await screen.findByRole('button', { name: /graph_search/ }));
 
-    expect(screen.getByText('Payload provenance')).toBeTruthy();
-    expect(screen.getAllByText('name').length).toBeGreaterThan(0);
-    expect(screen.getByText('file_path')).toBeTruthy();
-    expect(screen.getAllByText('degree').length).toBeGreaterThan(0);
-    expect(
-      screen.getByText(
-        (_content, element) =>
-          element?.tagName === 'P' &&
-          element.textContent?.includes('Position 1 in graph endpoint rows') === true,
-      ),
-    ).toBeTruthy();
+    // `name` and `degree` each appear twice on purpose: once as the label of
+    // the section that names the field a value was read from, and once as a key
+    // in the raw payload table. Asserting `getAllByText(...).length > 0` would
+    // pass on either one alone and on any number of accidental extras, so the
+    // payload keys are pinned inside the provenance region instead — one match
+    // each, in the region that is actually under test.
+    const provenance = screen.getByText('Payload provenance').closest('details');
+    expect(provenance).toBeTruthy();
+    const payload = within(provenance as HTMLElement);
+    expect(payload.getByText('name')).toBeTruthy();
+    expect(payload.getByText('file_path')).toBeTruthy();
+    expect(payload.getByText('degree')).toBeTruthy();
+    expect(payload.getByText('graph_search')).toBeTruthy();
+    expect(payload.getByText('7')).toBeTruthy();
+    expect(screen.getByText(/Position 1 in graph endpoint rows/)).toBeTruthy();
   });
 });

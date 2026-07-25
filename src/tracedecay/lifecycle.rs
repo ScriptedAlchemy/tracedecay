@@ -28,7 +28,7 @@ use super::locking::{
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
 impl TraceDecay {
-    fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
+    pub(super) fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
         let project_id =
             store_layout
                 .identity
@@ -391,7 +391,7 @@ impl TraceDecay {
         .await
     }
 
-    async fn registered_enrollment_roots(
+    pub(super) async fn registered_enrollment_roots(
         project_root: &Path,
         store_layout: &StoreLayout,
         project_id: &ProjectId,

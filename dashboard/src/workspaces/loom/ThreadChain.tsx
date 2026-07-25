@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { Legend, Meter, Panel } from '../../ui/instrument.tsx';
@@ -5,27 +6,46 @@ import { formatCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { formatDuration, formatMoment } from './tracks.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
-import { LoomChainPayloadSchema } from './contracts.ts';
+import {
+  LoomChainPayloadSchema,
+  type LoomBranchSpan,
+  type LoomCommit,
+  type LoomEditedFile,
+  type LoomSourceStatus,
+} from './contracts.ts';
 
 /**
  * The selected thread's chain: prompt → turns → tools.
  *
- * This is the "selecting a thread isolates its chain" half of the Loom, and it
- * is also where the plan's chain — prompt → tools → edits → commits — visibly
- * runs out of wire. The first two links are measured and drawn; the last two
- * are terminated with a named absence rather than trailing off.
+ * This is the "selecting a thread isolates its chain" half of the Loom:
+ * prompt → tools comes from session detail, then provider-qualified edits,
+ * commits and branch/worktree spans continue from the Loom temporal read.
+ * Delivery outcomes terminate in the shared route's typed dependency state.
  *
  * One further honesty point drives the whole layout: the LCM session endpoint
- * serves a `timestamp` on every message and it is null on every message of
- * every session on the real profile. So the chain is ordered by the store's
- * `ordinal` and presented as a SEQUENCE, never as a timeline — no elapsed
- * times, no gaps, no per-turn axis. A time-looking chain built on ordinals
- * would be the exact kind of decorative fiction this surface exists to avoid.
+ * may omit `timestamp`, so the chain is always ordered by the store's
+ * `ordinal`. It is presented as a sequence unless timestamps are actually
+ * present — no elapsed times or gaps are inferred from ordinal positions.
  */
-export function ThreadChain({ thread }: { thread: PlacedThread | null }) {
+export interface ThreadRelations {
+  commits: readonly LoomCommit[];
+  editedFiles: readonly LoomEditedFile[];
+  branchSpans: readonly LoomBranchSpan[];
+  commitStatus: LoomSourceStatus | null;
+  branchStatus: LoomSourceStatus | null;
+  deliveryStatus: LoomSourceStatus | null;
+}
+
+export function ThreadChain({
+  thread,
+  relations,
+}: {
+  thread: PlacedThread | null;
+  relations: ThreadRelations;
+}) {
   const chain = useLegacy(
     ['loom', 'chain', thread?.id ?? 'none'],
-    `/api/plugins/hermes-lcm/session/${encodeURIComponent(thread?.id ?? '')}?limit=200`,
+    `/api/plugins/hermes-lcm/session/${encodeURIComponent(thread?.sessionId ?? '')}?limit=200`,
     LoomChainPayloadSchema,
     { enabled: thread != null },
   );
@@ -42,14 +62,14 @@ export function ThreadChain({ thread }: { thread: PlacedThread | null }) {
   }
 
   return (
-    <Panel legend="Thread" footer={<ChainTerminus />}>
+    <Panel legend="Thread" footer={<ChainTerminus thread={thread} relations={relations} />}>
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1">
           <span className="text-xs font-medium leading-snug text-text-primary">
             {thread.label}
           </span>
           <span className="td-value truncate text-3xs text-text-muted">
-            {thread.id}
+            {thread.sessionId}
           </span>
         </div>
 
@@ -61,7 +81,7 @@ export function ThreadChain({ thread }: { thread: PlacedThread | null }) {
             value={
               thread.end != null
                 ? formatDuration(thread.end - thread.start)
-                : 'not served'
+                : 'unrecorded'
             }
             muted={thread.end == null}
           />
@@ -231,14 +251,136 @@ export function ThreadChain({ thread }: { thread: PlacedThread | null }) {
   );
 }
 
-/** Where the chain stops, and why. The plan's chain continues into edits and
- * commits; the wire does not, so the rail terminates explicitly instead of
- * simply ending and letting the reader assume there was nothing there. */
-function ChainTerminus() {
+/** Durable causal rows attached to the selected provider-qualified session.
+ * Missing edited-file metadata remains unknown; empty durable commit/span
+ * queries are true zero-findings. Delivery stays a named shared dependency. */
+function ChainTerminus({
+  thread,
+  relations,
+}: {
+  thread: PlacedThread;
+  relations: ThreadRelations;
+}) {
+  const {
+    commits,
+    editedFiles,
+    branchSpans,
+    commitStatus,
+    branchStatus,
+    deliveryStatus,
+  } = relations;
+  return (
+    <div className="flex flex-col gap-3">
+      <CausalGroup label="→ edited files">
+        {editedFiles.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {editedFiles.map((file) => (
+              <li key={`${file.path}:${file.change_type ?? ''}`} className="flex gap-2">
+                <span className="min-w-0 flex-1 truncate text-3xs text-text-secondary">
+                  {file.path}
+                </span>
+                {file.hunks != null ? (
+                  <span className="td-value shrink-0 text-3xs text-text-muted">
+                    {file.hunks} {file.hunks === 1 ? 'hunk' : 'hunks'}
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <StateChip
+            kind={thread.editedFilesRecorded ? 'complete_zero_findings' : 'unknown'}
+            detail={
+              thread.editedFilesRecorded
+                ? 'recorded edited-files rollup is empty'
+                : 'this session has no recorded edited-files rollup'
+            }
+          />
+        )}
+      </CausalGroup>
+
+      <CausalGroup label="→ commits">
+        {commits.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {commits.map((commit) => (
+              <li key={commit.commit_sha} className="flex flex-col">
+                <span className="td-value truncate text-3xs text-text-primary">
+                  {commit.commit_sha}
+                </span>
+                <span className="text-3xs text-text-muted">
+                  {commit.relation} · {commit.evidence} · confidence {commit.confidence}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <StateChip
+            kind={commitStatus?.state === 'ready' ? 'complete_zero_findings' : 'unknown'}
+            detail={
+              commitStatus?.state === 'ready'
+                ? 'commit_sessions has no attribution for this session'
+                : (commitStatus?.reason ??
+                  commitStatus?.coverage.reason ??
+                  'commit attribution coverage is unavailable')
+            }
+          />
+        )}
+      </CausalGroup>
+
+      <CausalGroup label="→ branch & worktree spans">
+        {branchSpans.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {branchSpans.map((span) => (
+              <li key={`${span.worktree}:${span.first_at}`} className="flex flex-col">
+                <span className="truncate text-3xs text-text-secondary">
+                  {span.branch ?? 'branch unrecorded'} · {span.worktree}
+                </span>
+                <span className="text-3xs text-text-muted">
+                  {formatDuration(span.last_at - span.first_at)} ·{' '}
+                  {span.event_count} {span.event_count === 1 ? 'event' : 'events'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <StateChip
+            kind={branchStatus?.state === 'ready' ? 'complete_zero_findings' : 'unknown'}
+            detail={
+              branchStatus?.state === 'ready'
+                ? 'session_git_spans has no span for this session'
+                : (branchStatus?.reason ??
+                  branchStatus?.coverage.reason ??
+                  'branch/worktree span coverage is unavailable')
+            }
+          />
+        )}
+      </CausalGroup>
+
+      <CausalGroup label="→ delivery outcomes">
+        <StateChip
+          kind={deliveryStatus?.state ?? 'unknown'}
+          detail={
+            deliveryStatus?.required_authority ??
+            deliveryStatus?.reason ??
+            'Loom temporal response omitted the Delivery dependency status'
+          }
+        />
+      </CausalGroup>
+    </div>
+  );
+}
+
+function CausalGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="td-legend text-text-secondary">→ edits → commits</span>
-      <StateChip kind="unsupported" detail="no session→file or session→commit route" />
+      <span className="td-legend text-text-secondary">{label}</span>
+      {children}
     </div>
   );
 }

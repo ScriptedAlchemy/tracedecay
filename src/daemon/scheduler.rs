@@ -114,21 +114,26 @@ fn log_daemon_scheduler_record(
 
 pub(super) fn automation_staged_log_fields(
     project_path: &Path,
-    counts: crate::automation::staged_notice::AutomationPendingCounts,
+    counts: &crate::automation::staged_notice::AutomationPendingCounts,
 ) -> Vec<(&'static str, String)> {
+    // `unreadable` rather than `0`: this line is the operator's record of what
+    // was awaiting human review, and a failed read is not an empty queue.
+    let field = |count: &crate::automation::staged_notice::PendingReviewCount| {
+        count
+            .count()
+            .map_or_else(|| "unreadable".to_string(), |count| count.to_string())
+    };
     vec![
         ("project", project_path.display().to_string()),
-        (
-            "pending_fact_proposals",
-            counts.pending_fact_proposals.to_string(),
-        ),
-        ("pending_skills", counts.pending_skills.to_string()),
+        ("pending_fact_proposals", field(&counts.fact_proposals)),
+        ("pending_skills", field(&counts.skills)),
     ]
 }
 
 /// After a scheduler tick where at least one task completed, emit a stable
 /// `event=automation_staged` line with pending automation review counts.
-/// Silent when nothing is pending or the profile root is unavailable.
+/// Silent only when every queue was read and every one is empty; a queue that
+/// could not be read is logged as `unreadable`, never omitted.
 async fn log_automation_staged_if_pending(project_path: &Path, cg: &TraceDecay) {
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return;
@@ -145,12 +150,12 @@ async fn log_automation_staged_if_pending(project_path: &Path, cg: &TraceDecay) 
     let counts =
         crate::automation::staged_notice::count_pending_automation_output(&memory, &profile_root)
             .await;
-    if counts.total() == 0 {
+    if counts.is_verified_empty() {
         return;
     }
     log_daemon_event(
         "automation_staged",
-        &automation_staged_log_fields(project_path, counts),
+        &automation_staged_log_fields(project_path, &counts),
     );
 }
 

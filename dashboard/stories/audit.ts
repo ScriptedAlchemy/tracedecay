@@ -225,8 +225,13 @@ async function main(): Promise<void> {
       const inject = () => {
         const style = document.createElement('style');
         style.id = 'audit-motion-reset';
+        // `animation: none`, not a zero duration. The design system's entrance
+        // primitives fill `both`, and a 0s animation with `both` fill holds the
+        // from-state — `opacity: 0` — indefinitely, so collapsing the duration
+        // photographs blank regions that axe then passes. See the stillness
+        // block in `theme/tokens.css`.
         style.textContent =
-          '*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;transition-duration:0s!important;transition-delay:0s!important;scroll-behavior:auto!important;}';
+          '*,*::before,*::after{animation:none!important;transition-duration:0s!important;transition-delay:0s!important;scroll-behavior:auto!important;}';
         document.head.appendChild(style);
       };
       if (document.head) inject();

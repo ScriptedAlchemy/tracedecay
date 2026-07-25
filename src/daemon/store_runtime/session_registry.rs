@@ -261,6 +261,24 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
+    /// Returns a read-only facade over the canonical project-memory shard.
+    ///
+    /// Mounting remains registry-owned so a branch graph can never substitute
+    /// its physical database for project memory. The returned facade cannot
+    /// acquire writer authority even when the retained runtime is writable.
+    pub(crate) async fn project_memory_read_only(
+        &self,
+        project_id: ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Database> {
+        let database = self.project_memory(project_id, enrollment_roots).await?;
+        Database::publish_runtime(
+            database.retained_runtime().clone(),
+            DatabaseAccessMode::ReadOnly,
+        )
+        .await
+    }
+
     pub(crate) async fn code_graph(
         &self,
         shard_id: StoreShardIdV1,

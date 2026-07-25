@@ -2,9 +2,20 @@ import { z } from 'zod';
 import { CircleCheck, CirclePause, CirclePlay } from 'lucide-react';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { cn } from '../../ui/cn';
+
+/** One human-review queue as `automation_scheduler_api.rs` reports it: either a
+ * measured count, or the reason the queue could not be read. */
+const PendingReviewSchema = z
+  .object({
+    state: z.enum(['measured', 'unreadable']),
+    count: z.number().nullable().optional(),
+    reason: z.string().nullable().optional(),
+  })
+  .passthrough();
 
 /** Wire-true shapes from automation_scheduler_api.rs / automation_jobs_api.rs. */
 const SchedulerStatusSchema = z
@@ -13,11 +24,61 @@ const SchedulerStatusSchema = z
     paused: z.boolean(),
     enabled: z.boolean().optional(),
     scheduler_tick_secs: z.number().optional(),
-    pending_fact_proposals: z.number().optional(),
-    pending_skills: z.number().optional(),
+    // Nullable, not optional-with-a-zero-default: the daemon sends null for a
+    // queue it could not read, and null must never round down to 0 here.
+    pending_fact_proposals: z.number().nullable().optional(),
+    pending_skills: z.number().nullable().optional(),
+    pending_review: z
+      .object({ fact_proposals: PendingReviewSchema, skills: PendingReviewSchema })
+      .optional(),
     last_session_activity: z.number().nullable().optional(),
   })
   .passthrough();
+
+type SchedulerStatus = z.infer<typeof SchedulerStatusSchema>;
+
+/** What this dashboard can actually say about one review queue. */
+type ReviewQueueReading =
+  | { quality: 'measured'; count: number }
+  | { quality: 'unknown'; reason: string };
+
+/**
+ * Resolves one review queue from the scheduler payload.
+ *
+ * These two counts are the whole human-approval step of the automation
+ * pipeline: they are what tells a person that agent-proposed facts and skill
+ * drafts are waiting. So there is no zero fallback anywhere on this path. A
+ * daemon too old to send `pending_review` still gets read truthfully — its
+ * bare number is a measured count, and a null or absent number is unknown.
+ */
+function reviewQueue(
+  data: SchedulerStatus,
+  queue: 'fact_proposals' | 'skills',
+  legacyCount: number | null | undefined,
+): ReviewQueueReading {
+  const reported = data.pending_review?.[queue];
+  if (reported?.state === 'unreadable') {
+    return { quality: 'unknown', reason: reported.reason ?? 'the daemon did not say why' };
+  }
+  const count = reported?.state === 'measured' ? reported.count : legacyCount;
+  if (typeof count !== 'number') {
+    return { quality: 'unknown', reason: 'the daemon reported no reading for this queue' };
+  }
+  return { quality: 'measured', count };
+}
+
+/** A review queue as a tile. An unread queue prints an em dash under the
+ * `unknown` evidence pattern — never a zero, which would read as a queue that
+ * was checked and found empty. */
+function ReviewQueueTile({ label, reading }: { label: string; reading: ReviewQueueReading }) {
+  return (
+    <StatTile
+      label={label}
+      value={reading.quality === 'measured' ? reading.count : '—'}
+      hint={<EvidencePattern quality={reading.quality} />}
+    />
+  );
+}
 
 const JobsPayloadSchema = z
   .object({
@@ -73,22 +134,43 @@ export function AutomationsPage() {
         ) : null}
       </div>
       <LegacyBoundary title="Scheduler" pending={scheduler.isPending} result={scheduler.data}>
-        {(data) => (
-          <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
-            <StatTile label="state" value={data.status} />
-            <StatTile
-              label="tick interval"
-              value={
-                data.scheduler_tick_secs != null ? `${data.scheduler_tick_secs}s` : '—'
-              }
-            />
-            <StatTile
-              label="pending proposals"
-              value={data.pending_fact_proposals ?? 0}
-            />
-            <StatTile label="pending skills" value={data.pending_skills ?? 0} />
-          </div>
-        )}
+        {(data) => {
+          const proposals = reviewQueue(data, 'fact_proposals', data.pending_fact_proposals);
+          const drafts = reviewQueue(data, 'skills', data.pending_skills);
+          const unread = (
+            [
+              ['fact proposals', proposals],
+              ['skill drafts', drafts],
+            ] as const
+          ).flatMap(([label, reading]) =>
+            reading.quality === 'unknown' ? [{ label, reason: reading.reason }] : [],
+          );
+          return (
+            <div className="flex flex-col gap-3 p-4">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <StatTile label="state" value={data.status} />
+                <StatTile
+                  label="tick interval"
+                  value={
+                    data.scheduler_tick_secs != null ? `${data.scheduler_tick_secs}s` : '—'
+                  }
+                />
+                <ReviewQueueTile label="pending proposals" reading={proposals} />
+                <ReviewQueueTile label="pending skills" reading={drafts} />
+              </div>
+              {/* The tile can only carry the evidence class; the reason belongs
+                * in full, unclipped, because this is the queue that gates human
+                * approval and "why can nobody read it" is the actionable part. */}
+              {unread.length > 0 ? (
+                <p className="border border-edge-subtle bg-surface-1 px-3 py-2 text-2xs leading-relaxed text-text-secondary">
+                  Awaiting-review counts are unknown, not zero.{' '}
+                  {unread.map((queue) => `The ${queue.label} queue: ${queue.reason}.`).join(' ')}{' '}
+                  Nothing here says whether anything is waiting for your approval.
+                </p>
+              ) : null}
+            </div>
+          );
+        }}
       </LegacyBoundary>
       <OverviewGrid>
         <OverviewCard title="Jobs">
