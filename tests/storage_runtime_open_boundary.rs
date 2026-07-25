@@ -81,16 +81,21 @@ fn concrete_sqlite_opens_are_closed_over_an_explicit_deletion_list() {
         violations.join("\n")
     );
 
+    let mut stale = Vec::new();
     for (key, entry) in allowed {
         assert!(
             !entry.disposition.trim().is_empty(),
             "allowlisted direct open needs a deletion or permanent-owner disposition: {key:?}"
         );
-        assert!(
-            observed.contains(&key),
-            "stale direct-open allowlist entry must be removed with its call site: {key:?}"
-        );
+        if !observed.contains(&key) {
+            stale.push(format!("{key:?}"));
+        }
     }
+    assert!(
+        stale.is_empty(),
+        "stale direct-open allowlist entries must be removed with their call sites:\n{}",
+        stale.join("\n")
+    );
 }
 
 #[test]
