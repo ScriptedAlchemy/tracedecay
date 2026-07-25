@@ -160,15 +160,21 @@ export function CostsPage() {
                     <p className="text-xs leading-relaxed text-text-primary">
                       {Math.round(coverage.measuredShare * 100)}% of{' '}
                       {coverage.messages.toLocaleString()} messages carry token counts the
-                      provider reported. The rest are estimated, which is what a{' '}
+                      provider reported. The remainder separates locally tokenized messages
+                      from estimates; together those sources form the{' '}
                       <span className="td-value">
                         {String(data.sessions.cost_basis ?? 'mixed')}
                       </span>{' '}
-                      cost basis means.
+                      cost basis.
                     </p>
                     <ShareRow
                       label="provider-reported"
                       value={coverage.usage}
+                      total={coverage.messages}
+                    />
+                    <ShareRow
+                      label="tokenized"
+                      value={coverage.tokenized}
                       total={coverage.messages}
                     />
                     <ShareRow
@@ -272,7 +278,7 @@ function TokenMixPlate({
           </div>
         ))}
         <figcaption className="text-3xs leading-relaxed text-text-muted">
-          The session ledger's own accounting across{' '}
+          The provider-reported token breakdown across{' '}
           {(sessions.messages ?? 0).toLocaleString()} messages in{' '}
           {(sessions.session_count ?? 0).toLocaleString()} sessions — a different, wider
           denominator than the priced turn ledger above.
@@ -285,12 +291,10 @@ function TokenMixPlate({
 /**
  * Per-project savings, drawn only where they differ.
  *
- * Twenty-five rows of which twenty are the same length is not a distribution,
- * it is one fact with twenty-four echoes: every worktree of one repository
- * shares a cache, so every worktree records the same lifetime saving. The
- * sameness is stated and only the rows that genuinely deviate from it are
- * plotted — against their deviation, which is the quantity that varies, rather
- * than against an absolute total on which they would all look identical again.
+ * Twenty-five rows of which twenty are the same length is not a useful plot.
+ * The sameness is stated without inventing a cause the wire does not provide,
+ * and only the rows that genuinely deviate are plotted — against their
+ * deviation, which is the quantity that varies.
  */
 function ProjectSpreadPlate({ spread }: { spread: ProjectSpread }) {
   if (!spread.flat) {
@@ -330,8 +334,8 @@ function ProjectSpreadPlate({ spread }: { spread: ProjectSpread }) {
       <p className="text-xs leading-relaxed text-text-primary">
         {spread.typicalCount} of {spread.count} projects saved between{' '}
         {formatTokens(spread.typicalLow)} and {formatTokens(spread.typicalHigh)} — within a
-        tenth of the {formatTokens(spread.median)} median. They share one cache, so they
-        record one figure.
+        tenth of the {formatTokens(spread.median)} median. The wire does not report why
+        these values cluster, so no cache topology is inferred.
       </p>
       {spread.deviations.length > 0 ? (
         <figure className="flex flex-col gap-1.5">
