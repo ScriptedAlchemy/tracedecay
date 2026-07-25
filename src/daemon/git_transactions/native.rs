@@ -425,17 +425,17 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             .validate()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
         let runner = self.runner()?;
-        if let Some(reason) = unsupported_native_preflight(&runner)? {
-            return unsupported_materialized(request, runner, reason);
+        if unsupported_native_preflight(&runner)?.is_some() {
+            // Bare repositories, unsupported object formats, and an index
+            // owned by another process cannot be recaptured under our lock.
+            // Returning a preview here would falsely bless the caller's
+            // snapshot as current.
+            return Err(GitIndexTransactionPortError::Unsupported);
         }
         let lock = match runner.acquire_index_lock() {
             Ok(lock) => lock,
             Err(NativeGitIndexError::IndexLocked) => {
-                return unsupported_materialized(
-                    request,
-                    runner,
-                    GitIndexUnsupportedStateV1::IndexLockPresent,
-                );
+                return Err(GitIndexTransactionPortError::Unsupported);
             }
             Err(error) => return Err(map_native_error(error)),
         };
@@ -1539,15 +1539,21 @@ pub(crate) fn capture_exact_snapshot_for_test(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
 
     use tempfile::TempDir;
+    use tracedecay_application::{
+        AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+        Deadline, DisclosureClass, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
+    };
     use tracedecay_domain::{
-        GitCommitIdentityV1, GitCoverageV1, GitIndexIdempotencyKey, GitIndexJournalPhaseV1,
-        GitIndexSigningPolicyV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
-        GitObjectFormatV1, GitOperationStateV1,
+        ActorId, ComponentVersion, GitCommitIdentityV1, GitCoverageV1, GitIndexIdempotencyKey,
+        GitIndexJournalPhaseV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+        GitIndexTransactionJournalV1, GitObjectFormatV1, GitOperationStateV1, RefId,
     };
     use tracedecay_store::GitIndexTransactionRecordV1;
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
 
@@ -1717,6 +1723,73 @@ mod tests {
         .expect("commit intent")
     }
 
+    fn commit_request(
+        snapshot: RepositoryStateSnapshotV1,
+        intent: GitIndexCommitIntentV1,
+        preview_id: &str,
+    ) -> GitIndexPreviewRequestV1 {
+        let capability_id = CapabilityId::new("capability.git.commit-index").expect("capability");
+        let use_case_id = UseCaseId::new("use-case.git.commit-index").expect("use case");
+        let GitHeadStateV1::Attached { branch, .. } = &snapshot.head else {
+            panic!("fixture has attached HEAD");
+        };
+        let scope = ResolvedScope::new(
+            snapshot.project_id.clone(),
+            snapshot.repository_id.clone(),
+            snapshot.worktree_id.clone().expect("fixture worktree"),
+            Some(RefId::new(branch.clone()).expect("fixture ref")),
+        )
+        .expect("scope");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.git-preview.fixture").expect("grant"),
+            1,
+            canonical_sha256(&"git preview grant").expect("grant digest"),
+            ActorId::new("actor.git-preview.issuer").expect("issuer"),
+            UtcMicros(1),
+            UtcMicros(1_000),
+            scope.clone(),
+            BTreeSet::from([capability_id.clone()]),
+            BTreeSet::from([use_case_id.clone()]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("grant");
+        let context = RequestContext::new(
+            ActorId::new("actor.git-preview.requester").expect("requester"),
+            scope,
+            grant,
+            RequestId::new(format!("request.{preview_id}")).expect("request"),
+            Deadline::new(UtcMicros(500)).expect("deadline"),
+            CancellationContext::active(format!("cancel.{preview_id}")).expect("cancellation"),
+        )
+        .expect("context");
+        let authority = AuthorityReceipt::from_context(
+            &context,
+            PolicyDecisionRef::new(
+                "policy.git-preview.fixture",
+                1,
+                canonical_sha256(&"git preview policy").expect("policy digest"),
+                ComponentVersion::new("policy.git-preview.v1").expect("policy version"),
+            )
+            .expect("policy"),
+            UtcMicros(2),
+        )
+        .expect("authority");
+        GitIndexPreviewRequestV1 {
+            context,
+            authority,
+            binding: tracedecay_application::GitIndexOperationBindingV1 {
+                capability_id,
+                use_case_id,
+                operation: GitIndexTransactionOperationV1::CommitIndex,
+            },
+            preview_id: GitIndexPreviewId::new(preview_id).expect("preview id"),
+            repository_snapshot: snapshot,
+            selected_hunks: Vec::new(),
+            commit_intent: Some(intent),
+            observed_at: UtcMicros(10),
+        }
+    }
+
     fn object_file_count(path: &Path) -> usize {
         fs::read_dir(path)
             .expect("object directory")
@@ -1882,6 +1955,54 @@ mod tests {
                 .expect("missing signing key classification")
         );
         assert_eq!(runner.index_bytes().expect("index after probes"), before);
+    }
+
+    #[test]
+    fn native_blockers_never_mint_a_preview_from_stale_caller_state() {
+        let (directory, assembler, runner) = repository_fixture();
+        let stale = commit_request(
+            exact_snapshot(&assembler, &runner),
+            commit_intent("stale preview\n"),
+            "git-index-preview.stale-native-blocker",
+        );
+        fs::write(directory.path().join("packet.txt"), "changed\n").expect("stale worktree");
+        fs::write(runner.index_lock_path(), b"external owner").expect("external lock");
+        assert!(matches!(
+            assembler.materialize(&stale),
+            Err(GitIndexTransactionPortError::Unsupported)
+        ));
+        fs::remove_file(runner.index_lock_path()).expect("remove external lock");
+
+        let hook = directory.path().join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&hook, permissions).expect("executable hook");
+        }
+        assert!(matches!(
+            assembler.materialize(&stale),
+            Err(GitIndexTransactionPortError::StalePreview)
+        ));
+
+        let fresh_snapshot = exact_snapshot(&assembler, &runner);
+        let fresh = commit_request(
+            fresh_snapshot.clone(),
+            commit_intent("fresh preview\n"),
+            "git-index-preview.fresh-native-blocker",
+        );
+        let materialized = assembler
+            .materialize(&fresh)
+            .expect("verified unsupported preview");
+        assert_eq!(materialized.preview.repository_snapshot, fresh_snapshot);
+        assert_eq!(
+            materialized.preview.disposition,
+            GitIndexPreviewDispositionV1::Unsupported(
+                GitIndexUnsupportedStateV1::ApplicableCommitHooks
+            )
+        );
     }
 
     #[test]
