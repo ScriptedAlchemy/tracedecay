@@ -207,7 +207,30 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
     ) -> Vec<ExactLiteralV1> {
         let mut literals = Vec::new();
         let mut seen = BTreeSet::new();
-        for atom in exact_query_atoms(query_view.as_str()) {
+        let query = query_view.as_str();
+        if query.chars().any(char::is_whitespace)
+            && !query.contains('"')
+            && !query
+                .split_whitespace()
+                .next()
+                .is_some_and(|atom| atom.contains(':'))
+            && exact_field_accepts(ExactFieldV1::CompilerOrRuntimeError, query)
+        {
+            let (canonical_bytes, _) =
+                canonicalize_exact(ExactFieldV1::CompilerOrRuntimeError, query);
+            let literal = ExactLiteralV1 {
+                field: ExactFieldV1::CompilerOrRuntimeError,
+                original_bytes: query.as_bytes().to_vec(),
+                canonical_bytes,
+            };
+            seen.insert((
+                literal.field,
+                literal.original_bytes.clone(),
+                literal.canonical_bytes.clone(),
+            ));
+            literals.push(literal);
+        }
+        for atom in exact_query_atoms(query) {
             let field = atom
                 .field
                 .or_else(|| classify_unprefixed_exact(atom.text.as_str(), atom.quoted));
