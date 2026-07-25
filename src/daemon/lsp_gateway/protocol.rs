@@ -2991,6 +2991,7 @@ mod tests {
     use super::super::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
     use super::super::provider::GenerationDiagnostics;
     use super::*;
+    use crate::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
     use crate::lsp_bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
     use std::cell::RefCell;
     use std::sync::Mutex;
