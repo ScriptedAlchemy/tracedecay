@@ -468,6 +468,12 @@ fn parse_commit_sha(value: &str) -> Result<String, GitCorrelationError> {
 /// True when an observation at `ts` should extend a span covering
 /// `[first_ts, last_ts]` (same session/branch/worktree assumed) instead of
 /// opening a new span: within the span or within `gap_secs` of either edge.
+///
+/// Reference statement of the mergeability rule. The candidate lookup in
+/// [`record_span_observation_in_transaction`] and the neighbour scan in
+/// `coalesce_adjacent_spans` evaluate the same predicate in SQL so the merge
+/// runs inside the database; this keeps the rule written once in Rust and is
+/// what the unit tests pin.
 pub fn observation_extends_span(first_ts: i64, last_ts: i64, ts: i64, gap_secs: i64) -> bool {
     ts >= first_ts.saturating_sub(gap_secs) && ts <= last_ts.saturating_add(gap_secs)
 }
@@ -891,10 +897,10 @@ fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> O
         .find_map(|key| metadata.get(key).and_then(serde_json::Value::as_str))
 }
 
-/// Folds one observation into the span table: extends the newest span for
-/// the same (provider, session, branch, worktree) when the observation lands
-/// within `merge_gap_secs` of it, otherwise inserts a new span. Returns the
-/// affected `span_id`.
+/// Folds one observation into the span table: extends whichever span for the
+/// same (provider, session, branch, worktree) the observation lands within
+/// `merge_gap_secs` of, otherwise inserts a new span. Returns the affected
+/// `span_id`.
 ///
 /// Runs in a `BEGIN IMMEDIATE` transaction so concurrent writers converge on
 /// widened spans instead of interleaved half-updates.
@@ -919,46 +925,71 @@ pub(crate) async fn record_span_observation_in_transaction(
     merge_gap_secs: i64,
 ) -> Result<i64, GitCorrelationError> {
     let worktree = normalize_worktree(&observation.worktree);
+    // Pick *any* span this observation can extend, not merely the newest one.
+    // Selecting the newest (`ORDER BY last_ts DESC LIMIT 1`) silently breaks
+    // whenever observations arrive out of order relative to the newest span —
+    // which is the norm, not the exception: a transcript re-ingest or backfill
+    // replays a session's earlier messages after later ones are already
+    // recorded, and a session that switches branches A → B → A leaves an older
+    // A-span behind a newer B-span. In those cases the newest span is not
+    // mergeable, so a fresh single-instant span was inserted for every replayed
+    // message, multiplying rows on each replay and collapsing spans to instants.
+    //
     // `branch IS ?` is NULL-safe: a detached-HEAD observation only extends a
-    // detached-HEAD span, never a named-branch span.
+    // detached-HEAD span, never a named-branch span. Ties prefer a span that
+    // strictly contains `ts`, then the oldest span, so the choice is
+    // deterministic regardless of insert order.
     let mut rows = conn
         .query(
-            "SELECT span_id, first_ts, last_ts
+            "SELECT span_id
              FROM session_git_spans
              WHERE provider = ?1 AND session_id = ?2
                AND branch IS ?3 AND worktree = ?4
-             ORDER BY last_ts DESC
+               AND ?5 >= first_ts - ?6 AND ?5 <= last_ts + ?6
+             ORDER BY
+                CASE WHEN ?5 >= first_ts AND ?5 <= last_ts THEN 0 ELSE 1 END,
+                first_ts ASC,
+                span_id ASC
              LIMIT 1",
             params![
                 observation.provider.as_str(),
                 observation.session_id.as_str(),
                 opt_text(observation.branch.as_deref()),
                 worktree.as_str(),
+                observation.ts,
+                merge_gap_secs.max(0),
             ],
         )
         .await?;
     if let Some(row) = rows.next().await? {
         let span_id: i64 = row.get(0)?;
-        let first_ts: i64 = row.get(1)?;
-        let last_ts: i64 = row.get(2)?;
-        if observation_extends_span(first_ts, last_ts, observation.ts, merge_gap_secs) {
-            conn.execute(
-                "UPDATE session_git_spans SET
+        conn.execute(
+            "UPDATE session_git_spans SET
                     first_ts = MIN(first_ts, ?2),
                     last_ts = MAX(last_ts, ?2),
                     event_count = event_count + 1,
                     thread_id = COALESCE(?3, thread_id),
                     updated_at = unixepoch()
                  WHERE span_id = ?1",
-                params![
-                    span_id,
-                    observation.ts,
-                    opt_text(observation.thread_id.as_deref()),
-                ],
-            )
-            .await?;
-            return Ok(span_id);
-        }
+            params![
+                span_id,
+                observation.ts,
+                opt_text(observation.thread_id.as_deref()),
+            ],
+        )
+        .await?;
+        // Widening can bring a neighbouring span within the merge gap; fold
+        // those in so a replayed session converges on the same span set it
+        // would have had from a single in-order pass.
+        coalesce_adjacent_spans(
+            conn,
+            span_id,
+            observation,
+            worktree.as_str(),
+            merge_gap_secs.max(0),
+        )
+        .await?;
+        return Ok(span_id);
     }
     conn.execute(
         "INSERT INTO session_git_spans (
@@ -983,6 +1014,94 @@ pub(crate) async fn record_span_observation_in_transaction(
         .await?
         .ok_or_else(|| GitCorrelationError::Db("missing inserted span id".to_string()))?;
     Ok(row.get(0)?)
+}
+
+/// Folds every span of the same (provider, session, branch, worktree) that now
+/// sits within `merge_gap_secs` of `survivor_id` into that span: the survivor
+/// absorbs their bounds and event counts, commit attributions pointing at them
+/// are repointed, and the absorbed rows are deleted.
+///
+/// Without this, replaying a session's observations out of order leaves
+/// fragments that a single in-order pass would have merged, so the span set
+/// depends on ingest order. Runs to a fixed point because each round can only
+/// widen the survivor.
+async fn coalesce_adjacent_spans(
+    conn: &(impl Executor + ?Sized),
+    survivor_id: i64,
+    observation: &SpanObservation,
+    worktree: &str,
+    merge_gap_secs: i64,
+) -> Result<(), GitCorrelationError> {
+    // Bounded so a pathological store can never spin here; each round strictly
+    // widens the survivor, so real data converges in one or two passes.
+    const MAX_COALESCE_ROUNDS: usize = 16;
+    for _ in 0..MAX_COALESCE_ROUNDS {
+        let mut rows = conn
+            .query(
+                "SELECT other.span_id, other.first_ts, other.last_ts, other.event_count
+                 FROM session_git_spans other
+                 JOIN session_git_spans survivor ON survivor.span_id = ?1
+                 WHERE other.span_id != ?1
+                   AND other.provider = ?2 AND other.session_id = ?3
+                   AND other.branch IS ?4 AND other.worktree = ?5
+                   AND other.first_ts <= survivor.last_ts + ?6
+                   AND other.last_ts >= survivor.first_ts - ?6",
+                params![
+                    survivor_id,
+                    observation.provider.as_str(),
+                    observation.session_id.as_str(),
+                    opt_text(observation.branch.as_deref()),
+                    worktree,
+                    merge_gap_secs,
+                ],
+            )
+            .await?;
+        let mut absorbed: Vec<i64> = Vec::new();
+        let mut min_first: Option<i64> = None;
+        let mut max_last: Option<i64> = None;
+        let mut events = 0i64;
+        while let Some(row) = rows.next().await? {
+            absorbed.push(row.get(0)?);
+            let first_ts: i64 = row.get(1)?;
+            let last_ts: i64 = row.get(2)?;
+            min_first = Some(min_first.map_or(first_ts, |cur: i64| cur.min(first_ts)));
+            max_last = Some(max_last.map_or(last_ts, |cur: i64| cur.max(last_ts)));
+            events = events.saturating_add(row.get::<i64>(3)?);
+        }
+        drop(rows);
+        let (Some(min_first), Some(max_last)) = (min_first, max_last) else {
+            return Ok(());
+        };
+        // Span ids are database-issued integers, so the `IN` list is rendered
+        // from validated i64 values rather than user text.
+        let id_list = absorbed
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        conn.execute(
+            "UPDATE session_git_spans SET
+                first_ts = MIN(first_ts, ?2),
+                last_ts = MAX(last_ts, ?3),
+                event_count = event_count + ?4,
+                updated_at = unixepoch()
+             WHERE span_id = ?1",
+            params![survivor_id, min_first, max_last, events],
+        )
+        .await?;
+        // Keep commit attributions addressable: a claimed span must not vanish.
+        conn.execute(
+            &format!("UPDATE commit_sessions SET span_id = ?1 WHERE span_id IN ({id_list})"),
+            params![survivor_id],
+        )
+        .await?;
+        conn.execute(
+            &format!("DELETE FROM session_git_spans WHERE span_id IN ({id_list})"),
+            (),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Inserts one commit attribution row. Stronger evidence replaces weaker
@@ -1035,7 +1154,8 @@ pub(crate) async fn upsert_commit_session(
 
 mod attribution;
 pub use attribution::{
-    ScannedCommit, SpanScanTarget, SpanWindow, commit_overlap_kind, match_commit_to_spans,
+    ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
+    match_commit_to_spans,
 };
 pub(crate) use attribution::{read_meta_value, run_commit_attribution_sweep, write_meta_value};
 

@@ -392,6 +392,224 @@ async fn observations_merge_within_gap_and_split_on_branch_switch() {
     assert_ne!(first, detached);
 }
 
+/// Reads every span row for one session, oldest-first.
+async fn span_rows(
+    conn: &GitCorrelationTestDb,
+    session_id: &str,
+) -> Vec<(i64, Option<String>, i64, i64)> {
+    let mut rows = conn
+        .query(
+            "SELECT span_id, branch, first_ts, last_ts FROM session_git_spans
+             WHERE session_id = ?1 ORDER BY first_ts ASC, span_id ASC",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        out.push((
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+            row.get(3).unwrap(),
+        ));
+    }
+    out
+}
+
+#[tokio::test]
+async fn out_of_order_observation_extends_the_matching_span_not_the_newest() {
+    let conn = test_conn().await;
+    // A session works on `main`, switches to `feat`, and the newest span is now
+    // the `feat` one. A late-arriving `main` observation (a re-ingested earlier
+    // message) must find the older `main` span rather than opening a new one.
+    let early =
+        record_span_observation(&conn, &observation("s1", Some("main"), "/repo", 1_000), 600)
+            .await
+            .unwrap();
+    record_span_observation(&conn, &observation("s1", Some("feat"), "/repo", 5_000), 600)
+        .await
+        .unwrap();
+    let late =
+        record_span_observation(&conn, &observation("s1", Some("main"), "/repo", 1_200), 600)
+            .await
+            .unwrap();
+    assert_eq!(
+        early, late,
+        "an in-gap observation must extend its own span even when a newer span exists"
+    );
+
+    let spans = span_rows(&conn, "s1").await;
+    assert_eq!(
+        spans.len(),
+        2,
+        "no orphan instant span was created: {spans:?}"
+    );
+    let main_span = spans
+        .iter()
+        .find(|(id, ..)| *id == early)
+        .expect("main span survives");
+    assert_eq!((main_span.2, main_span.3), (1_000, 1_200));
+}
+
+#[tokio::test]
+async fn replaying_a_session_in_any_order_converges_on_the_same_spans() {
+    // Same observations, forward and reversed, plus a full replay: the span set
+    // must be identical. Before the order-independent merge, the reversed and
+    // replayed passes inserted one single-instant span per observation.
+    let timestamps = [1_000i64, 1_100, 1_200, 9_000, 9_100];
+    let mut shapes = Vec::new();
+    for reversed in [false, true] {
+        let conn = test_conn().await;
+        let mut order: Vec<i64> = timestamps.to_vec();
+        if reversed {
+            order.reverse();
+        }
+        // Two passes: the second is an exact replay of the first.
+        for _ in 0..2 {
+            for ts in &order {
+                record_span_observation(&conn, &observation("s1", Some("main"), "/repo", *ts), 600)
+                    .await
+                    .unwrap();
+            }
+        }
+        let bounds: Vec<(i64, i64)> = span_rows(&conn, "s1")
+            .await
+            .into_iter()
+            .map(|(_, _, first, last)| (first, last))
+            .collect();
+        shapes.push(bounds);
+    }
+    assert_eq!(
+        shapes[0], shapes[1],
+        "span shape must not depend on observation order"
+    );
+    assert_eq!(
+        shapes[0],
+        vec![(1_000, 1_200), (9_000, 9_100)],
+        "observations must collapse into the two real activity stretches"
+    );
+}
+
+#[tokio::test]
+async fn coalescing_bridged_spans_repoints_commit_attributions() {
+    let conn = test_conn().await;
+    // Two stretches too far apart to merge (2_000 sits outside the 600s gap
+    // around the 1_000 span, so it opens its own).
+    let left =
+        record_span_observation(&conn, &observation("s1", Some("main"), "/repo", 1_000), 600)
+            .await
+            .unwrap();
+    let right =
+        record_span_observation(&conn, &observation("s1", Some("main"), "/repo", 2_000), 600)
+            .await
+            .unwrap();
+    assert_ne!(left, right);
+    // ...with a commit already attributed to the right-hand span.
+    let sha = "abcdef1234567890abcdef1234567890abcdef12";
+    upsert_commit_session(
+        &conn,
+        &CommitSessionRecord {
+            commit_sha: sha.to_string(),
+            provider: "claude".to_string(),
+            session_id: "s1".to_string(),
+            branch: Some("main".to_string()),
+            worktree: Some("/repo".to_string()),
+            committed_at: 2_000,
+            span_overlap_kind: SpanOverlapKind::WithinSpan,
+            span_id: Some(right),
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::TimeOverlap,
+            confidence: 20,
+            evidence_message_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // A middle observation lands inside the left span's gap window and widens
+    // it until the right span is within reach, so the two coalesce into one.
+    let bridged =
+        record_span_observation(&conn, &observation("s1", Some("main"), "/repo", 1_500), 600)
+            .await
+            .unwrap();
+    assert_eq!(
+        bridged, left,
+        "the bridging observation extends the left span"
+    );
+    let spans = span_rows(&conn, "s1").await;
+    assert_eq!(spans.len(), 1, "bridged spans must coalesce: {spans:?}");
+    assert_eq!((spans[0].2, spans[0].3), (1_000, 2_000));
+
+    let mut rows = conn
+        .query(
+            "SELECT span_id FROM commit_sessions WHERE commit_sha = ?1",
+            params![sha],
+        )
+        .await
+        .unwrap();
+    let attributed: Option<i64> = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        attributed,
+        Some(bridged),
+        "attribution must follow the surviving span, never dangle on a deleted one"
+    );
+}
+
+#[tokio::test]
+async fn sweep_holds_watermark_when_a_target_cannot_be_scanned() {
+    let conn = test_conn().await;
+    // One target whose worktree is unreadable at sweep time.
+    record_span_observation(
+        &conn,
+        &span_with(
+            "claude",
+            "s1",
+            Some("main"),
+            "/gone",
+            1_000,
+            SpanSource::Ingest,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+
+    let inserted = run_commit_attribution_sweep(&conn, 600, |_| TargetScan::Unavailable)
+        .await
+        .unwrap();
+    assert_eq!(inserted, 0);
+    assert_eq!(
+        read_meta_value(&conn, "commit_attribution_watermark")
+            .await
+            .unwrap(),
+        None,
+        "an unscannable target must not advance the watermark past itself"
+    );
+
+    // The next sweep, with the worktree readable again, still sees the target.
+    let sha = "abcdef1234567890abcdef1234567890abcdef12";
+    let inserted = run_commit_attribution_sweep(&conn, 600, |_| {
+        TargetScan::Scanned(vec![ScannedCommit {
+            sha: sha.to_string(),
+            committed_at: 1_000,
+        }])
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        inserted, 1,
+        "a target deferred by a failed scan must be retried, not dropped"
+    );
+    assert!(
+        read_meta_value(&conn, "commit_attribution_watermark")
+            .await
+            .unwrap()
+            .is_some(),
+        "a successful scan advances the watermark"
+    );
+}
+
 #[tokio::test]
 async fn sessions_for_branch_worktree_and_commit_round_trip() {
     let conn = test_conn().await;
@@ -846,10 +1064,10 @@ async fn commit_attribution_sweep_attributes_and_advances_watermark() {
     let inserted = run_commit_attribution_sweep(&conn, 600, |target| {
         assert_eq!(target.branch.as_deref(), Some("main"));
         assert_eq!(target.worktree, "/repo");
-        vec![ScannedCommit {
+        TargetScan::Scanned(vec![ScannedCommit {
             sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
             committed_at: 1_500,
-        }]
+        }])
     })
     .await
     .unwrap();
@@ -876,10 +1094,10 @@ async fn commit_attribution_sweep_attributes_and_advances_watermark() {
     // re-scanned (watermark uses `>=` so nothing is ever missed), the
     // commit is already attributed and the upsert inserts nothing more.
     let again = run_commit_attribution_sweep(&conn, 600, |_| {
-        vec![ScannedCommit {
+        TargetScan::Scanned(vec![ScannedCommit {
             sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
             committed_at: 1_500,
-        }]
+        }])
     })
     .await
     .unwrap();
@@ -1152,10 +1370,10 @@ async fn attribution_sweep_writes_one_row_for_mixed_provider_session() {
 
     let sha = "abcdef1234567890abcdef1234567890abcdef12";
     run_commit_attribution_sweep(&conn, 600, |_| {
-        vec![ScannedCommit {
+        TargetScan::Scanned(vec![ScannedCommit {
             sha: sha.to_string(),
             committed_at: 1_500,
-        }]
+        }])
     })
     .await
     .unwrap();
@@ -1255,7 +1473,7 @@ async fn sweep_watermark_tracks_ingest_time_so_late_history_is_attributed() {
     )
     .await
     .unwrap();
-    run_commit_attribution_sweep(&conn, 600, |_| Vec::new())
+    run_commit_attribution_sweep(&conn, 600, |_| TargetScan::Scanned(Vec::new()))
         .await
         .unwrap();
     let watermark = read_meta_value(&conn, "commit_attribution_watermark")
@@ -1286,12 +1504,12 @@ async fn sweep_watermark_tracks_ingest_time_so_late_history_is_attributed() {
 
     let inserted = run_commit_attribution_sweep(&conn, 600, |target| {
         if target.branch.as_deref() == Some("feat") {
-            vec![ScannedCommit {
+            TargetScan::Scanned(vec![ScannedCommit {
                 sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
                 committed_at: 500,
-            }]
+            }])
         } else {
-            Vec::new()
+            TargetScan::Scanned(Vec::new())
         }
     })
     .await

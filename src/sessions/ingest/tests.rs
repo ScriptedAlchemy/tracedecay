@@ -550,6 +550,106 @@ fn parse_git_log_commits_empty_is_empty() {
     assert!(parse_git_log_commits("").is_empty());
 }
 
+/// End-to-end over the real scanner: a commit made *while a session is still
+/// recording* must be attributed on the next sweep. This exercises the actual
+/// `git log` invocation and window arithmetic, not a stubbed scan, because the
+/// window bounds are where live commits were previously being missed.
+#[tokio::test]
+async fn live_session_commit_is_attributed_by_the_real_git_scan() {
+    use std::process::Command;
+
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "-b", "main"]).status.success());
+    assert!(
+        git(&["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(&["config", "user.name", "Test"]).status.success());
+    std::fs::write(repo.path().join("file.txt"), "one\n").unwrap();
+    assert!(git(&["add", "file.txt"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "live commit"]).status.success());
+    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let store = tempfile::tempdir().unwrap();
+    let handle = crate::db::engine::TestConnection::open(&store.path().join("sessions.db"));
+    let conn: &crate::db::engine::Connection = &handle;
+    git_correlation::ensure_git_correlation_schema_in_transaction(conn)
+        .await
+        .unwrap();
+
+    // A session recording "now" — the commit lands inside its span, exactly as
+    // it does when an agent commits mid-session.
+    let now = crate::tracedecay::current_timestamp();
+    let worktree = git_correlation::normalize_worktree(&repo.path().to_string_lossy());
+    for ts in [now - 60, now] {
+        git_correlation::record_span_observation_in_transaction(
+            conn,
+            &git_correlation::SpanObservation {
+                provider: "claude".to_string(),
+                session_id: "live".to_string(),
+                thread_id: None,
+                branch: Some("main".to_string()),
+                worktree: worktree.clone(),
+                ts,
+                source: git_correlation::SpanSource::HookRoute,
+            },
+            git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+        )
+        .await
+        .unwrap();
+    }
+
+    let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
+    let inserted =
+        git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
+            super::project::git_scan_commits(target, gap)
+        })
+        .await
+        .unwrap();
+    assert!(
+        inserted >= 1,
+        "a commit made during a live session must be attributed"
+    );
+
+    let hits = git_correlation::sessions_for_with_relation(
+        conn,
+        &git_correlation::SessionsForQuery {
+            git_ref: git_correlation::GitRefFilter::parse("commit", &sha).unwrap(),
+            since: None,
+            until: None,
+            limit: 10,
+        },
+        git_correlation::CommitRelationFilter::All,
+    )
+    .await
+    .unwrap();
+    assert_eq!(hits.len(), 1, "the live session must be correlated: {hits:?}");
+    assert_eq!(hits[0].session_id, "live");
+    assert_eq!(
+        hits[0].span_overlap_kind,
+        Some(git_correlation::SpanOverlapKind::WithinSpan)
+    );
+
+    // Replaying the sweep must not double-attribute.
+    let again = git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
+        super::project::git_scan_commits(target, gap)
+    })
+    .await
+    .unwrap();
+    assert_eq!(again, 0, "re-sweeping an attributed commit is a no-op");
+}
+
 #[test]
 fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
     let profile = tempfile::tempdir().unwrap().path().to_path_buf();
