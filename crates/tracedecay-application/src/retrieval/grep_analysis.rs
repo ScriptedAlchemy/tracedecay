@@ -311,6 +311,8 @@ pub struct RedundancySignalsV1 {
     pub body_vector_cosine: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_vector_cosine: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_distance_micros: Option<i64>,
     pub generic_helper_downranked: bool,
     pub body_tokens: [u64; 2],
 }
@@ -335,6 +337,12 @@ pub struct SemanticRedundancyGenerationV1 {
     pub vector_generation: String,
     pub source_generation: String,
     pub projection_key: String,
+    pub scope_digest: String,
+    pub accepted_profile_digest: String,
+    pub calibration_profile_id: String,
+    pub calibration_digest: String,
+    pub redundancy_profile_digest: String,
+    pub maximum_distance_micros: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
