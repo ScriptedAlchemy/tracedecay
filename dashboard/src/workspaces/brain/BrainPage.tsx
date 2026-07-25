@@ -56,13 +56,21 @@ export function BrainPage() {
              * instrument HUD, and the registry becomes a dense side rail that
              * remains the canvas's accessible equivalent. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-              <div className="relative flex min-h-0 flex-1 flex-col p-3">
+              {/* Below `lg` this is a vertical stack, and the column has to be
+                * allowed its natural height. Pinned to a share of the viewport
+                * it both squeezed the field and overflowed, and what would not
+                * fit painted straight through the registry rail beneath it.
+                * The shell's `main` is the scroll container, so giving the
+                * stack its real height simply makes the page scroll. From `lg`
+                * the two panes split the viewport and each owns its overflow
+                * again. */}
+              <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
                 <RegistryFieldView groups={groups} activeProjectId={data.active_project_id ?? null} />
               </div>
               <aside
                 aria-label="Project registry"
                 tabIndex={0}
-                className="flex w-full shrink-0 flex-col gap-2 overflow-auto border-t border-edge-subtle p-3 lg:w-80 lg:border-l lg:border-t-0"
+                className="flex w-full shrink-0 flex-col gap-2 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
               >
                 {groups.map((group, index) => (
                   <RepoGroupCard
@@ -225,7 +233,13 @@ function RegistryFieldView({
         nodes={nodes}
         edges={edges}
         fill
-        canvasClassName="min-h-[55vh] md:min-h-0"
+        // The field has a fixed aspect (five columns across a mass axis) and
+        // the camera fits it whole, so a canvas far taller than it is wide
+        // shrinks the whole composition into a band with dead space above and
+        // below. On a phone the canvas is therefore sized in viewport WIDTHS,
+        // which keeps its shape near the field's own; from `md` up there is
+        // enough width that a generous height is the right trade again.
+        canvasClassName="min-h-[64vw] max-h-[84vw] md:max-h-none md:min-h-[55vh] lg:min-h-0"
         extent={extent}
         activation={activationRef.current}
         selectedId={null}
@@ -245,7 +259,10 @@ function FieldAxis({ field }: { field: RegistryField }) {
   const busiest = field.columns.reduce((max, column) => Math.max(max, column.count), 0);
   return (
     <div className="flex flex-col gap-1.5">
-      <Legend>last seen · across &nbsp;·&nbsp; indexed mass · up</Legend>
+      {/* Short enough to survive a 320px rail: the full sentence is the
+        * paragraph below, and a legend that truncates to "INDEXED M…" states
+        * nothing. */}
+      <Legend>recency across · mass up</Legend>
       <div className="flex flex-wrap border-y border-edge-subtle bg-surface-1">
         {field.columns.map((column) => (
           <div

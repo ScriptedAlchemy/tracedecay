@@ -121,7 +121,10 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         </button>
       </div>
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <div className="relative flex min-h-0 flex-1 flex-col p-3">
+        {/* Same stacking rule as the all-projects field: natural height in the
+          * narrow column (the shell's `main` is the scroll container), split
+          * panes from `lg`. */}
+        <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
           {/* Same HUD geometry as the all-projects field, so the two Brains
             * read as one instrument in two states rather than two designs. */}
           <div className="pointer-events-none static z-10 mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
@@ -137,7 +140,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
             />
           </div>
           {subgraph.isPending ? (
-            <p className="flex min-h-[55vh] items-center justify-center p-6 text-center text-sm text-text-muted md:min-h-0 md:flex-1">
+            <p className="flex min-h-[55vh] items-center justify-center p-6 text-center text-sm text-text-muted lg:min-h-0 lg:flex-1">
               composing this project's graph neighbourhood…
             </p>
           ) : nodes.length > 0 ? (
@@ -145,7 +148,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
               nodes={nodes}
               edges={edges}
               fill
-              canvasClassName="min-h-[55vh] md:min-h-0"
+              canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
               activation={activationRef.current}
               ariaLabel={`${label} code graph: ${nodes.length} symbols, ${edges.length} relations. The stores and branches listed alongside are the accessible equivalent.`}
               caption={
@@ -164,7 +167,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         <aside
           aria-label={`What TraceDecay holds for ${label}`}
           tabIndex={0}
-          className="flex w-full shrink-0 flex-col gap-3 overflow-auto border-t border-edge-subtle p-3 lg:w-80 lg:border-l lg:border-t-0"
+          className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
         >
           <LegacyBoundary
             title="Project"
@@ -240,7 +243,7 @@ function UnmountedGraphField({
     .reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);
   const weight = splitBytes(bytes || null);
   return (
-    <div className="td-graticule flex min-h-[55vh] flex-col justify-end gap-3 rounded-[var(--radius-card)] border border-edge-subtle/60 bg-surface-0 p-5 md:min-h-0 md:flex-1">
+    <div className="td-graticule flex min-h-[55vh] flex-col justify-end gap-3 rounded-[var(--radius-card)] border border-edge-subtle/60 bg-surface-0 p-5 lg:min-h-0 lg:flex-1">
       <div className="flex flex-col gap-2">
         <Legend>graph field · not mounted</Legend>
         <p className="max-w-prose text-xs leading-relaxed text-text-secondary">
