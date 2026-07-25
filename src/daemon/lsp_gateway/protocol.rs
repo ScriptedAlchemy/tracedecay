@@ -3712,8 +3712,18 @@ mod tests {
             "an unchanged projected-only publication must not start a refresh loop"
         );
         session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"typescript","message":"changed native diagnostic"}]}}"#,
+            10_001,
+        );
+        assert_eq!(
+            session.native_upstream["file:///root/a.rs"].diagnostics[0].message,
+            "changed native diagnostic",
+            "duplicate suppression must not suppress a real native evidence change"
+        );
+        session.drain_outbound();
+        session.handle_payload(
             br#"{"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#,
-            64,
+            10_002,
         );
         assert!(
             !session.native_upstream.contains_key("file:///root/a.rs"),
