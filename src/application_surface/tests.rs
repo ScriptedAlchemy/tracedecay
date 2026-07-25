@@ -702,6 +702,31 @@ fn feedback_cycle_projections_require_the_canonical_handle() {
 }
 
 #[test]
+fn explicit_feedback_cycle_accepts_only_a_document_uri() {
+    let request = parse_application_surface_request(
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
+        serde_json::json!({"document_uri": "file:///project/src/lib.rs"}),
+    )
+    .expect("explicit feedback-cycle request");
+    assert!(matches!(
+        request,
+        ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request)
+            if request.document_uri == "file:///project/src/lib.rs"
+    ));
+
+    assert!(matches!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
+            serde_json::json!({
+                "document_uri": "file:///project/src/lib.rs",
+                "request_handle": "rh.client.selected"
+            }),
+        ),
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    ));
+}
+
+#[test]
 fn callable_code_page_is_transport_owned() {
     let rejected = parse_application_surface_request(
         ApplicationSurfaceOperation::CodeExactOccurrence,
