@@ -921,6 +921,8 @@ pub struct FeedbackDiagnosticProjectionV1 {
     pub severity: DiagnosticSeverityV1,
     pub safe_bounded_message: String,
     pub producer: FeedbackDiagnosticProducerV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_description_uri: Option<String>,
 }
 
 impl FeedbackDiagnosticProjectionV1 {
@@ -940,8 +942,32 @@ impl FeedbackDiagnosticProjectionV1 {
                 field: "feedback diagnostic projection message",
             });
         }
+        if self
+            .code_description_uri
+            .as_ref()
+            .is_some_and(|value| !safe_diagnostic_code_description_uri(value))
+        {
+            return Err(DomainError::UnsafeText {
+                field: "feedback diagnostic code description URI",
+            });
+        }
         Ok(())
     }
+}
+
+fn safe_diagnostic_code_description_uri(value: &str) -> bool {
+    if value.len() > 2_048 {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
 }
 
 /// Closed producer vocabulary for standard diagnostic projection.

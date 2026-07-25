@@ -758,7 +758,7 @@ where
                         range: crate::daemon::lsp_gateway::LspRange { start, end },
                         severity: Some(gateway_severity(projection.severity)),
                         code: Some(projection.code.clone()),
-                        code_description_uri: None,
+                        code_description_uri: projection.code_description_uri.clone(),
                         message: projection.safe_bounded_message.clone(),
                         source: advisory_diagnostic_source(projection.producer),
                         related_information: Vec::new(),
