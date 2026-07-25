@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -164,6 +164,7 @@ pub trait GitHubReadOnlyCredentialAuthorityV1: Send + Sync {
 struct RegisteredGitHubReadOnlyCredentialAuthorityV1 {
     authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
     active: Arc<AtomicBool>,
+    generation: u64,
 }
 
 enum ProfileGitHubReadOnlyCredentialAuthorityV1 {
@@ -192,6 +193,11 @@ fn registered_github_read_only_credential_authorities()
     AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+fn next_github_credential_generation_v1() -> u64 {
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Registers one retained, exact-repository credential authority.
 ///
 /// Live conflicting authorities are rejected. The application registry
@@ -218,6 +224,7 @@ pub fn register_github_read_only_credential_authority_v1(
         RegisteredGitHubReadOnlyCredentialAuthorityV1 {
             authority: Arc::clone(authority),
             active: Arc::new(AtomicBool::new(true)),
+            generation: next_github_credential_generation_v1(),
         },
     );
     true
@@ -479,11 +486,12 @@ pub(crate) fn resolve_registered_github_read_only_credential_v1(
                 (
                     Arc::clone(&registered.authority),
                     Arc::clone(&registered.active),
+                    registered.generation,
                 )
             }),
         Err(_) => return RegisteredGitHubReadOnlyCredentialV1::Rejected,
     };
-    let Some((authority, active)) = registered else {
+    let Some((authority, active, generation)) = registered else {
         return RegisteredGitHubReadOnlyCredentialV1::Missing;
     };
     match authority.resolve(repository_owner, repository_name) {
@@ -498,6 +506,7 @@ pub(crate) fn resolve_registered_github_read_only_credential_v1(
                 repository_name.to_owned(),
                 exact_permissions,
                 active,
+                generation,
             )
             .map_or(
                 RegisteredGitHubReadOnlyCredentialV1::Rejected,
@@ -520,6 +529,7 @@ enum GitHubReadOnlyCredentialKindV1 {
         repository_owner: String,
         repository_name: String,
         active: Arc<AtomicBool>,
+        generation: u64,
     },
 }
 
@@ -547,6 +557,7 @@ impl GitHubReadOnlyCredentialV1 {
         repository_name: String,
         exact_permissions: BTreeSet<GitHubReadPermissionV1>,
         active: Arc<AtomicBool>,
+        generation: u64,
     ) -> Option<Self> {
         (valid_path_segment(&repository_owner)
             && valid_path_segment(&repository_name)
@@ -558,8 +569,20 @@ impl GitHubReadOnlyCredentialV1 {
                 repository_owner,
                 repository_name,
                 active,
+                generation,
             },
         })
+    }
+
+    /// Opaque daemon-generation identity for the mounted credential authority.
+    ///
+    /// The value never contains credential bytes. A remount receives a fresh
+    /// generation even when it targets the same repository.
+    pub(crate) fn generation(&self) -> u64 {
+        match &self.kind {
+            GitHubReadOnlyCredentialKindV1::Anonymous => 0,
+            GitHubReadOnlyCredentialKindV1::VerifiedPrivate { generation, .. } => *generation,
+        }
     }
 
     pub(crate) fn permits(&self, permission: GitHubReadPermissionV1) -> bool {
@@ -1920,6 +1943,34 @@ mod tests {
         let resolution =
             resolve_registered_github_read_only_credential_v1("ScriptedAlchemy", repository);
         (authority, resolution)
+    }
+
+    #[test]
+    fn credential_remount_receives_a_new_opaque_generation() {
+        let repository = "credential-generation";
+        let (first_authority, first) =
+            registered_fixture_credential(repository, FixtureCredentialAuthorityModeV1::Verified);
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(first) = first else {
+            panic!("first credential must resolve");
+        };
+        let first_generation = first.generation();
+        assert!(unregister_github_read_only_credential_authority_v1(
+            "ScriptedAlchemy",
+            repository,
+            &first_authority,
+        ));
+
+        let (second_authority, second) =
+            registered_fixture_credential(repository, FixtureCredentialAuthorityModeV1::Verified);
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(second) = second else {
+            panic!("second credential must resolve");
+        };
+        assert_ne!(first_generation, second.generation());
+        assert!(unregister_github_read_only_credential_authority_v1(
+            "ScriptedAlchemy",
+            repository,
+            &second_authority,
+        ));
     }
 
     fn captured_get_headers(credential: GitHubReadOnlyCredentialV1, repository: &str) -> String {
