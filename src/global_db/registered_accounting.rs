@@ -298,21 +298,36 @@ impl RegisteredGlobalDb {
         Ok((inserted, cost_usd, tokens))
     }
 
-    pub(crate) async fn total_cost_since(&self, since: u64) -> Option<f64> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    pub(crate) async fn try_total_cost_since(&self, since: u64) -> Result<f64, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
         let mut rows = snapshot
             .query(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM turns WHERE timestamp >= ?1",
                 crate::db::engine::params![since as i64],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some(row.get::<f64>(0).unwrap_or(0.0))
+            .map_err(|error| format!("failed to query total cost: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read total cost row: {error}"))?
+            .ok_or_else(|| "total cost query returned no row".to_string())?;
+        row.get::<f64>(0)
+            .map_err(|error| format!("failed to decode total cost: {error}"))
     }
 
-    pub(crate) async fn total_tokens_since(&self, since: u64) -> Option<u64> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    pub(crate) async fn total_cost_since(&self, since: u64) -> Option<f64> {
+        self.try_total_cost_since(since).await.ok()
+    }
+
+    pub(crate) async fn try_total_tokens_since(&self, since: u64) -> Result<u64, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
         let mut rows = snapshot
             .query(
                 "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
@@ -320,9 +335,20 @@ impl RegisteredGlobalDb {
                 crate::db::engine::params![since as i64],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some(row.get::<i64>(0).unwrap_or(0) as u64)
+            .map_err(|error| format!("failed to query total tokens: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read total tokens row: {error}"))?
+            .ok_or_else(|| "total tokens query returned no row".to_string())?;
+        let total = row
+            .get::<i64>(0)
+            .map_err(|error| format!("failed to decode total tokens: {error}"))?;
+        u64::try_from(total).map_err(|_| format!("total tokens cannot be negative: {total}"))
+    }
+
+    pub(crate) async fn total_tokens_since(&self, since: u64) -> Option<u64> {
+        self.try_total_tokens_since(since).await.ok()
     }
 
     pub(crate) async fn token_breakdown_since(&self, since: u64) -> Option<(u64, u64, u64)> {
