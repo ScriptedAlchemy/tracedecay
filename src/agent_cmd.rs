@@ -1607,6 +1607,102 @@ fn host_bundle_component(
     }
 }
 
+/// Inspect or recover an interrupted first-party host component transaction.
+///
+/// This is the supported replacement for hand-deleting
+/// `~/.tracedecay/host-components/.tracedecay-host-bundle-v1/component-set-journal.*.json`,
+/// which used to be the only way out of a wedged host lifecycle.
+pub(crate) async fn handle_host_bundle_recovery_command(
+    action: crate::cli::HostBundleAction,
+    dry_run: bool,
+    yes: bool,
+) -> tracedecay::errors::Result<()> {
+    let home = tracedecay::agents::home_dir().ok_or_else(|| {
+        tracedecay::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        }
+    })?;
+    let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
+    let mut writer =
+        tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+            &home,
+            &lifecycle_root,
+        )
+        .map_err(host_bundle_error)?;
+
+    let (selected_agent, quarantine, status_only) = match action {
+        crate::cli::HostBundleAction::Status => (None, false, true),
+        crate::cli::HostBundleAction::Recover { agent, quarantine } => (agent, quarantine, dry_run),
+    };
+
+    let mut pending = writer
+        .pending_component_set_journal_hosts()
+        .map_err(host_bundle_error)?;
+    if let Some(agent) = selected_agent.as_deref() {
+        let host = host_kind_for_agent(agent)?;
+        pending.retain(|pending_host| *pending_host == host);
+    }
+    if pending.is_empty() {
+        eprintln!("\x1b[32m✔\x1b[0m no host component lifecycle journal is awaiting recovery");
+        return Ok(());
+    }
+    for host in &pending {
+        eprintln!(
+            "  pending: {} ({:?})",
+            tracedecay::agents::integration_id_for_host(*host),
+            host
+        );
+    }
+    if status_only {
+        return Ok(());
+    }
+    if !yes {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "host component recovery mutates deployed files; re-run with --yes"
+                .to_string(),
+        });
+    }
+
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
+        .as_secs();
+    for host in pending {
+        let agent_id = tracedecay::agents::integration_id_for_host(host);
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            agent_id,
+            &home,
+            &lifecycle_root,
+            tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair,
+        )?;
+        let outcome =
+            tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer)
+                .recover_host(host, &mut registration);
+        match outcome {
+            Ok(()) => eprintln!("\x1b[32m✔\x1b[0m {agent_id}: lifecycle journal recovered"),
+            Err(error) if quarantine => {
+                let quarantined = writer
+                    .quarantine_component_set_journal(host, now_unix)
+                    .map_err(host_bundle_error)?;
+                match quarantined {
+                    Some(path) => eprintln!(
+                        "\x1b[33m!\x1b[0m {agent_id}: {error}; journal quarantined at {} (rollback backups preserved)",
+                        path.display()
+                    ),
+                    None => eprintln!("\x1b[32m✔\x1b[0m {agent_id}: lifecycle journal cleared"),
+                }
+            }
+            Err(error) => return Err(host_bundle_error(error)),
+        }
+    }
+    Ok(())
+}
+
 fn host_kind_for_agent(
     agent: &str,
 ) -> tracedecay::errors::Result<tracedecay::agents::host_bundle_v2::HostKindV1> {

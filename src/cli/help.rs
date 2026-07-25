@@ -210,6 +210,28 @@ Examples:
 Related: tracedecay doctor (surfaces restart-safe rollback state), tracedecay
 install / update-plugin (refresh Core feedback routes).";
 
+pub(crate) const HOST_BUNDLE_LONG_ABOUT: &str = "\
+Inspects and recovers an interrupted first-party host component lifecycle \
+transaction. Each host keeps its own recovery journal; a host whose journal is \
+pending refuses further mutation until it is rolled back. Recovery converges \
+automatically whenever the deployed bytes already equal the pre-transaction \
+backup or this transaction's own cataloged output. Use status to see which \
+hosts are pending, recover to roll them back, and --quarantine only when \
+foreign content blocks convergence.";
+
+pub(crate) const HOST_BUNDLE_AFTER_HELP: &str = "\
+Examples:
+  tracedecay host-bundle status
+  tracedecay host-bundle recover --dry-run
+  tracedecay host-bundle recover --agent opencode --yes
+  tracedecay host-bundle recover --agent opencode --quarantine --yes
+
+Quarantine moves the journal aside into the lifecycle control directory and
+leaves every rollback backup on disk; nothing is deleted.
+
+Related: tracedecay doctor (surfaces the pending recovery boundary),
+tracedecay reinstall (re-applies each host component set).";
+
 pub(crate) const DASHBOARD_LONG_ABOUT: &str = "\
 Starts the local web dashboard: holographic memory curation, LCM session \
 explorer, code-graph browser, analytics, and automation review UI. Binds to \

@@ -33,8 +33,15 @@ const MAX_ARTIFACT_CONTENT_BYTES: usize = 1024 * 1024;
 const HOST_BUNDLE_RECEIPT_SCHEMA_VERSION: u16 = 1;
 const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
 const HOST_BUNDLE_JOURNAL_FILE: &str = "journal.v1.json";
+/// Legacy shared component-set journal name. One journal per lifecycle root
+/// meant an interrupted transaction for any host blocked every other host.
+/// Journals are host-scoped now; this name is still read (and retired) so a
+/// journal left by an older binary is recovered rather than orphaned.
 const HOST_COMPONENT_SET_JOURNAL_FILE: &str = "component-set-journal.v1.json";
 const HOST_COMPONENT_SET_STAGE_DIR: &str = "component-set-staging";
+/// Set-aside directory for journals an operator explicitly abandoned with
+/// `tracedecay host-bundle recover --quarantine --yes`. Backups stay in place.
+const HOST_BUNDLE_QUARANTINE_DIR: &str = "quarantine";
 const HOST_BUNDLE_LOCK_FILE: &str = "writer.v1.lock";
 const MAX_CONTROL_FILE_BYTES: usize = 256 * 1024;
 static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -1292,11 +1299,28 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         Self { writer }
     }
 
+    /// Recover whichever single component-set journal is outstanding. Callers
+    /// that know the host should prefer [`Self::recover_host`], which never
+    /// hands another host's journal to this registration adapter.
     pub fn recover<R: HostComponentSetRegistrationV1>(
         &mut self,
         registration: &mut R,
     ) -> Result<(), HostBundleError> {
-        self.writer.recover_component_set_operation(registration)?;
+        self.writer
+            .recover_component_set_operation(None, registration)?;
+        self.writer.recover_interrupted_operation()
+    }
+
+    /// Recover only `host`'s pending component-set journal. Other hosts'
+    /// journals are left untouched: their artifact path spaces are disjoint,
+    /// and their registration state belongs to a different adapter.
+    pub fn recover_host<R: HostComponentSetRegistrationV1>(
+        &mut self,
+        host: HostKindV1,
+        registration: &mut R,
+    ) -> Result<(), HostBundleError> {
+        self.writer
+            .recover_component_set_operation(Some(host), registration)?;
         self.writer.recover_interrupted_operation()
     }
 
@@ -1307,8 +1331,14 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         verifier: &V,
         registration: &mut R,
     ) -> Result<HostComponentSetLifecyclePreviewV1, HostBundleError> {
+        // Only this host's own pending journal blocks the preview. A wedged
+        // transaction for an unrelated host mutates a disjoint path space and
+        // is not a reason to refuse work here.
         if self.writer.load_journal()?.is_some()
-            || self.writer.load_component_set_journal()?.is_some()
+            || self
+                .writer
+                .load_component_set_journal_for(component_set.host)?
+                .is_some()
         {
             return Err(HostBundleError::RecoveryRequired);
         }
@@ -1388,7 +1418,10 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         verifier: &V,
         registration: &mut R,
     ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
-        self.recover(registration)?;
+        // Host-scoped: a pending journal for an unrelated host governs a
+        // disjoint artifact subtree and belongs to a different registration
+        // adapter, so it must neither be recovered here nor block this work.
+        self.recover_host(component_set.host, registration)?;
         self.writer
             .execute_component_set(component_set, request, verifier, registration)
     }
@@ -2062,51 +2095,61 @@ pub fn inspect_installed_host_bundle_components_at(
             None => components.push(corrupt_component_result(journal_path, None, None)),
         }
     }
-    let component_set_journal_path = control_root.join(HOST_COMPONENT_SET_JOURNAL_FILE);
-    if component_set_journal_path.exists() {
-        let journal = fs::read(&component_set_journal_path)
-            .ok()
-            .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_CONTROL_FILE_BYTES)
-            .and_then(|bytes| serde_json::from_slice::<HostComponentSetJournalV1>(&bytes).ok())
-            .filter(|journal| validate_component_set_journal(journal).is_ok());
-        match journal {
-            Some(journal) => {
-                for set_component in journal.components {
-                    let host = set_component.manifest.host;
-                    let component = set_component.manifest.component;
-                    if let Some(result) = components.iter_mut().find(|result| {
-                        result.host == Some(host) && result.component == Some(component)
-                    }) {
-                        result.state = HostBundleComponentDoctorStateV1::Repairable;
-                        result.repair_action = repair_action(
-                            host,
-                            component,
-                            HostBundleComponentDoctorStateV1::Repairable,
-                            HostBundleRegistrationStateV1::Current,
-                        );
-                    } else {
-                        components.push(HostBundleComponentDoctorResultV1 {
-                            receipt_path: component_set_journal_path.clone(),
-                            host: Some(host),
-                            component: Some(component),
-                            state: HostBundleComponentDoctorStateV1::Repairable,
-                            registration: None,
-                            artifacts: Vec::new(),
-                            repair_action: repair_action(
+    // Component-set journals are host-scoped; the legacy shared name is still
+    // inspected so a journal left by an older binary stays visible to doctor.
+    let component_set_journal_paths = std::iter::once(HOST_COMPONENT_SET_JOURNAL_FILE.to_string())
+        .chain(
+            stock_host_kinds()
+                .into_iter()
+                .map(component_set_journal_file),
+        )
+        .map(|file| control_root.join(file));
+    for component_set_journal_path in component_set_journal_paths {
+        if component_set_journal_path.exists() {
+            let journal = fs::read(&component_set_journal_path)
+                .ok()
+                .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_CONTROL_FILE_BYTES)
+                .and_then(|bytes| serde_json::from_slice::<HostComponentSetJournalV1>(&bytes).ok())
+                .filter(|journal| validate_component_set_journal(journal).is_ok());
+            match journal {
+                Some(journal) => {
+                    for set_component in journal.components {
+                        let host = set_component.manifest.host;
+                        let component = set_component.manifest.component;
+                        if let Some(result) = components.iter_mut().find(|result| {
+                            result.host == Some(host) && result.component == Some(component)
+                        }) {
+                            result.state = HostBundleComponentDoctorStateV1::Repairable;
+                            result.repair_action = repair_action(
                                 host,
                                 component,
                                 HostBundleComponentDoctorStateV1::Repairable,
                                 HostBundleRegistrationStateV1::Current,
-                            ),
-                        });
+                            );
+                        } else {
+                            components.push(HostBundleComponentDoctorResultV1 {
+                                receipt_path: component_set_journal_path.clone(),
+                                host: Some(host),
+                                component: Some(component),
+                                state: HostBundleComponentDoctorStateV1::Repairable,
+                                registration: None,
+                                artifacts: Vec::new(),
+                                repair_action: repair_action(
+                                    host,
+                                    component,
+                                    HostBundleComponentDoctorStateV1::Repairable,
+                                    HostBundleRegistrationStateV1::Current,
+                                ),
+                            });
+                        }
                     }
                 }
+                None => components.push(corrupt_component_result(
+                    component_set_journal_path,
+                    None,
+                    None,
+                )),
             }
-            None => components.push(corrupt_component_result(
-                component_set_journal_path,
-                None,
-                None,
-            )),
         }
     }
     for entry in fs::read_dir(&control_root)
@@ -2722,7 +2765,12 @@ impl HostBundleWriterV1 {
         }
         verifier.verify_manifest(manifest)?;
         let content_by_path = validate_artifact_contents(manifest, request, contents)?;
-        if self.load_component_set_journal()?.is_some() {
+        // Scoped to this manifest's own host: another host's pending
+        // component-set journal governs a disjoint artifact subtree.
+        if self
+            .load_component_set_journal_for(manifest.host)?
+            .is_some()
+        {
             return Err(HostBundleError::RecoveryRequired);
         }
         self.recover_interrupted_operation()?;
@@ -2954,6 +3002,14 @@ impl HostBundleWriterV1 {
         if self.load_journal()?.is_some() {
             return Err(HostBundleError::RecoveryRequired);
         }
+        // Never clobber this host's own outstanding journal: it is the only
+        // durable record of how to roll the earlier transaction back.
+        if self
+            .load_component_set_journal_for(component_set.host)?
+            .is_some()
+        {
+            return Err(HostBundleError::RecoveryRequired);
+        }
         if let Some(receipt) = self.load_component_set_receipt(request.operation_id)? {
             if !component_set_receipt_matches(&receipt, component_set, request)? {
                 return Err(HostBundleError::ReceiptCorrupted);
@@ -3053,7 +3109,7 @@ impl HostBundleWriterV1 {
             // aggregate and every component receipt have crossed commit.
             registration.commit(component_set, request)?;
             self.cleanup_component_set_boundary(request.operation_id)?;
-            self.remove_component_set_journal()?;
+            self.remove_component_set_journal(component_set.host)?;
             Ok(receipt)
         })();
 
@@ -3082,9 +3138,14 @@ impl HostBundleWriterV1 {
     /// state is rolled back in reverse component and artifact order.
     fn recover_component_set_operation<R: HostComponentSetRegistrationV1>(
         &mut self,
+        host: Option<HostKindV1>,
         registration: &mut R,
     ) -> Result<(), HostBundleError> {
-        let Some(mut journal) = self.load_component_set_journal()? else {
+        let loaded = match host {
+            Some(host) => self.load_component_set_journal_for(host)?,
+            None => self.load_component_set_journal()?,
+        };
+        let Some(mut journal) = loaded else {
             return Ok(());
         };
         validate_component_set_journal(&journal)?;
@@ -3109,7 +3170,7 @@ impl HostBundleWriterV1 {
         {
             registration.commit(&component_set, &request)?;
             self.cleanup_component_set_boundary(journal.operation_id)?;
-            self.remove_component_set_journal()?;
+            self.remove_component_set_journal(journal.host)?;
             return Ok(());
         }
 
@@ -3118,7 +3179,7 @@ impl HostBundleWriterV1 {
                 registration.rollback(&component_set, &request)?;
             }
             self.cleanup_component_set_boundary(journal.operation_id)?;
-            self.remove_component_set_journal()?;
+            self.remove_component_set_journal(journal.host)?;
             return Ok(());
         }
 
@@ -3129,7 +3190,7 @@ impl HostBundleWriterV1 {
         journal.state = HostComponentSetJournalStateV1::RolledBack;
         self.write_component_set_journal(&journal)?;
         self.cleanup_component_set_boundary(journal.operation_id)?;
-        self.remove_component_set_journal()
+        self.remove_component_set_journal(journal.host)
     }
 
     fn preflight_component_set<V: HostBundleVerificationAdapterV1>(
@@ -3378,6 +3439,33 @@ impl HostBundleWriterV1 {
         Ok(())
     }
 
+    /// Restore one journal entry to its pre-transaction state.
+    ///
+    /// Rollback must be able to CONVERGE when a second writer touched a
+    /// deployed path after this transaction wrote it. The compatibility
+    /// registration adapter re-runs a legacy installer over the same paths
+    /// during `apply`, so a post-apply failure routinely leaves live bytes that
+    /// are neither the backup nor this transaction's cataloged output. Before
+    /// the convergence rules below, that state was unrecoverable: rollback
+    /// returned `RecoveryRequired` forever, the journal stayed behind, and
+    /// every later host transaction failed up front.
+    ///
+    /// Two content equalities are provably safe to converge on, because in both
+    /// cases the operator-visible end state is byte-identical to a successful
+    /// restore:
+    ///
+    /// 1. **Live bytes equal the pre-transaction backup.** The end state
+    ///    rollback wants is already true; renaming the backup over it would
+    ///    produce the same bytes. Treat the path as restored.
+    /// 2. **Live bytes equal this entry's cataloged install target
+    ///    (`installed_digest`).** Those bytes are provably this transaction's
+    ///    own output, so removing them is a restore and not third-party data
+    ///    loss. This also closes the crash window between the artifact write
+    ///    and the `wrote_new` journal update.
+    ///
+    /// Anything else — foreign bytes that match neither — stays fail-closed
+    /// with `RecoveryRequired`, and the operator resolves it explicitly with
+    /// `tracedecay host-bundle recover`.
     fn restore_component_set_entry(
         &self,
         entry: &HostBundleJournalEntryV1,
@@ -3385,10 +3473,22 @@ impl HostBundleWriterV1 {
     ) -> Result<(), HostBundleError> {
         let (parent, name) = self.open_parent_nofollow(Path::new(&entry.relative_path))?;
         if let Some(backup_name) = &entry.backup_name {
-            let backup_exists = backup_dir
-                .map(|backups| regular_file_exists(backups, backup_name))
-                .transpose()?
-                .unwrap_or(false);
+            let backup_bytes = match backup_dir {
+                Some(backups) => read_regular_nofollow(backups, backup_name)?,
+                None => None,
+            };
+            let backup_exists = backup_bytes.is_some();
+            // Convergence rule 1: the live file already holds the exact
+            // pre-transaction bytes, so this path needs no mutation at all.
+            // The backup stays until the boundary cleanup retires the whole
+            // operation directory, which keeps a repeated restore idempotent.
+            if let (Some(backup), Some(live)) = (
+                backup_bytes.as_ref(),
+                read_regular_nofollow(&parent, &name)?,
+            ) && live == *backup
+            {
+                return Ok(());
+            }
             if !entry.backup_created {
                 if !backup_exists {
                     return Ok(());
@@ -3408,8 +3508,19 @@ impl HostBundleWriterV1 {
                         .installed_digest
                         .ok_or(HostBundleError::ReceiptCorrupted)?,
                 )?;
-            } else if regular_file_exists(&parent, &name)? {
-                return Err(HostBundleError::RecoveryRequired);
+            } else if let Some(live) = read_regular_nofollow(&parent, &name)? {
+                // Convergence rule 2. `installed_digest` is `None` for a
+                // BackupThenRemove entry, which has no cataloged target and
+                // therefore stays fail-closed.
+                let installed = entry
+                    .installed_digest
+                    .ok_or(HostBundleError::RecoveryRequired)?;
+                if <[u8; 32]>::from(Sha256::digest(&live)) != installed {
+                    return Err(HostBundleError::RecoveryRequired);
+                }
+                parent
+                    .remove_file(&name)
+                    .map_err(|_| HostBundleError::StorageFailure)?;
             }
             backups
                 .rename(backup_name, &parent, &name)
@@ -3417,6 +3528,12 @@ impl HostBundleWriterV1 {
             sync_cap_dir(backups)?;
             sync_cap_dir(&parent)
         } else if entry.wrote_new {
+            // No backup: the path did not exist before the transaction, so
+            // rollback wants it gone. `remove_if_digest_matches` already
+            // converges on the two safe outcomes (already absent, or holding
+            // this transaction's cataloged bytes). Foreign bytes at a path this
+            // transaction created are genuinely ambiguous — removing them could
+            // destroy another writer's file — so that case stays fail-closed.
             remove_if_digest_matches(
                 &parent,
                 &name,
@@ -3650,14 +3767,63 @@ impl HostBundleWriterV1 {
             .transpose()
     }
 
-    fn load_component_set_journal(
+    fn read_component_set_journal_file(
         &self,
+        file_name: &str,
     ) -> Result<Option<HostComponentSetJournalV1>, HostBundleError> {
-        read_control_json(&self.control, HOST_COMPONENT_SET_JOURNAL_FILE)?
+        read_control_json(&self.control, file_name)?
             .map(|bytes| {
                 serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
             })
             .transpose()
+    }
+
+    /// Load the pending component-set journal for one host.
+    ///
+    /// Journals are host-scoped so an interrupted transaction for host X never
+    /// blocks an unrelated host Y. Journals written by an older binary live
+    /// under the shared legacy name; they carry their own `host` field, so they
+    /// are readable here and are attributed to exactly one host.
+    fn load_component_set_journal_for(
+        &self,
+        host: HostKindV1,
+    ) -> Result<Option<HostComponentSetJournalV1>, HostBundleError> {
+        if let Some(journal) =
+            self.read_component_set_journal_file(&component_set_journal_file(host))?
+        {
+            return Ok(Some(journal));
+        }
+        Ok(self
+            .read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)?
+            .filter(|journal| journal.host == host))
+    }
+
+    /// Load any pending component-set journal, host-scoped or legacy. Used by
+    /// the host-blind recovery entry point, which must still be able to find a
+    /// single outstanding transaction.
+    fn load_component_set_journal(
+        &self,
+    ) -> Result<Option<HostComponentSetJournalV1>, HostBundleError> {
+        for host in stock_host_kinds() {
+            if let Some(journal) =
+                self.read_component_set_journal_file(&component_set_journal_file(host))?
+            {
+                return Ok(Some(journal));
+            }
+        }
+        self.read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)
+    }
+
+    /// Every host with a pending component-set journal. The recovery verb
+    /// reports these; `--agent` narrows the set.
+    pub fn pending_component_set_journal_hosts(&self) -> Result<Vec<HostKindV1>, HostBundleError> {
+        let mut hosts = Vec::new();
+        for host in stock_host_kinds() {
+            if self.load_component_set_journal_for(host)?.is_some() {
+                hosts.push(host);
+            }
+        }
+        Ok(hosts)
     }
 
     fn write_journal(&self, journal: &HostBundleJournalV1) -> Result<(), HostBundleError> {
@@ -3672,7 +3838,22 @@ impl HostBundleWriterV1 {
     ) -> Result<(), HostBundleError> {
         validate_component_set_journal(journal)?;
         let bytes = serde_json::to_vec(journal).map_err(|_| HostBundleError::ReceiptCorrupted)?;
-        atomic_write_nofollow(&self.control, HOST_COMPONENT_SET_JOURNAL_FILE, &bytes, true)
+        atomic_write_nofollow(
+            &self.control,
+            &component_set_journal_file(journal.host),
+            &bytes,
+            true,
+        )?;
+        // A journal written by an older binary lives under the shared legacy
+        // name. Once its host-scoped successor is durable, retire it so the
+        // legacy file can never shadow or double-recover this transaction.
+        if self
+            .read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)?
+            .is_some_and(|legacy| legacy.host == journal.host)
+        {
+            self.remove_control_file(HOST_COMPONENT_SET_JOURNAL_FILE)?;
+        }
+        Ok(())
     }
 
     fn remove_control_file(&self, name: &str) -> Result<(), HostBundleError> {
@@ -3680,8 +3861,70 @@ impl HostBundleWriterV1 {
         sync_cap_dir(&self.control)
     }
 
-    fn remove_component_set_journal(&self) -> Result<(), HostBundleError> {
-        self.remove_control_file(HOST_COMPONENT_SET_JOURNAL_FILE)
+    /// Last-resort operator escape when convergent recovery still cannot
+    /// resolve a host's component-set journal (genuinely foreign bytes at a
+    /// path the transaction created, for example).
+    ///
+    /// The journal is *moved* into a quarantine directory rather than deleted:
+    /// the transaction's immutable backups stay on disk beside it, so the
+    /// pre-transaction bytes remain recoverable by hand and nothing about the
+    /// failure is destroyed. Only the authority file that blocks further
+    /// mutation of this host is set aside. This replaces the previous recovery
+    /// path, which was hand-deleting the journal.
+    ///
+    /// Returns the quarantined path, or `None` when no journal was pending.
+    pub fn quarantine_component_set_journal(
+        &mut self,
+        host: HostKindV1,
+        now_unix: u64,
+    ) -> Result<Option<PathBuf>, HostBundleError> {
+        let mut moved = None;
+        for file in [
+            component_set_journal_file(host),
+            HOST_COMPONENT_SET_JOURNAL_FILE.to_string(),
+        ] {
+            // The legacy shared file belongs to whichever host wrote it; never
+            // quarantine another host's journal from under it.
+            if file == HOST_COMPONENT_SET_JOURNAL_FILE
+                && self
+                    .read_component_set_journal_file(&file)?
+                    .is_none_or(|journal| journal.host != host)
+            {
+                continue;
+            }
+            if !regular_file_exists(&self.control, &file)? {
+                continue;
+            }
+            let quarantine =
+                open_or_create_nofollow_dir(&self.control, HOST_BUNDLE_QUARANTINE_DIR)?;
+            let target = format!("{now_unix}.{file}");
+            if !is_safe_component(&target) {
+                return Err(HostBundleError::UnsafeInstallPath);
+            }
+            self.control
+                .rename(&file, &quarantine, &target)
+                .map_err(|_| HostBundleError::StorageFailure)?;
+            sync_cap_dir(&quarantine)?;
+            sync_cap_dir(&self.control)?;
+            moved = Some(
+                self.lifecycle_root_path
+                    .join(HOST_BUNDLE_CONTROL_DIR)
+                    .join(HOST_BUNDLE_QUARANTINE_DIR)
+                    .join(target),
+            );
+        }
+        Ok(moved)
+    }
+
+    fn remove_component_set_journal(&self, host: HostKindV1) -> Result<(), HostBundleError> {
+        self.remove_control_file(&component_set_journal_file(host))?;
+        if self
+            .read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)?
+            .is_some_and(|legacy| legacy.host == host)
+        {
+            self.remove_control_file(HOST_COMPONENT_SET_JOURNAL_FILE)?;
+        }
+        Ok(())
     }
 
     fn cleanup_unreferenced_backup_dir(
@@ -4452,6 +4695,24 @@ fn receipt_file(host: HostKindV1, component: HostBundleComponentV1) -> String {
     )
 }
 
+/// Host-scoped component-set journal name.
+///
+/// Blast-radius argument for per-host isolation: every host deploys its
+/// artifacts under its own disjoint subtree of the artifact root
+/// (`.claude/…`, `.codex/…`, `.cursor/…`, `.config/opencode/…`,
+/// `.kimi-code/…`, `.hermes/…`, `.kiro/…`, `.cline/…`, `.roo/…`,
+/// `.config/kilo/…`), and backups plus staging directories are keyed by
+/// `operation_id`. A pending transaction for host X therefore shares no
+/// mutable path with a transaction for host Y, so X awaiting recovery is not a
+/// reason to refuse Y. `first_party_host_artifact_prefixes_are_disjoint`
+/// pins that premise as a test, so a future host that violates it fails the
+/// suite rather than silently widening the blast radius. The receipt namespace
+/// is already host-scoped (`receipt_file`), and the single writer lock still
+/// serializes all mutation within a lifecycle root.
+fn component_set_journal_file(host: HostKindV1) -> String {
+    format!("component-set-journal.{}.v1.json", host_slug(host))
+}
+
 fn component_set_receipt_file(operation_id: [u8; 16]) -> String {
     format!(
         "component-set-receipt.{}.v1.json",
@@ -4810,7 +5071,7 @@ mod tests {
         assert!(
             root.path()
                 .join(HOST_BUNDLE_CONTROL_DIR)
-                .join(HOST_COMPONENT_SET_JOURNAL_FILE)
+                .join(component_set_journal_file(HostKindV1::OpenCode))
                 .is_file(),
             "a rollback journal must remain available for restart reconciliation"
         );
@@ -4837,12 +5098,372 @@ mod tests {
             !root
                 .path()
                 .join(HOST_BUNDLE_CONTROL_DIR)
-                .join(HOST_COMPONENT_SET_JOURNAL_FILE)
+                .join(component_set_journal_file(HostKindV1::OpenCode))
                 .exists(),
             "restart recovery clears only a completed rollback boundary"
         );
         drop(writer);
         HostBundleWriterV1::open(root.path()).expect("reopen after recovery");
+    }
+
+    /// Stand-in for the compatibility registration adapter, which re-runs a
+    /// legacy installer over the very paths the transaction just wrote. It
+    /// rewrites one deployed path during `apply`, so artifact verification
+    /// fails afterwards and rollback has to cope with a second writer's bytes.
+    struct SecondWriterRegistration {
+        artifact_root: PathBuf,
+        relative_path: &'static str,
+        bytes: Vec<u8>,
+        rolled_back: bool,
+    }
+
+    impl HostComponentSetRegistrationV1 for SecondWriterRegistration {
+        fn apply(
+            &mut self,
+            _component_set: &HostComponentSetV1,
+            _request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            fs::write(self.artifact_root.join(self.relative_path), &self.bytes)
+                .map_err(|_| HostBundleError::StorageFailure)
+        }
+
+        fn rollback(
+            &mut self,
+            _component_set: &HostComponentSetV1,
+            _request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.rolled_back = true;
+            Ok(())
+        }
+    }
+
+    /// Install the two-component OpenCode set, then attempt a repair whose
+    /// registration adapter rewrites `plugins/core.json` with `second_bytes`.
+    /// Returns the repair outcome plus the writer for further assertions.
+    fn wedge_repair_with_second_writer(
+        root: &Path,
+        second_bytes: &[u8],
+    ) -> (
+        HostBundleWriterV1,
+        Result<HostComponentSetReceiptV1, HostBundleError>,
+    ) {
+        let initial = component_set(HostKindV1::OpenCode, b"core-v1", b"agent-v1");
+        let initial_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 41);
+        let initial_verifier = ComponentSetVerifier::from_set(&initial);
+        let mut writer = HostBundleWriterV1::open(root).unwrap();
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &initial,
+                &initial_request,
+                &initial_verifier,
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .unwrap();
+
+        let repair = component_set(HostKindV1::OpenCode, b"core-v2", b"agent-v2");
+        let repair_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Repair, 42);
+        let repair_verifier = ComponentSetVerifier::from_set(&repair);
+        let mut registration = SecondWriterRegistration {
+            artifact_root: root.to_path_buf(),
+            relative_path: "plugins/core.json",
+            bytes: second_bytes.to_vec(),
+            rolled_back: false,
+        };
+        let outcome = HostComponentSetTransactionV1::new(&mut writer).execute(
+            &repair,
+            &repair_request,
+            &repair_verifier,
+            &mut registration,
+        );
+        assert!(registration.rolled_back, "registration rollback must run");
+        (writer, outcome)
+    }
+
+    /// Defect: a second writer that left the deployed path holding the exact
+    /// pre-transaction bytes used to make rollback unconvergeable forever —
+    /// `remove_if_digest_matches` refused to touch a file that no longer
+    /// matched the installed digest, so the journal stayed behind and wedged
+    /// every later host transaction.
+    #[test]
+    fn component_set_rollback_converges_when_a_second_writer_left_the_backup_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut writer, outcome) = wedge_repair_with_second_writer(root.path(), b"core-v1");
+
+        assert_eq!(
+            outcome.err(),
+            Some(HostBundleError::ArtifactContentMismatch),
+            "the failure must surface as the real content mismatch, not RecoveryRequired"
+        );
+        assert_eq!(
+            fs::read(root.path().join("plugins/core.json")).unwrap(),
+            b"core-v1",
+            "the pre-transaction bytes are the converged end state"
+        );
+        assert_eq!(
+            fs::read(root.path().join("plugins/agent.json")).unwrap(),
+            b"agent-v1"
+        );
+        assert_eq!(
+            writer
+                .load_receipt(HostKindV1::OpenCode, HostBundleComponentV1::Core)
+                .unwrap()
+                .expect("the pre-transaction receipt is restored")
+                .operation_id,
+            [41; 16]
+        );
+
+        // A completed rollback leaves the journal for an explicit restart
+        // boundary; recovery clears it and the host is usable again.
+        HostComponentSetTransactionV1::new(&mut writer)
+            .recover_host(HostKindV1::OpenCode, &mut ArtifactOnlyTestRegistration)
+            .unwrap();
+        assert!(
+            writer
+                .pending_component_set_journal_hosts()
+                .unwrap()
+                .is_empty()
+        );
+        let next = component_set(HostKindV1::OpenCode, b"core-v3", b"agent-v3");
+        let next_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Repair, 43);
+        let next_verifier = ComponentSetVerifier::from_set(&next);
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &next,
+                &next_request,
+                &next_verifier,
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .expect("the host is no longer wedged");
+    }
+
+    /// Genuinely foreign bytes stay fail-closed: converging would silently
+    /// destroy content this transaction can not account for. The operator
+    /// resolves it with the explicit recovery verb instead.
+    #[test]
+    fn component_set_rollback_stays_fail_closed_for_foreign_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut writer, outcome) =
+            wedge_repair_with_second_writer(root.path(), b"foreign-third-party-bytes");
+
+        assert_eq!(outcome.err(), Some(HostBundleError::RecoveryRequired));
+        assert_eq!(
+            fs::read(root.path().join("plugins/core.json")).unwrap(),
+            b"foreign-third-party-bytes",
+            "unaccountable content is preserved, never silently discarded"
+        );
+        assert_eq!(
+            writer.pending_component_set_journal_hosts().unwrap(),
+            vec![HostKindV1::OpenCode]
+        );
+        // Convergent recovery cannot resolve this, so it still fails closed.
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer)
+                .recover_host(HostKindV1::OpenCode, &mut ArtifactOnlyTestRegistration)
+                .err(),
+            Some(HostBundleError::RecoveryRequired)
+        );
+
+        // The recovery verb's escape hatch: the journal is set aside (not
+        // deleted) and the immutable backups stay on disk.
+        let quarantined = writer
+            .quarantine_component_set_journal(HostKindV1::OpenCode, 1_700_000_000)
+            .unwrap()
+            .expect("the pending journal is quarantined");
+        assert!(quarantined.is_file());
+        assert!(
+            writer
+                .pending_component_set_journal_hosts()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            root.path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join("backups")
+                .exists(),
+            "quarantine preserves the rollback backups"
+        );
+        let next = component_set(HostKindV1::OpenCode, b"core-v4", b"agent-v4");
+        let next_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Repair, 44);
+        let next_verifier = ComponentSetVerifier::from_set(&next);
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &next,
+                &next_request,
+                &next_verifier,
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .expect("the recovery verb unblocks the host without hand-deleting a journal");
+    }
+
+    fn host_scoped_component_set(host: HostKindV1, slug: &str, tag: &[u8]) -> HostComponentSetV1 {
+        let core_path = format!("{slug}/core.json");
+        let agent_path = format!("{slug}/agent.json");
+        HostComponentSetV1 {
+            host,
+            components: vec![
+                component_entry(
+                    component_manifest(host, HostBundleComponentV1::Core, &core_path, tag),
+                    tag,
+                ),
+                component_entry(
+                    component_manifest(host, HostBundleComponentV1::Agent, &agent_path, tag),
+                    tag,
+                ),
+            ],
+        }
+    }
+
+    /// Defect: one shared journal per lifecycle root meant a wedged opencode
+    /// repair blocked codex, cursor, cline, roo-code, kilo, kiro, and kimi in
+    /// the same `tracedecay reinstall`. Journals are host-scoped now, and the
+    /// hosts' artifact path spaces are disjoint, so an unrelated host proceeds.
+    #[test]
+    fn a_wedged_host_journal_does_not_block_an_unrelated_host() {
+        let root = tempfile::tempdir().unwrap();
+        let wedged = host_scoped_component_set(HostKindV1::OpenCode, "opencode", b"v1");
+        let wedged_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 51);
+        let wedged_verifier = ComponentSetVerifier::from_set(&wedged);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut second_writer = SecondWriterRegistration {
+            artifact_root: root.path().to_path_buf(),
+            relative_path: "opencode/core.json",
+            bytes: b"foreign".to_vec(),
+            rolled_back: false,
+        };
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &wedged,
+                    &wedged_request,
+                    &wedged_verifier,
+                    &mut second_writer,
+                )
+                .err(),
+            Some(HostBundleError::RecoveryRequired)
+        );
+        assert_eq!(
+            writer.pending_component_set_journal_hosts().unwrap(),
+            vec![HostKindV1::OpenCode]
+        );
+
+        let unrelated = host_scoped_component_set(HostKindV1::Codex, "codex", b"v1");
+        let unrelated_request =
+            component_set_request(HostKindV1::Codex, HostBundleLifecycleOpV1::Install, 52);
+        let unrelated_verifier = ComponentSetVerifier::from_set(&unrelated);
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &unrelated,
+                &unrelated_request,
+                &unrelated_verifier,
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .expect("an unrelated host's disjoint path space is not blocked");
+        assert_eq!(
+            fs::read(root.path().join("codex/core.json")).unwrap(),
+            b"v1"
+        );
+        assert_eq!(
+            writer.pending_component_set_journal_hosts().unwrap(),
+            vec![HostKindV1::OpenCode],
+            "the wedged host still awaits its own recovery"
+        );
+
+        // Recovering one host must not touch another host's journal.
+        let mut also_wedged = SecondWriterRegistration {
+            artifact_root: root.path().to_path_buf(),
+            relative_path: "codex/core.json",
+            bytes: b"foreign".to_vec(),
+            rolled_back: false,
+        };
+        let repair = host_scoped_component_set(HostKindV1::Codex, "codex", b"v2");
+        let repair_request =
+            component_set_request(HostKindV1::Codex, HostBundleLifecycleOpV1::Repair, 53);
+        let repair_verifier = ComponentSetVerifier::from_set(&repair);
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute(&repair, &repair_request, &repair_verifier, &mut also_wedged)
+                .err(),
+            Some(HostBundleError::RecoveryRequired)
+        );
+        writer
+            .quarantine_component_set_journal(HostKindV1::Codex, 1_700_000_000)
+            .unwrap()
+            .expect("codex journal quarantined");
+        assert_eq!(
+            writer.pending_component_set_journal_hosts().unwrap(),
+            vec![HostKindV1::OpenCode],
+            "quarantining one host leaves every other host's journal intact"
+        );
+    }
+
+    /// A journal written by an older binary lives under the shared legacy name.
+    /// It must still be discoverable, attributable to exactly one host, and
+    /// retired once its host-scoped successor is durable.
+    #[test]
+    fn a_legacy_shared_component_set_journal_is_attributed_to_its_own_host() {
+        let root = tempfile::tempdir().unwrap();
+        let wedged = host_scoped_component_set(HostKindV1::OpenCode, "opencode", b"v1");
+        let wedged_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 61);
+        let wedged_verifier = ComponentSetVerifier::from_set(&wedged);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut second_writer = SecondWriterRegistration {
+            artifact_root: root.path().to_path_buf(),
+            relative_path: "opencode/core.json",
+            bytes: b"foreign".to_vec(),
+            rolled_back: false,
+        };
+        assert!(
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &wedged,
+                    &wedged_request,
+                    &wedged_verifier,
+                    &mut second_writer,
+                )
+                .is_err()
+        );
+        let control = root.path().join(HOST_BUNDLE_CONTROL_DIR);
+        fs::rename(
+            control.join(component_set_journal_file(HostKindV1::OpenCode)),
+            control.join(HOST_COMPONENT_SET_JOURNAL_FILE),
+        )
+        .unwrap();
+        drop(writer);
+
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        assert_eq!(
+            writer.pending_component_set_journal_hosts().unwrap(),
+            vec![HostKindV1::OpenCode],
+            "a legacy journal is discovered and attributed to its recorded host"
+        );
+        let unrelated = host_scoped_component_set(HostKindV1::Codex, "codex", b"v1");
+        let unrelated_request =
+            component_set_request(HostKindV1::Codex, HostBundleLifecycleOpV1::Install, 62);
+        let unrelated_verifier = ComponentSetVerifier::from_set(&unrelated);
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &unrelated,
+                &unrelated_request,
+                &unrelated_verifier,
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .expect("a legacy journal blocks only its own host");
+        assert!(
+            control.join(HOST_COMPONENT_SET_JOURNAL_FILE).is_file(),
+            "another host's transaction never retires the legacy journal"
+        );
+        writer
+            .quarantine_component_set_journal(HostKindV1::OpenCode, 1_700_000_000)
+            .unwrap()
+            .expect("the legacy journal is quarantined for its own host");
+        assert!(!control.join(HOST_COMPONENT_SET_JOURNAL_FILE).exists());
     }
 
     #[test]

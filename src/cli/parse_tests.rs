@@ -1,8 +1,8 @@
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
-    Commands, DaemonAction, FeedbackRollbackAction, LspAction, MemoryAction, MigrateAction,
-    PostUpdateMode, SessionsAction, SessionsRefreshAction,
+    Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
+    MigrateAction, PostUpdateMode, SessionsAction, SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -366,6 +366,49 @@ fn feedback_rollback_commands_parse_confirmation_and_state_paths() {
         .is_ok(),
         "confirmation is enforced by the handler so dry parsing remains inspectable"
     );
+}
+
+#[test]
+fn host_bundle_recovery_commands_parse_agent_scope_and_quarantine() {
+    let status = Cli::try_parse_from(["tracedecay", "host-bundle", "status"]).unwrap();
+    assert!(matches!(
+        status.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::Status
+        })
+    ));
+    let recover = Cli::try_parse_from([
+        "tracedecay",
+        "host-bundle",
+        "recover",
+        "--agent",
+        "opencode",
+        "--quarantine",
+        "--yes",
+    ])
+    .unwrap();
+    assert!(recover.yes);
+    assert!(matches!(
+        recover.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::Recover {
+                agent: Some(ref agent),
+                quarantine: true,
+            }
+        }) if agent == "opencode"
+    ));
+    let all_hosts = Cli::try_parse_from(["tracedecay", "host-bundle", "recover", "--dry-run"])
+        .expect("--dry-run needs no --component on the recovery verb");
+    assert!(all_hosts.dry_run);
+    assert!(matches!(
+        all_hosts.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::Recover {
+                agent: None,
+                quarantine: false,
+            }
+        })
+    ));
 }
 
 #[test]
