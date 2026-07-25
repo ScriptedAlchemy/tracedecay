@@ -233,24 +233,17 @@ pub fn decode_bound_native_hook_event(
 // strongly typed below, so wrong types fail without retaining raw payloads.
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct ClaudeWriteEvent {
+struct ClaudePostToolUseEvent {
     session_id: String,
     transcript_path: String,
     cwd: String,
     prompt_id: String,
     permission_mode: String,
     tool_name: String,
-    tool_input: ClaudeWriteInput,
-    tool_response: serde_json::Map<String, Value>,
+    tool_input: Value,
+    tool_response: Value,
     tool_use_id: String,
     duration_ms: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct ClaudeWriteInput {
-    file_path: String,
-    content: String,
 }
 
 #[allow(dead_code)]
@@ -316,17 +309,39 @@ struct CursorStopEvent {
 #[derive(Deserialize)]
 struct HermesWriteEvent {
     cwd: String,
-    extra: serde_json::Map<String, Value>,
+    extra: HermesToolExtra,
     session_id: String,
-    tool_input: HermesWriteInput,
+    tool_input: Value,
     tool_name: String,
 }
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct HermesWriteInput {
-    content: String,
-    path: String,
+struct HermesToolExtra {
+    status: String,
+    tool_call_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HermesTerminalReceiptEvent {
+    agent: String,
+    event: String,
+    route: HermesTerminalReceiptRoute,
+    receipt: HermesTerminalReceipt,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HermesTerminalReceiptRoute {
+    session_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HermesTerminalReceipt {
+    tool_call_id: String,
+    status: String,
 }
 
 #[allow(dead_code)]
@@ -427,12 +442,13 @@ fn decode_claude(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
     match event_name(raw, "hook_event_name")? {
         "SessionStart" => Ok(NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start)),
         "PostToolUse" => {
-            let event = decode_shape::<ClaudeWriteEvent>(raw)?;
-            if event.tool_name == "Write" {
-                Ok(NativeHookSignalV1::SavedEdit)
-            } else {
-                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            let event = decode_shape::<ClaudePostToolUseEvent>(raw)?;
+            if event.tool_name.is_empty() || event.tool_use_id.is_empty() {
+                return Err(NativeHookDecodeError::MalformedPayload);
             }
+            Ok(NativeHookSignalV1::ToolLifecycle(
+                HookLifecyclePhaseV1::Completed,
+            ))
         }
         "Stop" => {
             decode_shape::<ClaudeStopEvent>(raw)?;
@@ -493,11 +509,20 @@ fn decode_hermes(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
         )),
         "post_tool_call" => {
             let event = decode_shape::<HermesWriteEvent>(raw)?;
-            if event.tool_name == "write_file" {
-                Ok(NativeHookSignalV1::SavedEdit)
-            } else {
-                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            if event.tool_name.is_empty() || event.extra.tool_call_id.is_empty() {
+                return Err(NativeHookDecodeError::MalformedPayload);
             }
+            hermes_terminal_tool_signal(&event.extra.status)
+        }
+        "terminalReceipt" => {
+            let event = decode_shape::<HermesTerminalReceiptEvent>(raw)?;
+            if event.agent != "hermes"
+                || event.route.session_id.is_empty()
+                || event.receipt.tool_call_id.is_empty()
+            {
+                return Err(NativeHookDecodeError::MissingTypedIdentity);
+            }
+            hermes_terminal_tool_signal(&event.receipt.status)
         }
         "on_session_end" => {
             let event = decode_shape::<HermesSessionEndEvent>(raw)?;
@@ -509,6 +534,18 @@ fn decode_hermes(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
             ))
         }
         _ => Err(NativeHookDecodeError::UnsupportedNativeEvent),
+    }
+}
+
+fn hermes_terminal_tool_signal(status: &str) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
+    match status {
+        "ok" | "success" | "completed" => Ok(NativeHookSignalV1::ToolLifecycle(
+            HookLifecyclePhaseV1::Completed,
+        )),
+        "error" | "failed" => Ok(NativeHookSignalV1::ToolLifecycle(
+            HookLifecyclePhaseV1::Failed,
+        )),
+        _ => Err(NativeHookDecodeError::MalformedPayload),
     }
 }
 
@@ -643,7 +680,7 @@ mod tests {
             (
                 HookHostV1::ClaudeCode,
                 include_bytes!("../fixtures/host_events/claude/post_tool_use_write.json"),
-                NativeHookSignalV1::SavedEdit,
+                NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
             ),
             (
                 HookHostV1::ClaudeCode,
@@ -663,7 +700,12 @@ mod tests {
             (
                 HookHostV1::Hermes,
                 include_bytes!("../fixtures/host_events/hermes/saved-edit.json"),
-                NativeHookSignalV1::SavedEdit,
+                NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
+            ),
+            (
+                HookHostV1::Hermes,
+                include_bytes!("../fixtures/host_events/hermes/terminal-receipt.json"),
+                NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
             ),
             (
                 HookHostV1::Hermes,
@@ -743,6 +785,22 @@ mod tests {
                 Err(NativeHookDecodeError::UnsupportedNativeEvent)
             );
         }
+    }
+
+    #[test]
+    fn codex_documented_unverified_post_tool_use_stays_unavailable() {
+        let codex = include_str!("../fixtures/host_events/codex.json");
+        assert_eq!(
+            decode_native_hook_event(
+                HookHostV1::Codex,
+                fixture_request(codex, "saved_edit").as_slice()
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::Codex, HookEventFamily::ToolLifecycle),
+            HookEventSupportV1::Unavailable
+        );
     }
 
     #[test]
