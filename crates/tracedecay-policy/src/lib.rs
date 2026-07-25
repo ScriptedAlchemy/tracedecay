@@ -12,6 +12,7 @@ pub mod authorization;
 pub mod configuration;
 pub mod git;
 pub mod replay;
+pub mod retained;
 pub mod routing;
 
 pub use analyzer::*;
@@ -19,4 +20,5 @@ pub use authorization::*;
 pub use configuration::*;
 pub use git::*;
 pub use replay::*;
+pub use retained::*;
 pub use routing::*;
