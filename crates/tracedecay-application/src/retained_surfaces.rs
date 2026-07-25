@@ -34,9 +34,43 @@ pub enum RetainedSurfaceOperation {
     MessageSearch,
     SessionsFor,
     Workflows,
+    LcmStatus,
+    LcmDoctor,
+    LcmLoadSession,
+    LcmGrep,
+    LcmDescribe,
+    LcmExpand,
+    LcmExpandQuery,
+    LcmPreflight,
+    LcmCompress,
+    LcmSessionBoundary,
+    SessionStart,
+    SessionEnd,
 }
 
 impl RetainedSurfaceOperation {
+    pub const ALL: [Self; 19] = [
+        Self::FactStore,
+        Self::FactFeedback,
+        Self::MemoryStatus,
+        Self::SessionRefresh,
+        Self::MessageSearch,
+        Self::SessionsFor,
+        Self::LcmStatus,
+        Self::LcmDoctor,
+        Self::LcmLoadSession,
+        Self::LcmGrep,
+        Self::LcmDescribe,
+        Self::LcmExpand,
+        Self::LcmExpandQuery,
+        Self::LcmPreflight,
+        Self::LcmCompress,
+        Self::LcmSessionBoundary,
+        Self::SessionStart,
+        Self::SessionEnd,
+        Self::Workflows,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::FactStore => "fact_store",
@@ -46,6 +80,18 @@ impl RetainedSurfaceOperation {
             Self::MessageSearch => "message_search",
             Self::SessionsFor => "sessions_for",
             Self::Workflows => "workflows",
+            Self::LcmStatus => "lcm_status",
+            Self::LcmDoctor => "lcm_doctor",
+            Self::LcmLoadSession => "lcm_load_session",
+            Self::LcmGrep => "lcm_grep",
+            Self::LcmDescribe => "lcm_describe",
+            Self::LcmExpand => "lcm_expand",
+            Self::LcmExpandQuery => "lcm_expand_query",
+            Self::LcmPreflight => "lcm_preflight",
+            Self::LcmCompress => "lcm_compress",
+            Self::LcmSessionBoundary => "lcm_session_boundary",
+            Self::SessionStart => "session_start",
+            Self::SessionEnd => "session_end",
         }
     }
 
@@ -327,5 +373,12 @@ mod tests {
                 Some(spec.operation)
             );
         }
+        assert_eq!(
+            surface_specs()
+                .into_iter()
+                .map(|spec| spec.operation)
+                .collect::<Vec<_>>(),
+            RetainedSurfaceOperation::ALL
+        );
     }
 }
