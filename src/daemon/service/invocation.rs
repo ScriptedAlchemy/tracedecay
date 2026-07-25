@@ -2482,7 +2482,12 @@ async fn execute_context_scout_state_transition(
             )
         });
     if let Some(refreshed) = refreshed {
-        let _ = owner.install_configuration(refreshed, None).await;
+        if owner.install_state_transition(refreshed).await.is_err() {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
     } else {
         return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
     }
@@ -4110,7 +4115,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         let publications = runtime.publication_store();
         let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
             project_id.clone(),
-            runtime.observation_port(),
+            runtime.source_observation_port(),
         ));
         runtimes.insert(
             project_root.clone(),
