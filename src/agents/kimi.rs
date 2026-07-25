@@ -364,15 +364,30 @@ fn deploy_kimi_plugin(kimi_code_home: &Path, tracedecay_bin: &str) -> Result<Pat
     deploy_kimi_plugin_to(&managed_dir, tracedecay_bin)
 }
 
+/// Canonical rendered Kimi Code plugin inventory. The legacy installer and the
+/// receipt-backed first-party host-bundle catalog must produce byte-identical
+/// files: the component-set transaction verifies installed artifact digests
+/// after the compatibility registration adapter re-runs this installer, so any
+/// rendering drift between the two writers fails installs with
+/// `ArtifactContentMismatch`.
+pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+    super::plugin_bundle::kimi_files()
+        .into_iter()
+        .map(|(relative, contents)| {
+            let rendered = if relative == KIMI_PLUGIN_MANIFEST_RELATIVE {
+                let stamped = super::plugin_bundle::stamp_manifest_version(contents)?;
+                let with_mcp = super::plugin_bundle::set_mcp_command(&stamped, tracedecay_bin)?;
+                render_kimi_hook_commands(&with_mcp, tracedecay_bin)?
+            } else {
+                contents.to_string()
+            };
+            Ok((relative, rendered))
+        })
+        .collect()
+}
+
 fn deploy_kimi_plugin_to(managed_dir: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
-    for (relative, contents) in super::plugin_bundle::kimi_files() {
-        let rendered = if relative == KIMI_PLUGIN_MANIFEST_RELATIVE {
-            let stamped = super::plugin_bundle::stamp_manifest_version(contents)?;
-            let with_mcp = super::plugin_bundle::set_mcp_command(&stamped, tracedecay_bin)?;
-            render_kimi_hook_commands(&with_mcp, tracedecay_bin)?
-        } else {
-            contents.to_string()
-        };
+    for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
         safe_write_text_file(&managed_dir.join(relative), &rendered, None)?;
     }
     eprintln!(

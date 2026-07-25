@@ -428,14 +428,44 @@ fn component_assets(
             .collect());
     }
 
+    // The managed Kimi plugin directory is rewritten by the legacy installer
+    // that the compatibility registration adapter re-runs during apply, and the
+    // component-set transaction verifies installed digests afterwards. Deploy
+    // the installer's own rendered inventory (same bin resolution as
+    // `InstallContext::tracedecay_bin`) so both writers produce identical
+    // bytes; the raw template still carries its unstamped version and
+    // unresolved command placeholders.
+    if host == HostKindV1::KimiCode
+        && matches!(
+            component,
+            HostBundleComponentV1::Core
+                | HostBundleComponentV1::ContextMcp
+                | HostBundleComponentV1::OperatorMcp
+        )
+    {
+        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let files = super::kimi::rendered_plugin_files(&bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        // Kimi's plugin manifest declares its own MCP server, so the MCP
+        // companion components address that manifest alone while Core keeps the
+        // full deploy set.
+        let manifest_only = component != HostBundleComponentV1::Core;
+        return Ok(files
+            .into_iter()
+            .filter(|(relative, _)| !manifest_only || *relative == ".kimi-plugin/plugin.json")
+            .map(|(relative, body)| {
+                (
+                    format!(".kimi-code/plugins/managed/tracedecay/{relative}"),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
+    }
+
     let (prefix, files) = match (host, component) {
         (HostKindV1::CursorDesktop, HostBundleComponentV1::Agent) => (
             ".cursor/extensions/tracedecay.cursor-native-0.0.0",
             super::plugin_bundle::cursor_native_extension_files(),
-        ),
-        (HostKindV1::KimiCode, HostBundleComponentV1::Core) => (
-            ".kimi-code/plugins/managed/tracedecay",
-            super::plugin_bundle::kimi_files(),
         ),
         (HostKindV1::Kiro, HostBundleComponentV1::Core) => (
             ".kiro/tracedecay",
@@ -443,13 +473,6 @@ fn component_assets(
                 "component.json",
                 r#"{"host":"kiro","registration":"settings/mcp.json+agents/tracedecay.json","route":"hook+mcp","native_events":"userPromptSubmit,preToolUse,postToolUse","version_disposition":"session_workspace_prompt_boundaries_only"}"#,
             )],
-        ),
-        (
-            HostKindV1::KimiCode,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
-        ) => (
-            ".kimi-code/plugins/managed/tracedecay",
-            super::plugin_bundle::kimi_mcp_companion_files(),
         ),
         (HostKindV1::Cline, HostBundleComponentV1::Core) => (
             ".cline/data/settings/tracedecay",
@@ -632,6 +655,35 @@ mod tests {
                     content.relative_path
                 );
             }
+        }
+    }
+
+    /// The compatibility registration adapter re-runs the legacy Kimi
+    /// installer during apply and the component-set transaction verifies
+    /// installed digests afterwards, so the two writers must agree byte for
+    /// byte. Rendering the raw template here instead would leave the manifest
+    /// version unstamped and fail every install with `ArtifactContentMismatch`.
+    #[test]
+    fn kimi_catalog_assets_match_the_legacy_installer_rendering() {
+        let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let rendered = super::super::kimi::rendered_plugin_files(&bin).unwrap();
+        let bundle =
+            verified_embedded_host_bundle(HostKindV1::KimiCode, HostBundleComponentV1::Core, 0)
+                .unwrap();
+
+        assert_eq!(bundle.contents.len(), rendered.len());
+        for (relative, body) in rendered {
+            let path = format!(".kimi-code/plugins/managed/tracedecay/{relative}");
+            let content = bundle
+                .contents
+                .iter()
+                .find(|content| content.relative_path == path)
+                .unwrap_or_else(|| panic!("catalog is missing the deployed path {path}"));
+            assert_eq!(
+                content.bytes,
+                body.into_bytes(),
+                "{path} must match the legacy installer rendering"
+            );
         }
     }
 
