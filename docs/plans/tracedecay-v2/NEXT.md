@@ -100,8 +100,9 @@ normal CI are stable.
    *(Landed 2026-07-23: the rusqlite storage runtime is cut over and
    repository reads route through the daemon-owned runtime port; the
    outbox/inbox effects read port and the code/effects read-contract arms
-   exist. Remaining seam: the code-family read executor — the git-index store
-   is daemon-side.)*
+   exist. Landed 2026-07-25: the daemon-side git-index actor routes its
+   production reads through the typed code-family executor rather than a
+   parallel direct-read path.)*
 2. Finish PR12 application, transport, LSP, cancellation, streaming, and
    distribution reachability. *(In flight.)*
 3. Finish PR13 Hook V2, Context Scout, advisory authorities, host lifecycle,

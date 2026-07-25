@@ -16,15 +16,18 @@ use tracedecay_domain::{
     GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, RepositoryId,
 };
 use tracedecay_store::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
-    GitIndexTransactionRecordV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
-    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
+    CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
+    CodeRecoveryRepositoriesQueryV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1, GitIndexTransactionStore,
+    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
+    GitIndexTransactionTerminalWriteV1,
 };
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
 use crate::global_db::{
-    GlobalDbGitIndexTransactionStore, RegisteredGlobalDb, ensure_git_index_transaction_schema,
+    GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, RegisteredGlobalDb,
+    ensure_git_index_transaction_schema,
 };
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
@@ -39,7 +42,7 @@ type Reply<T> = SyncSender<GitIndexTransactionStoreResult<T>>;
 
 enum StoreCommand {
     SavePreview(GitIndexPreviewV1, Reply<()>),
-    ReadPreview(GitIndexPreviewId, Reply<Option<GitIndexPreviewV1>>),
+    ReadCode(CodeReadOperationV1, Reply<CodeReadResultV1>),
     BeginOrReplay(
         Box<GitIndexTransactionBeginRequestV1>,
         Reply<GitIndexTransactionBeginResultV1>,
@@ -54,8 +57,6 @@ enum StoreCommand {
         GitIndexTransactionTerminalWriteV1,
         Reply<GitIndexTransactionReceiptV1>,
     ),
-    RecoveryCandidates(RepositoryId, Reply<Vec<GitIndexTransactionRecordV1>>),
-    RecoveryRepositories(Reply<Vec<RepositoryId>>),
     QuarantineRepository(RepositoryId, GitIndexTransactionId, Reply<()>),
     ClearRepositoryQuarantine(
         RepositoryId,
@@ -183,6 +184,15 @@ impl DaemonGitIndexTransactionStore {
                 }
             })?
     }
+
+    fn execute_code_read(
+        &self,
+        operation: CodeReadOperationV1,
+    ) -> GitIndexTransactionStoreResult<CodeReadResultV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ReadCode(operation, reply))?;
+        Self::await_reply(&receiver)
+    }
 }
 
 impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
@@ -196,9 +206,10 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
         &self,
         preview_id: &GitIndexPreviewId,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadPreview(preview_id.clone(), reply))?;
-        Self::await_reply(&receiver)
+        match self.execute_code_read(CodeReadOperationV1::Preview(preview_id.clone()))? {
+            CodeReadResultV1::Preview(preview) => Ok(*preview),
+            _ => Err(GitIndexTransactionStoreError::Unavailable),
+        }
     }
 
     fn begin_or_replay(
@@ -239,18 +250,28 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
         &self,
         repository_id: &RepositoryId,
     ) -> GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::RecoveryCandidates(
-            repository_id.clone(),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        match self.execute_code_read(CodeReadOperationV1::RecoveryCandidates(
+            CodeRecoveryCandidatesQueryV1 {
+                repository_id: repository_id.clone(),
+                after: None,
+                limit: u32::MAX,
+            },
+        ))? {
+            CodeReadResultV1::RecoveryCandidates(page) => Ok(page.records),
+            _ => Err(GitIndexTransactionStoreError::Unavailable),
+        }
     }
 
     fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::RecoveryRepositories(reply))?;
-        Self::await_reply(&receiver)
+        match self.execute_code_read(CodeReadOperationV1::RecoveryRepositories(
+            CodeRecoveryRepositoriesQueryV1 {
+                after: None,
+                limit: u32::MAX,
+            },
+        ))? {
+            CodeReadResultV1::RecoveryRepositories(page) => Ok(page.repositories),
+            _ => Err(GitIndexTransactionStoreError::Unavailable),
+        }
     }
 
     fn quarantine_repository(
@@ -296,12 +317,10 @@ fn run_store_actor(
                     runtime.block_on(database.git_index_transaction_store().save_preview(preview));
                 let _ = reply.send(result);
             }
-            StoreCommand::ReadPreview(preview_id, reply) => {
-                let result = runtime.block_on(
-                    database
-                        .git_index_transaction_store()
-                        .read_preview(&preview_id),
-                );
+            StoreCommand::ReadCode(operation, reply) => {
+                let store = database.git_index_transaction_store();
+                let executor = GitIndexReadExecutor::new(&store);
+                let result = runtime.block_on(executor.execute_read(&operation));
                 let _ = reply.send(result);
             }
             StoreCommand::BeginOrReplay(request, reply) => {
@@ -323,22 +342,6 @@ fn run_store_actor(
             StoreCommand::WriteTerminal(write, reply) => {
                 let result =
                     runtime.block_on(database.git_index_transaction_store().write_terminal(write));
-                let _ = reply.send(result);
-            }
-            StoreCommand::RecoveryCandidates(repository_id, reply) => {
-                let result = runtime.block_on(
-                    database
-                        .git_index_transaction_store()
-                        .recovery_candidates(&repository_id),
-                );
-                let _ = reply.send(result);
-            }
-            StoreCommand::RecoveryRepositories(reply) => {
-                let result = runtime.block_on(
-                    database
-                        .git_index_transaction_store()
-                        .recovery_repositories(),
-                );
                 let _ = reply.send(result);
             }
             StoreCommand::QuarantineRepository(repository_id, transaction_id, reply) => {
