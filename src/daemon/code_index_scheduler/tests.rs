@@ -597,8 +597,22 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         "publication identity remains generation-local"
     );
 
-    write(&linked, "src/lib.rs", "pub fn shared() -> u32 { 8 }\n");
+    git(&linked, &["mv", "src/lib.rs", "src/renamed.rs"]);
     second_scheduler.notify_path(linked.join("src/lib.rs"));
+    second_scheduler.notify_path(linked.join("src/renamed.rs"));
+    published(
+        second_scheduler
+            .reconcile_now()
+            .expect("renamed linked-worktree publish"),
+    );
+    let after_rename = registry.byte_pool_stats();
+    assert_eq!(
+        after_rename.parse_chunk_reused, reuse.parse_chunk_reused,
+        "same content at a new logical path must not reuse path-bound parse/chunk artifacts"
+    );
+
+    write(&linked, "src/renamed.rs", "pub fn shared() -> u32 { 8 }\n");
+    second_scheduler.notify_path(linked.join("src/renamed.rs"));
     published(
         second_scheduler
             .reconcile_now()
@@ -606,7 +620,7 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
     );
     let after_edit = registry.byte_pool_stats();
     assert_eq!(
-        after_edit.parse_chunk_reused, reuse.parse_chunk_reused,
+        after_edit.parse_chunk_reused, after_rename.parse_chunk_reused,
         "changed source content must not reuse the prior parse/chunk artifact"
     );
     assert_eq!(
