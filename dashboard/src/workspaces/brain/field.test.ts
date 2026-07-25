@@ -4,6 +4,8 @@ import {
   composeRegistryField,
   indexedMass,
   recencyVitality,
+  summarizeHoldings,
+  vitalityHorizon,
 } from './field.ts';
 import type { ProjectRegistryEntry, ProjectRepoGroup } from './contracts.ts';
 
@@ -210,5 +212,148 @@ describe('composeRegistryField', () => {
     expect(field.nodes).toEqual([]);
     expect(field.edges).toEqual([]);
     expect(field.columns.every((column) => column.count === 0)).toBe(true);
+  });
+});
+
+/**
+ * The owner's real registry, in shape: forty-four projects, all seen inside ten
+ * days, every one holding exactly one store, artifacts only ever 3-5, and graph
+ * scopes spanning zero to two hundred and forty-two.
+ */
+function liveRegistry(): ProjectRepoGroup[] {
+  const ages = [0.01, 0.11, 0.17, 0.19, ...Array.from({ length: 40 }, (_, i) => 1.3 + i * 0.22)];
+  const scopes = [1, 0, 2, 56, 242, 36, 71, 20, 10, 8, 5, 3, 4];
+  return ages.map((age, i) =>
+    group(`g${i}`, [
+      project(`p${i}`, age, {
+        stores: 1,
+        scopes: scopes[i % scopes.length]!,
+        artifacts: [4, 4, 5, 3][i % 4]!,
+      }),
+    ]),
+  );
+}
+
+describe('recencyVitality horizon', () => {
+  it('uses the whole luminance scale across a ten-day registry', () => {
+    const horizon = 10;
+    const today = recencyVitality(NOW - 0.01 * DAY, NOW, horizon);
+    const thisWeek = recencyVitality(NOW - 1.3 * DAY, NOW, horizon);
+    const oldest = recencyVitality(NOW - 10 * DAY, NOW, horizon);
+    expect(today).toBeGreaterThan(0.99);
+    expect(oldest).toBe(0);
+    // The reading the punch list called out: today and this-week were 1.00 and
+    // 0.85 under the fixed 90-day horizon, a fifteen percent luminance step no
+    // eye separates on a dark field. Anchored to the observed range they are
+    // more than a third of the scale apart.
+    expect(today - thisWeek).toBeGreaterThan(0.3);
+  });
+
+  it('still separates the two under the old fixed horizon by almost nothing', () => {
+    const today = recencyVitality(NOW - 0.01 * DAY, NOW, 90);
+    const thisWeek = recencyVitality(NOW - 1.3 * DAY, NOW, 90);
+    expect(today - thisWeek).toBeLessThan(0.2);
+  });
+
+  it('clamps the horizon so a registry seen minutes ago is not all-or-nothing', () => {
+    expect(vitalityHorizon([project('a', 0.002, { stores: 1, scopes: 1, artifacts: 1 })], NOW)).toBe(1);
+    // Everything inside the clamp still reads as fully lit rather than as a
+    // scale invented out of minutes of drift.
+    expect(recencyVitality(NOW - 0.002 * DAY, NOW, 0.002)).toBeGreaterThan(0.99);
+  });
+
+  it('is not dragged to a century by one ancient registry entry', () => {
+    const projects = [
+      ...Array.from({ length: 20 }, (_, i) =>
+        project(`p${i}`, 1 + i * 0.4, { stores: 1, scopes: 1, artifacts: 1 }),
+      ),
+      // Last seen in 2019. Taking the maximum would set the horizon at ~94
+      // years and push every other body back to indistinguishable full
+      // brightness — the exact compression this parameter removes.
+      project('ancient', 34_000, { stores: 1, scopes: 1, artifacts: 1 }),
+    ];
+    const horizon = vitalityHorizon(projects, NOW);
+    expect(horizon).toBeLessThan(12);
+    expect(recencyVitality(NOW - 34_000 * DAY, NOW, horizon)).toBe(0);
+    // ...and the bulk of the registry still spreads across the scale.
+    expect(
+      recencyVitality(NOW - 1 * DAY, NOW, horizon) -
+        recencyVitality(NOW - 8 * DAY, NOW, horizon),
+    ).toBeGreaterThan(0.3);
+  });
+
+  it('never stretches the scale past the quarter the field calls dormant', () => {
+    const projects = Array.from({ length: 10 }, (_, i) =>
+      project(`p${i}`, 200 + i * 50, { stores: 1, scopes: 1, artifacts: 1 }),
+    );
+    expect(vitalityHorizon(projects, NOW)).toBe(90);
+  });
+
+  it('composes the field with that horizon and reports it', () => {
+    const field = composeRegistryField(liveRegistry(), NOW);
+    expect(field.vitalityHorizonDays).toBeGreaterThan(7);
+    expect(field.vitalityHorizonDays).toBeLessThan(10);
+    const vitalities = field.nodes.map((node) => node.vitality);
+    expect(Math.max(...vitalities)).toBeGreaterThan(0.99);
+    expect(Math.min(...vitalities)).toBe(0);
+  });
+});
+
+describe('mass axis frame', () => {
+  it('reports the lopsided distribution instead of leaving the axis to explain itself', () => {
+    const field = composeRegistryField(liveRegistry(), NOW);
+    expect(field.mass.total).toBe(44);
+    const masses = liveRegistry().flatMap((g) => g.projects).map(indexedMass);
+    expect(field.mass.floor).toBe(Math.min(...masses));
+    expect(field.mass.ceiling).toBe(Math.max(...masses));
+    expect(field.mass.ceiling).toBeGreaterThan(field.mass.median * 5);
+    // Most of the registry lives in the lower half of the log axis; that is the
+    // reading the caption has to carry.
+    expect(field.mass.lowerHalfCount).toBeGreaterThan(field.mass.total / 2);
+  });
+
+  it('frames the y axis from the bodies at its ends rather than a flat allowance', () => {
+    const field = composeRegistryField(liveRegistry(), NOW);
+    const [low, high] = field.extent.y;
+    const ys = field.nodes.map((node) => node.y);
+    // Every body is inside the frame...
+    expect(low).toBeLessThan(Math.min(...ys));
+    expect(high).toBeGreaterThan(Math.max(...ys));
+    // ...and the frame no longer spends the old flat 0.55 on clearance at
+    // either end, which is what made the axis top out empty.
+    expect(high - Math.max(...ys)).toBeLessThan(0.55);
+    expect(Math.min(...ys) - low).toBeLessThan(0.55);
+  });
+});
+
+describe('summarizeHoldings', () => {
+  const projects = liveRegistry().flatMap((g) => g.projects);
+
+  it('states the constant channels once and keeps the one that varies', () => {
+    const holdings = summarizeHoldings(projects)!;
+    expect(holdings.total).toBe(44);
+    expect(holdings.stores.uniform).toBe(1);
+    expect(holdings.artifacts.uniform).toBeNull();
+    expect(holdings.artifacts.min).toBe(3);
+    expect(holdings.artifacts.max).toBe(5);
+    // Scopes are the only channel with real range, and the only one that
+    // belongs on a row.
+    expect(holdings.scopes.uniform).toBeNull();
+    expect(holdings.scopes.max - holdings.scopes.min).toBeGreaterThan(200);
+    expect(holdings.uniformLine).toContain('exactly 1 store');
+    expect(holdings.uniformLine).toContain('3–5 artifacts');
+    expect(holdings.uniformLine).not.toContain('scope');
+  });
+
+  it('has no uniform line when every channel genuinely varies', () => {
+    const holdings = summarizeHoldings([
+      project('a', 1, { stores: 1, scopes: 1, artifacts: 1 }),
+      project('b', 1, { stores: 9, scopes: 40, artifacts: 30 }),
+    ])!;
+    expect(holdings.uniformLine).toBeNull();
+  });
+
+  it('has nothing to summarize for an empty registry', () => {
+    expect(summarizeHoldings([])).toBeNull();
   });
 });
