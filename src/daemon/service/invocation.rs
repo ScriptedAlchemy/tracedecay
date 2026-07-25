@@ -4110,7 +4110,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         let publications = runtime.publication_store();
         let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
             project_id.clone(),
-            runtime.source_observation_port(),
+            runtime.observation_port(),
         ));
         runtimes.insert(
             project_root.clone(),

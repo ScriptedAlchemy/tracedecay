@@ -4,6 +4,7 @@ import {
   extentOf,
   summarizeChain,
   threadsFrom,
+  WEFT_SOURCES,
 } from './weave.ts';
 import type { LoomSession } from './contracts.ts';
 
@@ -51,15 +52,6 @@ describe('threadsFrom', () => {
     ]);
     expect(threads[0]?.label).toBe('Verify PR9 scheduler');
     expect(threads[1]?.label).toBe('b');
-  });
-
-  it('keeps equal session ids from different providers independently selectable', () => {
-    const { threads } = threadsFrom([
-      session({ provider: 'cursor', session_id: 'shared' }),
-      session({ provider: 'claude', session_id: 'shared' }),
-    ]);
-    expect(new Set(threads.map((thread) => thread.id)).size).toBe(2);
-    expect(threads.map((thread) => thread.sessionId)).toEqual(['shared', 'shared']);
   });
 
   it('collects distinct model names and ignores the null placeholder', () => {
@@ -136,7 +128,7 @@ describe('composeWeave', () => {
       session({ session_id: 'c', started_at: 300, last_message_at: 400 }),
     ]);
     const lane = (id: string) =>
-      weave.threads.find((thread) => thread.sessionId === id)?.lane;
+      weave.threads.find((thread) => thread.id === id)?.lane;
     expect(lane('a')).toBe(0);
     expect(lane('b')).toBe(1);
     expect(lane('c')).toBe(0);
@@ -148,8 +140,8 @@ describe('composeWeave', () => {
       session({ session_id: 'a', messages: 1000 }),
       session({ session_id: 'b', messages: 10 }),
     ]);
-    const heavy = weave.threads.find((thread) => thread.sessionId === 'a');
-    const light = weave.threads.find((thread) => thread.sessionId === 'b');
+    const heavy = weave.threads.find((thread) => thread.id === 'a');
+    const light = weave.threads.find((thread) => thread.id === 'b');
     expect(heavy?.weight).toBe(1);
     expect(light?.weight).toBeGreaterThan(0);
     expect(light?.weight).toBeLessThan(0.5);
@@ -166,10 +158,10 @@ describe('composeWeave', () => {
     ]);
     expect(weave.openEndedCount).toBe(2);
     expect(weave.hollowCount).toBe(1);
-    const open = weave.threads.find((thread) => thread.sessionId === 'b');
+    const open = weave.threads.find((thread) => thread.id === 'b');
     expect(open?.openEnded).toBe(true);
     expect(open?.hollow).toBe(false);
-    const hollow = weave.threads.find((thread) => thread.sessionId === 'c');
+    const hollow = weave.threads.find((thread) => thread.id === 'c');
     expect(hollow?.hollow).toBe(true);
     expect(hollow?.weight).toBe(0);
   });
@@ -191,7 +183,7 @@ describe('composeWeave', () => {
       session({ session_id: 'late', started_at: 900 }),
       session({ session_id: 'early', started_at: 100 }),
     ]);
-    expect(weave.threads.map((thread) => thread.sessionId)).toEqual(['early', 'late']);
+    expect(weave.threads.map((thread) => thread.id)).toEqual(['early', 'late']);
   });
 
   it('composes an empty payload without an extent instead of throwing', () => {
@@ -199,6 +191,24 @@ describe('composeWeave', () => {
     expect(weave.threads).toEqual([]);
     expect(weave.hosts).toEqual([]);
     expect(weave.extent).toBeNull();
+  });
+});
+
+describe('WEFT_SOURCES', () => {
+  it('names every causal crossing the plan asks for, with no duplicates', () => {
+    const ids = WEFT_SOURCES.map((source) => source.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain('session-commit');
+    expect(ids).toContain('session-file');
+    expect(ids).toContain('pull-request');
+    expect(ids).toContain('ci-outcome');
+  });
+
+  it('carries a reason for every entry, so nothing renders a bare chip', () => {
+    for (const source of WEFT_SOURCES) {
+      expect(source.label.length).toBeGreaterThan(0);
+      expect(source.detail.length).toBeGreaterThan(0);
+    }
   });
 });
 

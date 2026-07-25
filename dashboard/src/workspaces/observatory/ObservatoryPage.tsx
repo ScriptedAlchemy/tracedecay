@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import {
+  DoctorFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
   type DoctorReportEntry,
   type StorageTelemetryRead,
@@ -24,15 +25,10 @@ import {
   growthPresentation,
   refreshOperation,
   storageFindingLabel,
-  storageSourcePresentation,
   storeRolesLabel,
   type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
-import {
-  ObservatoryStorageFindingsPayloadSchema,
-  type StorageFindingSourceStatus,
-} from './contracts.ts';
 
 /** Observatory storage health: independent typed telemetry and Doctor finding
  * read models. A failed source never hides the other source or becomes empty. */
@@ -47,10 +43,7 @@ export function ObservatoryPage() {
   const findings = useQuery({
     queryKey: ['storage', 'findings', scopeKey(scope)],
     queryFn: () =>
-      fetchEnvelope(
-        scopedUrl(scope, '/api/storage/findings'),
-        ObservatoryStorageFindingsPayloadSchema,
-      ),
+      fetchEnvelope(scopedUrl(scope, '/api/storage/findings'), DoctorFindingsPayloadSchema),
     refetchInterval: 30_000,
   });
 
@@ -160,7 +153,7 @@ function FindingsReadModel({
   refreshing,
   onRefresh,
 }: {
-  result: EnvelopeResult<ReturnType<typeof ObservatoryStorageFindingsPayloadSchema.parse>>;
+  result: EnvelopeResult<ReturnType<typeof DoctorFindingsPayloadSchema.parse>>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
@@ -178,7 +171,6 @@ function FindingsReadModel({
         refreshing={refreshing}
         onRefresh={onRefresh}
       />
-      <StorageSourceStatuses statuses={envelope.payload.kind_statuses} />
       {envelope.payload.entries.length === 0 ? (
         <ReadModelState kind={envelope.domain_state} detail={envelope.payload.note} />
       ) : (
@@ -193,43 +185,6 @@ function FindingsReadModel({
       )}
       <ReadModelNotes notes={[envelope.payload.note]} />
     </>
-  );
-}
-
-function StorageSourceStatuses({ statuses }: { statuses: StorageFindingSourceStatus[] }) {
-  return (
-    <ul
-      className="mx-4 mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5"
-      aria-label="Storage finding source status"
-    >
-      {statuses.map((status) => {
-        const presentation = storageSourcePresentation(status);
-        return (
-          <li
-            key={status.kind}
-            className="min-w-0 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-3"
-            data-storage-source-kind={status.kind}
-            data-storage-source-state={status.state}
-          >
-            <p className="flex items-center gap-1.5 text-2xs font-medium text-text-secondary">
-              <span
-                aria-hidden
-                className={`size-1.5 shrink-0 rounded-full ${presentation.dotClass}`}
-              />
-              <span>{storageFindingLabel(status.kind)}</span>
-              <span className={presentation.tokenClass}>· {presentation.label}</span>
-            </p>
-            <p className="mt-1 text-2xs text-text-muted">{status.reason}</p>
-            {status.observed_entries > 0 ? (
-              <p className="mt-1 text-3xs text-text-muted tabular">
-                {status.observed_entries} observed{' '}
-                {status.observed_entries === 1 ? 'entry' : 'entries'}
-              </p>
-            ) : null}
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 
