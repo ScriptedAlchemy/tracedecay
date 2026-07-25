@@ -462,6 +462,28 @@ fn component_assets(
             .collect());
     }
 
+    // The managed OpenCode plugin file is also written by the legacy installer
+    // that the compatibility registration adapter re-runs during apply, and the
+    // component-set transaction verifies installed digests afterwards. Deploy
+    // the installer's own rendered inventory (same bin resolution as
+    // `InstallContext::tracedecay_bin`) so both writers produce identical
+    // bytes. `render_compiled_asset` below resolves the binary from
+    // `std::env::current_exe()` instead, which disagrees with
+    // `which_tracedecay()` whenever the running binary lives outside the
+    // installed path (for example `./target/release/tracedecay reinstall`) and
+    // corrupted every OpenCode transaction. The MCP companion and Agent
+    // components keep the compiled-asset path: the legacy installer never
+    // writes those files.
+    if (host, component) == (HostKindV1::OpenCode, HostBundleComponentV1::Core) {
+        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let files = super::opencode::rendered_plugin_files(&bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        return Ok(files
+            .into_iter()
+            .map(|(relative, body)| (format!(".config/opencode/{relative}"), body.into_bytes()))
+            .collect());
+    }
+
     let (prefix, files) = match (host, component) {
         (HostKindV1::CursorDesktop, HostBundleComponentV1::Agent) => (
             ".cursor/extensions/tracedecay.cursor-native-0.0.0",
@@ -493,13 +515,6 @@ fn component_assets(
             vec![(
                 "component.json",
                 r#"{"host":"kilo","registration":"kilo.jsonc","route":"mcp","version_disposition":"current_kilo_cli_jsonc_and_project_kilo.json"}"#,
-            )],
-        ),
-        (HostKindV1::OpenCode, HostBundleComponentV1::Core) => (
-            ".config/opencode/plugins",
-            vec![(
-                "tracedecay.ts",
-                include_str!("../../plugin/opencode/tracedecay.ts"),
             )],
         ),
         (HostKindV1::OpenCode, HostBundleComponentV1::Agent) => (
@@ -683,6 +698,55 @@ mod tests {
                 content.bytes,
                 body.into_bytes(),
                 "{path} must match the legacy installer rendering"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_catalog_assets_match_the_legacy_installer_rendering() {
+        let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let rendered = super::super::opencode::rendered_plugin_files(&bin).unwrap();
+        let bundle =
+            verified_embedded_host_bundle(HostKindV1::OpenCode, HostBundleComponentV1::Core, 0)
+                .unwrap();
+
+        assert_eq!(bundle.contents.len(), rendered.len());
+        for (relative, body) in rendered {
+            let path = format!(".config/opencode/{relative}");
+            let content = bundle
+                .contents
+                .iter()
+                .find(|content| content.relative_path == path)
+                .unwrap_or_else(|| panic!("catalog is missing the deployed path {path}"));
+            assert_eq!(
+                content.bytes,
+                body.into_bytes(),
+                "{path} must match the legacy installer rendering"
+            );
+        }
+    }
+
+    /// Both writers must agree even when the running binary is not the
+    /// installed one — `./target/release/tracedecay reinstall` is exactly the
+    /// case that corrupted the OpenCode transaction and wedged the shared
+    /// component-set journal.
+    #[test]
+    fn opencode_core_assets_do_not_depend_on_the_running_executable_path() {
+        let assets = component_assets(HostKindV1::OpenCode, HostBundleComponentV1::Core).unwrap();
+        let running = std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let installed = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        assert_eq!(assets.len(), 1);
+        let body = String::from_utf8(assets[0].1.clone()).unwrap();
+        assert!(
+            body.contains(&serde_json::to_string(&installed).unwrap()),
+            "the catalog must render the installer's resolved binary"
+        );
+        if running != installed && !running.is_empty() {
+            assert!(
+                !body.contains(&running),
+                "the catalog must not render the running executable path"
             );
         }
     }
