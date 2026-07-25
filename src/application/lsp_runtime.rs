@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -110,6 +111,95 @@ struct CurrentFeedbackCycle {
     canonical_handle: String,
     observed_at: UtcMicros,
     expires_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProjectionChangeKey {
+    root_uri: String,
+    document_uri: Option<String>,
+    kind: ContextProjectionKind,
+}
+
+#[derive(Default)]
+struct ProjectionChangeState {
+    subscriptions: BTreeMap<String, BTreeSet<ContextProjectionRegistration>>,
+    source_revisions: BTreeMap<ProjectionChangeKey, String>,
+    pending: BTreeMap<ProjectionChangeKey, ContextProjectionChange>,
+}
+
+#[derive(Clone, Default)]
+struct ProjectionChangeQueue {
+    state: Arc<StdMutex<ProjectionChangeState>>,
+}
+
+impl ProjectionChangeQueue {
+    fn activate(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .subscriptions
+            .insert(root.uri().to_owned(), subscriptions.clone());
+        state.pending.retain(|key, _| {
+            key.root_uri != root.uri()
+                || subscriptions.contains(&ContextProjectionRegistration {
+                    kind: key.kind.clone(),
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                })
+        });
+    }
+
+    fn offer(&self, source_revision: String, change: ContextProjectionChange) {
+        let key = ProjectionChangeKey {
+            root_uri: change.root_uri.clone(),
+            document_uri: change.document_uri.clone(),
+            kind: change.kind.clone(),
+        };
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let registration = ContextProjectionRegistration {
+            kind: change.kind.clone(),
+            revision: change.revision,
+        };
+        if !state
+            .subscriptions
+            .get(&change.root_uri)
+            .is_some_and(|subscriptions| subscriptions.contains(&registration))
+            || state.source_revisions.get(&key) == Some(&source_revision)
+        {
+            return;
+        }
+        state.source_revisions.insert(key.clone(), source_revision);
+        state.pending.insert(key, change);
+    }
+
+    fn drain(&self, root: &AdmittedRoot) -> Vec<ContextProjectionChange> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let keys = state
+            .pending
+            .keys()
+            .filter(|key| key.root_uri == root.uri())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut changes = keys
+            .into_iter()
+            .filter_map(|key| state.pending.remove(&key))
+            .collect::<Vec<_>>();
+        changes.sort_by_key(|change| {
+            (
+                match change.kind.as_str() {
+                    ContextProjectionKind::DIAGNOSTICS => 0,
+                    ContextProjectionKind::POST_EDIT_IMPACT => 1,
+                    ContextProjectionKind::AFFECTED_TESTS => 2,
+                    ContextProjectionKind::TEST_RUN_RESULTS => 3,
+                    _ => 4,
+                },
+                change.document_uri.clone(),
+            )
+        });
+        changes
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -731,6 +821,15 @@ pub trait LspTestRunProjectionPort: Send + Sync {
 pub(crate) struct OperationEventTestRunProjection {
     reader: CanonicalManagedTestRunReader,
     project: Arc<RegisteredProjectLspAuthority>,
+    current_scopes: Arc<StdMutex<BTreeMap<String, CachedTestRunScope>>>,
+    observed_revisions: Arc<StdMutex<BTreeMap<String, String>>>,
+    changes: ProjectionChangeQueue,
+}
+
+#[derive(Clone)]
+struct CachedTestRunScope {
+    current: ManagedTestRunCurrentScope,
+    projection: LspFeedbackProjectionScope,
 }
 
 impl OperationEventTestRunProjection {
@@ -738,7 +837,13 @@ impl OperationEventTestRunProjection {
         reader: CanonicalManagedTestRunReader,
         project: Arc<RegisteredProjectLspAuthority>,
     ) -> Self {
-        Self { reader, project }
+        Self {
+            reader,
+            project,
+            current_scopes: Arc::new(StdMutex::new(BTreeMap::new())),
+            observed_revisions: Arc::new(StdMutex::new(BTreeMap::new())),
+            changes: ProjectionChangeQueue::default(),
+        }
     }
 }
 
@@ -786,8 +891,27 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                 document_uri: document_uri.clone(),
                 document_content_digest: scope.document_content_digest.clone(),
             };
+            projection
+                .current_scopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(
+                    current_scope_key(&current),
+                    CachedTestRunScope {
+                        current: current.clone(),
+                        projection: scope.clone(),
+                    },
+                );
             match projection.reader.latest_current(&current).await {
                 ManagedTestRunReadOutcome::Current(snapshot) => {
+                    projection
+                        .observed_revisions
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(
+                            current_scope_key(&current),
+                            test_run_source_revision(&snapshot),
+                        );
                     test_run_projection(root, document_uri, scope, snapshot)
                 }
                 ManagedTestRunReadOutcome::Unavailable(
@@ -835,6 +959,86 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
             }
         })
     }
+
+    fn poll_changes(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) -> Vec<ContextProjectionChange> {
+        self.changes.activate(root, subscriptions);
+        let registration = ContextProjectionRegistration {
+            kind: ContextProjectionKind::test_run_results(),
+            revision: TRACEDECAY_CONTEXT_REVISION,
+        };
+        if !subscriptions.contains(&registration) {
+            return self.changes.drain(root);
+        }
+        let scopes = self
+            .current_scopes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .filter(|scope| scope.current.root_uri == root.uri())
+            .cloned()
+            .collect::<Vec<_>>();
+        for cached in scopes {
+            let current = cached.current;
+            let Some(ManagedTestRunReadOutcome::Current(snapshot)) =
+                self.reader.try_latest_current(&current)
+            else {
+                continue;
+            };
+            let key = current_scope_key(&current);
+            let source_revision = test_run_source_revision(&snapshot);
+            let changed = {
+                let mut observed = self
+                    .observed_revisions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                match observed.insert(key, source_revision.clone()) {
+                    Some(previous) => previous != source_revision,
+                    None => false,
+                }
+            };
+            if !changed {
+                continue;
+            }
+            let document_uri = current.document_uri.clone();
+            let ContextProjectionOutcome::Ready(envelope) =
+                test_run_projection(root.clone(), document_uri, cached.projection, snapshot)
+            else {
+                continue;
+            };
+            self.changes.offer(
+                source_revision,
+                ContextProjectionChange {
+                    root_uri: envelope.root_uri,
+                    document_uri: envelope.document_uri,
+                    kind: envelope.kind,
+                    generation: envelope.generation,
+                    identity: envelope.identity,
+                    freshness: envelope.freshness,
+                    producer_state: envelope.producer_state,
+                    coverage: envelope.coverage,
+                    revision: envelope.revision,
+                    retrieval_handle: envelope.retrieval_handle,
+                },
+            );
+        }
+        self.changes.drain(root)
+    }
+}
+
+fn current_scope_key(scope: &ManagedTestRunCurrentScope) -> String {
+    format!(
+        "{}\u{0}{}",
+        scope.root_uri,
+        scope.document_uri.as_deref().unwrap_or_default()
+    )
+}
+
+fn test_run_source_revision(snapshot: &ManagedTestRunSnapshot) -> String {
+    format!("{}:{}", snapshot.operation_id, snapshot.source_revision)
 }
 
 /// A retained managed test run is evidence about saved source. An LSP overlay
@@ -868,6 +1072,7 @@ pub struct ConcretePr12FeedbackLspSource {
     diagnostic_projection: Arc<dyn LspFeedbackDiagnosticProjectionPort>,
     test_runs: Arc<dyn LspTestRunProjectionPort>,
     next_request: Arc<AtomicU64>,
+    changes: ProjectionChangeQueue,
 }
 
 impl ConcretePr12FeedbackLspSource {
@@ -893,6 +1098,7 @@ impl ConcretePr12FeedbackLspSource {
             diagnostic_projection,
             test_runs,
             next_request: Arc::new(AtomicU64::new(1)),
+            changes: ProjectionChangeQueue::default(),
         }
     }
 
@@ -901,6 +1107,51 @@ impl ConcretePr12FeedbackLspSource {
     /// surfaces use one authority.
     pub fn publication_store(&self) -> ProjectFeedbackStore {
         self.publications.clone()
+    }
+
+    async fn queue_feedback_changes(&self, request: &FeedbackCycleRequest) {
+        let Ok(current) = self
+            .current_cycle(
+                AdmittedRoot::new(request.root_uri.clone()),
+                Some(request.document_uri.clone()),
+                None,
+            )
+            .await
+        else {
+            return;
+        };
+        let cycle = &current.result.cycle;
+        let source_revision = cycle.result_id.as_str().to_owned();
+        let producer_state = producer_state_for_cycle(cycle);
+        let identity = current.scope.projection_identity();
+        let generation = current.scope.generation;
+        for (kind, coverage) in [
+            (ContextProjectionKind::diagnostics(), cycle_coverage(cycle)),
+            (
+                ContextProjectionKind::post_edit_impact(),
+                impact_projection(cycle).0,
+            ),
+            (
+                ContextProjectionKind::affected_tests(),
+                affected_test_projection(cycle).0,
+            ),
+        ] {
+            self.changes.offer(
+                source_revision.clone(),
+                ContextProjectionChange {
+                    root_uri: request.root_uri.clone(),
+                    document_uri: Some(request.document_uri.clone()),
+                    kind,
+                    generation,
+                    identity: identity.clone(),
+                    freshness: ContextFreshness::Current,
+                    producer_state,
+                    coverage,
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                    retrieval_handle: None,
+                },
+            );
+        }
     }
 
     async fn current_cycle(
@@ -1179,7 +1430,12 @@ impl FeedbackCycleRuntimePort for ConcretePr12FeedbackLspSource {
         &self,
         request: FeedbackCycleRequest,
     ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
-        self.cycle.execute(request)
+        let source = self.clone();
+        Box::pin(async move {
+            source.cycle.execute(request.clone()).await?;
+            source.queue_feedback_changes(&request).await;
+            Ok(())
+        })
     }
 }
 
@@ -1191,7 +1447,6 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
         let source = self.clone();
         Box::pin(async move {
             source
-                .cycle
                 .execute(FeedbackCycleRequest {
                     root_uri: request.root.uri().to_owned(),
                     document_uri: request.document_uri.clone(),
@@ -1411,7 +1666,10 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
-        self.test_runs.poll_changes(root, subscriptions)
+        self.changes.activate(root, subscriptions);
+        let mut changes = self.changes.drain(root);
+        changes.extend(self.test_runs.poll_changes(root, subscriptions));
+        changes
     }
 }
 
