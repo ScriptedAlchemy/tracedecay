@@ -236,8 +236,10 @@ fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayD
             BrokerDiagnosticSeverity::Hint => DiagnosticSeverity::Hint,
         }),
         code: diagnostic.code,
+        code_description_uri: None,
         message: diagnostic.message,
         source: DiagnosticSource::Upstream,
+        related_information: Vec::new(),
         data: None,
     }
 }
