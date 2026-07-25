@@ -477,17 +477,6 @@ fn complete_hook_v2_pending_work(
     sequence: u64,
     now: UtcMicros,
 ) -> bool {
-    let key = (data_root.to_path_buf(), envelope.producer.as_key());
-    let Some(mut ledgers) = hook_v2_admission_ledgers().lock().ok() else {
-        return false;
-    };
-    let Some(ledger) = ledgers.get_mut(&key) else {
-        return false;
-    };
-    if ledger.mark_work_completed(envelope).is_err() {
-        return false;
-    }
-    drop(ledgers);
     let Some(_gate) = hook_v2_pending_work_gate().lock().ok() else {
         return false;
     };
@@ -498,7 +487,7 @@ fn complete_hook_v2_pending_work(
     ) else {
         return false;
     };
-    spool
+    if spool
         .acknowledge(
             tracedecay_hooks::HookSpoolAckV1 {
                 sequence,
@@ -507,7 +496,24 @@ fn complete_hook_v2_pending_work(
             },
             now,
         )
-        .is_ok()
+        .is_err()
+    {
+        return false;
+    }
+    drop(spool);
+    drop(_gate);
+
+    // Delete the pending payload first. If the daemon stops before the
+    // completion bit is fsynced, the source duplicate is admitted again and
+    // safely reconstructs the outbox. The opposite order could strand an
+    // outbox record forever because completed duplicates suppress redrive.
+    let key = (data_root.to_path_buf(), envelope.producer.as_key());
+    let Some(mut ledgers) = hook_v2_admission_ledgers().lock().ok() else {
+        return false;
+    };
+    ledgers
+        .get_mut(&key)
+        .is_some_and(|ledger| ledger.mark_work_completed(envelope).is_ok())
 }
 
 fn retain_hook_v2_pending_work(
@@ -587,6 +593,17 @@ pub(crate) fn record_hook_v2_admission(
         .get_mut(&key)?
         .admit_with_receipt(envelope, now)
         .ok()
+}
+
+#[cfg(test)]
+fn forget_hook_v2_admission_ledger_for_test(
+    data_root: &Path,
+    host: tracedecay_hooks::HookHostV1,
+) {
+    hook_v2_admission_ledgers()
+        .lock()
+        .unwrap()
+        .remove(&(data_root.to_path_buf(), host.as_key()));
 }
 
 fn hook_v2_requires_producer_work(envelope: &tracedecay_hooks::HookEventEnvelopeV2) -> bool {
@@ -2387,14 +2404,9 @@ mod tests {
         let binding = admission_test_binding(7);
         let first = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
         assert!(!first.work_completed);
-        let unavailable = retain_hook_v2_pending_work(
-            data_root.path(),
-            &envelope,
-            &envelope,
-            &binding,
-            now,
-        )
-        .expect("durable pending work");
+        let unavailable =
+            retain_hook_v2_pending_work(data_root.path(), &envelope, &envelope, &binding, now)
+                .expect("durable pending work");
         drop(unavailable);
         assert_eq!(
             hook_v2_pending_work_envelopes(
@@ -2404,6 +2416,52 @@ mod tests {
             ),
             [envelope.clone()]
         );
+        forget_hook_v2_admission_ledger_for_test(
+            data_root.path(),
+            tracedecay_hooks::HookHostV1::ClaudeCode,
+        );
+        assert_eq!(
+            record_hook_v2_admission(data_root.path(), &envelope, now)
+                .unwrap()
+                .decision,
+            tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate,
+            "daemon restart must reopen the durable admission ledger"
+        );
+
+        // Simulate a stop after the worker deleted its payload but before the
+        // completion ledger fsync. The duplicate must reconstruct the outbox.
+        {
+            let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
+                hook_v2_pending_work_root(
+                    data_root.path(),
+                    tracedecay_hooks::HookHostV1::ClaudeCode,
+                ),
+                tracedecay_hooks::HookSpoolConfigV1::stock(
+                    tracedecay_hooks::HookHostV1::ClaudeCode,
+                ),
+                now,
+            )
+            .unwrap();
+            let record = spool.claim_replay_batches(now, 1).unwrap()[0].records[0].clone();
+            spool
+                .acknowledge(
+                    tracedecay_hooks::HookSpoolAckV1 {
+                        sequence: record.sequence,
+                        receipt_id: envelope.event_id,
+                        disposition: tracedecay_hooks::HookSpoolAckDispositionV1::Committed,
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        assert!(
+            hook_v2_pending_work_envelopes(
+                data_root.path(),
+                tracedecay_hooks::HookHostV1::ClaudeCode,
+                now,
+            )
+            .is_empty()
+        );
 
         let duplicate = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
         assert_eq!(
@@ -2411,26 +2469,41 @@ mod tests {
             tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         );
         assert!(!duplicate.work_completed);
-        let redrive = retain_hook_v2_pending_work(
-            data_root.path(),
-            &envelope,
-            &envelope,
-            &binding,
-            now,
-        )
-        .expect("duplicate pending work redrive");
+        let redrive =
+            retain_hook_v2_pending_work(data_root.path(), &envelope, &envelope, &binding, now)
+                .expect("duplicate pending work redrive");
+        assert_eq!(
+            hook_v2_pending_work_envelopes(
+                data_root.path(),
+                tracedecay_hooks::HookHostV1::ClaudeCode,
+                now,
+            ),
+            [envelope.clone()]
+        );
         redrive();
 
-        assert!(hook_v2_pending_work_envelopes(
-            data_root.path(),
-            tracedecay_hooks::HookHostV1::ClaudeCode,
-            now,
-        )
-        .is_empty());
+        assert!(
+            hook_v2_pending_work_envelopes(
+                data_root.path(),
+                tracedecay_hooks::HookHostV1::ClaudeCode,
+                now,
+            )
+            .is_empty()
+        );
         assert!(
             record_hook_v2_admission(data_root.path(), &envelope, now)
                 .unwrap()
                 .work_completed
+        );
+        forget_hook_v2_admission_ledger_for_test(
+            data_root.path(),
+            tracedecay_hooks::HookHostV1::ClaudeCode,
+        );
+        assert!(
+            record_hook_v2_admission(data_root.path(), &envelope, now)
+                .unwrap()
+                .work_completed,
+            "producer-work completion must survive daemon restart"
         );
     }
 
