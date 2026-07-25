@@ -768,8 +768,12 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                     };
                 }
             };
-            if document_content_digest.is_some() {
-                scope.document_content_digest = document_content_digest;
+            if let Err(reason) =
+                bind_test_run_document_content(&mut scope, document_content_digest)
+            {
+                return ContextProjectionOutcome::Deferred {
+                    reason: reason.to_owned(),
+                };
             }
             let current = ManagedTestRunCurrentScope {
                 root_uri: root.uri().to_owned(),
@@ -827,6 +831,25 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
             }
         })
     }
+}
+
+/// A retained managed test run is evidence about saved source. An LSP overlay
+/// may reuse it only while its exact bytes still match that saved document.
+fn bind_test_run_document_content(
+    scope: &mut LspFeedbackProjectionScope,
+    overlay_digest: Option<ContentDigest>,
+) -> Result<(), &'static str> {
+    let Some(overlay_digest) = overlay_digest else {
+        return Ok(());
+    };
+    let Some(saved_digest) = scope.document_content_digest.as_ref() else {
+        return Err("managed-test-run-document-content-unbound");
+    };
+    if saved_digest != &overlay_digest {
+        return Err("managed-test-run-document-content-stale");
+    }
+    scope.document_content_digest = Some(overlay_digest);
+    Ok(())
 }
 
 /// Shared feedback source mounted as both `FeedbackCyclePort` and the managed
@@ -2330,7 +2353,8 @@ mod projection_tests {
     use std::collections::BTreeMap;
 
     use super::{
-        LspFeedbackProjectionScope, feedback_content_is_current, finding_item, test_run_projection,
+        LspFeedbackProjectionScope, bind_test_run_document_content, feedback_content_is_current,
+        finding_item, test_run_projection,
     };
     use crate::application::operation_stream::{
         ManagedTestRunResult, ManagedTestRunSnapshot, OperationId,
@@ -2479,6 +2503,45 @@ mod projection_tests {
         assert_eq!(envelope.producer_state, ContextProducerState::Complete);
         assert_eq!(envelope.items.len(), 1);
         assert_eq!(envelope.items[0].summary, "passed: suite::passes");
+    }
+
+    #[test]
+    fn preexisting_dirty_overlay_cannot_relabel_saved_test_results() {
+        let saved_digest =
+            ContentDigest::new(format!("sha256:{}", "d".repeat(64))).expect("saved digest");
+        let overlay_digest =
+            ContentDigest::new(format!("sha256:{}", "e".repeat(64))).expect("overlay digest");
+        let mut scope = LspFeedbackProjectionScope {
+            document_content_digest: Some(saved_digest),
+            ..projection_scope()
+        };
+
+        assert_eq!(
+            bind_test_run_document_content(&mut scope, Some(overlay_digest)),
+            Err("managed-test-run-document-content-stale")
+        );
+    }
+
+    #[test]
+    fn overlay_digest_drift_invalidates_saved_test_result_currentness() {
+        let saved_digest =
+            ContentDigest::new(format!("sha256:{}", "d".repeat(64))).expect("saved digest");
+        let drifted_digest =
+            ContentDigest::new(format!("sha256:{}", "e".repeat(64))).expect("drifted digest");
+        let mut scope = LspFeedbackProjectionScope {
+            document_content_digest: Some(saved_digest.clone()),
+            ..projection_scope()
+        };
+
+        assert_eq!(
+            bind_test_run_document_content(&mut scope, Some(saved_digest.clone())),
+            Ok(())
+        );
+        assert_eq!(
+            bind_test_run_document_content(&mut scope, Some(drifted_digest)),
+            Err("managed-test-run-document-content-stale")
+        );
+        assert_eq!(scope.document_content_digest, Some(saved_digest));
     }
 
     #[test]
