@@ -88,13 +88,24 @@ impl RegisteredGlobalDb {
     pub(crate) async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
         let project =
             project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
+        self.sum_savings_by_project_id(project.as_deref(), since)
+            .await
+    }
+
+    /// Same aggregation for an already-resolved canonical project identity.
+    /// Application read models use this to avoid reinterpreting identity as a path.
+    pub(crate) async fn sum_savings_by_project_id(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+    ) -> SavingsTotal {
         let Ok(snapshot) = self.read_snapshot().await else {
             return SavingsTotal {
                 saved_tokens: 0,
                 calls: 0,
             };
         };
-        let rows = match project.as_deref() {
+        let rows = match project_id {
             Some(project) => {
                 snapshot
                     .query(

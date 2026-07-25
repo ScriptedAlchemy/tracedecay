@@ -13,6 +13,7 @@ pub mod git_reads;
 pub mod host_admission;
 pub mod lsp_runtime;
 pub mod memory;
+pub mod observability;
 pub mod observation;
 pub mod operation_stream;
 pub mod primitives;
