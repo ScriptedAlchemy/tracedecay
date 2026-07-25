@@ -54,7 +54,44 @@ export const SavingsOverviewPayloadSchema = z
         cost_basis: z.string().optional(),
       })
       .passthrough(),
-    sessions: z.object({ available: z.boolean() }).passthrough(),
+    /**
+     * The session ledger's own token accounting — a DIFFERENT denominator from
+     * `turns`. `turns` is the priced turn ledger (57,704 turns on the owner's
+     * profile); this counts every message the session store holds (1.75M), and
+     * splits them by whether a provider reported usage, the figure was
+     * estimated, or the model could not be identified at all. Both are true;
+     * they answer different questions, and the page has to say which is which.
+     */
+    sessions: z
+      .object({
+        available: z.boolean(),
+        cost_basis: z.string().optional(),
+        scope: z.string().optional(),
+        session_count: z.number().optional(),
+        model_count: z.number().optional(),
+        messages: z.number().optional(),
+        usage_messages: z.number().optional(),
+        estimated_messages: z.number().optional(),
+        tokenized_messages: z.number().optional(),
+        unknown_model_messages: z.number().optional(),
+        actual: z
+          .object({
+            input_tokens: z.number().optional(),
+            output_tokens: z.number().optional(),
+            cache_read_tokens: z.number().optional(),
+            cache_write_tokens: z.number().optional(),
+          })
+          .passthrough()
+          .optional(),
+        estimated: z
+          .object({
+            input_tokens: z.number().optional(),
+            output_tokens: z.number().optional(),
+          })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough(),
     pricing: z
       .object({
         source: z.unknown().optional(),
