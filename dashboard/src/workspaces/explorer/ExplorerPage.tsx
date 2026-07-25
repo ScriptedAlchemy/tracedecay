@@ -1,49 +1,43 @@
-import { useState } from 'react';
-import { Search } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Boxes, MessagesSquare, Lightbulb, type LucideIcon } from 'lucide-react';
 import { z } from 'zod';
 import {
   DataRow,
   ExplorerSplit,
   InspectorPanel,
-  KeyValueTree,
+  ListCaption,
+  RawFields,
+  RESULT_ROW_HEIGHT,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { VirtualList } from '../../ui/VirtualList.tsx';
+import { Highlight, MetaLabel } from '../../ui/search/Highlight.tsx';
+import { FacetGroup } from '../../ui/search/Facets.tsx';
+import { SearchField } from '../../ui/search/SearchField.tsx';
+import { queryTerms } from '../../ui/search/terms.ts';
+import { cn } from '../../ui/cn';
 import { Meter } from '../../ui/instrument.tsx';
-import { AnyObject } from '../../data/query/legacy.ts';
+import { AnyObject, type LegacyResult } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import {
+  LANES,
+  codeHits,
+  facetCounts,
+  knowledgeHits,
+  relativeTime,
+  sessionHits,
+  type Hit,
+  type LaneId,
+} from './model.ts';
 
-const ListPayload = z
-  .object({
-    results: z.array(AnyObject).optional(),
-    items: z.array(AnyObject).optional(),
-    nodes: z.array(AnyObject).optional(),
-    facts: z.array(AnyObject).optional(),
-  })
+/* ---------------------------------------------------------------- payloads */
+
+const GraphSearchPayload = z
+  .object({ results: z.array(AnyObject).optional(), total: z.number().optional() })
   .passthrough();
-
-function rowsOf(data: z.infer<typeof ListPayload>): Record<string, unknown>[] {
-  return data.results ?? data.items ?? data.nodes ?? data.facts ?? [];
-}
-
-const MemoryListPayload = z
-  .object({
-    holographic: z
-      .object({
-        facts: z.array(AnyObject).optional(),
-        entities: z
-          .array(
-            z
-              .object({ name: z.string(), fact_count: z.number().optional() })
-              .passthrough(),
-          )
-          .optional(),
-      })
-      .passthrough()
-      .optional(),
-  })
+const GraphOverviewPayload = z
+  .object({ top_connected: z.array(AnyObject).optional() })
   .passthrough();
-
 const LcmSearchPayload = z
   .object({
     matches: z
@@ -51,464 +45,694 @@ const LcmSearchPayload = z
         messages: z.array(AnyObject).optional(),
         summary_nodes: z.array(AnyObject).optional(),
       })
-      .passthrough(),
-  })
-  .passthrough();
-
-function lcmRows(data: Record<string, unknown>): Record<string, unknown>[] {
-  const matches = data['matches'] as z.infer<typeof LcmSearchPayload>['matches'];
-  return [...(matches.messages ?? []), ...(matches.summary_nodes ?? [])];
-}
-
-function memoryRows(data: Record<string, unknown>): Record<string, unknown>[] {
-  const holographic = data['holographic'];
-  if (holographic && typeof holographic === 'object') {
-    const facts = (holographic as { facts?: unknown }).facts;
-    if (Array.isArray(facts)) return facts as Record<string, unknown>[];
-  }
-  return [];
-}
-
-/** `/api/plugins/graph/overview` — the code index's own size and its most
- * connected symbols. One of the two cheap reads the idle state is composed
- * from (~40ms against a live daemon). */
-const GraphIndexPayload = z
-  .object({
-    totals: z
-      .object({ nodes: z.number(), edges: z.number(), files: z.number() })
-      .passthrough(),
-    top_connected: z
-      .array(
-        z
-          .object({
-            id: z.string().optional(),
-            name: z.string().nullable().optional(),
-            kind: z.string().optional(),
-            file_path: z.string().nullable().optional(),
-            degree: z.number().optional(),
-          })
-          .passthrough(),
-      )
+      .passthrough()
+      .optional(),
+    total: z
+      .object({
+        messages: z.number().optional(),
+        summary_nodes: z.number().optional(),
+      })
+      .passthrough()
       .optional(),
   })
   .passthrough();
-
-/** `/api/plugins/holographic/status` — the memory store's size (~110ms). */
-const MemoryIndexPayload = z
+const LcmOverviewPayload = z
   .object({
-    exists: z.boolean().optional(),
-    memory: z
+    latest_summary_nodes: z.array(AnyObject).optional(),
+    overview: z.object({ messages_total: z.number().optional() }).passthrough().optional(),
+  })
+  .passthrough();
+const MemoryPayload = z
+  .object({
+    holographic: z
       .object({
-        fact_count: z.number().optional(),
-        entity_count: z.number().optional(),
-        bank_count: z.number().optional(),
+        facts: z.array(AnyObject).optional(),
+        overview: z.object({ facts: z.number().optional() }).passthrough().optional(),
       })
       .passthrough()
       .optional(),
   })
   .passthrough();
 
-type SourceResult =
-  | { outcome: 'ok'; data: Record<string, unknown> }
-  | { outcome: string; data?: unknown };
+const LANE_ICON: Record<LaneId, LucideIcon> = {
+  code: Boxes,
+  sessions: MessagesSquare,
+  knowledge: Lightbulb,
+};
 
-/** Explorer: one query fanned across independent sources with per-source
- * progress rows (the planner-composer pattern, minimally realized over the
- * legacy search surfaces — the typed PlannerQueryRun replaces this fan-out
- * when plan-09's coordinator is exposed). */
+interface Lane {
+  readonly id: LaneId;
+  readonly hits: Hit[];
+  readonly pending: boolean;
+  readonly outcome: LegacyResult<unknown>['outcome'] | 'pending' | 'unknown';
+  /** Size of the matching set the daemon reports, when it reports one. */
+  readonly reportedTotal?: number | undefined;
+}
+
+/**
+ * Explorer — one query, three memories.
+ *
+ * TraceDecay remembers a repository three separate ways, and the honest
+ * consequence is that a search is a *fan-out*, not a single ranked list: the
+ * code graph, the transcript store, and the fact store each answer for
+ * themselves. This surface makes that structure the design. Each memory is a
+ * lane with its own identity rail and its own live state; results stay
+ * comparable through one row grammar; and because the daemon returns hits but
+ * no relevance score, "why this is here" is told with things that are actually
+ * true — the daemon's own ordering, the fields whose text really contains the
+ * term, and measured quantities (graph degree, fact trust) that always name
+ * the field they came from.
+ *
+ * Before a query, the surface is not blank: it browses what each memory holds
+ * right now, from the same endpoints' overview shapes.
+ */
 export function ExplorerPage() {
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
-  const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
-  const enabled = submitted !== '';
+  const [laneFilter, setLaneFilter] = useState<LaneId | null>(null);
+  const [facet, setFacet] = useState<{ lane: LaneId; value: string } | null>(null);
+  const [selected, setSelected] = useState<Hit | null>(null);
+  const searching = submitted !== '';
+  const terms = useMemo(() => queryTerms(submitted), [submitted]);
 
-  const graph = useLegacy(
+  const encoded = encodeURIComponent(submitted);
+  const graphSearch = useLegacy(
     ['explorer', 'graph', submitted],
-    `/api/plugins/graph/search?q=${encodeURIComponent(submitted)}`,
-    ListPayload,
+    `/api/plugins/graph/search?q=${encoded}`,
+    GraphSearchPayload,
+    { enabled: searching },
   );
-  const lcm = useLegacy(
+  const graphBrowse = useLegacy(
+    ['explorer', 'graph-overview'],
+    '/api/plugins/graph/overview',
+    GraphOverviewPayload,
+    { enabled: !searching },
+  );
+  const lcmSearch = useLegacy(
     ['explorer', 'lcm', submitted],
-    `/api/plugins/hermes-lcm/search?q=${encodeURIComponent(submitted)}`,
+    `/api/plugins/hermes-lcm/search?q=${encoded}&limit=50`,
     LcmSearchPayload,
+    { enabled: searching },
+  );
+  const lcmBrowse = useLegacy(
+    ['explorer', 'lcm-overview'],
+    '/api/plugins/hermes-lcm/overview',
+    LcmOverviewPayload,
+    { enabled: !searching },
   );
   const memory = useLegacy(
     ['explorer', 'memory', submitted],
-    `/api/plugins/holographic/?q=${encodeURIComponent(submitted)}&limit=25`,
-    MemoryListPayload,
+    `/api/plugins/holographic/?q=${encoded}&limit=25`,
+    MemoryPayload,
   );
 
-  // The idle state's two reads. Both are index summaries rather than searches,
-  // both answer in well under a second, and neither is issued once a query is
-  // running — the surface is then about the results, not about the index.
-  const graphIndex = useLegacy(
-    ['explorer', 'graph-index'],
-    '/api/plugins/graph/overview',
-    GraphIndexPayload,
-    { enabled: !enabled },
+  const lanes: Lane[] = useMemo(() => {
+    const code = searching ? graphSearch : graphBrowse;
+    const sessions = searching ? lcmSearch : lcmBrowse;
+    const codeRows =
+      code.data?.outcome === 'ok'
+        ? searching
+          ? ((code.data.data as z.infer<typeof GraphSearchPayload>).results ?? [])
+          : ((code.data.data as z.infer<typeof GraphOverviewPayload>).top_connected ?? [])
+        : [];
+    const sessionRows =
+      sessions.data?.outcome === 'ok'
+        ? searching
+          ? [
+              ...((sessions.data.data as z.infer<typeof LcmSearchPayload>).matches?.messages ??
+                []),
+              ...((sessions.data.data as z.infer<typeof LcmSearchPayload>).matches
+                ?.summary_nodes ?? []),
+            ]
+          : ((sessions.data.data as z.infer<typeof LcmOverviewPayload>).latest_summary_nodes ??
+            [])
+        : [];
+    const factRows =
+      memory.data?.outcome === 'ok'
+        ? ((memory.data.data as z.infer<typeof MemoryPayload>).holographic?.facts ?? [])
+        : [];
+    const codeTotal =
+      searching && code.data?.outcome === 'ok'
+        ? (code.data.data as z.infer<typeof GraphSearchPayload>).total
+        : undefined;
+    const sessionTotal =
+      searching && sessions.data?.outcome === 'ok'
+        ? ((sessions.data.data as z.infer<typeof LcmSearchPayload>).total?.messages ?? 0) +
+          ((sessions.data.data as z.infer<typeof LcmSearchPayload>).total?.summary_nodes ?? 0)
+        : undefined;
+    return [
+      {
+        id: 'code' as const,
+        hits: codeHits(codeRows, terms),
+        pending: code.isPending,
+        outcome: code.isPending ? ('pending' as const) : (code.data?.outcome ?? 'unknown'),
+        ...(codeTotal != null ? { reportedTotal: codeTotal } : {}),
+      },
+      {
+        id: 'sessions' as const,
+        hits: sessionHits(sessionRows, terms),
+        pending: sessions.isPending,
+        outcome: sessions.isPending
+          ? ('pending' as const)
+          : (sessions.data?.outcome ?? 'unknown'),
+        ...(sessionTotal != null ? { reportedTotal: sessionTotal } : {}),
+      },
+      {
+        id: 'knowledge' as const,
+        hits: knowledgeHits(factRows, terms),
+        pending: memory.isPending,
+        outcome: memory.isPending ? ('pending' as const) : (memory.data?.outcome ?? 'unknown'),
+      },
+    ];
+  }, [searching, graphSearch, graphBrowse, lcmSearch, lcmBrowse, memory, terms]);
+
+  const laneById = useMemo(
+    () => new Map(lanes.map((lane) => [lane.id, lane])),
+    [lanes],
   );
-  const memoryIndex = useLegacy(
-    ['explorer', 'memory-index'],
-    '/api/plugins/holographic/status',
-    MemoryIndexPayload,
-    { enabled: !enabled },
-  );
-  const memoryEntities = useLegacy(
-    ['explorer', 'memory-entities'],
-    '/api/plugins/holographic/?limit=25',
-    MemoryListPayload,
-    { enabled: !enabled },
+  const visibleLanes = laneFilter ? lanes.filter((l) => l.id === laneFilter) : lanes;
+  const laneHits = visibleLanes.flatMap((lane) => lane.hits);
+  const hits = facet
+    ? laneHits.filter((hit) => hit.lane === facet.lane && hit.facet === facet.value)
+    : laneHits;
+  const anyPending = lanes.some((lane) => lane.pending);
+  const failedLanes = lanes.filter(
+    (lane) => lane.outcome !== 'ok' && lane.outcome !== 'pending',
   );
 
-  const runQuery = (next: string) => {
-    setQuery(next);
-    setSubmitted(next);
+  const reset = () => {
+    setQuery('');
+    setSubmitted('');
+    setFacet(null);
+    setSelected(null);
   };
-
-  const sources: Array<{
-    name: string;
-    query: { isPending: boolean; data?: SourceResult };
-    extract: (data: Record<string, unknown>) => Record<string, unknown>[];
-  }> = [
-    { name: 'code graph', query: graph, extract: rowsOf },
-    { name: 'sessions', query: lcm, extract: lcmRows },
-    { name: 'knowledge', query: memory, extract: memoryRows },
-  ];
 
   return (
     <ExplorerSplit
-      filters={
-        <div className="flex flex-col gap-3">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              setSubmitted(query);
-            }}
-          >
-            <input
+      stackOnNarrow
+      header={
+        <div className="flex shrink-0 flex-col gap-3 border-b border-edge-subtle bg-surface-1 px-4 py-3">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h1 className="text-sm font-semibold tracking-tight">Explorer</h1>
+            <p className="text-2xs text-text-muted">
+              one query, fanned across the three memories the daemon keeps
+            </p>
+          </div>
+          <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start">
+            <SearchField
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search everything…"
-              aria-label="Explorer search"
-              className="h-8 w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 px-2 text-xs outline-none focus-visible:border-accent"
-            />
-          </form>
-          {enabled ? (
-            <div className="flex flex-col gap-1.5" aria-label="Source progress">
-              {sources.map((s) => (
-                <div key={s.name} className="flex items-center justify-between text-2xs">
-                  <span className="text-text-muted">{s.name}</span>
-                  {s.query.isPending ? (
-                    <StateChip kind="loading" />
-                  ) : s.query.data?.outcome === 'ok' ? (
-                    <span className="tabular text-text-secondary">
-                      {s.extract(s.query.data.data as Record<string, unknown>).length}
-                    </span>
-                  ) : (
-                    <StateChip
-                      kind={s.query.data?.outcome === 'offline' ? 'offline' : 'error'}
-                    />
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <IndexSummary
-              graph={graphIndex.data?.outcome === 'ok' ? graphIndex.data.data : undefined}
-              graphPending={graphIndex.isPending}
-              memory={
-                memoryIndex.data?.outcome === 'ok' ? memoryIndex.data.data : undefined
+              onChange={setQuery}
+              onSubmit={() => {
+                setSubmitted(query.trim());
+                setFacet(null);
+                setSelected(null);
+              }}
+              onClear={reset}
+              submitted={submitted}
+              label="Search code, sessions, and knowledge"
+              placeholder="Search everything the daemon remembers…"
+              hint={
+                searching ? (
+                  <>
+                    showing hits for{' '}
+                    <span className="font-medium text-text-secondary">“{submitted}”</span> in the
+                    daemon&rsquo;s own order · terms are marked where they occur in the payload
+                  </>
+                ) : (
+                  <>
+                    quote a phrase to keep it whole · press{' '}
+                    <kbd className="rounded-[var(--radius-chip)] border border-edge-subtle px-1">
+                      /
+                    </kbd>{' '}
+                    to focus, <kbd className="rounded-[var(--radius-chip)] border border-edge-subtle px-1">Esc</kbd>{' '}
+                    to return to browsing
+                  </>
+                )
               }
-              memoryPending={memoryIndex.isPending}
             />
-          )}
+            <div
+              className="flex shrink-0 flex-wrap gap-2"
+              aria-label="Memory lanes"
+              role="group"
+            >
+              {LANES.map((spec) => {
+                const lane = laneById.get(spec.id);
+                const Icon = LANE_ICON[spec.id];
+                const active = laneFilter === spec.id;
+                return (
+                  <button
+                    key={spec.id}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => {
+                      setLaneFilter(active ? null : spec.id);
+                      setFacet(null);
+                    }}
+                    className={cn(
+                      'flex min-w-[7.5rem] flex-col gap-1 rounded-[var(--radius-standard)] border px-2.5 py-1.5 text-left',
+                      active
+                        ? 'border-accent bg-surface-2'
+                        : 'border-edge-subtle bg-surface-0 hover:border-edge-strong',
+                    )}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Icon aria-hidden size={12} className={spec.textClass} />
+                      <span className="text-2xs font-medium text-text-secondary">
+                        {spec.label}
+                      </span>
+                    </span>
+                    <span className="flex items-baseline gap-1.5">
+                      {lane?.pending ? (
+                        <StateChip kind="loading" />
+                      ) : lane?.outcome === 'ok' ? (
+                        <>
+                          <span className="tabular text-sm font-semibold leading-none text-text-primary">
+                            {lane.hits.length.toLocaleString()}
+                          </span>
+                          <span className="text-2xs text-text-muted">
+                            {lane.reportedTotal != null
+                              ? `of ${lane.reportedTotal.toLocaleString()}`
+                              : searching
+                                ? 'hits'
+                                : 'shown'}
+                          </span>
+                        </>
+                      ) : (
+                        <StateChip
+                          kind={lane?.outcome === 'offline' ? 'offline' : 'error'}
+                        />
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      }
+      filters={
+        <div className="flex flex-col gap-4">
+          {visibleLanes.map((lane) => {
+            const spec = LANES.find((l) => l.id === lane.id)!;
+            const counts = facetCounts(lane.hits);
+            if (counts.length === 0) return null;
+            return (
+              <FacetGroup
+                key={lane.id}
+                title={spec.facetLabel}
+                note="loaded rows"
+                facets={counts}
+                active={facet?.lane === lane.id ? facet.value : null}
+                onToggle={(value) =>
+                  setFacet(value === null ? null : { lane: lane.id, value })
+                }
+              />
+            );
+          })}
+          <section className="flex flex-col gap-2">
+            <MetaLabel>What each lane searches</MetaLabel>
+            <dl className="flex flex-col gap-2">
+              {LANES.map((spec) => {
+                const lane = laneById.get(spec.id);
+                return (
+                  <div key={spec.id} className="flex gap-2">
+                    <span
+                      aria-hidden
+                      className={cn('mt-1 h-3 w-[3px] shrink-0 rounded-full', spec.railClass)}
+                    />
+                    <span className="min-w-0">
+                      <dt className="text-2xs font-medium text-text-secondary">
+                        {spec.label}
+                      </dt>
+                      <dd className="text-2xs leading-relaxed text-text-muted">
+                        {searching ? spec.searches : spec.browseLabel}
+                        {lane?.reportedTotal != null
+                          ? ` · daemon reports ${lane.reportedTotal.toLocaleString()} matching`
+                          : ''}
+                      </dd>
+                    </span>
+                  </div>
+                );
+              })}
+            </dl>
+          </section>
+          {failedLanes.length > 0 ? (
+            <section className="flex flex-col gap-1.5">
+              <MetaLabel>Unanswered</MetaLabel>
+              {failedLanes.map((lane) => (
+                <p key={lane.id} className="flex items-center gap-1.5 text-2xs text-text-muted">
+                  <StateChip
+                    kind={lane.outcome === 'offline' ? 'offline' : 'error'}
+                  />
+                  <span>{LANES.find((l) => l.id === lane.id)?.label}</span>
+                </p>
+              ))}
+              <p className="text-2xs leading-relaxed text-text-muted">
+                Results below are only from the lanes that answered. Nothing is being
+                substituted for the rest.
+              </p>
+            </section>
+          ) : null}
         </div>
       }
       list={
-        !enabled ? (
-          <EmptyQuery
-            onRun={runQuery}
-            hubs={
-              graphIndex.data?.outcome === 'ok'
-                ? (graphIndex.data.data.top_connected ?? [])
-                : []
-            }
-            entities={
-              memoryEntities.data?.outcome === 'ok'
-                ? (memoryEntities.data.data.holographic?.entities ?? [])
-                : []
-            }
+        hits.length === 0 ? (
+          <EmptyResults
+            searching={searching}
+            pending={anyPending}
+            query={submitted}
+            facet={facet?.value ?? null}
+            failed={failedLanes.length > 0}
+            onClearFacet={() => setFacet(null)}
+            onClearQuery={reset}
           />
         ) : (
           <VirtualList
-            items={sources.flatMap((s) =>
-              s.query.data?.outcome === 'ok'
-                ? s
-                    .extract(s.query.data.data as Record<string, unknown>)
-                    .map((row, i) => ({ source: s.name, row, index: i }))
-                : [],
+            items={hits}
+            estimateHeight={RESULT_ROW_HEIGHT}
+            getKey={(hit) => hit.key}
+            header={
+              <ListCaption>
+                <span className="tabular font-medium text-text-secondary">
+                  {hits.length.toLocaleString()}
+                </span>
+                <span>
+                  {searching ? 'results' : 'rows'}
+                  {laneFilter
+                    ? ` in ${LANES.find((l) => l.id === laneFilter)?.label.toLowerCase()}`
+                    : ' across three memories'}
+                  {facet ? ` · ${facet.value}` : ''}
+                </span>
+                <span aria-hidden className="ml-auto hidden sm:inline">
+                  ordered by each memory&rsquo;s own ranking
+                </span>
+              </ListCaption>
+            }
+            renderItem={(hit) => (
+              <HitRow
+                hit={hit}
+                terms={terms}
+                selected={selected?.key === hit.key}
+                onSelect={() => setSelected(hit)}
+              />
             )}
-            getKey={(entry) => `${entry.source}-${entry.index}`}
-            renderItem={(entry) => {
-              const { source, row } = entry;
-              const label = String(
-                row['qualified_name'] ??
-                  row['name'] ??
-                  row['summary'] ??
-                  row['content'] ??
-                  row['text'] ??
-                  row['session_id'] ??
-                  entry.index,
-              );
-              return (
-                <DataRow
-                  selected={selected === row}
-                  onSelect={() => setSelected(row)}
-                >
-                  <span className="w-24 shrink-0 truncate text-2xs text-text-muted">
-                    {source}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">{label}</span>
-                </DataRow>
-              );
-            }}
           />
         )
       }
       inspector={
         selected ? (
-          <InspectorPanel title="Result" onClose={() => setSelected(null)}>
-            <KeyValueTree value={selected} />
-          </InspectorPanel>
+          <HitInspector
+            hit={selected}
+            terms={terms}
+            onClose={() => setSelected(null)}
+          />
         ) : undefined
       }
     />
   );
 }
 
-/**
- * What each source actually holds, in the rail, before a query exists.
- *
- * The idle rail used to show nothing but an input. Two summary endpoints
- * answer in under a fifth of a second between them and report the real size of
- * two of the three sources, so the reader can see what they are about to
- * search rather than take it on faith. The third — sessions — has no index
- * summary route that answers reliably, and that is stated rather than filled
- * with a plausible number.
- */
-function IndexSummary({
-  graph,
-  graphPending,
-  memory,
-  memoryPending,
-}: {
-  graph: z.infer<typeof GraphIndexPayload> | undefined;
-  graphPending: boolean;
-  memory: z.infer<typeof MemoryIndexPayload> | undefined;
-  memoryPending: boolean;
-}) {
-  return (
-    <figure className="flex flex-col gap-2">
-      <figcaption className="td-legend">what is indexed</figcaption>
-      <SourceSize
-        name="code graph"
-        pending={graphPending}
-        parts={
-          graph
-            ? [
-                [graph.totals.nodes, 'symbols'],
-                [graph.totals.edges, 'edges'],
-                [graph.totals.files, 'files'],
-              ]
-            : null
-        }
-      />
-      <SourceSize
-        name="knowledge"
-        pending={memoryPending}
-        parts={
-          memory?.memory
-            ? [
-                [memory.memory.fact_count ?? 0, 'facts'],
-                [memory.memory.entity_count ?? 0, 'entities'],
-                [memory.memory.bank_count ?? 0, 'banks'],
-              ]
-            : null
-        }
-      />
-      <div className="flex flex-col gap-0.5">
-        <span className="text-2xs text-text-secondary">sessions</span>
-        <span className="text-3xs leading-relaxed text-text-muted">
-          searched live — the daemon serves no size for this source, so none is shown
-        </span>
-      </div>
-    </figure>
-  );
-}
+/* ------------------------------------------------------------------- rows */
 
-function SourceSize({
-  name,
-  pending,
-  parts,
+function HitRow({
+  hit,
+  terms,
+  selected,
+  onSelect,
 }: {
-  name: string;
-  pending: boolean;
-  parts: ReadonlyArray<readonly [number, string]> | null;
+  hit: Hit;
+  terms: readonly string[];
+  selected: boolean;
+  onSelect: () => void;
 }) {
+  const spec = LANES.find((lane) => lane.id === hit.lane)!;
+  const Icon = LANE_ICON[hit.lane];
+  const age = relativeTime(hit.stamp);
   return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-2xs text-text-secondary">{name}</span>
-      {pending ? (
-        <StateChip kind="loading" />
-      ) : parts ? (
-        <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          {parts.map(([value, unit]) => (
-            <span key={unit} className="td-value text-3xs text-text-primary" data-cell="numeric">
-              {value.toLocaleString()}
-              <span className="td-unit ml-1">{unit}</span>
+    <DataRow
+      selected={selected}
+      onSelect={onSelect}
+      height={RESULT_ROW_HEIGHT}
+      railClassName={spec.railClass}
+      className="pl-4"
+    >
+      <span className="flex w-10 shrink-0 flex-col items-center gap-0.5">
+        <Icon aria-hidden size={13} className={cn(spec.textClass, 'opacity-80')} />
+        <span className="tabular text-2xs leading-none text-text-muted">#{hit.rank}</span>
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="flex min-w-0 items-baseline gap-2">
+          <Highlight
+            text={hit.title}
+            terms={terms}
+            className={cn(
+              'min-w-0 flex-1 truncate text-xs text-text-primary',
+              hit.lane === 'code' && 'font-mono',
+            )}
+          />
+          {hit.facet ? (
+            <span className="shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs text-text-secondary">
+              {hit.facet}
             </span>
-          ))}
+          ) : null}
         </span>
-      ) : (
-        <span className="text-3xs text-text-muted">index size unavailable</span>
-      )}
-    </div>
+        <span className="flex min-w-0 items-baseline gap-2 text-2xs text-text-muted">
+          {hit.context ? (
+            <Highlight
+              text={hit.context}
+              terms={terms}
+              className="min-w-0 max-w-[22rem] shrink truncate"
+            />
+          ) : null}
+          {hit.body ? (
+            <Highlight text={hit.body} terms={terms} className="min-w-0 flex-1 truncate" />
+          ) : null}
+          {hit.matchedIn.length > 0 ? (
+            <span className="hidden shrink-0 truncate text-text-secondary lg:inline">
+              matched in {hit.matchedIn.join(', ')}
+            </span>
+          ) : null}
+        </span>
+      </span>
+      <span className="hidden w-28 shrink-0 items-center justify-end gap-2 md:flex">
+        {hit.signal ? (
+          <>
+            <span className="tabular text-2xs text-text-muted">{hit.signal.display}</span>
+            <Meter
+              fraction={hit.signal.max <= 0 ? 0 : hit.signal.value / hit.signal.max}
+              className="w-10 rounded-full"
+              tone="bg-accent/80"
+              ariaLabel={`${hit.signal.field} ${hit.signal.value}`}
+            />
+          </>
+        ) : null}
+      </span>
+      <span className="tabular w-10 shrink-0 text-right text-2xs text-text-muted">
+        {age ?? ''}
+      </span>
+    </DataRow>
   );
 }
 
-/**
- * The query-before-results state, composed from what the daemon already knows
- * rather than left as one sentence in a void.
- *
- * Everything here is a real read and everything here is a way in: the code
- * graph's most connected symbols and the entities the memory store holds the
- * most facts about, each one running itself as a query when pressed. Nothing
- * is invented — if a source did not answer, its column simply is not drawn.
- */
-function EmptyQuery({
-  onRun,
-  hubs,
-  entities,
-}: {
-  onRun: (query: string) => void;
-  hubs: ReadonlyArray<{ name?: string | null; kind?: string; degree?: number }>;
-  entities: ReadonlyArray<{ name: string; fact_count?: number }>;
-}) {
-  const topHubs = hubs.filter((hub) => hub.name).slice(0, 8);
-  const topEntities = entities.slice(0, 8);
-  const hubCeiling = topHubs.reduce((max, hub) => Math.max(max, hub.degree ?? 0), 0);
-  const entityCeiling = topEntities.reduce(
-    (max, entity) => Math.max(max, entity.fact_count ?? 0),
-    0,
-  );
-  return (
-    // Bounded width on purpose. These are two ranked columns of eight rows;
-    // let loose across a 1440px workspace each row becomes a name at the far
-    // left and its measurements at the far right with a hand's width of nothing
-    // between them, which is not density, only distance.
-    <div className="flex h-full w-full max-w-3xl flex-col gap-5 overflow-auto p-6">
-      <div className="flex items-start gap-3">
-        <span
-          aria-hidden
-          className="flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 text-text-muted"
-        >
-          <Search size={17} />
-        </span>
-        <div className="flex min-w-0 flex-col gap-1">
-          <h2 className="text-sm font-semibold tracking-tight">Search across every surface</h2>
-          <p className="text-xs leading-relaxed text-text-muted">
-            One query fans out to the code graph, sessions and knowledge at once, each
-            with its own progress in the rail. The rail also carries what each of them
-            currently holds.
-          </p>
-        </div>
-      </div>
+/* -------------------------------------------------------------- inspector */
 
-      {topHubs.length > 0 || topEntities.length > 0 ? (
-        <div className="grid gap-x-6 gap-y-5 md:grid-cols-2">
-          {topHubs.length > 0 ? (
-            <SeedList
-              legend={`most connected symbols · top ${topHubs.length} by degree`}
-              rows={topHubs.map((hub) => ({
-                label: String(hub.name),
-                note: hub.kind ?? '',
-                value: hub.degree ?? 0,
-                unit: 'deg',
-              }))}
-              ceiling={hubCeiling}
-              onRun={onRun}
-            />
-          ) : null}
-          {topEntities.length > 0 ? (
-            <SeedList
-              legend={`entities by fact count · top ${topEntities.length}`}
-              rows={topEntities.map((entity) => ({
-                label: entity.name,
-                note: '',
-                value: entity.fact_count ?? 0,
-                unit: 'facts',
-              }))}
-              ceiling={entityCeiling}
-              onRun={onRun}
-            />
-          ) : null}
-        </div>
-      ) : (
-        <p className="text-2xs text-text-muted">
-          Neither index answered, so there is nothing here to offer as a starting point.
-          The search above still works.
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** A ranked column of real index entries, each one a query waiting to be run. */
-function SeedList({
-  legend,
-  rows,
-  ceiling,
-  onRun,
+function HitInspector({
+  hit,
+  terms,
+  onClose,
 }: {
-  legend: string;
-  rows: ReadonlyArray<{ label: string; note: string; value: number; unit: string }>;
-  ceiling: number;
-  onRun: (query: string) => void;
+  hit: Hit;
+  terms: readonly string[];
+  onClose: () => void;
 }) {
+  const spec = LANES.find((lane) => lane.id === hit.lane)!;
+  const Icon = LANE_ICON[hit.lane];
+  const age = relativeTime(hit.stamp);
   return (
-    <figure className="flex min-w-0 flex-col gap-1.5">
-      <figcaption className="td-legend">{legend}</figcaption>
-      <ul className="flex flex-col">
-        {rows.map((row, index) => (
-          <li key={`${row.label}-${index}`}>
-            <button
-              type="button"
-              onClick={() => onRun(row.label)}
-              className="flex w-full items-center gap-2 border-b border-edge-subtle py-1.5 text-left last:border-b-0 hover:bg-surface-1 focus-visible:bg-surface-1"
-            >
-              <span className="td-value min-w-0 flex-1 truncate text-xs text-text-primary">
-                {row.label}
-              </span>
-              {row.note ? (
-                <span className="td-legend shrink-0 max-w-20 truncate max-sm:hidden">
-                  {row.note}
+    <InspectorPanel
+      title={hit.title}
+      eyebrow={
+        <>
+          <Icon aria-hidden size={11} className={spec.textClass} />
+          {spec.label} · rank {hit.rank}
+        </>
+      }
+      onClose={onClose}
+    >
+      <div className="flex flex-col gap-4">
+        <section className="flex flex-col gap-1.5">
+          <MetaLabel>Why this is here</MetaLabel>
+          <p className="text-2xs leading-relaxed text-text-secondary">
+            {terms.length === 0 ? (
+              <>
+                Browsing {spec.browseLabel}; position {hit.rank} is the order the daemon
+                returned, not a score.
+              </>
+            ) : hit.matchedIn.length > 0 ? (
+              <>
+                Position {hit.rank} in this memory&rsquo;s answer. The query text occurs in{' '}
+                <span className="font-mono text-text-primary">
+                  {hit.matchedIn.join(', ')}
                 </span>
-              ) : null}
+                .
+              </>
+            ) : (
+              <>
+                Position {hit.rank} in this memory&rsquo;s answer. The daemon matched on its
+                own index; the literal terms do not appear in the fields it returned.
+              </>
+            )}
+          </p>
+        </section>
+        {hit.context ? (
+          <section className="flex flex-col gap-1">
+            <MetaLabel>Where</MetaLabel>
+            <Highlight
+              text={hit.context}
+              terms={terms}
+              className="break-all font-mono text-2xs text-text-secondary"
+            />
+          </section>
+        ) : null}
+        {hit.signal ? (
+          <section className="flex flex-col gap-1.5">
+            <MetaLabel>Measured</MetaLabel>
+            <span className="flex items-center gap-2">
               <Meter
-                fraction={ceiling > 0 ? row.value / ceiling : null}
-                className="h-[3px] w-14 shrink-0 max-sm:hidden"
+                fraction={hit.signal.max <= 0 ? 0 : hit.signal.value / hit.signal.max}
+                className="w-10 rounded-full"
+                tone="bg-accent/80"
+                ariaLabel={`${hit.signal.field} ${hit.signal.value}`}
               />
-              <span
-                className="td-value w-14 shrink-0 text-right text-2xs text-text-secondary"
-                data-cell="numeric"
-              >
-                {row.value.toLocaleString()}
-                <span className="td-unit ml-1">{row.unit}</span>
+              <span className="tabular text-xs text-text-primary">
+                {hit.signal.display}
               </span>
-            </button>
-          </li>
-        ))}
-      </ul>
-    </figure>
+              <span className="font-mono text-2xs text-text-muted">
+                {hit.signal.field}
+              </span>
+            </span>
+          </section>
+        ) : null}
+        {hit.body ? (
+          <section className="flex flex-col gap-1">
+            <MetaLabel>{hit.lane === 'code' ? 'Signature' : 'Body'}</MetaLabel>
+            <Highlight
+              text={hit.body}
+              terms={terms}
+              className={cn(
+                'whitespace-pre-wrap break-words text-xs leading-relaxed text-text-secondary',
+                hit.lane === 'code' && 'font-mono',
+              )}
+            />
+          </section>
+        ) : null}
+        <section className="flex flex-col gap-1">
+          <MetaLabel>{hit.titleField}</MetaLabel>
+          <Highlight
+            text={hit.title}
+            terms={terms}
+            className={cn(
+              'whitespace-pre-wrap break-words text-xs leading-[1.6] text-text-primary',
+              hit.lane === 'code' && 'font-mono',
+            )}
+          />
+          {age ? <span className="text-2xs text-text-muted">{age} ago</span> : null}
+        </section>
+        <RawFields value={hit.raw} />
+      </div>
+    </InspectorPanel>
+  );
+}
+
+/* ----------------------------------------------------------- empty states */
+
+function EmptyResults({
+  searching,
+  pending,
+  query,
+  facet,
+  failed,
+  onClearFacet,
+  onClearQuery,
+}: {
+  searching: boolean;
+  pending: boolean;
+  query: string;
+  facet: string | null;
+  failed: boolean;
+  onClearFacet: () => void;
+  onClearQuery: () => void;
+}) {
+  if (pending) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <StateChip kind="loading" />
+        <p className="text-2xs text-text-muted">Reading from the daemon.</p>
+      </div>
+    );
+  }
+  if (facet) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <h2 className="text-sm font-semibold tracking-tight">
+          Nothing loaded carries “{facet}”
+        </h2>
+        <p className="max-w-sm text-2xs leading-relaxed text-text-muted">
+          The pivot is applied to the rows currently loaded, not to the whole index — a wider
+          query may still contain this value.
+        </p>
+        <button
+          type="button"
+          onClick={onClearFacet}
+          className="rounded-[var(--radius-chip)] border border-edge-subtle px-2 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
+        >
+          Clear the pivot
+        </button>
+      </div>
+    );
+  }
+  if (failed) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <h2 className="text-sm font-semibold tracking-tight">
+          Some memories did not answer
+        </h2>
+        <p className="max-w-md text-2xs leading-relaxed text-text-muted">
+          The lanes that answered returned no visible rows, but at least one lane is
+          unavailable. A zero-result claim would be unsafe, so Explorer keeps this result
+          partial.
+        </p>
+      </div>
+    );
+  }
+  if (searching) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <h2 className="text-sm font-semibold tracking-tight">
+          No memory answered for “{query}”
+        </h2>
+        <p className="max-w-md text-2xs leading-relaxed text-text-muted">
+          All three lanes returned successfully and all three returned nothing. The term is
+          genuinely absent from the indexed symbols, the stored transcripts, and the fact
+          store — it is not being filtered out here.
+        </p>
+        <button
+          type="button"
+          onClick={onClearQuery}
+          className="rounded-[var(--radius-chip)] border border-edge-subtle px-2 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
+        >
+          Back to browsing
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+      <h2 className="text-sm font-semibold tracking-tight">Nothing to browse yet</h2>
+      <p className="max-w-md text-2xs leading-relaxed text-text-muted">
+        The overview endpoints answered with no rows, so there is nothing indexed to show.
+        Index a project, or search directly for a term.
+      </p>
+    </div>
   );
 }
