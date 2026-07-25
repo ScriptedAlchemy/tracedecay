@@ -1,4 +1,5 @@
-import { useRef, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
+import { ChevronDown } from 'lucide-react';
 import { cn } from '../cn';
 import { WorkspaceHeader } from '../instrument.tsx';
 
@@ -28,6 +29,14 @@ export function ExplorerSplit({
   className?: string;
 }) {
   const resultsRef = useRef<HTMLElement | null>(null);
+  // Below `lg` the filter rail is display:none, which used to take the query
+  // input — the only way to search — with it. The archetype owns the fix: the
+  // same `filters` node renders a second time as a collapsible strip above the
+  // results, shown only below `lg` (the rail and the strip are never both
+  // visible). Filter state lives in the workspace, so both renders stay in
+  // sync; collapsed by default so narrow viewports keep their vertical budget.
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const mobileFiltersId = useId();
   // Roving arrows over the result rows (plan 11 keyboard model): rows are
   // native buttons, so Enter/Space activate for free; arrows, Home, End and
   // Page keys move focus without forcing a Tab-through of every row.
@@ -59,6 +68,36 @@ export function ExplorerSplit({
   return (
     <div className={cn('flex h-full min-h-0 flex-col', className)}>
       {path && title ? <WorkspaceHeader path={path} title={title} note={note} /> : null}
+      {filters ? (
+        <div className="shrink-0 border-b border-edge-subtle bg-surface-1 lg:hidden">
+          <button
+            type="button"
+            aria-expanded={mobileFiltersOpen}
+            aria-controls={mobileFiltersId}
+            onClick={() => setMobileFiltersOpen((open) => !open)}
+            className="flex h-8 w-full items-center gap-2.5 px-2.5 text-left"
+          >
+            <span className="td-title">Query</span>
+            <span aria-hidden className="td-rule" />
+            <ChevronDown
+              aria-hidden
+              size={13}
+              className={cn(
+                'shrink-0 text-text-muted',
+                mobileFiltersOpen && 'rotate-180',
+              )}
+            />
+          </button>
+          {mobileFiltersOpen ? (
+            <div
+              id={mobileFiltersId}
+              className="max-h-[45vh] overflow-auto border-t border-edge-subtle p-2.5"
+            >
+              {filters}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="flex min-h-0 flex-1">
         {filters ? (
           <aside
