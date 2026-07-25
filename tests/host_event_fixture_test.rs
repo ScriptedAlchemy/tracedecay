@@ -17,14 +17,15 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
     LocatorDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
-    ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass, SessionId,
-    SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
-    SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
-    SourceCoverageV1, SourceCursorV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
-    SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1, SourceObjectRevisionV1,
-    SourcePartitionFrontierV1, SourcePartitionIdV1, SourceRefetchStrategyV1,
-    SourceSnapshotCompletionV1, SourceSnapshotIdV1, UserProfileId, canonical_sha256,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass,
+    SessionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
+    SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1,
+    SourceContentStateV1, SourceCoverageV1, SourceCursorV1, SourceDefinitionV1,
+    SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
+    SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
+    SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1, UserProfileId,
+    canonical_sha256,
 };
 use tracedecay_store::ObservationReplayRequest;
 
@@ -71,12 +72,16 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     let host = TempDir::new().unwrap();
     let home = host.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    let data_root = home.join(".tracedecay");
+    std::fs::create_dir_all(&data_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&data_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let _home = EnvVarGuard::set("HOME", &home);
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    let _data_dir = EnvVarGuard::set(
-        tracedecay::config::USER_DATA_DIR_ENV,
-        home.join(".tracedecay"),
-    );
+    let _data_dir = EnvVarGuard::set(tracedecay::config::USER_DATA_DIR_ENV, &data_root);
     let boundary_project = initialize_boundary_project(&home);
     let init = tracedecay_command_with_home(&home)
         .arg("init")
@@ -308,6 +313,26 @@ fn assert_json_strings_omit(value: &Value, private: &str, label: &str) {
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn native_provider_fixtures_persist_external_source_receipts_across_restart() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let host = TempDir::new().unwrap();
+    let home = host.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    for (provider, _) in FIXTURES {
+        assert_eq!(
+            execute_native_provider_path(provider, &home).await.status,
+            HostAdmissionStatus::Supported,
+            "{provider}"
+        );
     }
 }
 
@@ -1002,6 +1027,37 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
             "{session_id}"
         );
     }
+    let repeated_source_request = || {
+        host_capture_request_in_scope_with_expected_cursor(
+            "codex",
+            "session.canonical-checkout",
+            "codex.canonical.follow-up",
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+            "project-scoped follow-up",
+            scope.clone(),
+            Some(
+                ObservationSourceCursorV1::for_ordering(
+                    ObservationSourceIdentityV1::for_provider(
+                        ProviderId::new("codex").unwrap(),
+                        SessionId::new("session.canonical-checkout").unwrap(),
+                    )
+                    .unwrap(),
+                    scope.clone(),
+                    ObservationSourceGenerationV1::new(9).unwrap(),
+                    ObservationOrderingDomainV1::SqliteRowId,
+                    1,
+                )
+                .unwrap(),
+            ),
+            ObservationCancellation::default(),
+        )
+    };
+    let repeated_source_outcome = facade.capture(repeated_source_request()).await;
+    assert_eq!(
+        repeated_source_outcome.status,
+        HostAdmissionStatus::Committed,
+        "{repeated_source_outcome:?}"
+    );
 
     let project_rows = runtime
         .replay_observations(
@@ -1010,7 +1066,62 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
         )
         .await
         .unwrap();
-    assert_eq!(project_rows.len(), 2);
+    assert_eq!(project_rows.len(), 3);
+    let first_source_commit = runtime
+        .external_source_receipt_for_test(
+            HostAdmissionScope::Project,
+            project_rows[0].commit_receipt(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let advanced_source_commit = runtime
+        .external_source_receipt_for_test(
+            HostAdmissionScope::Project,
+            project_rows[2].commit_receipt(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first_source_commit.source_frontier().binding(),
+        advanced_source_commit.source_frontier().binding()
+    );
+    assert_eq!(
+        first_source_commit
+            .source_frontier()
+            .partitions()
+            .values()
+            .next()
+            .unwrap()
+            .sequence(),
+        1
+    );
+    assert_eq!(
+        advanced_source_commit
+            .source_frontier()
+            .partitions()
+            .values()
+            .next()
+            .unwrap()
+            .sequence(),
+        2
+    );
+    assert_eq!(
+        facade.capture(repeated_source_request()).await.status,
+        HostAdmissionStatus::ExactDuplicate
+    );
+    assert_eq!(
+        runtime
+            .external_source_receipt_for_test(
+                HostAdmissionScope::Project,
+                project_rows[2].commit_receipt(),
+            )
+            .await
+            .unwrap(),
+        Some(advanced_source_commit),
+        "exact replay must preserve the committed frontier and projection receipt"
+    );
 
     let mismatched = facade
         .capture(host_capture_request_in_scope(
@@ -1081,6 +1192,29 @@ fn host_capture_request_in_scope(
     scope: ObservationScopeV1,
     cancellation: ObservationCancellation,
 ) -> CaptureObservationRequest {
+    host_capture_request_in_scope_with_expected_cursor(
+        provider,
+        session_id,
+        record_id,
+        range,
+        text,
+        scope,
+        None,
+        cancellation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn host_capture_request_in_scope_with_expected_cursor(
+    provider: &str,
+    session_id: &str,
+    record_id: &str,
+    range: ObservationSourceRangeV1,
+    text: &str,
+    scope: ObservationScopeV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    cancellation: ObservationCancellation,
+) -> CaptureObservationRequest {
     let record = json!({ "text": text });
     let encoded = serde_json::to_vec(&record).unwrap();
     let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
@@ -1125,7 +1259,7 @@ fn host_capture_request_in_scope(
             ObservationId::new(record_id).unwrap(),
         )
         .unwrap(),
-        None,
+        expected_cursor,
         RetentionClass::new("retention.host-fixture-test").unwrap(),
         cancellation,
     )
