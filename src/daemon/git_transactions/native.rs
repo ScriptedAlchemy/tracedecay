@@ -428,7 +428,17 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         if let Some(reason) = unsupported_native_preflight(&runner)? {
             return unsupported_materialized(request, runner, reason);
         }
-        let lock = runner.acquire_index_lock().map_err(map_native_error)?;
+        let lock = match runner.acquire_index_lock() {
+            Ok(lock) => lock,
+            Err(NativeGitIndexError::IndexLocked) => {
+                return unsupported_materialized(
+                    request,
+                    runner,
+                    GitIndexUnsupportedStateV1::IndexLockPresent,
+                );
+            }
+            Err(error) => return Err(map_native_error(error)),
+        };
         let current = self.capture_snapshot(&request.repository_snapshot, &runner, &lock)?;
         if current != request.repository_snapshot {
             return Err(GitIndexTransactionPortError::StalePreview);
@@ -713,10 +723,8 @@ fn unsupported_native_preflight(
         }
         Err(error) => return Err(map_native_error(error)),
     }
-    if !runner
-        .object_format()
-        .is_ok_and(|format| supported_object_format(&format))
-    {
+    let object_format = runner.object_format().map_err(map_native_error)?;
+    if !supported_object_format(&object_format) {
         return Ok(Some(GitIndexUnsupportedStateV1::UnsupportedObjectFormat));
     }
     Ok(None)
@@ -827,6 +835,15 @@ fn unsupported_path_state(
     operation: GitIndexTransactionOperationV1,
     path: &str,
 ) -> Option<GitIndexUnsupportedStateV1> {
+    let unreadable = match operation {
+        GitIndexTransactionOperationV1::StageHunks => {
+            GitIndexUnsupportedStateV1::UnreadableWorkingTree
+        }
+        GitIndexTransactionOperationV1::UnstageHunks => GitIndexUnsupportedStateV1::UnreadableIndex,
+        GitIndexTransactionOperationV1::CommitIndex => {
+            GitIndexUnsupportedStateV1::UnreadableWorkingTree
+        }
+    };
     let scope = match operation {
         GitIndexTransactionOperationV1::StageHunks => GitDiffScopeV1::WorkingTree,
         GitIndexTransactionOperationV1::UnstageHunks => GitDiffScopeV1::Staged,
@@ -835,10 +852,10 @@ fn unsupported_path_state(
         }
     };
     let Ok(diff) = intelligence.diff(&scope) else {
-        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+        return Some(unreadable);
     };
     let Some(file) = diff.files.iter().find(|file| file.path == path) else {
-        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+        return Some(unreadable);
     };
     if file.original_path.is_some() {
         return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
@@ -860,7 +877,7 @@ fn unsupported_path_state(
         return Some(GitIndexUnsupportedStateV1::FileModeOnly);
     }
     if !diff.coverage.is_complete() {
-        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+        return Some(unreadable);
     }
     let mut command = read_git_command(runner.repository_root());
     let Ok(output) = command
@@ -876,10 +893,10 @@ fn unsupported_path_state(
         ])
         .output()
     else {
-        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+        return Some(unreadable);
     };
     if !output.status.success() {
-        return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine);
+        return Some(unreadable);
     }
     let fields = output
         .stdout
@@ -892,7 +909,7 @@ fn unsupported_path_state(
         value != b"unspecified" && value != b"unset" && value != b"false"
     });
     if !records.remainder().is_empty() {
-        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+        return Some(unreadable);
     }
     if has_filter {
         return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine);
@@ -1872,6 +1889,24 @@ mod tests {
         let (directory, assembler, runner) = repository_fixture();
         fs::write(directory.path().join("packet.txt"), "after\nsecond\n")
             .expect("change text file");
+        assert_eq!(
+            unsupported_path_state(
+                &runner,
+                &assembler.read_authority(),
+                GitIndexTransactionOperationV1::StageHunks,
+                "missing.txt"
+            ),
+            Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree)
+        );
+        assert_eq!(
+            unsupported_path_state(
+                &runner,
+                &assembler.read_authority(),
+                GitIndexTransactionOperationV1::UnstageHunks,
+                "missing.txt"
+            ),
+            Some(GitIndexUnsupportedStateV1::UnreadableIndex)
+        );
         let snapshot = exact_snapshot(&assembler, &runner);
         let snapshot_digest =
             GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
