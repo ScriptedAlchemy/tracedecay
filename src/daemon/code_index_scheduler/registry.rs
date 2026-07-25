@@ -378,6 +378,75 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|latest| latest.generation.manifest().generation_id.clone())
     }
 
+    /// Exact live dashboard projection for one mounted worktree.
+    ///
+    /// The freshness ladder runs before projection. Generation and scope fields
+    /// are copied from the durable sealed generation, never reconstructed from
+    /// the dashboard's display path.
+    pub(in crate::daemon) async fn dashboard_freshness(
+        &self,
+        project_root: &Path,
+    ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
+        let canonical_root = project_root.canonicalize().ok()?;
+        let latest = self.latest_complete_fresh(&canonical_root).await;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&canonical_root)?.scheduler)
+        };
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hook_hint_count = scheduler.pending_hint_count();
+        let (repository_id, worktree_id, source_reference, generation_id, content_identity, sealed) =
+            latest
+                .as_ref()
+                .map_or((None, None, None, None, None, None), |latest| {
+                    let generation = &latest.generation;
+                    let snapshot = generation.snapshot();
+                    (
+                        Some(snapshot.repository.as_str().to_owned()),
+                        snapshot
+                            .worktree
+                            .as_ref()
+                            .map(|worktree| worktree.as_str().to_owned()),
+                        snapshot
+                            .reference
+                            .as_ref()
+                            .map(|reference| reference.as_str().to_owned()),
+                        Some(generation.manifest().generation_id.as_str().to_owned()),
+                        Some(snapshot.content_identity.as_str().to_owned()),
+                        Some(generation.manifest().seal.sealed_at.0),
+                    )
+                });
+        Some(
+            crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: canonical_root.display().to_string(),
+                repository_id,
+                worktree_id,
+                source_reference,
+                latest_generation_id: generation_id,
+                snapshot_content_identity: content_identity,
+                sealed_at_micros: sealed,
+                last_reconcile_micros: Some(scheduler.last_reconciled_at_micros()),
+                staleness_state: Some(
+                    if latest.is_some() {
+                        "fresh"
+                    } else {
+                        "indexing"
+                    }
+                    .to_owned(),
+                ),
+                hook_hint_count,
+                coverage: if hook_hint_count.is_some() {
+                    "complete"
+                } else {
+                    "partial_hook_hint_overflow"
+                }
+                .to_owned(),
+            },
+        )
+    }
+
     /// Query-admission entry point: run the freshness ladder (tier-1 git
     /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
     /// returning the latest complete generation, so external out-of-band changes

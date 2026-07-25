@@ -1,10 +1,10 @@
 //! `GET /api/storage/telemetry` — per-store size, free-page ratio, and typed
 //! budget/growth dimensions (plan 38 §7 read models over the PR14 envelope).
 //!
-//! The size samples are **real**: they are read directly from the store
-//! connections the dashboard already holds, via the cheap `PRAGMA page_count`
-//! / `PRAGMA freelist_count` / `PRAGMA page_size` header reads that back
-//! [`StoreSizeSampleV1`].
+//! The size and growth samples come from the canonical application
+//! `StorageStatus` owner. It records exact store-file sizes into a bounded,
+//! durable, project-scoped history; the dashboard never opens an adapter-owned
+//! SQLite telemetry connection.
 //!
 //! Both typed dimensions now have a real server-side source:
 //! - **budget**: the owner-configurable soft budgets live in the configuration
@@ -15,11 +15,8 @@
 //!   deliberately distinct from "the server cannot evaluate budgets". A config
 //!   or sample the dashboard cannot read reports `unknown`, never a fabricated
 //!   "within budget".
-//! - **growth**: the daemon persists no historical per-table watermark series,
-//!   so growth is served from a bounded in-process watermark ring recorded on
-//!   every telemetry sample. The window is therefore **since daemon start**,
-//!   and every observed growth read states that coverage explicitly rather
-//!   than implying a historical series.
+//! - **growth**: the bounded `StorageStatus` history survives daemon restart
+//!   and is validated against exact project/store scope before use.
 //!
 //! Store identity: the dashboard holds several *roles* (`graph`, `memory`,
 //! `lcm`, `savings`) that can resolve to the **same** store file — in project
@@ -27,11 +24,6 @@
 //! are therefore deduplicated by store file identity: one card per real store,
 //! carrying every role it serves, instead of the same store reported twice with
 //! identical sizes.
-
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
 use axum::Json;
 use axum::extract::State;
@@ -41,8 +33,6 @@ use tracedecay_application::storage::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1,
 };
 use tracedecay_domain::UtcMicros;
-
-use crate::db::engine::QueryExecutor;
 
 use super::DashboardState;
 use super::read_model::{
@@ -67,7 +57,7 @@ pub(crate) struct StoreTelemetryEntryV1 {
     /// Display path of the store file.
     pub path: String,
     /// The typed telemetry read: `observed` with a sample, or `unknown` when the
-    /// pragma read failed. Never silently healthy.
+    /// canonical application read failed. Never silently healthy.
     pub read: StorageTelemetryReadV1,
     pub total_bytes: Option<u64>,
     pub free_bytes: Option<u64>,
@@ -113,7 +103,7 @@ pub(crate) struct StoreSizeWatermarkV1 {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub(crate) enum StoreGrowthDimensionV1 {
-    /// The first watermark of this daemon lifetime: a real measurement with no
+    /// The first retained durable watermark: a real measurement with no
     /// earlier point to compare against. Not "zero growth".
     Baseline {
         coverage: String,
@@ -138,8 +128,7 @@ pub(crate) enum StoreGrowthDimensionV1 {
     Unknown { reason: String },
 }
 
-/// Telemetry payload: one entry per distinct store the dashboard holds a
-/// connection to.
+/// Telemetry payload: one entry per canonical store covered by StorageStatus.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct StorageTelemetryPayloadV1 {
     pub stores: Vec<StoreTelemetryEntryV1>,
@@ -155,18 +144,17 @@ const BUDGET_UNSET_REASON: &str = "no soft size budget is configured by the owne
      sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)";
 const BUDGET_NOTE: &str = "budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store \
      key; a store with no entry reports unset (no budget configured), never a fabricated pass";
-const GROWTH_COVERAGE: &str = "since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not \
-     a persisted historical series";
-const GROWTH_NOTE: &str = "growth is measured over the store-size watermarks this daemon has recorded since it started; \
-     no persisted historical watermark series exists, so the window is not historical";
+const GROWTH_COVERAGE: &str =
+    "durable project-store history retained by ApplicationSurfaceOperation::StorageStatus";
+const GROWTH_NOTE: &str = "growth is derived from the durable, project-scoped StorageStatus history and survives daemon restart";
 const GROWTH_BASELINE_REASON: &str =
-    "first watermark recorded in this daemon lifetime; a growth delta needs a second sample";
+    "first durable watermark for this project store; a growth delta needs a second sample";
 const GROWTH_UNKNOWN_REASON: &str =
     "no watermark could be recorded because the store size read did not produce a sample";
 const BUDGET_NO_SAMPLE_REASON: &str =
     "no observed size sample, so a configured budget could not be evaluated";
 
-/// One store the dashboard holds a connection to, sampled once.
+/// One canonical store sampled by StorageStatus.
 ///
 #[derive(Clone, Debug)]
 struct SampledStoreV1 {
@@ -179,10 +167,12 @@ struct SampledStoreV1 {
     pub roles: Vec<String>,
     /// The typed size read: `observed` with a sample, or `unknown`.
     pub read: StorageTelemetryReadV1,
+    pub history: Vec<StoreSizeWatermarkV1>,
+    pub history_coverage: String,
 }
 
 impl SampledStoreV1 {
-    /// The observed size sample, when the pragma read produced one.
+    /// The observed page sample, when an owning runtime provides one.
     const fn sample(&self) -> Option<&StoreSizeSampleV1> {
         match &self.read {
             StorageTelemetryReadV1::Observed { sample } => Some(sample),
@@ -232,101 +222,58 @@ fn resolve_store_budget(
     }
 }
 
-/// Enumerate every store the dashboard holds a connection to, deduplicated by
-/// store file identity, each with one live size sample.
+/// Read the exact project store through the canonical StorageStatus owner.
 async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
-    let mut entries: Vec<SampledStoreV1> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-
-    // Graph store: the dashboard owns the connection directly.
-    push_or_merge_role(
-        &mut entries,
-        &mut seen,
-        "graph",
-        &state.graph_db_path,
-        &state.graph_conn,
-    )
-    .await;
-    // Project-memory store. In project storage mode this resolves to the same
-    // file as the graph role and is merged into that entry rather than
-    // reported as a second, identically-sized store.
-    push_or_merge_role(
-        &mut entries,
-        &mut seen,
-        "memory",
-        &state.mem_db_path,
-        &state.mem_db.engine_conn(),
-    )
-    .await;
-    // LCM session store, when a read connection is held.
-    if let Some(db) = &state.lcm_db
-        && let Ok(snapshot) = db.read_snapshot().await
-    {
-        push_or_merge_role(
-            &mut entries,
-            &mut seen,
-            "lcm",
-            &state.lcm_db_path,
-            &snapshot,
-        )
-        .await;
-    }
-    // Global accounting store, when available.
-    if let Some(db) = &state.savings_db
-        && let Ok(snapshot) = db.read_snapshot().await
-    {
-        push_or_merge_role(
-            &mut entries,
-            &mut seen,
-            "savings",
-            &state.savings_db_path,
-            &snapshot,
-        )
-        .await;
-    }
-
-    entries
-}
-
-/// Upper bound on watermarks retained per store, and on distinct stores tracked
-/// by one process. Both keep the daemon-lifetime ring strictly bounded.
-const MAX_WATERMARKS_PER_STORE: usize = 128;
-const MAX_TRACKED_STORES: usize = 256;
-
-/// Bounded, daemon-lifetime store-size watermark history.
-///
-/// This is deliberately process-global rather than per-`DashboardState`: the
-/// honest window it serves is "since this daemon started", which is exactly the
-/// lifetime of the process, and every dashboard state in the process observes
-/// the same stores.
-#[derive(Debug, Default)]
-pub(crate) struct StoreSizeHistoryV1 {
-    stores: HashMap<String, VecDeque<StoreSizeWatermarkV1>>,
-}
-
-impl StoreSizeHistoryV1 {
-    /// Record one watermark for `store` and return the retained window.
-    fn record(
-        &mut self,
-        store: &str,
-        watermark: StoreSizeWatermarkV1,
-    ) -> Vec<StoreSizeWatermarkV1> {
-        if !self.stores.contains_key(store) && self.stores.len() >= MAX_TRACKED_STORES {
-            // Refuse to grow unboundedly; report the single point we hold.
-            return vec![watermark];
-        }
-        let series = self.stores.entry(store.to_string()).or_default();
-        series.push_back(watermark);
-        while series.len() > MAX_WATERMARKS_PER_STORE {
-            series.pop_front();
-        }
-        series.iter().copied().collect()
-    }
-}
-
-fn history() -> &'static Mutex<StoreSizeHistoryV1> {
-    static HISTORY: OnceLock<Mutex<StoreSizeHistoryV1>> = OnceLock::new();
-    HISTORY.get_or_init(|| Mutex::new(StoreSizeHistoryV1::default()))
+    let Some(graph) = state.project_graph.as_ref() else {
+        return Vec::new();
+    };
+    let status =
+        crate::application::primitives::production::canonical_storage_status(graph.as_ref(), false);
+    let Some(path) = status.store_path else {
+        return Vec::new();
+    };
+    let store_name = store_file_name(&path);
+    let Ok(store) = StoreKeyV1::new(store_name.clone()) else {
+        return Vec::new();
+    };
+    let history_coverage = status
+        .history_coverage
+        .unwrap_or_else(|| "storage_status_history_coverage_unknown".to_owned());
+    let Some(total_bytes) = status.database_bytes else {
+        return vec![SampledStoreV1 {
+            store: store_name,
+            path,
+            roles: vec!["graph".to_owned()],
+            read: StorageTelemetryReadV1::Unknown { store },
+            history: Vec::new(),
+            history_coverage,
+        }];
+    };
+    let observed_at = status
+        .history
+        .last()
+        .map_or_else(now_micros, |sample| sample.observed_at);
+    let history = status
+        .history
+        .into_iter()
+        .map(|sample| StoreSizeWatermarkV1 {
+            measured_at: sample.observed_at,
+            total_bytes: sample.database_bytes,
+            free_bytes: 0,
+        })
+        .collect();
+    vec![SampledStoreV1 {
+        store: store_name,
+        path,
+        roles: vec!["graph".to_owned()],
+        read: StorageTelemetryReadV1::ObservedBytes {
+            store,
+            total_bytes: tracedecay_application::storage::identity::StorageByteSizeV1(total_bytes),
+            observed_at: UtcMicros(observed_at),
+        },
+        history,
+        history_coverage,
+    }]
 }
 
 /// `GET /api/storage/telemetry`
@@ -346,19 +293,25 @@ pub(crate) async fn telemetry(
     let total = entries.len() as u64;
     let observed = entries
         .iter()
-        .filter(|entry| matches!(entry.read, StorageTelemetryReadV1::Observed { .. }))
+        .filter(|entry| {
+            matches!(
+                entry.read,
+                StorageTelemetryReadV1::Observed { .. }
+                    | StorageTelemetryReadV1::ObservedBytes { .. }
+            )
+        })
         .count() as u64;
 
-    // Coverage is over the known, enumerated set of dashboard-held stores. A
+    // Coverage is over the canonical stores enumerated by StorageStatus. A
     // complete claim therefore always carries a real denominator.
     let coverage = if observed == total {
-        DashboardCoverageV1::complete(total, "dashboard_held_stores")
+        DashboardCoverageV1::complete(total, "canonical_storage_status_stores")
     } else {
         DashboardCoverageV1::partial(
             total,
             observed,
-            "dashboard_held_stores",
-            vec!["store telemetry read failed (pragma unavailable)".to_string()],
+            "canonical_storage_status_stores",
+            vec!["canonical StorageStatus read did not produce a size".to_string()],
         )
     };
 
@@ -376,73 +329,6 @@ pub(crate) async fn telemetry(
     Json(envelope)
 }
 
-/// Sample a role's store, or merge the role into the existing entry when the
-/// role resolves to a store file already sampled in this read.
-async fn push_or_merge_role(
-    entries: &mut Vec<SampledStoreV1>,
-    seen: &mut HashMap<String, usize>,
-    role: &str,
-    path: &str,
-    conn: &(impl QueryExecutor + ?Sized),
-) {
-    let identity = store_identity(path);
-    if let Some(index) = seen.get(&identity).copied() {
-        let entry = &mut entries[index];
-        if !entry.roles.iter().any(|existing| existing == role) {
-            entry.roles.push(role.to_string());
-        }
-        return;
-    }
-    let entry = sample_store(role, path, conn).await;
-    seen.insert(identity, entries.len());
-    entries.push(entry);
-}
-
-/// Identity of a store *file*, used to deduplicate roles that share a database.
-/// Canonicalization resolves symlinks and relative spellings; an
-/// uncanonicalizable path falls back to its own spelling so two genuinely
-/// distinct stores are never merged.
-fn store_identity(path: &str) -> String {
-    std::fs::canonicalize(path).map_or_else(
-        |_| path.to_string(),
-        |resolved| resolved.display().to_string(),
-    )
-}
-
-/// Sample one store's size from a live connection. A pragma failure produces a
-/// typed [`StorageTelemetryReadV1::Unknown`], never a fabricated size.
-#[allow(clippy::expect_used)] // the "store" fallback key is statically valid
-async fn sample_store(
-    role: &str,
-    path: &str,
-    conn: &(impl QueryExecutor + ?Sized),
-) -> SampledStoreV1 {
-    let store_name = store_file_name(path);
-    let store_key = StoreKeyV1::new(store_name.clone());
-
-    let read = match &store_key {
-        Ok(store) => match read_size_sample(conn, store).await {
-            Some(sample) => StorageTelemetryReadV1::Observed { sample },
-            None => StorageTelemetryReadV1::Unknown {
-                store: store.clone(),
-            },
-        },
-        // The store file name is not a valid store key; report the read as
-        // unknown against a sanitized fallback key rather than inventing a size.
-        Err(_) => StorageTelemetryReadV1::Unknown {
-            store: StoreKeyV1::new(sanitize_store_key(&store_name))
-                .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key")),
-        },
-    };
-
-    SampledStoreV1 {
-        store: store_name,
-        path: path.to_string(),
-        roles: vec![role.to_string()],
-        read,
-    }
-}
-
 /// Project one sampled store onto the telemetry read model, adding the budget
 /// and growth dimensions.
 fn telemetry_entry(
@@ -450,15 +336,19 @@ fn telemetry_entry(
     retention: Option<&crate::config::RetentionConfig>,
 ) -> StoreTelemetryEntryV1 {
     let sample = sampled.sample();
-    let (total_bytes, free_bytes, free_page_ratio) = sample.map_or((None, None, None), |sample| {
-        (
+    let (total_bytes, free_bytes, free_page_ratio) = match &sampled.read {
+        StorageTelemetryReadV1::Observed { sample } => (
             Some(sample.total_bytes().get()),
             Some(sample.free_bytes().get()),
             Some(sample.free_page_ratio().as_f64()),
-        )
-    });
-    let budget = budget_dimension(&sampled.store, sample, retention);
-    let growth = growth_dimension(&store_identity(&sampled.path), total_bytes, free_bytes);
+        ),
+        StorageTelemetryReadV1::ObservedBytes { total_bytes, .. } => {
+            (Some(total_bytes.get()), None, None)
+        }
+        _ => (None, None, None),
+    };
+    let budget = budget_dimension(&sampled.store, sample, total_bytes, retention);
+    let growth = growth_dimension(&sampled.history, &sampled.history_coverage);
     let role = sampled.primary_role();
 
     StoreTelemetryEntryV1 {
@@ -479,6 +369,7 @@ fn telemetry_entry(
 fn budget_dimension(
     store_name: &str,
     sample: Option<&StoreSizeSampleV1>,
+    total_bytes: Option<u64>,
     retention: Option<&crate::config::RetentionConfig>,
 ) -> StoreBudgetDimensionV1 {
     let budget = match resolve_store_budget(store_name, retention) {
@@ -493,12 +384,28 @@ fn budget_dimension(
             return StoreBudgetDimensionV1::Unknown { reason };
         }
     };
-    let Some(sample) = sample else {
+    let evaluation = if let Some(sample) = sample {
+        budget.evaluate(sample)
+    } else if let Some(total_bytes) = total_bytes {
+        let observed = tracedecay_application::storage::identity::StorageByteSizeV1(total_bytes);
+        Ok(if observed > budget.soft_limit_bytes {
+            StoreBudgetEvaluationV1::OverBudget {
+                observed,
+                soft_limit: budget.soft_limit_bytes,
+                overage: observed.saturating_sub(budget.soft_limit_bytes),
+            }
+        } else {
+            StoreBudgetEvaluationV1::WithinBudget {
+                observed,
+                soft_limit: budget.soft_limit_bytes,
+            }
+        })
+    } else {
         return StoreBudgetDimensionV1::Unknown {
             reason: BUDGET_NO_SAMPLE_REASON.to_string(),
         };
     };
-    match budget.evaluate(sample) {
+    match evaluation {
         Ok(evaluation) => StoreBudgetDimensionV1::Evaluated {
             evaluation,
             setting_key: BUDGET_SETTING_KEY.to_string(),
@@ -513,27 +420,13 @@ fn budget_dimension(
     }
 }
 
-/// Record this read's watermark and derive the growth dimension over the
-/// daemon-lifetime window.
-fn growth_dimension(
-    store_identity: &str,
-    total_bytes: Option<u64>,
-    free_bytes: Option<u64>,
-) -> StoreGrowthDimensionV1 {
-    let (Some(total_bytes), Some(free_bytes)) = (total_bytes, free_bytes) else {
+/// Derive growth from the canonical application's durable watermark history.
+fn growth_dimension(samples: &[StoreSizeWatermarkV1], coverage: &str) -> StoreGrowthDimensionV1 {
+    if samples.is_empty() {
         return StoreGrowthDimensionV1::Unknown {
-            reason: GROWTH_UNKNOWN_REASON.to_string(),
+            reason: format!("{GROWTH_UNKNOWN_REASON}; coverage: {coverage}"),
         };
-    };
-    let watermark = StoreSizeWatermarkV1 {
-        measured_at: now_micros(),
-        total_bytes,
-        free_bytes,
-    };
-    let samples = match history().lock() {
-        Ok(mut history) => history.record(store_identity, watermark),
-        Err(poisoned) => poisoned.into_inner().record(store_identity, watermark),
-    };
+    }
     let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
         return StoreGrowthDimensionV1::Unknown {
             reason: GROWTH_UNKNOWN_REASON.to_string(),
@@ -541,7 +434,7 @@ fn growth_dimension(
     };
     if samples.len() < 2 {
         return StoreGrowthDimensionV1::Baseline {
-            coverage: GROWTH_COVERAGE.to_string(),
+            coverage: coverage.to_owned(),
             measured_at: last.measured_at,
             total_bytes: last.total_bytes,
             reason: GROWTH_BASELINE_REASON.to_string(),
@@ -551,48 +444,15 @@ fn growth_dimension(
         .unwrap_or(i64::MAX)
         .saturating_sub(i64::try_from(first.total_bytes).unwrap_or(i64::MAX));
     StoreGrowthDimensionV1::Observed {
-        coverage: GROWTH_COVERAGE.to_string(),
+        coverage: coverage.to_owned(),
         first_measured_at: first.measured_at,
         last_measured_at: last.measured_at,
         sample_count: samples.len(),
         first_total_bytes: first.total_bytes,
         current_total_bytes: last.total_bytes,
         growth_bytes,
-        samples,
+        samples: samples.to_vec(),
     }
-}
-
-/// Read `PRAGMA page_size` / `page_count` / `freelist_count` into a validated
-/// [`StoreSizeSampleV1`]. Returns `None` on any pragma failure or an invalid
-/// sample so the caller reports a typed `unknown` read.
-async fn read_size_sample(
-    conn: &(impl QueryExecutor + ?Sized),
-    store: &StoreKeyV1,
-) -> Option<StoreSizeSampleV1> {
-    let page_size = pragma_u64(conn, "page_size").await?;
-    let page_count = pragma_u64(conn, "page_count").await?;
-    let freelist_pages = pragma_u64(conn, "freelist_count").await?;
-    let page_size_bytes = u32::try_from(page_size).ok()?;
-    let sample = StoreSizeSampleV1 {
-        store: store.clone(),
-        page_size_bytes,
-        page_count,
-        freelist_pages,
-        observed_at: UtcMicros(now_micros()),
-    };
-    sample.validate().ok()?;
-    Some(sample)
-}
-
-/// Run one `PRAGMA` and read its first column as a `u64`. `None` distinguishes a
-/// failed read from a real zero, so the caller never treats a query error as a
-/// zero-sized store.
-async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> Option<u64> {
-    let sql = format!("PRAGMA {pragma}");
-    let mut rows = conn.query(&sql, ()).await.ok()?;
-    let row = rows.next().await.ok()??;
-    let value = row.get::<i64>(0).ok()?;
-    Some(value.max(0) as u64)
 }
 
 fn store_file_name(path: &str) -> String {
@@ -602,166 +462,58 @@ fn store_file_name(path: &str) -> String {
         .map_or_else(|| path.to_string(), str::to_string)
 }
 
-/// Reduce an invalid store file name to a bounded, control-free key.
-fn sanitize_store_key(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(200)
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        "store".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::RetentionConfig;
-    use crate::dashboard::read_model::{DashboardDomainStateV1, DashboardFreshnessStateV1};
-    use crate::tracedecay::TraceDecay;
 
-    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
-        let state = crate::dashboard::build_state(&cg)
-            .await
-            .expect("dashboard state");
-        (project, state)
-    }
+    #[test]
+    fn telemetry_entry_projects_durable_observed_bytes() {
+        let sampled = SampledStoreV1 {
+            store: "graph.db".to_owned(),
+            path: "/project/.tracedecay/graph.db".to_owned(),
+            roles: vec!["graph".to_owned()],
+            read: StorageTelemetryReadV1::ObservedBytes {
+                store: StoreKeyV1::new("graph.db").expect("key"),
+                total_bytes: tracedecay_application::storage::identity::StorageByteSizeV1(8192),
+                observed_at: UtcMicros(2),
+            },
+            history: vec![
+                StoreSizeWatermarkV1 {
+                    measured_at: 1,
+                    total_bytes: 4096,
+                    free_bytes: 0,
+                },
+                StoreSizeWatermarkV1 {
+                    measured_at: 2,
+                    total_bytes: 8192,
+                    free_bytes: 0,
+                },
+            ],
+            history_coverage: GROWTH_COVERAGE.to_owned(),
+        };
 
-    #[tokio::test]
-    async fn telemetry_reports_real_observed_sizes_for_held_stores() {
-        let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
-        let Json(envelope) = telemetry(State(state)).await;
-
-        assert_eq!(envelope.schema_revision, 1);
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
-        assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Fresh);
-        assert!(
-            !envelope.payload.stores.is_empty(),
-            "dashboard always holds at least the graph and memory stores"
-        );
-
-        for entry in &envelope.payload.stores {
-            assert!(
-                matches!(entry.read, StorageTelemetryReadV1::Observed { .. }),
-                "store {} should have an observed size read",
-                entry.store
-            );
-            assert!(
-                entry.total_bytes.unwrap_or(0) > 0,
-                "store {} sized",
-                entry.store
-            );
-            // No budget is configured in a fresh project: the honest state is
-            // "unset by owner", never "unsupported by server".
-            assert!(
-                matches!(entry.budget, StoreBudgetDimensionV1::Unset { .. }),
-                "store {} should report an unset budget, got {:?}",
-                entry.store,
-                entry.budget
-            );
-            // Growth is real, sourced from the watermark ring, and states its
-            // since-daemon-start coverage.
-            match &entry.growth {
-                StoreGrowthDimensionV1::Baseline { coverage, .. }
-                | StoreGrowthDimensionV1::Observed { coverage, .. } => {
-                    assert!(coverage.contains("since-daemon-start"));
-                }
-                other => panic!("store {} growth should be real, got {other:?}", entry.store),
+        let entry = telemetry_entry(sampled, Some(&RetentionConfig::default()));
+        assert_eq!(entry.total_bytes, Some(8192));
+        assert_eq!(entry.free_bytes, None);
+        assert_eq!(entry.free_page_ratio, None);
+        assert!(matches!(
+            entry.read,
+            StorageTelemetryReadV1::ObservedBytes { .. }
+        ));
+        assert!(matches!(entry.budget, StoreBudgetDimensionV1::Unset { .. }));
+        match entry.growth {
+            StoreGrowthDimensionV1::Observed {
+                growth_bytes,
+                sample_count,
+                ..
+            } => {
+                assert_eq!(growth_bytes, 4096);
+                assert_eq!(sample_count, 2);
             }
-            assert!(!entry.roles.is_empty());
-            assert!(entry.roles.contains(&entry.role));
+            other => panic!("expected durable observed growth, got {other:?}"),
         }
-
-        // Complete coverage carries a real denominator equal to the store count.
-        assert!(envelope.coverage.is_complete());
-        assert_eq!(
-            envelope.coverage.denominator,
-            Some(envelope.payload.stores.len() as u64)
-        );
-    }
-
-    #[tokio::test]
-    async fn roles_sharing_one_store_file_are_reported_once_with_both_roles() {
-        let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
-        let Json(envelope) = telemetry(State(state)).await;
-
-        // No two entries may name the same store file: identical sizes reported
-        // twice was the duplicate-card defect this guards.
-        let mut identities: Vec<String> = envelope
-            .payload
-            .stores
-            .iter()
-            .map(|entry| store_identity(&entry.path))
-            .collect();
-        let before = identities.len();
-        identities.sort();
-        identities.dedup();
-        assert_eq!(
-            before,
-            identities.len(),
-            "one entry per distinct store file"
-        );
-
-        // The graph and project-memory roles share one database in project
-        // storage mode, so a single entry carries both roles.
-        let shared = envelope
-            .payload
-            .stores
-            .iter()
-            .find(|entry| entry.roles.contains(&"graph".to_string()))
-            .expect("graph role served");
-        assert!(
-            shared.roles.contains(&"memory".to_string()),
-            "graph and memory share one store file; roles: {:?}",
-            shared.roles
-        );
-    }
-
-    #[tokio::test]
-    async fn two_roles_backed_by_one_file_produce_one_entry_carrying_both_roles() {
-        // The graph and project-memory roles resolve to the same database file
-        // in project storage mode. Reporting them as two entries produced two
-        // cards with byte-identical sizes; they must merge into one store.
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("shared.db");
-        let conn = crate::db::engine::TestConnection::open(&path);
-        let display = path.display().to_string();
-
-        let mut entries = Vec::new();
-        let mut seen = HashMap::new();
-        push_or_merge_role(&mut entries, &mut seen, "graph", &display, &conn).await;
-        push_or_merge_role(&mut entries, &mut seen, "memory", &display, &conn).await;
-
-        assert_eq!(entries.len(), 1, "one file is one store");
-        assert_eq!(entries[0].primary_role(), "graph");
-        assert_eq!(entries[0].roles, vec!["graph", "memory"]);
-
-        // A genuinely distinct file is still its own entry.
-        let other = directory.path().join("other.db");
-        let other_conn = crate::db::engine::TestConnection::open(&other);
-        let other_display = other.display().to_string();
-        push_or_merge_role(
-            &mut entries,
-            &mut seen,
-            "savings",
-            &other_display,
-            &other_conn,
-        )
-        .await;
-        assert_eq!(entries.len(), 2, "distinct files are never merged");
     }
 
     #[test]
@@ -777,7 +529,7 @@ mod tests {
 
         // No owner entry -> unset (a missing setting, not a missing feature).
         let empty = RetentionConfig::default();
-        let unset = budget_dimension("probe.db", Some(&sample), Some(&empty));
+        let unset = budget_dimension("probe.db", Some(&sample), None, Some(&empty));
         assert!(matches!(unset, StoreBudgetDimensionV1::Unset { .. }));
 
         // Owner-configured limit below the observed size -> over budget.
@@ -785,7 +537,7 @@ mod tests {
         configured
             .store_soft_budgets_bytes
             .insert("probe.db".to_string(), 1024);
-        let evaluated = budget_dimension("probe.db", Some(&sample), Some(&configured));
+        let evaluated = budget_dimension("probe.db", Some(&sample), None, Some(&configured));
         match evaluated {
             StoreBudgetDimensionV1::Evaluated { evaluation, .. } => {
                 assert!(evaluation.is_over_budget());
@@ -798,7 +550,7 @@ mod tests {
         generous
             .store_soft_budgets_bytes
             .insert("probe.db".to_string(), 10_000_000);
-        match budget_dimension("probe.db", Some(&sample), Some(&generous)) {
+        match budget_dimension("probe.db", Some(&sample), None, Some(&generous)) {
             StoreBudgetDimensionV1::Evaluated { evaluation, .. } => {
                 assert!(!evaluation.is_over_budget());
             }
@@ -807,21 +559,24 @@ mod tests {
 
         // An unreadable configuration is unknown, never a silent "no budget".
         assert!(matches!(
-            budget_dimension("probe.db", Some(&sample), None),
+            budget_dimension("probe.db", Some(&sample), None, None),
             StoreBudgetDimensionV1::Unknown { .. }
         ));
         // A configured budget with no sample cannot be evaluated.
         assert!(matches!(
-            budget_dimension("probe.db", None, Some(&configured)),
+            budget_dimension("probe.db", None, None, Some(&configured)),
             StoreBudgetDimensionV1::Unknown { .. }
         ));
     }
 
     #[test]
-    fn growth_starts_at_baseline_then_reports_a_signed_delta_over_the_window() {
-        let identity = format!("/telemetry-growth-test/{}", now_micros());
-
-        let first = growth_dimension(&identity, Some(4096), Some(0));
+    fn durable_history_projects_baseline_and_signed_growth() {
+        let first_samples = vec![StoreSizeWatermarkV1 {
+            measured_at: 1,
+            total_bytes: 4096,
+            free_bytes: 0,
+        }];
+        let first = growth_dimension(&first_samples, GROWTH_COVERAGE);
         match first {
             StoreGrowthDimensionV1::Baseline {
                 coverage,
@@ -829,12 +584,20 @@ mod tests {
                 ..
             } => {
                 assert_eq!(total_bytes, 4096);
-                assert!(coverage.contains("since-daemon-start"));
+                assert!(coverage.contains("durable"));
             }
             other => panic!("first watermark should be a baseline, got {other:?}"),
         }
 
-        let second = growth_dimension(&identity, Some(8192), Some(0));
+        let second_samples = vec![
+            first_samples[0],
+            StoreSizeWatermarkV1 {
+                measured_at: 2,
+                total_bytes: 8192,
+                free_bytes: 0,
+            },
+        ];
+        let second = growth_dimension(&second_samples, GROWTH_COVERAGE);
         match second {
             StoreGrowthDimensionV1::Observed {
                 growth_bytes,
@@ -851,45 +614,27 @@ mod tests {
             other => panic!("second watermark should observe growth, got {other:?}"),
         }
 
-        // A shrinking store reports a negative delta rather than zero growth.
-        match growth_dimension(&identity, Some(2048), Some(0)) {
+        let shrinking = vec![
+            StoreSizeWatermarkV1 {
+                measured_at: 1,
+                total_bytes: 4096,
+                free_bytes: 0,
+            },
+            StoreSizeWatermarkV1 {
+                measured_at: 2,
+                total_bytes: 2048,
+                free_bytes: 0,
+            },
+        ];
+        match growth_dimension(&shrinking, GROWTH_COVERAGE) {
             StoreGrowthDimensionV1::Observed { growth_bytes, .. } => {
                 assert_eq!(growth_bytes, -2048);
             }
             other => panic!("expected an observed shrink, got {other:?}"),
         }
-
-        // A failed size read records nothing and is typed unknown.
         assert!(matches!(
-            growth_dimension(&identity, None, None),
+            growth_dimension(&[], "current_sample_unavailable"),
             StoreGrowthDimensionV1::Unknown { .. }
         ));
-    }
-
-    #[test]
-    fn watermark_ring_is_bounded_per_store() {
-        let identity = format!("/telemetry-ring-test/{}", now_micros());
-        for index in 0..(MAX_WATERMARKS_PER_STORE + 10) {
-            let _ = growth_dimension(&identity, Some(4096 + index as u64), Some(0));
-        }
-        match growth_dimension(&identity, Some(4096), Some(0)) {
-            StoreGrowthDimensionV1::Observed { sample_count, .. } => {
-                assert_eq!(sample_count, MAX_WATERMARKS_PER_STORE);
-            }
-            other => panic!("expected a bounded observed window, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn malformed_pragma_read_is_typed_unknown_not_zero() {
-        // A closed/empty connection cannot answer pragmas: the read is `unknown`,
-        // and the size fields stay `None` rather than collapsing to zero.
-        let directory = tempfile::tempdir().expect("tempdir");
-        let conn = crate::db::engine::TestConnection::open(&directory.path().join("telemetry.db"));
-        let store = StoreKeyV1::new("probe.db").expect("key");
-        // `PRAGMA not_a_real_pragma` returns no row -> None.
-        assert!(pragma_u64(&conn, "definitely_not_a_pragma").await.is_none());
-        // A valid pragma still reads.
-        assert!(read_size_sample(&conn, &store).await.is_some());
     }
 }

@@ -3126,6 +3126,13 @@ impl DaemonEngine {
             code_search_project_id,
             read_admission_provider,
         );
+        let dashboard_code_index_schedulers = self.invocation.code_index_schedulers.clone();
+        let dashboard_code_index_freshness_reader:
+            crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
+            Arc::new(move |project_root| {
+                let schedulers = dashboard_code_index_schedulers.clone();
+                Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
+            });
         let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
             cg,
             handshake.scope_prefix.clone(),
@@ -3153,6 +3160,7 @@ impl DaemonEngine {
         .with_automation_scheduler_reconciler(reconciler)
         .with_dashboard_doctor_report_reader(doctor_report_reader)
         .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
+        .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
         .with_diagnostics_lsp(diagnostic_broker)
         .with_code_index_hook_sink(code_index_hook_sink)
         .with_code_index_publication_identity(code_index_publication_identity)
@@ -4190,6 +4198,13 @@ async fn portable_project_server(
         code_search_project_id,
         read_admission_provider,
     );
+    let dashboard_code_index_schedulers = invocation.code_index_schedulers.clone();
+    let dashboard_code_index_freshness_reader:
+        crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
+        Arc::new(move |project_root| {
+            let schedulers = dashboard_code_index_schedulers.clone();
+            Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
+        });
     let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
@@ -4216,6 +4231,7 @@ async fn portable_project_server(
     )
     .with_dashboard_doctor_report_reader(doctor_report_reader)
     .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
+    .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
     .with_diagnostics_lsp(diagnostic_broker)
     .with_code_index_hook_sink(code_index_hook_sink)
     .with_code_index_publication_identity(code_index_publication_identity)
