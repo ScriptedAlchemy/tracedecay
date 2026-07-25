@@ -109,7 +109,7 @@ impl DaemonSessionRetrievalRoot {
         }
         let (store_id, graph_scope_id) = selected?;
 
-        let project_key = ProjectId::new(context.project.canonical_root.clone()).ok()?;
+        let project_key = ProjectId::new(context.project.project_id.clone()).ok()?;
         let repository_id = context
             .project
             .git_common_dir
@@ -143,7 +143,7 @@ impl DaemonSessionRetrievalRoot {
         })
     }
 
-    #[cfg(feature = "test-transport")]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) fn project_for_test(cg: &TraceDecay) -> Self {
         let project_root = cg.project_root().to_path_buf();
         let project_id = cg.store_layout().identity.project_id.clone();

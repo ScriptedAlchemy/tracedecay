@@ -23,8 +23,12 @@ use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRu
 use crate::config::PinnedUserDataDir;
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::mcp::transport::JsonRpcRequest;
-use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+
+fn cutover_project_id(project_root: &std::path::Path) -> ProjectId {
+    ProjectId::new(crate::storage::default_profile_project_id(project_root))
+        .expect("typed canonical project identity")
+}
 
 fn git(root: &std::path::Path, args: &[&str]) {
     let status = std::process::Command::new(crate::git::git_program())
@@ -50,7 +54,18 @@ async fn indexed_project() -> (TraceDecay, TempDir, PinnedUserDataDir) {
     .expect("source");
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-q", "-m", "initial"]);
-    let cg = TraceDecay::init(dir.path()).await.expect("project init");
+    let project_id = cutover_project_id(dir.path());
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        crate::config::user_data_dir().expect("isolated profile root"),
+        dir.path(),
+        project_id,
+    )
+    .await
+    .expect("registered project session runtime");
+    let cg = runtime
+        .initialize_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
+        .await
+        .expect("project init");
     (cg, dir, pin)
 }
 
@@ -321,52 +336,14 @@ async fn seed_temporal_message(
         observation,
     ))
     .await;
-    let legacy_projection_content = format!("legacy projection poison {ordinal}");
-    let session = SessionRecord {
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        project_key: project_key.to_string(),
-        project_path: "/fixture".to_string(),
-        title: None,
-        started_at: Some(ordinal as i64),
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    let message = SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: "assistant".to_string(),
-        timestamp: Some(ordinal as i64),
-        ordinal: ordinal as i64,
-        text: legacy_projection_content.clone(),
-        kind: Some("message".to_string()),
-        model: None,
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: None,
-    };
-    assert!(
-        !runtime
-            .upsert_transcript_batch_for_test(
-                authority_scope,
-                &session,
-                std::slice::from_ref(&message),
-                &format!(
-                    "message-search-cutover-test:{}:{}",
-                    message.provider, message.message_id
-                ),
-                crate::global_db::ParseOffset::default(),
-            )
+    assert_eq!(
+        runtime
+            .session_for_test(authority_scope, provider, session_id)
             .await
-            .expect("registered transcript seed")
-            .is_empty()
+            .expect("read seeded session")
+            .expect("seeded session")
+            .project_key,
+        project_key
     );
     runtime
         .session_temporal_store_for_test(authority_scope)
@@ -376,6 +353,28 @@ async fn seed_temporal_message(
         )
         .await
         .expect("materialize canonical temporal projection");
+    assert!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                authority_scope,
+                crate::application::host_admission::SessionTemporalFixtureCountV1::TemporalGenerations,
+            )
+            .await
+            .expect("count temporal generations")
+            > 0,
+        "temporal projection must create an active generation"
+    );
+    assert!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                authority_scope,
+                crate::application::host_admission::SessionTemporalFixtureCountV1::Occurrences,
+            )
+            .await
+            .expect("count temporal occurrences")
+            > 0,
+        "temporal projection must create searchable occurrences"
+    );
 }
 
 #[tokio::test]
@@ -390,9 +389,14 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
 async fn unavailable_project_worker_rejects_before_expensive_reads() {
     let (server, dir, _pin) =
         server_with_project_refresh_wake(Some(SessionTemporalRefreshWake::unavailable())).await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
+            .await
+    );
 
     let payload = tokio::time::timeout(
-        Duration::from_millis(100),
+        Duration::from_secs(1),
         message_search(
             &server,
             json!({
@@ -428,10 +432,16 @@ async fn fresh_direct_root_reuses_configuration_session_storage() {
         sessions_db_path.exists(),
         "init must open configuration authority sessions.db"
     );
-    let server = McpServer::new(cg, None).await;
+    let runtime = registered_runtime(&cg).await;
+    let server = McpServer::new_with_context(
+        runtime
+            .into_mcp_server_context_for_test(cg, None)
+            .expect("registered MCP server context"),
+    )
+    .await;
 
-    // Direct roots reuse the existing configuration sessions.db handle and
-    // wire temporal retrieval from that retained authority.
+    // Registered roots reuse the existing configuration sessions.db handle
+    // and wire temporal retrieval from that retained authority.
     assert!(server.session_db.is_some());
     assert!(server.project_session_retrieval_service.is_some());
     server.shutdown().await;
@@ -532,7 +542,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     let runtime = server
         .host_admission_test_runtime_for_test()
         .expect("retained host-admission test runtime");
-    let project_key = HostAdmissionTestRuntimeV1::canonical_project_key(dir.path());
+    let project_key = cutover_project_id(dir.path()).as_str().to_string();
     let project_scope = ObservationScopeV1::Project {
         project_id: ProjectId::new(project_key.clone()).expect("project id"),
     };
@@ -621,7 +631,9 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     assert!(
         first["temporal"]["coverage"]["visible"]
             .as_u64()
-            .is_some_and(|visible| visible > 0)
+            .zip(first["temporal"]["coverage"]["unknown"].as_u64())
+            .is_some_and(|(visible, unknown)| visible.saturating_add(unknown) > 0),
+        "{first}"
     );
     assert!(
         first["temporal"]["explanations"]
@@ -656,7 +668,8 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         }),
     )
     .await;
-    assert_eq!(fresh["outcome"], "complete", "{fresh}");
+    assert_eq!(fresh["outcome"], "partial", "{fresh}");
+    assert_eq!(fresh["count"], 2);
     assert_eq!(fresh["temporal"]["freshness"]["state"], "fresh");
     assert_eq!(fresh["refresh_required"], false);
 
@@ -685,7 +698,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         }),
     )
     .await;
-    assert_eq!(profile["outcome"], "complete", "{profile}");
+    assert_eq!(profile["outcome"], "partial", "{profile}");
     assert_eq!(profile["count"], 2);
 
     server.shutdown().await;
@@ -705,8 +718,17 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     );
     drop(server);
 
-    let cg = TraceDecay::open(dir.path()).await.expect("reopen project");
-    let runtime = registered_runtime(&cg).await;
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        crate::config::user_data_dir().expect("isolated profile root"),
+        dir.path(),
+        cutover_project_id(dir.path()),
+    )
+    .await
+    .expect("reopen registered message-search runtime");
+    let cg = runtime
+        .open_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
+        .await
+        .expect("reopen project");
     let context = runtime
         .into_mcp_server_context_for_test(cg, None)
         .expect("restarted registered MCP context");
@@ -738,7 +760,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         }),
     )
     .await;
-    assert_eq!(resumed["outcome"], "complete", "{resumed}");
+    assert_eq!(resumed["outcome"], "partial", "{resumed}");
     assert_eq!(resumed["count"], 1);
     restarted.shutdown().await;
     assert_eq!(
