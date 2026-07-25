@@ -4110,7 +4110,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         let publications = runtime.publication_store();
         let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
             project_id.clone(),
-            runtime.observation_port(),
+            runtime.source_observation_port(),
         ));
         runtimes.insert(
             project_root.clone(),
@@ -4125,9 +4125,7 @@ impl DaemonFeedbackRuntimeRegistrar {
             .lock()
             .await
             .entry(project_root)
-            .or_insert_with(|| {
-                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle))
-            });
+            .or_insert_with(|| Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle)));
         Ok(publications)
     }
 
@@ -6434,9 +6432,7 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct RecordingFeedbackCycleObservations(
-        std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>,
-    );
+    struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
 
     impl Plan26FeedbackObservationEmitterV1 for RecordingFeedbackCycleObservations {
         fn observe_source_event(
@@ -6560,9 +6556,9 @@ mod tests {
         let proximity_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let advisory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observations = Arc::new(RecordingFeedbackCycleObservations::default());
-        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
-            unavailable_feedback_cycle(Arc::clone(&observations)),
-        ));
+        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(unavailable_feedback_cycle(
+            Arc::clone(&observations),
+        )));
         let request = FeedbackCycleRequest {
             root_uri: "file:///project".to_owned(),
             document_uri: "file:///project/src/lib.rs".to_owned(),
