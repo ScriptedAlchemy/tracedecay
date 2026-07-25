@@ -67,6 +67,7 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
     assert!(
         engine
             .invocation
+            .service
             .lsp_owner(Some(&canonical_project))
             .await
             .is_some(),
@@ -75,6 +76,7 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
     assert_eq!(
         engine
             .invocation
+            .service
             .feedback_cycle(Some(&canonical_project))
             .await
             .is_some(),
