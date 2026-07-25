@@ -370,6 +370,8 @@ pub(crate) async fn analytics_diagnostics_with_db(
             session_id: None,
             event_kind: None,
             since: None,
+            until: None,
+            before_id: None,
             limit: EVENT_SAMPLE_LIMIT,
         })
         .await
@@ -379,8 +381,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
         project_filter.as_deref(),
         0,
     )
-    .await
-    .map_err(cli_error)?;
+    .await;
     let event_rows: Vec<Value> = events
         .iter()
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)

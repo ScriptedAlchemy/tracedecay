@@ -76,7 +76,8 @@ where
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MetricCoverageV1 {
-    pub eligible: u64,
+    /// Exact denominator cardinality. `None` means the denominator is unknown.
+    pub eligible: Option<u64>,
     pub observed: u64,
     pub completed: u64,
     pub censored: u64,
@@ -85,14 +86,77 @@ pub struct MetricCoverageV1 {
     pub state: CoverageStateV1,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricEvidenceClassV1 {
+    Measurement,
+    Association,
+    CalibratedPrediction,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricSourceV1 {
+    ObservabilityEnvelope,
+    AccountingTurn,
+    SavingsLedger,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MetricProvenanceV1 {
+    pub source: MetricSourceV1,
+    pub source_revision: String,
+    pub projector_revision: String,
+    pub watermark: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MetricCohortV1 {
+    pub descriptor_revision: String,
+    pub eligible_population: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MetricTemporalV1 {
+    pub horizon: ObservabilityHorizonV1,
+    pub baseline_watermark: Option<String>,
+    pub delta: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MetricUncertaintyV1 {
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MetricCalibrationV1 {
+    pub estimator_revision: String,
+    pub calibration_revision: String,
+    pub cohort_revision: String,
+    pub support: u64,
+    pub drift_valid: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MetricValueV1 {
     pub descriptor_revision: String,
     pub metric: String,
+    /// Aggregate value. It is absent whenever its denominator or coverage is
+    /// insufficient; observed lower bounds remain available in `coverage`.
     pub value: Option<f64>,
     pub unit: String,
     pub denominator: String,
+    pub denominator_value: Option<u64>,
     pub coverage: MetricCoverageV1,
+    pub evidence_class: MetricEvidenceClassV1,
+    pub provenance: MetricProvenanceV1,
+    pub cohort: MetricCohortV1,
+    pub temporal: MetricTemporalV1,
+    pub uncertainty: MetricUncertaintyV1,
+    pub calibration: Option<MetricCalibrationV1>,
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -137,8 +201,9 @@ mod tests {
                 value: Some(3.0),
                 unit: "events".into(),
                 denominator: "eligible_calls".into(),
+                denominator_value: Some(3),
                 coverage: MetricCoverageV1 {
-                    eligible: 3,
+                    eligible: Some(3),
                     observed: 3,
                     completed: 3,
                     censored: 0,
@@ -146,6 +211,32 @@ mod tests {
                     excluded: 0,
                     state: CoverageStateV1::Known,
                 },
+                evidence_class: MetricEvidenceClassV1::Measurement,
+                provenance: MetricProvenanceV1 {
+                    source: MetricSourceV1::ObservabilityEnvelope,
+                    source_revision: "observability-envelope.v1".into(),
+                    projector_revision: "observatory.v1".into(),
+                    watermark: "watermark:7".into(),
+                },
+                cohort: MetricCohortV1 {
+                    descriptor_revision: "eligible-calls.v1".into(),
+                    eligible_population: "eligible_calls".into(),
+                },
+                temporal: MetricTemporalV1 {
+                    horizon: ObservabilityHorizonV1 {
+                        since_micros: 10,
+                        until_micros: 20,
+                    },
+                    baseline_watermark: None,
+                    delta: None,
+                },
+                uncertainty: MetricUncertaintyV1 {
+                    lower: Some(3.0),
+                    upper: Some(3.0),
+                    reason: None,
+                },
+                calibration: None,
+                unavailable_reason: None,
             }],
         }
     }
@@ -158,8 +249,9 @@ mod tests {
             value: None,
             unit: "events".into(),
             denominator: "eligible_calls".into(),
+            denominator_value: None,
             coverage: MetricCoverageV1 {
-                eligible: 0,
+                eligible: None,
                 observed: 0,
                 completed: 0,
                 censored: 0,
@@ -167,6 +259,32 @@ mod tests {
                 excluded: 0,
                 state: CoverageStateV1::Unknown,
             },
+            evidence_class: MetricEvidenceClassV1::Measurement,
+            provenance: MetricProvenanceV1 {
+                source: MetricSourceV1::ObservabilityEnvelope,
+                source_revision: "observability-envelope.v1".into(),
+                projector_revision: "observatory.v1".into(),
+                watermark: "watermark:unknown".into(),
+            },
+            cohort: MetricCohortV1 {
+                descriptor_revision: "eligible-calls.v1".into(),
+                eligible_population: "eligible_calls".into(),
+            },
+            temporal: MetricTemporalV1 {
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 10,
+                    until_micros: 20,
+                },
+                baseline_watermark: None,
+                delta: None,
+            },
+            uncertainty: MetricUncertaintyV1 {
+                lower: None,
+                upper: None,
+                reason: Some("unknown_denominator".into()),
+            },
+            calibration: None,
+            unavailable_reason: Some("unknown_denominator".into()),
         };
         assert_eq!(metric.value, None);
         assert_eq!(metric.coverage.state, CoverageStateV1::Unknown);

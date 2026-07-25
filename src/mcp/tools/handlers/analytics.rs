@@ -296,8 +296,7 @@ pub(super) async fn handle_analytics(
         scope.filter.as_deref(),
         since,
     )
-    .await
-    .map_err(config_error)?;
+    .await;
 
     let mut value = json!({
         "status": "ok",
