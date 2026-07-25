@@ -3,16 +3,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-    CiFailureLocalizationRequestV1, FeedbackPortFuture, GitHubReviewReadRequestV1,
+    CiFailureLocalizationRequestV1, FeedbackPortFuture,
 };
 use tracedecay_application::{RequestAdmission, RequestContext};
 use tracedecay_domain::feedback::{
     CiFailureBranchEvidenceV1, CiFailureCallerEvidenceV1, CiFailureCoverageV1,
     CiFailureGenerationEvidenceV1, CiFailureKindV1, CiFailureLocalizationResultV1,
-    CiFailureLocalizationStateV1, CiFailureParserIdentityV1, CiFailureRunIdentityV1,
+    CiFailureLocalizationStateV1, CiFailureParserIdentityV1, CiFailureRateLimitCheckpointV1,
+    CiFailureRunIdentityV1, CiFailureSourceDegradationV1, CiFailureSourceFailureV1,
     CiFailureSymbolEvidenceV1, CiFailureTestEvidenceV1, FeedbackScopeV1,
-    GitHubReviewReadOperationV1, MAX_CI_FAILURE_CALLER_EVIDENCE_V1,
-    MAX_CI_FAILURE_TEST_EVIDENCE_V1,
+    MAX_CI_FAILURE_CALLER_EVIDENCE_V1, MAX_CI_FAILURE_TEST_EVIDENCE_V1,
 };
 use tracedecay_domain::{
     CanonicalObservationIdV1, CommitId, ProviderId, RetrievalAnchorId, UtcMicros,
@@ -22,13 +22,14 @@ use super::super::context_allows_feedback_operation;
 use super::super::github_runtime::{
     GitHubActionsCheckRunV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
     GitHubActionsWorkflowJobV1, GitHubActionsWorkflowRunV1, GitHubActionsWorkflowStepV1,
-    GitHubCheckAnnotationV1, GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1,
-    GitHubProviderLifecycleV1, GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1,
-    GitHubRepositoryTargetV1, GitHubSourceAccessAuthorityV1,
+    GitHubCheckAnnotationV1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
+    GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,
+    GitHubReadOnlyCredentialV1,
 };
 use super::{
     CiExactEvidenceAuthorityV1, CiProviderReadResultV1, CiReadOnlyProviderArchiveV1,
-    GitHubCiProviderRecordV1, MAX_CI_RETAINED_ANNOTATIONS_V1, MAX_CI_RETAINED_FAILURES_V1,
+    CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1, GitHubCiProviderRecordV1,
+    MAX_CI_RETAINED_ANNOTATIONS_V1, MAX_CI_RETAINED_FAILURES_V1,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -130,10 +131,10 @@ pub trait CiCodeAnchorStoreV1: Send + Sync {
 pub struct ProductionCiProviderConfigV1 {
     pub provider: ProviderId,
     pub parser: CiFailureParserIdentityV1,
-    pub target: GitHubRepositoryTargetV1,
+    pub target: GitHubCiRepositoryTargetV1,
     pub credential: GitHubReadOnlyCredentialV1,
     pub http: GitHubHttpReadConfigV1,
-    pub source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    pub source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 }
 
 const GITHUB_ACTIONS_PROVIDER_ID_V1: &str = "provider.github-actions";
@@ -148,6 +149,8 @@ pub enum ProductionCiFailureDiscoveryOutcomeV1 {
     NotConfigured,
     NotFound,
     Ambiguous,
+    RateLimited(CiFailureRateLimitCheckpointV1),
+    Failed(CiFailureSourceFailureV1),
     Denied,
     Unavailable,
 }
@@ -159,14 +162,22 @@ impl ProductionCiFailureDiscoveryOutcomeV1 {
             Self::NotConfigured
             | Self::NotFound
             | Self::Ambiguous
+            | Self::RateLimited(_)
+            | Self::Failed(_)
             | Self::Denied
             | Self::Unavailable => None,
         }
     }
 
     pub fn validate_for(&self, scope: &FeedbackScopeV1) -> bool {
-        self.request()
-            .is_none_or(|request| request.validate().is_ok() && request.scope == *scope)
+        scope.validate().is_ok()
+            && self
+                .request()
+                .is_none_or(|request| request.validate().is_ok() && request.scope == *scope)
+            && !matches!(
+                self,
+                Self::RateLimited(checkpoint) if checkpoint.validate().is_err()
+            )
     }
 
     pub const fn is_configured(&self) -> bool {
@@ -215,7 +226,7 @@ trait ProductionCiDiscoveryReadPortV1: Send + Sync {
     ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1>;
 }
 
-impl ProductionCiDiscoveryReadPortV1 for GitHubReadOnlyClientV1 {
+impl ProductionCiDiscoveryReadPortV1 for GitHubCiReadOnlyClientV1 {
     fn read_workflow_runs_for_head<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -313,11 +324,10 @@ async fn discover_production_ci_failure_request_scan_v1(
         Ok(records) => records,
         Err(outcome) => return outcome,
     };
-    let workflow_run =
-        match select_failed_workflow_run(&config.target, scope, &workflow_runs).cloned() {
-            Ok(run) => run,
-            Err(outcome) => return outcome,
-        };
+    let workflow_run = match select_failed_workflow_run(scope, &workflow_runs).cloned() {
+        Ok(run) => run,
+        Err(outcome) => return outcome,
+    };
     let workflow_jobs =
         match collect_workflow_jobs(context, config, scope, client, workflow_run.id).await {
             Ok(records) => records,
@@ -354,6 +364,14 @@ fn consensus_ci_discovery_outcome(
         ) => ProductionCiFailureDiscoveryOutcomeV1::Denied,
         (
             ProductionCiFailureDiscoveryOutcomeV1::Found(_),
+            ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint),
+        ) => ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint),
+        (
+            ProductionCiFailureDiscoveryOutcomeV1::Found(_),
+            ProductionCiFailureDiscoveryOutcomeV1::Failed(cause),
+        ) => ProductionCiFailureDiscoveryOutcomeV1::Failed(cause),
+        (
+            ProductionCiFailureDiscoveryOutcomeV1::Found(_),
             ProductionCiFailureDiscoveryOutcomeV1::Found(_)
             | ProductionCiFailureDiscoveryOutcomeV1::Ambiguous,
         ) => ProductionCiFailureDiscoveryOutcomeV1::Ambiguous,
@@ -381,7 +399,7 @@ async fn collect_workflow_runs(
         )?;
         authorize_ci_source(context, config, scope).await?;
         let page = serde_json::from_slice::<GitHubActionsWorkflowRunsPageV1>(&body)
-            .map_err(|_| ProductionCiFailureDiscoveryOutcomeV1::Unavailable)?;
+            .map_err(discovery_decode_failure)?;
         if append_discovery_page(
             &mut records,
             &mut expected_total,
@@ -413,7 +431,7 @@ async fn collect_workflow_jobs(
         )?;
         authorize_ci_source(context, config, scope).await?;
         let page = serde_json::from_slice::<GitHubActionsWorkflowJobsPageV1>(&body)
-            .map_err(|_| ProductionCiFailureDiscoveryOutcomeV1::Unavailable)?;
+            .map_err(discovery_decode_failure)?;
         if append_discovery_page(
             &mut records,
             &mut expected_total,
@@ -445,7 +463,7 @@ async fn collect_check_runs(
         )?;
         authorize_ci_source(context, config, scope).await?;
         let page = serde_json::from_slice::<GitHubActionsCheckRunsPageV1>(&body)
-            .map_err(|_| ProductionCiFailureDiscoveryOutcomeV1::Unavailable)?;
+            .map_err(discovery_decode_failure)?;
         if append_discovery_page(
             &mut records,
             &mut expected_total,
@@ -469,7 +487,9 @@ fn append_discovery_page<T>(
     let total = usize::try_from(total_count)
         .ok()
         .filter(|total| *total <= MAX_CI_DISCOVERY_RECORDS_V1)
-        .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)?;
+        .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Failed(
+            CiFailureSourceFailureV1::Schema,
+        ))?;
     if expected_total.is_some_and(|expected| expected != total)
         || page.len() > CI_DISCOVERY_PAGE_SIZE_V1
         || records.len().saturating_add(page.len()) > total
@@ -485,7 +505,9 @@ fn append_discovery_page<T>(
                 .any(|other| provider_id(other) == id)
         })
     {
-        return Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable);
+        return Err(ProductionCiFailureDiscoveryOutcomeV1::Failed(
+            CiFailureSourceFailureV1::Schema,
+        ));
     }
     *expected_total = Some(total);
     records.extend(page);
@@ -500,29 +522,15 @@ async fn authorize_ci_source(
     if !context_admitted_for_ci_discovery(context, scope) {
         return Err(ProductionCiFailureDiscoveryOutcomeV1::Denied);
     }
-    let request = ci_source_access_request(&config.target, scope)
-        .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)?;
-    match config.source_access.authorize(context, &request).await {
-        GitHubProviderLifecycleV1::Ready => Ok(()),
-        GitHubProviderLifecycleV1::Denied => Err(ProductionCiFailureDiscoveryOutcomeV1::Denied),
-        GitHubProviderLifecycleV1::Stale
-        | GitHubProviderLifecycleV1::Ambiguous
-        | GitHubProviderLifecycleV1::Unavailable => {
+    match config.source_access.authorize_ci(context, scope).await {
+        CiSourceAccessOutcomeV1::Ready => Ok(()),
+        CiSourceAccessOutcomeV1::Denied => Err(ProductionCiFailureDiscoveryOutcomeV1::Denied),
+        CiSourceAccessOutcomeV1::Stale
+        | CiSourceAccessOutcomeV1::Ambiguous
+        | CiSourceAccessOutcomeV1::Unavailable => {
             Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
         }
     }
-}
-
-fn ci_source_access_request(
-    target: &GitHubRepositoryTargetV1,
-    scope: &FeedbackScopeV1,
-) -> Option<GitHubReviewReadRequestV1> {
-    let request = GitHubReviewReadRequestV1 {
-        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-        scope: scope.clone(),
-        pull_request_id: target.pull_request_id.clone(),
-    };
-    request.validate().is_ok().then_some(request)
 }
 
 fn production_ci_discovery_configuration_is_valid(
@@ -538,7 +546,7 @@ fn production_ci_discovery_configuration_is_valid(
 
 fn select_production_ci_failure_request_v1(
     provider: &ProviderId,
-    target: &GitHubRepositoryTargetV1,
+    target: &GitHubCiRepositoryTargetV1,
     scope: &FeedbackScopeV1,
     workflow_runs: &[GitHubActionsWorkflowRunV1],
     workflow_jobs: &[GitHubActionsWorkflowJobV1],
@@ -554,7 +562,7 @@ fn select_production_ci_failure_request_v1(
     {
         return ProductionCiFailureDiscoveryOutcomeV1::Unavailable;
     }
-    let workflow_run = match select_failed_workflow_run(target, scope, workflow_runs) {
+    let workflow_run = match select_failed_workflow_run(scope, workflow_runs) {
         Ok(run) => run,
         Err(outcome) => return outcome,
     };
@@ -574,10 +582,6 @@ fn select_production_ci_failure_request_v1(
         }
         Err(outcome) => return outcome,
     };
-    let pull_request_id = match target.pull_request_id.as_str().parse::<u64>() {
-        Ok(id) if id > 0 => id,
-        _ => return ProductionCiFailureDiscoveryOutcomeV1::Unavailable,
-    };
     let Some(workflow_job_check_run_id) =
         workflow_job_check_run_id(target, &workflow_job.check_run_url)
     else {
@@ -589,10 +593,6 @@ fn select_production_ci_failure_request_v1(
             && check.check_suite.id == workflow_run.check_suite_id
             && check.status == GitHubActionsStatusV1::Completed
             && check.conclusion == Some(GitHubActionsConclusionV1::Failure)
-            && check
-                .pull_requests
-                .iter()
-                .any(|pull| pull.id == pull_request_id)
     })) {
         Ok(check) => check,
         Err(ProductionCiFailureDiscoveryOutcomeV1::NotFound) => {
@@ -618,17 +618,9 @@ fn select_production_ci_failure_request_v1(
 }
 
 fn select_failed_workflow_run<'a>(
-    target: &GitHubRepositoryTargetV1,
     scope: &FeedbackScopeV1,
     workflow_runs: &'a [GitHubActionsWorkflowRunV1],
 ) -> Result<&'a GitHubActionsWorkflowRunV1, ProductionCiFailureDiscoveryOutcomeV1> {
-    let pull_request_id = target
-        .pull_request_id
-        .as_str()
-        .parse::<u64>()
-        .ok()
-        .filter(|id| *id > 0)
-        .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)?;
     unique_discovery_candidate(workflow_runs.iter().filter(|run| {
         run.id > 0
             && run.workflow_id > 0
@@ -644,10 +636,6 @@ fn select_failed_workflow_run<'a>(
                     Some(GitHubActionsConclusionV1::Failure)
                 ) | (GitHubActionsStatusV1::InProgress, None)
             )
-            && run
-                .pull_requests
-                .iter()
-                .any(|pull| pull.id == pull_request_id)
     }))
 }
 
@@ -659,7 +647,7 @@ fn feedback_branch_name(scope: &FeedbackScopeV1) -> &str {
 }
 
 fn workflow_job_check_run_id(
-    target: &GitHubRepositoryTargetV1,
+    target: &GitHubCiRepositoryTargetV1,
     check_run_url: &str,
 ) -> Option<u64> {
     let url = url::Url::parse(check_run_url).ok()?;
@@ -702,9 +690,33 @@ fn discovery_response_body(
     match outcome {
         GitHubCiTransportOutcomeV1::Response(body) => Ok(body),
         GitHubCiTransportOutcomeV1::Denied => Err(ProductionCiFailureDiscoveryOutcomeV1::Denied),
-        GitHubCiTransportOutcomeV1::RateLimited(_) | GitHubCiTransportOutcomeV1::Unavailable => {
-            Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
+        GitHubCiTransportOutcomeV1::RateLimited(checkpoint) => Err(
+            ProductionCiFailureDiscoveryOutcomeV1::RateLimited(ci_rate_limit(checkpoint)),
+        ),
+        GitHubCiTransportOutcomeV1::Unavailable => Err(
+            ProductionCiFailureDiscoveryOutcomeV1::Failed(CiFailureSourceFailureV1::Transport),
+        ),
+    }
+}
+
+fn discovery_decode_failure(error: serde_json::Error) -> ProductionCiFailureDiscoveryOutcomeV1 {
+    let cause = match error.classify() {
+        serde_json::error::Category::Data => CiFailureSourceFailureV1::Schema,
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+            CiFailureSourceFailureV1::Parse
         }
+        serde_json::error::Category::Io => CiFailureSourceFailureV1::Transport,
+    };
+    ProductionCiFailureDiscoveryOutcomeV1::Failed(cause)
+}
+
+fn ci_rate_limit(
+    checkpoint: tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1,
+) -> CiFailureRateLimitCheckpointV1 {
+    CiFailureRateLimitCheckpointV1 {
+        limit: checkpoint.limit,
+        remaining: checkpoint.remaining,
+        reset_at: checkpoint.reset_at,
     }
 }
 
@@ -795,6 +807,7 @@ impl CiReadOnlyProviderArchiveV1 for UnavailableProductionCiArchiveV1 {
                 run: request.run.clone(),
                 state: CiFailureLocalizationStateV1::Unavailable,
                 coverage: CiFailureCoverageV1::Unavailable,
+                source_degradation: None,
                 failures: 0,
                 checks: 0,
                 annotations: 0,
@@ -822,10 +835,10 @@ impl CiExactEvidenceAuthorityV1<CiRetainedProviderRecordV1>
 
 struct ProductionGitHubCiArchiveV1 {
     provider: ProviderId,
-    client: GitHubReadOnlyClientV1,
+    client: GitHubCiReadOnlyClientV1,
     retained: Arc<dyn CiRetainedProviderObservationAuthorityV1>,
-    target: GitHubRepositoryTargetV1,
-    source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    target: GitHubCiRepositoryTargetV1,
+    source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 }
 
 impl ProductionGitHubCiArchiveV1 {
@@ -833,6 +846,7 @@ impl ProductionGitHubCiArchiveV1 {
         &self,
         context: &RequestContext,
         request: &CiFailureLocalizationRequestV1,
+        source_degradation: CiFailureSourceDegradationV1,
     ) -> CiProviderReadResultV1<CiRetainedProviderRecordV1> {
         if let Err(failure) = self.authorize_source(context, request).await {
             return source_failure_result(&self.provider, request, failure);
@@ -866,13 +880,14 @@ impl ProductionGitHubCiArchiveV1 {
             state: if valid {
                 CiFailureLocalizationStateV1::Stale
             } else {
-                CiFailureLocalizationStateV1::Unavailable
+                CiFailureLocalizationStateV1::Failed
             },
             coverage: if valid {
                 CiFailureCoverageV1::Stale
             } else {
                 CiFailureCoverageV1::Unavailable
             },
+            source_degradation: Some(source_degradation),
             failures: if valid { failures } else { 0 },
             checks: usize::from(valid),
             annotations: if valid { annotations } else { 0 },
@@ -896,11 +911,11 @@ impl ProductionGitHubCiArchiveV1 {
         let check_run = response_body(self.client.read_check_run(context, check_run_id).await)?;
         self.authorize_source(context, request).await?;
         let workflow_run = serde_json::from_slice::<GitHubActionsWorkflowRunV1>(&workflow_run)
-            .map_err(|_| LiveCiReadFailureV1::Unavailable)?;
+            .map_err(live_decode_failure)?;
         let workflow_job = serde_json::from_slice::<GitHubActionsWorkflowJobV1>(&workflow_job)
-            .map_err(|_| LiveCiReadFailureV1::Unavailable)?;
+            .map_err(live_decode_failure)?;
         let check_run = serde_json::from_slice::<GitHubActionsCheckRunV1>(&check_run)
-            .map_err(|_| LiveCiReadFailureV1::Unavailable)?;
+            .map_err(live_decode_failure)?;
         let annotations = self
             .read_annotations(
                 context,
@@ -916,7 +931,9 @@ impl ProductionGitHubCiArchiveV1 {
             annotations,
         };
         if !validate_provider_record(&self.target, request, &record) {
-            return Err(LiveCiReadFailureV1::Unavailable);
+            return Err(LiveCiReadFailureV1::Failed(
+                CiFailureSourceFailureV1::Schema,
+            ));
         }
         self.authorize_source(context, request).await?;
         Ok(record)
@@ -935,7 +952,9 @@ impl ProductionGitHubCiArchiveV1 {
         // unretained and falls back to the prior stale observation.
         (first == second)
             .then_some(second)
-            .ok_or(LiveCiReadFailureV1::Unavailable)
+            .ok_or(LiveCiReadFailureV1::Failed(
+                CiFailureSourceFailureV1::Schema,
+            ))
     }
 
     async fn read_annotations(
@@ -961,19 +980,23 @@ impl ProductionGitHubCiArchiveV1 {
             )?;
             self.authorize_source(context, request).await?;
             let page = serde_json::from_slice::<Vec<GitHubCheckAnnotationV1>>(&body)
-                .map_err(|_| LiveCiReadFailureV1::Unavailable)?;
+                .map_err(live_decode_failure)?;
             if page.len() > CI_DISCOVERY_PAGE_SIZE_V1
                 || page.is_empty()
                 || annotations.len().saturating_add(page.len()) > retained_limit
             {
-                return Err(LiveCiReadFailureV1::Unavailable);
+                return Err(LiveCiReadFailureV1::Failed(
+                    CiFailureSourceFailureV1::Schema,
+                ));
             }
             annotations.extend(page);
             if annotations.len() == retained_limit {
                 return Ok(annotations);
             }
         }
-        Err(LiveCiReadFailureV1::Unavailable)
+        Err(LiveCiReadFailureV1::Failed(
+            CiFailureSourceFailureV1::Schema,
+        ))
     }
 
     async fn authorize_source(
@@ -1008,6 +1031,7 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                         run: request.run.clone(),
                         state: CiFailureLocalizationStateV1::Denied,
                         coverage: CiFailureCoverageV1::Denied,
+                        source_degradation: None,
                         failures: 0,
                         checks: 0,
                         annotations: 0,
@@ -1015,13 +1039,37 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                     };
                 }
                 Err(LiveCiReadFailureV1::Unavailable) => {
+                    return unavailable_result(&self.provider, request);
+                }
+                Err(LiveCiReadFailureV1::RateLimited(checkpoint)) => {
                     if !context_admitted(context) {
                         return unavailable_result(&self.provider, request);
                     }
                     if let Err(failure) = self.authorize_source(context, request).await {
                         return source_failure_result(&self.provider, request, failure);
                     }
-                    return self.retained_result(context, request).await;
+                    return self
+                        .retained_result(
+                            context,
+                            request,
+                            CiFailureSourceDegradationV1::RateLimited(checkpoint),
+                        )
+                        .await;
+                }
+                Err(LiveCiReadFailureV1::Failed(cause)) => {
+                    if !context_admitted(context) {
+                        return unavailable_result(&self.provider, request);
+                    }
+                    if let Err(failure) = self.authorize_source(context, request).await {
+                        return source_failure_result(&self.provider, request, failure);
+                    }
+                    return self
+                        .retained_result(
+                            context,
+                            request,
+                            CiFailureSourceDegradationV1::Failed(cause),
+                        )
+                        .await;
                 }
             };
             let failures = live
@@ -1039,6 +1087,7 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                     run: request.run.clone(),
                     state: CiFailureLocalizationStateV1::Partial,
                     coverage: CiFailureCoverageV1::Partial,
+                    source_degradation: None,
                     failures: failures.min(MAX_CI_RETAINED_FAILURES_V1),
                     checks: 1,
                     annotations: live.annotations.len().min(MAX_CI_RETAINED_ANNOTATIONS_V1),
@@ -1078,6 +1127,7 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                     run: request.run.clone(),
                     state: CiFailureLocalizationStateV1::Partial,
                     coverage: CiFailureCoverageV1::Partial,
+                    source_degradation: None,
                     failures: failures.min(MAX_CI_RETAINED_FAILURES_V1),
                     checks: 1,
                     annotations: live.annotations.len().min(MAX_CI_RETAINED_ANNOTATIONS_V1),
@@ -1089,6 +1139,7 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                 run: request.run.clone(),
                 state,
                 coverage,
+                source_degradation: None,
                 failures,
                 checks: 1,
                 annotations: live.annotations.len(),
@@ -1104,8 +1155,8 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
 struct StoreBackedCiExactEvidenceAuthorityV1 {
     parser: CiFailureParserIdentityV1,
     code_anchors: Arc<dyn CiCodeAnchorStoreV1>,
-    target: GitHubRepositoryTargetV1,
-    source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    target: GitHubCiRepositoryTargetV1,
+    source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 }
 
 impl CiExactEvidenceAuthorityV1<CiRetainedProviderRecordV1>
@@ -1146,6 +1197,7 @@ impl CiExactEvidenceAuthorityV1<CiRetainedProviderRecordV1>
                 parser: self.parser.clone(),
                 state,
                 coverage,
+                source_degradation: read.source_degradation.clone(),
                 failure_kind: record.observation.failure_kind,
                 failure_anchor: record.observation.failure_anchor.clone(),
                 branch: CiFailureBranchEvidenceV1 {
@@ -1165,29 +1217,29 @@ impl CiExactEvidenceAuthorityV1<CiRetainedProviderRecordV1>
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum LiveCiReadFailureV1 {
     Denied,
     Unavailable,
+    RateLimited(CiFailureRateLimitCheckpointV1),
+    Failed(CiFailureSourceFailureV1),
 }
 
 async fn authorize_live_ci_source(
-    source_access: &dyn GitHubSourceAccessAuthorityV1,
-    target: &GitHubRepositoryTargetV1,
+    source_access: &dyn CiSourceAccessAuthorityV1,
+    _target: &GitHubCiRepositoryTargetV1,
     context: &RequestContext,
     request: &CiFailureLocalizationRequestV1,
 ) -> Result<(), LiveCiReadFailureV1> {
     if !context_admitted_for_ci_discovery(context, &request.scope) {
         return Err(LiveCiReadFailureV1::Denied);
     }
-    let source_request =
-        ci_source_access_request(target, &request.scope).ok_or(LiveCiReadFailureV1::Unavailable)?;
-    match source_access.authorize(context, &source_request).await {
-        GitHubProviderLifecycleV1::Ready => Ok(()),
-        GitHubProviderLifecycleV1::Denied => Err(LiveCiReadFailureV1::Denied),
-        GitHubProviderLifecycleV1::Stale
-        | GitHubProviderLifecycleV1::Ambiguous
-        | GitHubProviderLifecycleV1::Unavailable => Err(LiveCiReadFailureV1::Unavailable),
+    match source_access.authorize_ci(context, &request.scope).await {
+        CiSourceAccessOutcomeV1::Ready => Ok(()),
+        CiSourceAccessOutcomeV1::Denied => Err(LiveCiReadFailureV1::Denied),
+        CiSourceAccessOutcomeV1::Stale
+        | CiSourceAccessOutcomeV1::Ambiguous
+        | CiSourceAccessOutcomeV1::Unavailable => Err(LiveCiReadFailureV1::Unavailable),
     }
 }
 
@@ -1195,9 +1247,12 @@ fn response_body(outcome: GitHubCiTransportOutcomeV1) -> Result<Vec<u8>, LiveCiR
     match outcome {
         GitHubCiTransportOutcomeV1::Response(body) => Ok(body),
         GitHubCiTransportOutcomeV1::Denied => Err(LiveCiReadFailureV1::Denied),
-        GitHubCiTransportOutcomeV1::RateLimited(_) | GitHubCiTransportOutcomeV1::Unavailable => {
-            Err(LiveCiReadFailureV1::Unavailable)
+        GitHubCiTransportOutcomeV1::RateLimited(checkpoint) => {
+            Err(LiveCiReadFailureV1::RateLimited(ci_rate_limit(checkpoint)))
         }
+        GitHubCiTransportOutcomeV1::Unavailable => Err(LiveCiReadFailureV1::Failed(
+            CiFailureSourceFailureV1::Transport,
+        )),
     }
 }
 
@@ -1206,7 +1261,14 @@ fn parse_provider_id(value: &str) -> Result<u64, LiveCiReadFailureV1> {
         .parse::<u64>()
         .ok()
         .filter(|value| *value > 0)
-        .ok_or(LiveCiReadFailureV1::Unavailable)
+        .ok_or(LiveCiReadFailureV1::Failed(CiFailureSourceFailureV1::Parse))
+}
+
+fn live_decode_failure(error: serde_json::Error) -> LiveCiReadFailureV1 {
+    match discovery_decode_failure(error) {
+        ProductionCiFailureDiscoveryOutcomeV1::Failed(cause) => LiveCiReadFailureV1::Failed(cause),
+        _ => LiveCiReadFailureV1::Failed(CiFailureSourceFailureV1::Parse),
+    }
 }
 
 fn unavailable_result(
@@ -1218,6 +1280,7 @@ fn unavailable_result(
         run: request.run.clone(),
         state: CiFailureLocalizationStateV1::Unavailable,
         coverage: CiFailureCoverageV1::Unavailable,
+        source_degradation: None,
         failures: 0,
         checks: 0,
         annotations: 0,
@@ -1236,12 +1299,35 @@ fn source_failure_result(
             run: request.run.clone(),
             state: CiFailureLocalizationStateV1::Denied,
             coverage: CiFailureCoverageV1::Denied,
+            source_degradation: None,
             failures: 0,
             checks: 0,
             annotations: 0,
             record: None,
         },
         LiveCiReadFailureV1::Unavailable => unavailable_result(provider, request),
+        LiveCiReadFailureV1::RateLimited(checkpoint) => CiProviderReadResultV1 {
+            provider: provider.clone(),
+            run: request.run.clone(),
+            state: CiFailureLocalizationStateV1::Failed,
+            coverage: CiFailureCoverageV1::Unavailable,
+            source_degradation: Some(CiFailureSourceDegradationV1::RateLimited(checkpoint)),
+            failures: 0,
+            checks: 0,
+            annotations: 0,
+            record: None,
+        },
+        LiveCiReadFailureV1::Failed(cause) => CiProviderReadResultV1 {
+            provider: provider.clone(),
+            run: request.run.clone(),
+            state: CiFailureLocalizationStateV1::Failed,
+            coverage: CiFailureCoverageV1::Unavailable,
+            source_degradation: Some(CiFailureSourceDegradationV1::Failed(cause)),
+            failures: 0,
+            checks: 0,
+            annotations: 0,
+            record: None,
+        },
     }
 }
 
@@ -1270,16 +1356,10 @@ fn now_micros() -> UtcMicros {
 }
 
 fn validate_provider_record(
-    target: &GitHubRepositoryTargetV1,
+    target: &GitHubCiRepositoryTargetV1,
     request: &CiFailureLocalizationRequestV1,
     record: &GitHubCiProviderRecordV1,
 ) -> bool {
-    let pull_request_id = target
-        .pull_request_id
-        .as_str()
-        .parse::<u64>()
-        .ok()
-        .filter(|id| *id > 0);
     record.run_identity() == request.run
         && record.workflow_run.head_sha == request.scope.head_commit_id.as_str()
         && record.workflow_run.head_branch == feedback_branch_name(&request.scope)
@@ -1295,18 +1375,6 @@ fn validate_provider_record(
         && record.workflow_job.conclusion == Some(GitHubActionsConclusionV1::Failure)
         && record.check_run.status == GitHubActionsStatusV1::Completed
         && record.check_run.conclusion == Some(GitHubActionsConclusionV1::Failure)
-        && pull_request_id.is_some_and(|pull_request_id| {
-            record
-                .workflow_run
-                .pull_requests
-                .iter()
-                .any(|pull| pull.id == pull_request_id)
-                && record
-                    .check_run
-                    .pull_requests
-                    .iter()
-                    .any(|pull| pull.id == pull_request_id)
-        })
         && record.failed_step().is_some()
 }
 
@@ -1378,7 +1446,8 @@ mod discovery_tests {
     };
     use tracedecay_domain::feedback::{CiFailureParserIdentityV1, FeedbackScopeV1};
     use tracedecay_domain::{
-        ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+        ActorId, CanonicalObservationIdV1, ManifestDigest, ProjectId, RefId, RepositoryId,
+        RetrievalAnchorId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -1390,7 +1459,7 @@ mod discovery_tests {
     }
 
     impl SequencedSourceAccess {
-        fn ready() -> Arc<dyn GitHubSourceAccessAuthorityV1> {
+        fn ready() -> Arc<dyn CiSourceAccessAuthorityV1> {
             Arc::new(Self {
                 calls: AtomicUsize::new(0),
                 deny_at: usize::MAX,
@@ -1405,17 +1474,17 @@ mod discovery_tests {
         }
     }
 
-    impl GitHubSourceAccessAuthorityV1 for SequencedSourceAccess {
-        fn authorize<'a>(
+    impl CiSourceAccessAuthorityV1 for SequencedSourceAccess {
+        fn authorize_ci<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _request: &'a GitHubReviewReadRequestV1,
-        ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+            _scope: &'a FeedbackScopeV1,
+        ) -> FeedbackPortFuture<'a, CiSourceAccessOutcomeV1> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             let outcome = if call >= self.deny_at {
-                GitHubProviderLifecycleV1::Denied
+                CiSourceAccessOutcomeV1::Denied
             } else {
-                GitHubProviderLifecycleV1::Ready
+                CiSourceAccessOutcomeV1::Ready
             };
             Box::pin(async move { outcome })
         }
@@ -1434,13 +1503,11 @@ mod discovery_tests {
     }
 
     fn target(
-        fixture: &crate::application::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
-    ) -> GitHubRepositoryTargetV1 {
-        GitHubRepositoryTargetV1 {
+        _fixture: &crate::application::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
+    ) -> GitHubCiRepositoryTargetV1 {
+        GitHubCiRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "tracedecay".to_owned(),
-            pull_request_number: fixture.pull_request_number,
-            pull_request_id: fixture.github.pull_request_id.clone(),
         }
     }
 
@@ -1452,7 +1519,7 @@ mod discovery_tests {
 
     fn config_with_source(
         fixture: &crate::application::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
-        source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+        source_access: Arc<dyn CiSourceAccessAuthorityV1>,
     ) -> ProductionCiProviderConfigV1 {
         ProductionCiProviderConfigV1 {
             provider: ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1).unwrap(),
@@ -1632,6 +1699,234 @@ mod discovery_tests {
         };
         assert_eq!(request.scope, scope);
         assert_eq!(request.run, fixture.ci.run);
+    }
+
+    #[test]
+    fn ci_discovery_does_not_require_pull_request_resolution() {
+        let fixture =
+            crate::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
+                .unwrap();
+        let scope = scope(&fixture);
+        let mut record = fixture.ci_provider_record.clone();
+        record.workflow_run.pull_requests.clear();
+        record.check_run.pull_requests.clear();
+
+        let outcome = select_production_ci_failure_request_v1(
+            &ProviderId::new("provider.github-actions").unwrap(),
+            &target(&fixture),
+            &scope,
+            std::slice::from_ref(&record.workflow_run),
+            std::slice::from_ref(&record.workflow_job),
+            std::slice::from_ref(&record.check_run),
+        );
+
+        assert!(matches!(
+            outcome,
+            ProductionCiFailureDiscoveryOutcomeV1::Found(_)
+        ));
+    }
+
+    #[test]
+    fn discovery_preserves_rate_limit_and_decode_failure_kinds() {
+        let checkpoint = tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1 {
+            limit: 5_000,
+            remaining: 0,
+            reset_at: UtcMicros(42),
+        };
+        assert_eq!(
+            discovery_response_body(GitHubCiTransportOutcomeV1::RateLimited(checkpoint)),
+            Err(ProductionCiFailureDiscoveryOutcomeV1::RateLimited(
+                CiFailureRateLimitCheckpointV1 {
+                    limit: 5_000,
+                    remaining: 0,
+                    reset_at: UtcMicros(42),
+                },
+            ))
+        );
+        let parse = serde_json::from_slice::<GitHubActionsWorkflowRunsPageV1>(b"{")
+            .err()
+            .unwrap();
+        assert_eq!(
+            discovery_decode_failure(parse),
+            ProductionCiFailureDiscoveryOutcomeV1::Failed(CiFailureSourceFailureV1::Parse)
+        );
+        let schema = serde_json::from_slice::<GitHubActionsWorkflowRunsPageV1>(b"{}")
+            .err()
+            .unwrap();
+        assert_eq!(
+            discovery_decode_failure(schema),
+            ProductionCiFailureDiscoveryOutcomeV1::Failed(CiFailureSourceFailureV1::Schema)
+        );
+    }
+
+    struct RetainedFixture(CiRetainedProviderRecordV1);
+
+    impl CiRetainedProviderObservationAuthorityV1 for RetainedFixture {
+        fn load<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a CiFailureLocalizationRequestV1,
+        ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderRecordV1>> {
+            let record = self.0.clone();
+            Box::pin(async move { Some(record) })
+        }
+
+        fn retain<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a CiFailureLocalizationRequestV1,
+            _record: &'a GitHubCiProviderRecordV1,
+            _state: CiFailureLocalizationStateV1,
+            _coverage: CiFailureCoverageV1,
+        ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderObservationV1>> {
+            Box::pin(async { None })
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_stale_fallback_exposes_rate_limit_cause_and_coverage() {
+        let fixture =
+            crate::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
+                .unwrap();
+        let scope = scope(&fixture);
+        let request = CiFailureLocalizationRequestV1 {
+            scope: scope.clone(),
+            run: fixture.ci.run.clone(),
+        };
+        let target = target(&fixture);
+        let archive = ProductionGitHubCiArchiveV1 {
+            provider: ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1).unwrap(),
+            client: GitHubReadOnlyClientV1::new_for_ci(
+                target.clone(),
+                GitHubReadOnlyCredentialV1::anonymous(),
+                GitHubHttpReadConfigV1::default(),
+            )
+            .unwrap(),
+            retained: Arc::new(RetainedFixture(CiRetainedProviderRecordV1 {
+                provider_record: fixture.ci_provider_record.clone(),
+                observation: CiRetainedProviderObservationV1 {
+                    observation_id: CanonicalObservationIdV1::new(
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .unwrap(),
+                    failure_anchor: RetrievalAnchorId::new("anchor.ci-retained").unwrap(),
+                    provider_head_commit_id: scope.head_commit_id.clone(),
+                    failure_kind: CiFailureKindV1::LintFailure,
+                    observed_at: UtcMicros(7),
+                },
+            })),
+            target,
+            source_access: SequencedSourceAccess::ready(),
+        };
+        let degradation =
+            CiFailureSourceDegradationV1::RateLimited(CiFailureRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 0,
+                reset_at: UtcMicros(42),
+            });
+
+        let read = archive
+            .retained_result(
+                &context(&scope, UtcMicros(i64::MAX)),
+                &request,
+                degradation.clone(),
+            )
+            .await;
+
+        assert_eq!(read.state, CiFailureLocalizationStateV1::Stale);
+        assert_eq!(read.coverage, CiFailureCoverageV1::Stale);
+        assert_eq!(read.source_degradation, Some(degradation));
+        assert!(read.record.is_some());
+        assert!(read.validate_for(&request));
+    }
+
+    struct TerminalArchive(CiFailureSourceDegradationV1);
+
+    impl CiReadOnlyProviderArchiveV1 for TerminalArchive {
+        type Record = ();
+
+        fn read_record<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            request: &'a CiFailureLocalizationRequestV1,
+        ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>> {
+            let degradation = self.0.clone();
+            Box::pin(async move {
+                CiProviderReadResultV1 {
+                    provider: ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1).unwrap(),
+                    run: request.run.clone(),
+                    state: CiFailureLocalizationStateV1::Failed,
+                    coverage: CiFailureCoverageV1::Unavailable,
+                    source_degradation: Some(degradation),
+                    failures: 0,
+                    checks: 0,
+                    annotations: 0,
+                    record: None,
+                }
+            })
+        }
+    }
+
+    struct NeverExact;
+
+    impl CiExactEvidenceAuthorityV1<()> for NeverExact {
+        fn map_exact_evidence<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a CiFailureLocalizationRequestV1,
+            _read: &'a CiProviderReadResultV1<()>,
+            _record: &'a (),
+        ) -> FeedbackPortFuture<'a, Option<CiFailureLocalizationResultV1>> {
+            Box::pin(async { None })
+        }
+    }
+
+    #[tokio::test]
+    async fn localization_reader_preserves_rate_limit_and_failed_outcomes() {
+        use crate::application::advisory::{
+            CiReadOnlyEvidenceSource, DaemonCiReadOnlyEvidenceSourceV1,
+        };
+        use tracedecay_application::feedback::CiFailureLocalizationPortOutcomeV1;
+
+        let fixture =
+            crate::application::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1()
+                .unwrap();
+        let scope = scope(&fixture);
+        let request = CiFailureLocalizationRequestV1 {
+            scope: scope.clone(),
+            run: fixture.ci.run.clone(),
+        };
+        let context = context(&scope, UtcMicros(i64::MAX));
+        let checkpoint = CiFailureRateLimitCheckpointV1 {
+            limit: 5_000,
+            remaining: 0,
+            reset_at: UtcMicros(42),
+        };
+        let rate_limited = DaemonCiReadOnlyEvidenceSourceV1::new(
+            TerminalArchive(CiFailureSourceDegradationV1::RateLimited(
+                checkpoint.clone(),
+            )),
+            NeverExact,
+        )
+        .read_localization(&context, &request)
+        .await;
+        assert_eq!(
+            rate_limited,
+            CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint)
+        );
+
+        let failed = DaemonCiReadOnlyEvidenceSourceV1::new(
+            TerminalArchive(CiFailureSourceDegradationV1::Failed(
+                CiFailureSourceFailureV1::Schema,
+            )),
+            NeverExact,
+        )
+        .read_localization(&context, &request)
+        .await;
+        assert_eq!(
+            failed,
+            CiFailureLocalizationPortOutcomeV1::Failed(CiFailureSourceFailureV1::Schema)
+        );
     }
 
     #[test]

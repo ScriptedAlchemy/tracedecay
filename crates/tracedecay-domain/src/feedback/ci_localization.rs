@@ -38,6 +38,52 @@ pub enum CiFailureLocalizationStateV1 {
     Failed,
 }
 
+/// Why current CI provider evidence could not be read or decoded.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CiFailureSourceFailureV1 {
+    Transport,
+    Schema,
+    Parse,
+}
+
+/// Provider-neutral rate-limit evidence retained with a degraded CI read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CiFailureRateLimitCheckpointV1 {
+    pub limit: u32,
+    pub remaining: u32,
+    pub reset_at: UtcMicros,
+}
+
+impl CiFailureRateLimitCheckpointV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.limit == 0 || self.remaining > self.limit {
+            return Err(DomainError::NonCanonical {
+                field: "ci failure rate-limit checkpoint",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Cause attached to stale retained evidence or a failed current read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CiFailureSourceDegradationV1 {
+    RateLimited(CiFailureRateLimitCheckpointV1),
+    Failed(CiFailureSourceFailureV1),
+}
+
+impl CiFailureSourceDegradationV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        match self {
+            Self::RateLimited(checkpoint) => checkpoint.validate(),
+            Self::Failed(_) => Ok(()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CiFailureKindV1 {
@@ -219,6 +265,8 @@ pub struct CiFailureLocalizationResultV1 {
     pub parser: CiFailureParserIdentityV1,
     pub state: CiFailureLocalizationStateV1,
     pub coverage: CiFailureCoverageV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_degradation: Option<CiFailureSourceDegradationV1>,
     pub failure_kind: CiFailureKindV1,
     pub failure_anchor: RetrievalAnchorId,
     pub branch: CiFailureBranchEvidenceV1,
@@ -235,6 +283,9 @@ impl CiFailureLocalizationResultV1 {
         self.provider.validate()?;
         self.run.validate()?;
         self.parser.validate()?;
+        self.source_degradation
+            .as_ref()
+            .map_or(Ok(()), CiFailureSourceDegradationV1::validate)?;
         self.failure_anchor.validate()?;
         self.branch.validate()?;
         self.generation
@@ -285,6 +336,23 @@ impl CiFailureLocalizationResultV1 {
         if !coverage_matches {
             return Err(DomainError::NonCanonical {
                 field: "ci failure localization coverage",
+            });
+        }
+        if (self.state == CiFailureLocalizationStateV1::Failed
+            && !matches!(
+                self.source_degradation,
+                Some(CiFailureSourceDegradationV1::Failed(_))
+            ))
+            || matches!(
+                self.state,
+                CiFailureLocalizationStateV1::Complete
+                    | CiFailureLocalizationStateV1::Partial
+                    | CiFailureLocalizationStateV1::Unavailable
+                    | CiFailureLocalizationStateV1::Denied
+            ) && self.source_degradation.is_some()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "ci failure source degradation",
             });
         }
         if self.state == CiFailureLocalizationStateV1::Complete && self.generation.is_none() {
@@ -367,6 +435,7 @@ mod tests {
             },
             state: CiFailureLocalizationStateV1::Complete,
             coverage: CiFailureCoverageV1::Complete,
+            source_degradation: None,
             failure_kind: CiFailureKindV1::InfrastructureFailure,
             failure_anchor: RetrievalAnchorId::new("anchor.ci").unwrap(),
             branch: CiFailureBranchEvidenceV1 {
