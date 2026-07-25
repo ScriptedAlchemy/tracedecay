@@ -418,6 +418,22 @@ fn retained_or_unreported_observation_history_is_not_absent() {
             coverage: DoctorCoverageCompletenessV1::Unknown,
         }
     );
+
+    let mut active =
+        crate::application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+            .expect("active empty projection");
+    active.coverage = crate::application::feedback::observations::Plan26CoverageV1::Known;
+    active.watermark.producer_boot_id =
+        Some(tracedecay_domain::canonical_sha256(&"active-observation-boot").unwrap());
+    assert_eq!(
+        observability_read_from_model(Ok(active)),
+        ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 0,
+            last_observed_at_micros: None,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        }
+    );
 }
 
 // --- Storage mapper ---------------------------------------------------------
