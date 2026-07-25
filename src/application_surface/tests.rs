@@ -525,7 +525,9 @@ fn callable_code_operations_parse_distinct_application_requests() {
         ApplicationSurfaceOperation::CodePhraseSearch,
         callable_code_request_body(serde_json::json!({
             "query": "callable application surface",
-            "phrases": ["callable application", "surface"]
+            "phrases": ["callable application", "surface"],
+            "field_filters": [{"field": "path", "include": true}],
+            "fuzzy_budget": 7
         })),
     )
     .expect("phrase search request");
@@ -543,6 +545,14 @@ fn callable_code_operations_parse_distinct_application_requests() {
         )
         .expect("validated phrase request");
     assert_eq!(phrase.query.as_str(), "callable application surface");
+    assert_eq!(phrase.fuzzy_budget, 7);
+    assert_eq!(
+        phrase.field_filters,
+        [tracedecay_application::CodeLexicalFieldFilter {
+            field: tracedecay_application::CodeLexicalField::Path,
+            include: true,
+        }]
+    );
 
     let callees = parse_application_surface_request(
         ApplicationSurfaceOperation::CodeCallees,
@@ -558,6 +568,43 @@ fn callable_code_operations_parse_distinct_application_requests() {
         ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Callees(request))
             if request.node_id == "node.application-surface"
     ));
+
+    let facets = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeFacets,
+        callable_code_request_body(serde_json::json!({"dimension": "language"})),
+    )
+    .expect("facets request");
+    assert!(matches!(
+        facets,
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Facets(request))
+            if request.dimension == tracedecay_application::CodeFacetDimension::Language
+    ));
+
+    let timeline = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeTimeline,
+        callable_code_request_body(serde_json::json!({})),
+    )
+    .expect("timeline request");
+    assert!(matches!(
+        timeline,
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Timeline(_))
+    ));
+
+    for operation in [
+        ApplicationSurfaceOperation::CodeDeclaration,
+        ApplicationSurfaceOperation::CodeDefinition,
+        ApplicationSurfaceOperation::CodeTypeDefinition,
+        ApplicationSurfaceOperation::CodeReferences,
+    ] {
+        let request = parse_application_surface_request(
+            operation,
+            callable_code_request_body(
+                serde_json::json!({"node_id": "symbol.application-surface"}),
+            ),
+        )
+        .expect("navigation request");
+        assert!(request.matches(operation));
+    }
 }
 
 #[test]
@@ -803,6 +850,24 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
         ),
         (ApplicationSurfaceOperation::CodeCallers, "code_callers"),
         (ApplicationSurfaceOperation::CodeCallees, "code_callees"),
+        (ApplicationSurfaceOperation::CodeFacets, "code_facets"),
+        (ApplicationSurfaceOperation::CodeTimeline, "code_timeline"),
+        (
+            ApplicationSurfaceOperation::CodeDeclaration,
+            "code_declaration",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeDefinition,
+            "code_definition",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeTypeDefinition,
+            "code_type_definition",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeReferences,
+            "code_references",
+        ),
     ] {
         assert_eq!(operation.as_str(), name);
         assert_eq!(
@@ -819,6 +884,12 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
         "type_hierarchy",
         "callers",
         "callees",
+        "facets",
+        "timeline",
+        "declaration",
+        "definition",
+        "type_definition",
+        "references",
     ] {
         assert_eq!(
             ApplicationSurfaceOperation::from_tool_name(primitive_alias),

@@ -59,6 +59,12 @@ pub enum HttpApplicationOperation {
     CodeTypeHierarchy,
     CodeCallers,
     CodeCallees,
+    CodeFacets,
+    CodeTimeline,
+    CodeDeclaration,
+    CodeDefinition,
+    CodeTypeDefinition,
+    CodeReferences,
     SessionLookup,
     QualifiedName,
     CallChain,
@@ -134,6 +140,12 @@ impl HttpApplicationOperation {
             Self::CodeTypeHierarchy => "code_type_hierarchy",
             Self::CodeCallers => "code_callers",
             Self::CodeCallees => "code_callees",
+            Self::CodeFacets => "code_facets",
+            Self::CodeTimeline => "code_timeline",
+            Self::CodeDeclaration => "code_declaration",
+            Self::CodeDefinition => "code_definition",
+            Self::CodeTypeDefinition => "code_type_definition",
+            Self::CodeReferences => "code_references",
             Self::SessionLookup => "session_lookup",
             Self::QualifiedName => "qualified_name",
             Self::CallChain => "call_chain",
@@ -188,9 +200,15 @@ impl HttpApplicationOperation {
             | Self::FeedbackList
             | Self::FeedbackAdvisoryCycle
             | Self::FeedbackImpact => HttpApplicationOwnerKind::Feedback,
-            Self::CodeExactOccurrence | Self::CodePhraseSearch | Self::CodeCallees => {
-                HttpApplicationOwnerKind::CallableCode
-            }
+            Self::CodeExactOccurrence
+            | Self::CodePhraseSearch
+            | Self::CodeCallees
+            | Self::CodeFacets
+            | Self::CodeTimeline
+            | Self::CodeDeclaration
+            | Self::CodeDefinition
+            | Self::CodeTypeDefinition
+            | Self::CodeReferences => HttpApplicationOwnerKind::CallableCode,
             Self::AffectedTests => HttpApplicationOwnerKind::Feedback,
             Self::TestResults
             | Self::CodeSymbolSearch
@@ -735,6 +753,12 @@ fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOpera
         "code_type_hierarchy" => Some(HttpApplicationOperation::CodeTypeHierarchy),
         "code_callers" => Some(HttpApplicationOperation::CodeCallers),
         "code_callees" => Some(HttpApplicationOperation::CodeCallees),
+        "code_facets" => Some(HttpApplicationOperation::CodeFacets),
+        "code_timeline" => Some(HttpApplicationOperation::CodeTimeline),
+        "code_declaration" => Some(HttpApplicationOperation::CodeDeclaration),
+        "code_definition" => Some(HttpApplicationOperation::CodeDefinition),
+        "code_type_definition" => Some(HttpApplicationOperation::CodeTypeDefinition),
+        "code_references" => Some(HttpApplicationOperation::CodeReferences),
         _ => None,
     }
 }
@@ -984,6 +1008,36 @@ mod tests {
             (
                 "code_callees",
                 HttpApplicationOperation::CodeCallees,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_facets",
+                HttpApplicationOperation::CodeFacets,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_timeline",
+                HttpApplicationOperation::CodeTimeline,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_declaration",
+                HttpApplicationOperation::CodeDeclaration,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_definition",
+                HttpApplicationOperation::CodeDefinition,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_type_definition",
+                HttpApplicationOperation::CodeTypeDefinition,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_references",
+                HttpApplicationOperation::CodeReferences,
                 HttpApplicationOwnerKind::CallableCode,
             ),
         ] {
