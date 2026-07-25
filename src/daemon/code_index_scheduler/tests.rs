@@ -827,6 +827,34 @@ async fn bundled_pr9_profile_composes_live_code_index_lanes() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted scheduler projection");
+    let latest = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("latest generation");
+
+    assert_eq!(
+        projected.latest_generation_id.as_deref(),
+        Some(latest.generation.manifest().generation_id.as_str())
+    );
+    assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(projected.coverage, "complete");
+}
+
 #[test]
 fn restart_restores_complete_generation_and_content_noop() {
     let fixture = GitFixture::new(&[(
