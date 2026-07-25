@@ -4090,12 +4090,15 @@ impl DaemonFeedbackRuntimeRegistrar {
             return Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered);
         }
         let project_id = scope.project_id.clone();
-        let runtime = Arc::new(open_pr12_feedback_runtime(
-            database,
-            project_root.clone(),
-            scope.clone(),
-            access.clone(),
-        )?);
+        let runtime = Arc::new(
+            open_pr12_feedback_runtime(
+                database,
+                project_root.clone(),
+                scope.clone(),
+                access.clone(),
+            )
+            .await?,
+        );
         self.service.callable_code_runtimes.lock().await.insert(
             project_root.clone(),
             RegisteredCallableCodeRuntime {
