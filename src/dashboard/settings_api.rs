@@ -19,6 +19,7 @@ const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/conf
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ProjectSettingsPatch {
+    expected_revision_id: String,
     #[serde(default)]
     include: Option<Vec<String>>,
     #[serde(default)]
@@ -56,6 +57,7 @@ struct TelemetrySettingsPatch {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct UserSettingsPatch {
+    expected_revision_id: String,
     #[serde(default)]
     upload_enabled: Option<bool>,
     #[serde(default)]
@@ -106,6 +108,7 @@ pub(crate) async fn patch_project_settings(
 
     let current = crate::config::cached_runtime_configuration(&state.project_root)
         .map_err(|err| configuration_unavailable(&err))?;
+    ensure_expected_revision(&patch.expected_revision_id, current.revision_id.as_str())?;
     let current_config = &current.config;
     let sync = patch.sync.as_ref().map_or_else(
         || current_config.sync.clone(),
@@ -183,6 +186,10 @@ pub(crate) async fn patch_user_settings(
     if !errors.is_empty() {
         return Err(validation_failed(&errors));
     }
+
+    let current = crate::config::cached_runtime_configuration(&state.project_root)
+        .map_err(|err| configuration_unavailable(&err))?;
+    ensure_expected_revision(&patch.expected_revision_id, current.revision_id.as_str())?;
 
     let mut config = UserConfig::load();
     let restart_recommended = patch
@@ -388,9 +395,24 @@ fn validation_failed(errors: &[Value]) -> JsonError {
     )
 }
 
+fn ensure_expected_revision(expected: &str, actual: &str) -> std::result::Result<(), JsonError> {
+    if expected == actual {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        Json(json!({
+            "code": "configuration_revision_conflict",
+            "detail": "settings changed after this edit began; refresh and retry",
+            "expected_revision_id": expected,
+            "actual_revision_id": actual,
+        })),
+    ))
+}
+
 fn patch_shape_error(scope: &str, err: &serde_json::Error) -> JsonError {
     let message = format!("invalid {scope} patch: {err}");
-    let field = unknown_field(&message).unwrap_or_else(|| "patch".to_string());
+    let field = serde_error_field(&message).unwrap_or_else(|| "patch".to_string());
     (
         StatusCode::BAD_REQUEST,
         Json(json!({
@@ -400,11 +422,15 @@ fn patch_shape_error(scope: &str, err: &serde_json::Error) -> JsonError {
     )
 }
 
-fn unknown_field(message: &str) -> Option<String> {
-    let start = message.find("unknown field `")? + "unknown field `".len();
-    let rest = &message[start..];
-    let end = rest.find('`')?;
-    Some(rest[..end].to_string())
+fn serde_error_field(message: &str) -> Option<String> {
+    ["unknown field `", "missing field `"]
+        .into_iter()
+        .find_map(|prefix| {
+            let start = message.find(prefix)? + prefix.len();
+            let rest = &message[start..];
+            let end = rest.find('`')?;
+            Some(rest[..end].to_string())
+        })
 }
 
 fn internal_error(err: &impl ToString) -> JsonError {

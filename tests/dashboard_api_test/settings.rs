@@ -152,6 +152,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .is_some_and(|value| !value.is_empty()),
             "settings must expose the pinned configuration revision: {settings}"
         );
+        let mut revision = settings["project"]["configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing configuration revision: {settings}"))
+            .to_owned();
         let legacy_config_path = std::path::PathBuf::from(
             settings["project"]["legacy_config_path"]
                 .as_str()
@@ -217,15 +221,23 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert!(settings["environment"]["global_accounting_enabled"].is_boolean());
 
         let project_url = format!("{url}/project");
-        let (status, unchanged) =
-            patch_json_body(&agent, &project_url, &json!({ "max_file_size": 1_048_576 }));
+        let (status, unchanged) = patch_json_body(
+            &agent,
+            &project_url,
+            &json!({
+                "expected_revision_id": revision,
+                "max_file_size": 1_048_576
+            }),
+        );
         assert_eq!(status, 200, "no-op project patch failed: {unchanged}");
         assert_eq!(unchanged["resync_recommended"], false);
 
+        let previous_revision = revision.clone();
         let (status, patched) = patch_json_body(
             &agent,
             &project_url,
             &json!({
+                "expected_revision_id": revision,
                 "exclude": ["target/**", "dist/**"],
                 "include": [".github/**"],
                 "max_file_size": 2048
@@ -240,14 +252,52 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             patched["project"]["config"]["max_file_size"], 2048,
             "the response must publish the daemon-returned snapshot: {patched}"
         );
+        revision = patched["project"]["configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("mutated response omitted revision: {patched}"))
+            .to_owned();
+        assert_ne!(
+            revision, previous_revision,
+            "a project mutation must publish a new configuration revision"
+        );
         assert_eq!(
             std::fs::read(&legacy_config_path).ok(),
             legacy_config_before,
             "a typed mutation must not fall back to config.json"
         );
 
-        let (status, invalid) =
-            patch_json_body(&agent, &project_url, &json!({ "exclude": ["[invalid"] }));
+        let (status, stale) = patch_json_body(
+            &agent,
+            &project_url,
+            &json!({
+                "expected_revision_id": previous_revision,
+                "track_call_sites": false
+            }),
+        );
+        assert_eq!(status, 409, "stale project patch should conflict: {stale}");
+        assert_eq!(stale["code"], "configuration_revision_conflict");
+        assert_eq!(stale["expected_revision_id"], previous_revision);
+        assert_eq!(stale["actual_revision_id"], revision);
+
+        let (status, absent) =
+            patch_json_body(&agent, &project_url, &json!({ "track_call_sites": false }));
+        assert_eq!(
+            status, 400,
+            "missing project revision must be rejected: {absent}"
+        );
+        assert_eq!(
+            absent["validation_errors"][0]["field"],
+            "expected_revision_id"
+        );
+
+        let (status, invalid) = patch_json_body(
+            &agent,
+            &project_url,
+            &json!({
+                "expected_revision_id": revision,
+                "exclude": ["[invalid"]
+            }),
+        );
         assert_eq!(status, 400, "invalid glob should 400: {invalid}");
         assert_eq!(invalid["validation_errors"][0]["field"], "exclude");
         assert!(
@@ -257,20 +307,50 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .contains("[invalid")
         );
 
-        let (status, unknown) =
-            patch_json_body(&agent, &project_url, &json!({ "made_up_field": true }));
+        let (status, unknown) = patch_json_body(
+            &agent,
+            &project_url,
+            &json!({
+                "expected_revision_id": revision,
+                "made_up_field": true
+            }),
+        );
         assert_eq!(status, 400, "unknown field should 400: {unknown}");
         assert_eq!(unknown["validation_errors"][0]["field"], "made_up_field");
 
-        let (status, zero) = patch_json_body(&agent, &project_url, &json!({ "max_file_size": 0 }));
+        let (status, zero) = patch_json_body(
+            &agent,
+            &project_url,
+            &json!({
+                "expected_revision_id": revision,
+                "max_file_size": 0
+            }),
+        );
         assert_eq!(status, 400, "zero max_file_size should 400: {zero}");
         assert_eq!(zero["validation_errors"][0]["field"], "max_file_size");
 
         let user_url = format!("{url}/user");
+        let (status, stale_user) = patch_json_body(
+            &agent,
+            &user_url,
+            &json!({
+                "expected_revision_id": previous_revision,
+                "upload_enabled": true
+            }),
+        );
+        assert_eq!(
+            status, 409,
+            "stale user patch should conflict: {stale_user}"
+        );
+        assert_eq!(stale_user["code"], "configuration_revision_conflict");
+        assert_eq!(stale_user["expected_revision_id"], previous_revision);
+        assert_eq!(stale_user["actual_revision_id"], revision);
+
         let (status, user) = patch_json_body(
             &agent,
             &user_url,
             &json!({
+                "expected_revision_id": revision,
                 "upload_enabled": false,
                 "watcher_debounce": "15s"
             }),
@@ -283,13 +363,36 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(user["user"]["upload_enabled"], false);
         assert_eq!(user["user"]["watcher_debounce"], "15s");
 
-        let (status, upload_only) =
-            patch_json_body(&agent, &user_url, &json!({ "upload_enabled": true }));
+        let (status, upload_only) = patch_json_body(
+            &agent,
+            &user_url,
+            &json!({
+                "expected_revision_id": revision,
+                "upload_enabled": true
+            }),
+        );
         assert_eq!(status, 200, "upload-only patch failed: {upload_only}");
         assert_eq!(upload_only["restart_recommended"], false);
 
-        let (status, bad_debounce) =
-            patch_json_body(&agent, &user_url, &json!({ "watcher_debounce": "1h" }));
+        let (status, absent_user_revision) =
+            patch_json_body(&agent, &user_url, &json!({ "upload_enabled": false }));
+        assert_eq!(
+            status, 400,
+            "missing user revision must be rejected: {absent_user_revision}"
+        );
+        assert_eq!(
+            absent_user_revision["validation_errors"][0]["field"],
+            "expected_revision_id"
+        );
+
+        let (status, bad_debounce) = patch_json_body(
+            &agent,
+            &user_url,
+            &json!({
+                "expected_revision_id": revision,
+                "watcher_debounce": "1h"
+            }),
+        );
         assert_eq!(status, 400, "bad debounce should 400: {bad_debounce}");
         assert_eq!(
             bad_debounce["validation_errors"][0]["field"],

@@ -61,7 +61,10 @@ describe('SettingsPage authorized changes', () => {
       'PATCH /api/settings/project',
       'GET /api/settings',
     ]);
-    expect(calls[2]?.body).toEqual({ max_file_size: 2_097_152 });
+    expect(calls[2]?.body).toEqual({
+      expected_revision_id: 'rev-42',
+      max_file_size: 2_097_152,
+    });
   });
 
   it('blocks a stale project change before sending the patch', async () => {
@@ -126,13 +129,14 @@ describe('SettingsPage authorized changes', () => {
   });
 
   it('surfaces structured server validation errors for a user patch', async () => {
-    const calls: Array<{ url: string; method: string }> = [];
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method ?? 'GET';
-        calls.push({ url, method });
+        const body = init?.body ? JSON.parse(String(init.body)) : null;
+        calls.push({ url, method, body });
         if (url === '/api/settings' && method === 'GET') {
           return jsonResponse(settings());
         }
@@ -171,9 +175,16 @@ describe('SettingsPage authorized changes', () => {
       await screen.findByText('watcher debounce is denied by the active profile policy'),
     ).toBeTruthy();
     expect(calls).toEqual([
-      { method: 'GET', url: '/api/settings' },
-      { method: 'GET', url: '/api/settings' },
-      { method: 'PATCH', url: '/api/settings/user' },
+      { method: 'GET', url: '/api/settings', body: null },
+      { method: 'GET', url: '/api/settings', body: null },
+      {
+        method: 'PATCH',
+        url: '/api/settings/user',
+        body: {
+          expected_revision_id: 'rev-42',
+          watcher_debounce: '15s',
+        },
+      },
     ]);
   });
 });
