@@ -284,7 +284,9 @@ fn observability_event(
         hint_category: None,
         hint_id: Some(envelope.idempotency_key.clone()),
         outcome: Some("failed".to_string()),
-        metadata_json: Some(serde_json::to_string(&envelope).expect("serialize observability event")),
+        metadata_json: Some(
+            serde_json::to_string(&envelope).expect("serialize observability event"),
+        ),
     }
 }
 
@@ -686,8 +688,7 @@ fn observatory_counts_canonical_failed_outcomes() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        let project_id =
-            HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
         fixture
             .host_runtime
             .append_analytics_event_for_test(
@@ -701,8 +702,10 @@ fn observatory_counts_canonical_failed_outcomes() {
             .await
             .expect("append canonical failed event");
 
-        let (status, observatory) =
-            get_json(&http_agent(), &format!("{}/api/observatory", fixture.base_url));
+        let (status, observatory) = get_json(
+            &http_agent(),
+            &format!("{}/api/observatory", fixture.base_url),
+        );
         assert_eq!(status, 200);
         let failures = observatory["metrics"]
             .as_array()
@@ -724,8 +727,7 @@ fn costs_read_model_is_mounted_on_the_active_dashboard() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        let (status, costs) =
-            get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
+        let (status, costs) = get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(costs["authorized_scope_ref"], "all");
         assert!(costs["usage"].is_array());

@@ -45,8 +45,7 @@ use super::{
     DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
     Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationPortV1,
     Pr13AdvisoryCycleInvocationRequestV1, Pr13AdvisoryRegistrationIdentityV1,
-    Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1,
+    Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -883,11 +882,7 @@ pub(crate) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
-    if graph
-        .configuration_runtime()
-        .semantic_runtime()
-        .is_none()
-    {
+    if graph.configuration_runtime().semantic_runtime().is_none() {
         register_semantic_activation_owner(
             invocation,
             project_root,
