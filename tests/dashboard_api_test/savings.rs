@@ -563,24 +563,7 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         let (status, caps) = get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(caps["features"]["savings"], true);
-        assert!(
-            caps["dashboards"]
-                .as_array()
-                .expect("dashboards")
-                .iter()
-                .any(|name| name == "savings")
-        );
-        let (_, plugins) = get_json(
-            &agent,
-            &format!("{}/api/dashboard/plugins", fixture.base_url),
-        );
-        assert!(
-            plugins
-                .as_array()
-                .expect("plugins")
-                .iter()
-                .any(|plugin| plugin["name"] == "savings")
-        );
+        assert_eq!(caps["dashboards"], serde_json::json!(["tracedecay"]));
 
         // Overview: ledger totals + lifetime counters.
         let (status, overview) = get_json(
@@ -940,15 +923,5 @@ fn pricing_serves_bundled_fallback_when_offline() {
         );
         assert_eq!(overview["pricing"]["source"], "fallback");
         assert_eq!(overview["pricing"]["offline"], true);
-
-        // Embedded frontend assets serve for the new plugin.
-        let asset = agent
-            .get(format!(
-                "{}/dashboard-plugins/savings/dist/index.js",
-                fixture.base_url
-            ))
-            .call()
-            .expect("asset fetch");
-        assert_eq!(asset.status().as_u16(), 200);
     });
 }
