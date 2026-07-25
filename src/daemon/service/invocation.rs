@@ -200,6 +200,7 @@ pub(crate) enum DaemonInvocationOperation {
     LspFrame,
     LspPoll,
     LspAcknowledge,
+    LspReconnect,
     LspDetach,
 }
 
@@ -241,6 +242,7 @@ impl DaemonInvocationOperation {
             Self::LspFrame => "lsp_frame",
             Self::LspPoll => "lsp_poll",
             Self::LspAcknowledge => "lsp_acknowledge",
+            Self::LspReconnect => "lsp_reconnect",
             Self::LspDetach => "lsp_detach",
         }
     }
@@ -436,6 +438,9 @@ pub(crate) enum DaemonInvocationPayload {
         session: DaemonLspSessionAccess,
     },
     LspAcknowledge {
+        session: DaemonLspSessionAccess,
+    },
+    LspReconnect {
         session: DaemonLspSessionAccess,
     },
     LspDetach {
@@ -987,6 +992,19 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn lsp_reconnect(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspReconnect { session },
+        }
+    }
+
     pub(crate) fn with_delivery_route(mut self, route: Plan26DeliveryRouteV1) -> Self {
         self.delivery_route = Some(route);
         self
@@ -1100,6 +1118,7 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::LspAcknowledge { .. } => {
                 DaemonInvocationOperation::LspAcknowledge
             }
+            DaemonInvocationPayload::LspReconnect { .. } => DaemonInvocationOperation::LspReconnect,
             DaemonInvocationPayload::LspDetach { .. } => DaemonInvocationOperation::LspDetach,
         }
     }
@@ -1402,6 +1421,7 @@ impl DaemonInvocationRequest {
             }
             DaemonInvocationPayload::LspPoll { session }
             | DaemonInvocationPayload::LspAcknowledge { session }
+            | DaemonInvocationPayload::LspReconnect { session }
             | DaemonInvocationPayload::LspDetach { session } => {
                 let _ = session.clone().into_access()?;
             }
@@ -3791,6 +3811,9 @@ pub(crate) enum DaemonInvocationOutcome {
     LspAcknowledged {
         acknowledged: bool,
     },
+    LspReconnected {
+        session: DaemonLspSessionAccess,
+    },
     LspDetached,
     Problem {
         problem: DaemonInvocationProblem,
@@ -5486,6 +5509,12 @@ struct RuntimeLspSession {
     actor: RuntimeLspActor,
 }
 
+impl Drop for RuntimeLspSession {
+    fn drop(&mut self) {
+        self.actor.expire();
+    }
+}
+
 type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
@@ -7033,6 +7062,10 @@ impl DaemonInvocationService {
                 self.acknowledge_lsp_frame(lsp_registry, request_id, session, now_ms)
                     .await
             }
+            DaemonInvocationPayload::LspReconnect { session } => {
+                self.reconnect_lsp_session(lsp_registry, request_id, session, now_ms)
+                    .await
+            }
             DaemonInvocationPayload::LspDetach { session } => {
                 self.detach_lsp_session(lsp_registry, request_id, session, now_ms)
                     .await
@@ -7260,7 +7293,7 @@ impl DaemonInvocationService {
         };
         let endpoint_detached = {
             let mut registry = lsp_registry.lock().await;
-            registry.detach(&access, now_ms).is_ok()
+            registry.close(&access, now_ms).is_ok()
         };
         let Some(mut session) = self.lsp_sessions.lock().await.remove(access.session_id()) else {
             return DaemonInvocationResponse::problem(
@@ -7278,6 +7311,74 @@ impl DaemonInvocationService {
         DaemonInvocationResponse::with_outcome(request_id, DaemonInvocationOutcome::LspDetached)
     }
 
+    async fn reconnect_lsp_session(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        request_id: String,
+        session: DaemonLspSessionAccess,
+        now_ms: u64,
+    ) -> DaemonInvocationResponse {
+        let access = match session.into_access() {
+            Ok(access) => access,
+            Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        };
+        let mut credential_bytes = [0_u8; 32];
+        if getrandom::getrandom(&mut credential_bytes).is_err() {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+        let Ok(credential) = LspSessionCredential::new(credential_bytes.to_vec()) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        };
+        let reconnected_access = lsp_registry
+            .lock()
+            .await
+            .reconnect_with_credential(&access, credential, now_ms);
+        let Ok(reconnected_access) = reconnected_access else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        let mut sessions = self.lsp_sessions.lock().await;
+        let Some(session) = sessions.get_mut(access.session_id()) else {
+            drop(sessions);
+            let _ = lsp_registry.lock().await.close(&reconnected_access, now_ms);
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        let actor_reconnected = match session.actor.lifecycle() {
+            SessionLifecycle::Detached => session.actor.reconnect().is_ok(),
+            SessionLifecycle::AwaitingInitialize
+            | SessionLifecycle::AwaitingInitialized
+            | SessionLifecycle::Ready
+            | SessionLifecycle::Shutdown => true,
+            SessionLifecycle::Exited | SessionLifecycle::Expired => false,
+        };
+        if !actor_reconnected {
+            drop(sessions);
+            let _ = lsp_registry.lock().await.close(&reconnected_access, now_ms);
+            self.lsp_sessions.lock().await.remove(access.session_id());
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        }
+        DaemonInvocationResponse::with_outcome(
+            request_id,
+            DaemonInvocationOutcome::LspReconnected {
+                session: DaemonLspSessionAccess::from_access(&reconnected_access),
+            },
+        )
+    }
+
     pub(crate) async fn disconnect_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -7286,16 +7387,32 @@ impl DaemonInvocationService {
         let Ok(access) = session.into_access() else {
             return;
         };
-        let removed = lsp_registry
-            .lock()
-            .await
-            .detach(&access, now_millis())
-            .is_ok();
-        if removed
-            && let Some(mut session) = self.lsp_sessions.lock().await.remove(access.session_id())
-        {
-            let _ = session.actor.detach();
+        let now_ms = now_millis();
+        if lsp_registry.lock().await.detach(&access, now_ms).is_err() {
+            return;
         }
+        let expires_at_ms = {
+            let mut sessions = self.lsp_sessions.lock().await;
+            let Some(session) = sessions.get_mut(access.session_id()) else {
+                return;
+            };
+            let _ = session.actor.detach();
+            session.expires_at_ms
+        };
+        let sessions = Arc::clone(&self.lsp_sessions);
+        let registry = Arc::clone(lsp_registry);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                expires_at_ms.saturating_sub(now_millis()),
+            ))
+            .await;
+            let now_ms = now_millis();
+            registry.lock().await.expire_at(now_ms);
+            sessions
+                .lock()
+                .await
+                .retain(|_, session| session.expires_at_ms > now_ms);
+        });
     }
 
     async fn authenticate(
@@ -7305,15 +7422,21 @@ impl DaemonInvocationService {
         now_ms: u64,
     ) -> Result<LspSessionAccess, DaemonInvocationProblem> {
         let access = session.into_access()?;
-        let authenticated = {
+        let authentication = {
             let mut registry = lsp_registry.lock().await;
-            registry.authenticate(&access, now_ms).is_ok()
+            registry
+                .authenticate(&access, now_ms)
+                .map(|_| ())
+                .map_err(|error| matches!(error, LspEndpointError::SessionExpired))
         };
-        if authenticated {
-            Ok(access)
-        } else {
-            self.lsp_sessions.lock().await.remove(access.session_id());
-            Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
+        match authentication {
+            Ok(()) => Ok(access),
+            Err(expired) => {
+                if expired {
+                    self.lsp_sessions.lock().await.remove(access.session_id());
+                }
+                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
+            }
         }
     }
 
@@ -7386,6 +7509,7 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::LspFrame
         | DaemonInvocationOperation::LspPoll
         | DaemonInvocationOperation::LspAcknowledge
+        | DaemonInvocationOperation::LspReconnect
         | DaemonInvocationOperation::LspDetach => Plan26FeedbackOperationV1::LspSession,
         DaemonInvocationOperation::FeedbackObserve
         | DaemonInvocationOperation::PrimitiveRead
@@ -7433,6 +7557,7 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }
+        | DaemonInvocationOutcome::LspReconnected { .. }
         | DaemonInvocationOutcome::LspDetached => Plan26FeedbackOutcomeV1::Completed,
         DaemonInvocationOutcome::Feedback { result, .. }
         | DaemonInvocationOutcome::Primitive { result, .. }
@@ -9009,7 +9134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lsp_detach_and_disconnect_release_actor_and_registry_capacity() {
+    async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
         let service = DaemonInvocationService::default();
         let project_root = PathBuf::from("/authoritative");
         DaemonLspOwnerRegistrar::new(&service)
@@ -9058,8 +9183,79 @@ mod tests {
             panic!("released capacity must admit a replacement");
         };
         service
-            .disconnect_lsp_session(&registry, session)
+            .disconnect_lsp_session(&registry, session.clone())
             .await;
+        assert_eq!(registry.lock().await.active_sessions(), 1);
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+
+        let reconnected = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_reconnect("request.reconnect", session.clone()),
+            )
+            .await;
+        let DaemonInvocationOutcome::LspReconnected {
+            session: reconnected_session,
+        } = reconnected.outcome
+        else {
+            panic!("expected reconnect");
+        };
+        let takeover = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_reconnect(
+                    "request.reconnect-race",
+                    reconnected_session.clone(),
+                ),
+            )
+            .await;
+        let DaemonInvocationOutcome::LspReconnected {
+            session: current_session,
+        } = takeover.outcome
+        else {
+            panic!("expected active transport takeover");
+        };
+        service
+            .disconnect_lsp_session(&registry, reconnected_session)
+            .await;
+        assert_eq!(registry.lock().await.active_sessions(), 1);
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+        let stale_transport = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_poll("request.stale", session),
+            )
+            .await;
+        assert!(matches!(
+            stale_transport.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+            }
+        ));
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+
+        let detached = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_detach("request.detach.2", current_session),
+            )
+            .await;
+        assert!(matches!(
+            detached.outcome,
+            DaemonInvocationOutcome::LspDetached
+        ));
         assert_eq!(registry.lock().await.active_sessions(), 0);
         assert!(service.lsp_sessions.lock().await.is_empty());
     }
