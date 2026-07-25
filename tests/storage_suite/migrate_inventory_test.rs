@@ -63,9 +63,25 @@ fn same_path(left: &Path, right: &Path) -> bool {
 fn block_on_inventory(
     options: MigrationInventoryOptions,
 ) -> tracedecay::errors::Result<tracedecay::migrate::inventory::MigrationInventory> {
+    prepare_inventory_profile(&options);
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(build_inventory(options))
+}
+
+fn prepare_inventory_profile(options: &MigrationInventoryOptions) {
+    let profile_root = options
+        .global_db_path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| tracedecay::storage::default_profile_root().unwrap());
+    fs::create_dir_all(&profile_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(profile_root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
 }
 
 async fn build_inventory_with_env_lock(
@@ -76,6 +92,7 @@ async fn build_inventory_with_env_lock(
     // parallel tests neither contend on one lifecycle lease nor scan another
     // test's transient profile.
     let _guard = crate::support::HOME_ENV_LOCK.lock().await;
+    prepare_inventory_profile(&options);
     build_inventory(options).await
 }
 
