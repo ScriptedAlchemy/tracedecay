@@ -666,11 +666,27 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
 }
 
 function graphOverviewPayload(): Record<string, unknown> {
-  // top_connected: highest-degree hubs first (graph_queries.rs top_connected_rows
-  // shape: id, name, kind, file_path, degree).
-  const topConnected = Array.from({ length: 18 }, (_, i) =>
-    graphNode(i, 'hub', 340 - i * 16),
-  );
+  // top_connected: highest-degree hubs first. This row set had drifted away
+  // from its own stated contract — it emitted 18 full node records, while
+  // `graph_queries::top_connected_rows` selects exactly FIVE columns from a
+  // `LIMIT 12` subquery and never joins `qualified_name`. The Code workspace
+  // renders these rows directly, so the audit was judging a payload the daemon
+  // cannot produce. Restored to the real shape, including the real curve:
+  // degree in a symbol graph is power-law, not linear — one run-away hub, a
+  // steep fall, then near-ties bunching at the bottom of the twelve.
+  const HUB_DEGREES = [
+    1840, 1461, 1218, 1093, 837, 811, 704, 551, 546, 545, 399, 390,
+  ] as const;
+  const topConnected = HUB_DEGREES.map((degree, i) => {
+    const full = graphNode(i, 'hub', degree);
+    return {
+      id: full['id'],
+      name: full['name'],
+      kind: full['kind'],
+      file_path: full['file_path'],
+      degree,
+    };
+  });
   return {
     totals: { nodes: 12_873, edges: 41_206, files: 642 },
     nodes_by_kind: [
