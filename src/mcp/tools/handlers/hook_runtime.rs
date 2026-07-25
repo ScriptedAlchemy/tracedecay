@@ -2387,14 +2387,9 @@ mod tests {
         let binding = admission_test_binding(7);
         let first = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
         assert!(!first.work_completed);
-        let unavailable = retain_hook_v2_pending_work(
-            data_root.path(),
-            &envelope,
-            &envelope,
-            &binding,
-            now,
-        )
-        .expect("durable pending work");
+        let unavailable =
+            retain_hook_v2_pending_work(data_root.path(), &envelope, &envelope, &binding, now)
+                .expect("durable pending work");
         drop(unavailable);
         assert_eq!(
             hook_v2_pending_work_envelopes(
@@ -2411,22 +2406,19 @@ mod tests {
             tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         );
         assert!(!duplicate.work_completed);
-        let redrive = retain_hook_v2_pending_work(
-            data_root.path(),
-            &envelope,
-            &envelope,
-            &binding,
-            now,
-        )
-        .expect("duplicate pending work redrive");
+        let redrive =
+            retain_hook_v2_pending_work(data_root.path(), &envelope, &envelope, &binding, now)
+                .expect("duplicate pending work redrive");
         redrive();
 
-        assert!(hook_v2_pending_work_envelopes(
-            data_root.path(),
-            tracedecay_hooks::HookHostV1::ClaudeCode,
-            now,
-        )
-        .is_empty());
+        assert!(
+            hook_v2_pending_work_envelopes(
+                data_root.path(),
+                tracedecay_hooks::HookHostV1::ClaudeCode,
+                now,
+            )
+            .is_empty()
+        );
         assert!(
             record_hook_v2_admission(data_root.path(), &envelope, now)
                 .unwrap()

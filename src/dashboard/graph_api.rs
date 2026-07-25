@@ -9,7 +9,7 @@
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::Json;
+use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -49,32 +49,34 @@ pub(crate) struct PathParams {
 }
 
 /// `GET /api/plugins/graph/overview`
-pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
-    Json(graph_service::overview_payload(&state).await)
+pub(crate) async fn overview(State(state): State<DashboardState>) -> Response {
+    graph_response(graph_service::overview_payload(&state).await)
 }
 
 /// `GET /api/plugins/graph/search?q=...&limit=50&offset=0`
 pub(crate) async fn search(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SearchParams>,
-) -> Json<Value> {
+) -> Response {
     let limit = coerce_limit(params.limit, 50, 200);
     let offset = params.offset.unwrap_or(0).max(0);
-    Json(graph_service::search_payload(&state, params.q.trim(), limit, offset).await)
+    graph_response(graph_service::search_payload(&state, params.q.trim(), limit, offset).await)
 }
 
 /// `GET /api/plugins/graph/node/{node_id}`
 pub(crate) async fn node(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
-) -> (StatusCode, Json<Value>) {
-    let Some(payload) = graph_service::node_payload(&state, &node_id).await else {
-        return (
+) -> Response {
+    match graph_service::node_payload(&state, &node_id).await {
+        Ok(Some(payload)) => Json(payload).into_response(),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(http_detail(&format!("node not found: {node_id}"))),
-        );
-    };
-    (StatusCode::OK, Json(payload))
+        )
+            .into_response(),
+        Err(error) => graph_read_failed(error),
+    }
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/neighbors`
@@ -82,18 +84,20 @@ pub(crate) async fn neighbors(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<NeighborParams>,
-) -> (StatusCode, Json<Value>) {
-    if !graph_service::node_exists(&state, &node_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("node not found: {node_id}"))),
-        );
+) -> Response {
+    match graph_service::node_exists(&state, &node_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(http_detail(&format!("node not found: {node_id}"))),
+            )
+                .into_response();
+        }
+        Err(error) => return graph_read_failed(error),
     }
     let limit = coerce_limit(params.limit, 50, 200);
-    (
-        StatusCode::OK,
-        Json(graph_service::neighbors_payload(&state, &node_id, limit).await),
-    )
+    graph_response(graph_service::neighbors_payload(&state, &node_id, limit).await)
 }
 
 /// `GET /api/plugins/graph/subgraph?node_id=...&limit_nodes=80&limit_edges=120`
@@ -105,10 +109,10 @@ pub(crate) async fn neighbors(
 pub(crate) async fn subgraph(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SubgraphParams>,
-) -> Json<Value> {
+) -> Response {
     let node_limit = coerce_limit(params.limit_nodes, 80, 250);
     let edge_limit = coerce_limit(params.limit_edges, 120, 500);
-    Json(
+    graph_response(
         graph_service::subgraph_payload(
             &state,
             params.node_id,
@@ -124,7 +128,27 @@ pub(crate) async fn subgraph(
 pub(crate) async fn path(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<PathParams>,
-) -> Json<Value> {
+) -> Response {
     let max_depth = coerce_limit(params.max_depth, 6, 10);
-    Json(graph_service::path_payload(&state, params.from.trim(), params.to.trim(), max_depth).await)
+    graph_response(
+        graph_service::path_payload(&state, params.from.trim(), params.to.trim(), max_depth).await,
+    )
+}
+
+fn graph_response(result: Result<Value, String>) -> Response {
+    match result {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => graph_read_failed(error),
+    }
+}
+
+fn graph_read_failed(error: String) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "status": "read_failed",
+            "error": error,
+        })),
+    )
+        .into_response()
 }

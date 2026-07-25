@@ -8,8 +8,9 @@ use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::migrate::inventory::{
-    InventoryIntegrityMode, MigrationInventory, MigrationInventoryOptions, RegistryStatus,
-    StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus, build_inventory,
+    InventoryIntegrityMode, InventoryStoreAuthority, MigrationInventory, MigrationInventoryOptions,
+    RegistryStatus, SqliteIntegrityOutcome, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
+    StoreStatus, build_inventory,
 };
 use tracedecay::migrate::manifest::{
     MigrationManifest, MigrationPlanOptions, MigrationProtocol, StoreArtifactPath,
@@ -108,6 +109,37 @@ async fn make_healthy_project_store(root: &Path) {
     let conn = rusqlite::Connection::open(data_dir.join("tracedecay.db")).unwrap();
     conn.execute("CREATE TABLE health_check (id INTEGER PRIMARY KEY)", [])
         .unwrap();
+}
+
+fn make_damaged_sqlite(path: &Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute(
+        "CREATE TABLE damaged_facts (id INTEGER PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .unwrap();
+    for id in 0..256 {
+        conn.execute(
+            "INSERT INTO damaged_facts (id, value) VALUES (?1, ?2)",
+            rusqlite::params![id, format!("fact-{id:04}-{}", "x".repeat(64))],
+        )
+        .unwrap();
+    }
+    let root_page = conn
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'damaged_facts'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as usize;
+    let page_size = conn
+        .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+        .unwrap() as usize;
+    drop(conn);
+
+    let mut bytes = fs::read(path).unwrap();
+    bytes[(root_page - 1) * page_size] = 0xff;
+    fs::write(path, bytes).unwrap();
 }
 
 fn single_ok_inventory(project: &Path, data_dir: &Path, graph_db: &Path) -> MigrationInventory {
@@ -304,7 +336,16 @@ async fn inventory_does_not_open_or_recover_dirty_project_db() {
         .find(|store| store.project_root == root)
         .expect("project store should be inventoried");
     assert!(store.statuses.contains(&StoreStatus::Dirty));
-    assert!(store.statuses.contains(&StoreStatus::Corrupt));
+    assert!(store.statuses.iter().any(|status| {
+        matches!(
+            status,
+            StoreStatus::IntegrityIssue {
+                path,
+                authority: InventoryStoreAuthority::Authoritative,
+                outcome: SqliteIntegrityOutcome::Damaged { .. },
+            } if same_path(path, &db_path)
+        )
+    }));
 }
 
 #[tokio::test]
@@ -357,7 +398,7 @@ async fn inventory_records_project_store_sidecar_artifacts() {
 }
 
 #[tokio::test]
-async fn inventory_records_branch_graph_db_and_marks_corrupt_when_quick_check_fails() {
+async fn damaged_stale_branch_is_attributed_without_condemning_authoritative_store() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     let branches_dir = root.join(".tracedecay/branches");
@@ -365,7 +406,7 @@ async fn inventory_records_branch_graph_db_and_marks_corrupt_when_quick_check_fa
     fs::create_dir_all(&root).unwrap();
     make_healthy_project_store(&root).await;
     fs::create_dir_all(&branches_dir).unwrap();
-    fs::write(&branch_db, b"not sqlite").unwrap();
+    make_damaged_sqlite(&branch_db);
     fs::write(branches_dir.join("feature.db-wal"), b"wal").unwrap();
     fs::write(branches_dir.join("feature.db-shm"), b"shm").unwrap();
 
@@ -399,7 +440,30 @@ async fn inventory_records_branch_graph_db_and_marks_corrupt_when_quick_check_fa
             && same_path(&artifact.path, &branches_dir.join("feature.db-shm"))
             && artifact.size_bytes == 3
     }));
-    assert_eq!(store.statuses, vec![StoreStatus::Corrupt]);
+    assert!(!store.statuses.contains(&StoreStatus::Corrupt));
+    assert!(
+        store.statuses.iter().any(|status| {
+            matches!(
+                status,
+                StoreStatus::IntegrityIssue {
+                    path,
+                    authority: InventoryStoreAuthority::StaleBranch,
+                    outcome: SqliteIntegrityOutcome::Damaged { details },
+                } if same_path(path, &branch_db) && !details.is_empty()
+            )
+        }),
+        "{:?}",
+        store.statuses
+    );
+    assert!(!store.statuses.iter().any(|status| {
+        matches!(
+            status,
+            StoreStatus::IntegrityIssue {
+                authority: InventoryStoreAuthority::Authoritative,
+                ..
+            }
+        )
+    }));
 }
 
 #[tokio::test]
@@ -711,7 +775,7 @@ async fn inventory_reports_registered_project_with_missing_local_store() {
 }
 
 #[tokio::test]
-async fn inventory_warns_instead_of_failing_on_unreadable_global_db() {
+async fn inventory_reports_non_sqlite_global_db_as_damaged() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     fs::write(&db_path, b"not sqlite").unwrap();
@@ -727,6 +791,11 @@ async fn inventory_warns_instead_of_failing_on_unreadable_global_db() {
     let global = report.global_db.expect("global DB metadata should exist");
     assert!(global.exists);
     assert_eq!(global.project_count, 0);
+    assert!(matches!(
+        global.integrity,
+        SqliteIntegrityOutcome::Damaged { ref details }
+            if !details.is_empty()
+    ));
     assert!(!global.warnings.is_empty());
 }
 

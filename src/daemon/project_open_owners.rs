@@ -70,15 +70,15 @@ use crate::application::advisory::{
 };
 use crate::application::configuration::ConfigurationControlStore;
 use crate::application::context::{CancellationToken, MonotonicDeadline};
+use crate::application::feedback::observations::{
+    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
+    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+};
 use crate::application::feedback::{
     Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
     ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
     ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
     resolve_production_feedback_cycle_parts,
-};
-use crate::application::feedback::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
 };
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
@@ -1512,7 +1512,7 @@ async fn run_production_pr13_hook_cycle(
             OperationKind::FeedbackDiagnostics,
             observed_at,
         )
-    .await
+        .await
     else {
         observe_hook_feedback_cycle_terminal(
             &registration.host_delivery.source_observations,
@@ -2361,9 +2361,7 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct RecordingHookCycleObservations(
-        std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>,
-    );
+    struct RecordingHookCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
 
     impl Plan26FeedbackObservationEmitterV1 for RecordingHookCycleObservations {
         fn observe_source_event(

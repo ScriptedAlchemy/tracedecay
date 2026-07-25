@@ -41,6 +41,31 @@ pub enum StoreRole {
     HermesStateDbSource,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SqliteIntegrityOutcome {
+    #[default]
+    NotChecked,
+    Verified,
+    Damaged {
+        details: Vec<String>,
+    },
+    Unavailable {
+        reason: String,
+    },
+    NoData {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryStoreAuthority {
+    Authoritative,
+    StaleBranch,
+    ExternalSource,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreStatus {
@@ -48,7 +73,14 @@ pub enum StoreStatus {
     MissingDb,
     Dirty,
     Locked,
+    /// Legacy inventory manifests used this unscoped status. New scans emit
+    /// `IntegrityIssue`, which identifies the exact database and its authority.
     Corrupt,
+    IntegrityIssue {
+        path: PathBuf,
+        authority: InventoryStoreAuthority,
+        outcome: SqliteIntegrityOutcome,
+    },
     IntegrityUnchecked,
     NeedsManualReview,
 }
@@ -98,5 +130,7 @@ pub struct GlobalDbInventory {
     pub lcm_raw_message_count: u64,
     pub token_cache_present: bool,
     pub registered_project_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub integrity: SqliteIntegrityOutcome,
     pub warnings: Vec<String>,
 }
