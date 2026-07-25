@@ -73,7 +73,7 @@
             "value": "Synthetic exact message metadata."
           },
           "occurred_window": {
-            "end": 1767323045000000,
+            "end": 1767323045000001,
             "start": 1767323045000000
           },
           "purpose": {
@@ -219,7 +219,7 @@
             "value": "Synthetic copied coordination event without direct authorship."
           },
           "occurred_window": {
-            "end": 1767323165000000,
+            "end": 1767323165000001,
             "start": 1767323165000000
           },
           "purpose": {
@@ -576,7 +576,7 @@
         "actor_id": "actor-synthetic-parent-001",
         "version": null
       },
-      "digest": "sha256:3aa2c3d49dc8c8c4794136fd5c846f0eb30b9e6fa37bb7cde7e47cb4758f270d",
+      "digest": "sha256:434a2e25fc976db1dc72bb6c73a55317b1749cd0901480864cbc93188d615c10",
       "git_snapshot": {
         "captured_at": 1767323045000000,
         "dirty": false,
