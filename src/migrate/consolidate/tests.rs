@@ -34,7 +34,7 @@ use crate::memory::types::{
     AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::tracedecay::TraceDecayOpenOptions;
 
 mod lifecycle;
 mod memory;

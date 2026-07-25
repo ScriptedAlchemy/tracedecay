@@ -509,6 +509,7 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
         .map(|project| project.project_id)
         .collect::<Vec<_>>();
     assert_eq!(owners, vec![applied.destination_project_id.clone()]);
+    drop(global);
     assert!(
         fixture
             .profile
@@ -553,12 +554,20 @@ async fn mixed_page_destination_survives_overlapping_watcher_opens() {
         .destination_data_root
         .join(crate::config::DB_FILENAME);
     assert_eq!(database_page_size(&destination).await, 4096);
+    let _session_runtime = HostAdmissionTestRuntimeV1::project(
+        &fixture.profile,
+        &fixture.project,
+        ProjectId::new(applied.destination_project_id.clone()).unwrap(),
+    )
+    .await
+    .unwrap();
 
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(fixture.profile.clone()),
         global_db_path: Some(fixture.profile.join("global.db")),
     };
-    let cached = TraceDecay::open_with_options(&fixture.project, open_options.clone())
+    let cached = _session_runtime
+        .open_project_graph_for_test(&fixture.project, open_options.clone())
         .await
         .unwrap();
 
@@ -568,7 +577,8 @@ async fn mixed_page_destination_survives_overlapping_watcher_opens() {
             format!("pub fn fixture() -> usize {{ {round} }}\n"),
         )
         .unwrap();
-        let watcher = TraceDecay::open_with_options(&fixture.project, open_options.clone())
+        let watcher = _session_runtime
+            .open_project_graph_for_test(&fixture.project, open_options.clone())
             .await
             .unwrap();
         watcher
@@ -1044,15 +1054,23 @@ async fn identity_survives_symlink_and_repository_move() {
 
     let moved = fixture.project.parent().unwrap().join("repo-moved");
     fs::rename(&fixture.project, &moved).unwrap();
-    let reopened = TraceDecay::open_read_only_with_options(
+    let _session_runtime = HostAdmissionTestRuntimeV1::project(
+        &fixture.profile,
         &moved,
-        TraceDecayOpenOptions {
-            profile_root: Some(fixture.profile.clone()),
-            global_db_path: Some(fixture.profile.join("global.db")),
-        },
+        ProjectId::new(applied.destination_project_id.clone()).unwrap(),
     )
     .await
     .unwrap();
+    let reopened = _session_runtime
+        .open_project_graph_read_only_for_test(
+            &moved,
+            TraceDecayOpenOptions {
+                profile_root: Some(fixture.profile.clone()),
+                global_db_path: Some(fixture.profile.join("global.db")),
+            },
+        )
+        .await
+        .unwrap();
     assert!(same_path(
         &reopened.store_layout().data_root,
         &applied.destination_data_root
@@ -1068,11 +1086,15 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
     add_untracked_branch(&source, "orphan-source", SOURCE_ORPHAN_FACT).await;
     add_untracked_branch(&target, "orphan-target", TARGET_ORPHAN_FACT).await;
-    fs::rename(
-        target.data_root.join("branches/orphan-target.db"),
-        target.data_root.join("branches/orphan-target.DB"),
-    )
-    .unwrap();
+    let lowercase = target.data_root.join("branches/orphan-target.db");
+    let uppercase = target.data_root.join("branches/orphan-target.DB");
+    fs::rename(&lowercase, &uppercase).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let source = sqlite_sidecar(&lowercase, suffix);
+        if source.is_file() {
+            fs::rename(source, sqlite_sidecar(&uppercase, suffix)).unwrap();
+        }
+    }
 
     let options = fixture.options();
     let planned = plan(&options).await.unwrap();

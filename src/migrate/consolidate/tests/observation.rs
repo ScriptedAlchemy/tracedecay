@@ -33,6 +33,124 @@ impl ObservationDatabaseFixture {
     }
 }
 
+async fn observation_backfill_watermark(db: &RegisteredGlobalDb, migration: &str) -> Option<i64> {
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT backfilled_through FROM observation_backfill_watermarks
+             WHERE migration = ?1",
+            params![migration],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .map(|row| row.get::<i64>(0).unwrap())
+}
+
+#[tokio::test]
+async fn legacy_completed_backfills_resume_from_the_premerge_frontier() {
+    let temp = TempDir::new().unwrap();
+    let target = ObservationDatabaseFixture::profile(temp.path().join("target-profile")).await;
+    let source = ObservationDatabaseFixture::profile(temp.path().join("source-profile")).await;
+    let target_path = target.path.clone();
+    let source_path = source.path.clone();
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let target_first = migration_observation_for(
+        "session.legacy.target.first",
+        "receipt.legacy-target-1",
+        "legacy-target-1",
+        "legacy target first",
+    );
+    let target_second = migration_observation_for(
+        "session.legacy.target.second",
+        "receipt.legacy-target-2",
+        "legacy-target-2",
+        "legacy target second",
+    );
+
+    Box::pin(persist_migration_observation(
+        target.database(),
+        target_first,
+        None,
+    ))
+    .await;
+    Box::pin(persist_migration_observation(
+        target.database(),
+        target_second,
+        None,
+    ))
+    .await;
+    Box::pin(persist_migration_observation(
+        source.database(),
+        migration_observation_for(
+            "session.legacy.source.tail",
+            "receipt.legacy-source-tail",
+            "legacy-source-tail",
+            "legacy source tail",
+        ),
+        None,
+    ))
+    .await;
+
+    let writer = target.database().writer_connection().unwrap();
+    writer
+        .execute_batch(
+            "DELETE FROM observation_backfill_watermarks;
+             INSERT OR REPLACE INTO global_schema_migrations(migration)
+             VALUES ('observation-retrieval-anchors-v2');
+             INSERT OR REPLACE INTO global_schema_migrations(migration)
+             VALUES ('observation-repository-provenance-v1');",
+        )
+        .await
+        .unwrap();
+    drop(writer);
+    assert_eq!(
+        observation_backfill_watermark(
+            target.database(),
+            crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+        )
+        .await,
+        None
+    );
+    assert_eq!(
+        observation_backfill_watermark(
+            target.database(),
+            crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+        )
+        .await,
+        None
+    );
+    target.checkpoint().await;
+    source.checkpoint().await;
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "legacy_source",
+        &offsets,
+    )
+    .await
+    .unwrap();
+
+    for migration in [
+        crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+        crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+    ] {
+        assert_eq!(
+            observation_backfill_watermark(target.database(), migration).await,
+            Some(2),
+            "{migration} must resume above the legacy target frontier"
+        );
+    }
+}
+
 #[tokio::test]
 async fn observation_authority_merge_is_lossless_idempotent_and_replayable() {
     let temp = TempDir::new().unwrap();

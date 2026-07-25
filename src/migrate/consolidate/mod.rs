@@ -1910,6 +1910,9 @@ fn validate_artifact_records(
     resolved: &ResolvedPlan,
     records: &[ConsolidationArtifactRecordV1],
 ) -> Result<()> {
+    for record in records {
+        record.authority.validate()?;
+    }
     let expected = artifact_authorities(resolved)?;
     if records.len() != expected.len() {
         return Err(config_error(

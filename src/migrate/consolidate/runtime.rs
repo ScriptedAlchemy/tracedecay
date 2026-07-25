@@ -446,7 +446,7 @@ impl MountedConsolidationArtifactV1 {
     }
 
     pub(super) async fn checkpoint_and_close_exact(mut self) -> Result<ConsolidationAttachTokenV1> {
-        if let Err(error) = self.database().checkpoint().await {
+        if let Err(error) = self.database().truncate_wal_for_offline_maintenance().await {
             drop(self.database.take());
             if let Err(failure) = self
                 .registry
@@ -526,15 +526,28 @@ impl ConsolidationAttachTokenV1 {
                 "consolidation attach token names a replaced SQLite file",
             ));
         }
-        for sidecar in [
-            super::files::sqlite_sidecar(self.closed.path(), "-wal"),
-            super::files::sqlite_sidecar(self.closed.path(), "-shm"),
-        ] {
-            if sidecar.exists() {
+        let wal = super::files::sqlite_sidecar(self.closed.path(), "-wal");
+        if wal.exists() {
+            let bytes = std::fs::metadata(&wal)
+                .map_err(|error| runtime_error(format!("inspect truncated WAL: {error}")))?
+                .len();
+            if bytes != 0 {
                 return Err(runtime_error(
-                    "consolidation attach token refuses live WAL/SHM sidecars",
+                    "consolidation attach token refuses a non-empty WAL",
                 ));
             }
+            std::fs::remove_file(&wal)
+                .map_err(|error| runtime_error(format!("remove truncated WAL: {error}")))?;
+        }
+        let shm = super::files::sqlite_sidecar(self.closed.path(), "-shm");
+        if shm.exists() {
+            std::fs::remove_file(&shm)
+                .map_err(|error| runtime_error(format!("remove closed WAL index: {error}")))?;
+        }
+        if wal.exists() || shm.exists() {
+            return Err(runtime_error(
+                "consolidation attach token could not clear closed WAL/SHM sidecars",
+            ));
         }
         Ok(self.closed.path().to_path_buf())
     }

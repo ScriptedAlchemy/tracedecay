@@ -110,6 +110,16 @@
       "scope": "SnapshotDatabase::backup_to",
       "callee": "Connection::open_with_flags",
       "disposition": "new private standalone backup destination populated from an already-frozen snapshot"
+    },
+    {
+      "path": "src/retention/branch_compaction.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded daemon maintenance for an unmounted non-active branch database; busy files are skipped rather than competing with a writer"
+    },
+    {
+      "path": "src/retention/storage_report.rs",
+      "callee": "Connection::open_with_flags",
+      "disposition": "short read-only free-page sample that degrades on busy or unavailable WAL state and never obtains writer authority"
     }
   ]
 }
