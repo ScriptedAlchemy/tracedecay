@@ -154,14 +154,14 @@ impl GitHubProviderPermissionVerifierV1 {
                 _ => return GitHubReadOnlyCredentialAuthorityOutcomeV1::Indeterminate,
             }
             let known = match permission.as_str() {
-                "metadata" => Some(GitHubReadPermissionV1::Metadata),
-                "pull_requests" => Some(GitHubReadPermissionV1::PullRequests),
-                "contents" => Some(GitHubReadPermissionV1::Contents),
-                "actions" => Some(GitHubReadPermissionV1::Actions),
-                "checks" => Some(GitHubReadPermissionV1::Checks),
-                _ => None,
+                "metadata" => GitHubReadPermissionV1::Metadata,
+                "pull_requests" => GitHubReadPermissionV1::PullRequests,
+                "contents" => GitHubReadPermissionV1::Contents,
+                "actions" => GitHubReadPermissionV1::Actions,
+                "checks" => GitHubReadPermissionV1::Checks,
+                _ => return GitHubReadOnlyCredentialAuthorityOutcomeV1::Indeterminate,
             };
-            exact_permissions.extend(known);
+            exact_permissions.insert(known);
         }
         if !exact_permissions.contains(&GitHubReadPermissionV1::PullRequests) {
             return GitHubReadOnlyCredentialAuthorityOutcomeV1::Indeterminate;
@@ -553,6 +553,20 @@ keyring_account = "indeterminate"
 
 [[github_review_sources]]
 owner = "ScriptedAlchemy"
+repository = "keyring-selected"
+access = "os_keyring"
+keyring_service = "tracedecay.github"
+keyring_account = "selected"
+
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
+repository = "keyring-missing"
+access = "os_keyring"
+keyring_service = "tracedecay.github"
+keyring_account = "missing"
+
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
 repository = "explicit-public"
 access = "public"
 "#,
@@ -566,14 +580,20 @@ access = "public"
                     "indeterminate".to_owned(),
                     "github-token-indeterminate".to_owned(),
                 ),
+                ("selected".to_owned(), "github-token-selected".to_owned()),
             ]),
         });
         let listener = TcpListener::bind("127.0.0.1:0").expect("permission verifier listener");
         let address = listener.local_addr().expect("listener address");
         let server = std::thread::spawn(move || {
-            for _ in 0..4 {
+            for _ in 0..6 {
                 let (mut stream, _) = listener.accept().expect("permission request");
                 let headers = read_headers(&mut stream).to_ascii_lowercase();
+                let repository_selection = if headers.contains("bearer github-token-selected") {
+                    "selected"
+                } else {
+                    "all"
+                };
                 let permissions = if headers.contains("bearer github-token-read") {
                     serde_json::json!({
                         "metadata": "read",
@@ -587,7 +607,9 @@ access = "public"
                     })
                 } else {
                     serde_json::json!({
-                        "metadata": "read"
+                        "metadata": "read",
+                        "pull_requests": "read",
+                        "mystery_permission": "read"
                     })
                 };
                 write_json(
@@ -595,7 +617,7 @@ access = "public"
                     &serde_json::json!({
                         "installations": [{
                             "account": { "login": "ScriptedAlchemy" },
-                            "repository_selection": "all",
+                            "repository_selection": repository_selection,
                             "permissions": permissions,
                             "suspended_at": null
                         }]
@@ -628,7 +650,12 @@ access = "public"
         assert!(read.permits(GitHubReadPermissionV1::PullRequests));
         assert!(!read.permits(GitHubReadPermissionV1::Actions));
 
-        for repository in ["keyring-write", "keyring-indeterminate"] {
+        for repository in [
+            "keyring-write",
+            "keyring-indeterminate",
+            "keyring-selected",
+            "keyring-missing",
+        ] {
             assert_eq!(
                 invocation.mount_github_read_only_credential_authority_for_project(
                     identity.profile_id(),
