@@ -272,15 +272,16 @@ pub(crate) struct SnapshotAttachToken<'snapshot> {
 impl SnapshotAttachToken<'_> {
     pub(crate) fn verified_path(&self) -> io::Result<&Path> {
         self.snapshot.validate_source()?;
-        let current = crate::sessions::source::sqlite_generation_identity(&self.snapshot.path)
-            .map_err(|_| io::Error::other("could not re-identify immutable SQLite snapshot"))?;
+        let current =
+            crate::sessions::source::sqlite_generation_identity(&self.snapshot.identity_path)
+                .map_err(|_| io::Error::other("could not re-identify immutable SQLite snapshot"))?;
         if current != self.file_identity {
             return Err(io::Error::other(
                 "immutable SQLite snapshot path was replaced before ATTACH",
             ));
         }
         for suffix in ["-wal", "-shm"] {
-            let mut sidecar = self.snapshot.path.as_os_str().to_os_string();
+            let mut sidecar = self.snapshot.identity_path.as_os_str().to_os_string();
             sidecar.push(suffix);
             if PathBuf::from(sidecar).exists() {
                 return Err(io::Error::other(
@@ -944,6 +945,24 @@ mod tests {
             "checkpointed"
         );
         assert_eq!(family_state(&path).unwrap(), before);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn direct_immutable_attach_token_verifies_the_filesystem_identity() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        let snapshot = open(&path).await.unwrap();
+        assert_ne!(snapshot.path(), snapshot.identity_path);
+        assert_eq!(
+            snapshot.attach_token().unwrap().verified_path().unwrap(),
+            snapshot.path()
+        );
     }
 
     #[tokio::test]
