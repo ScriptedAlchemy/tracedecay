@@ -124,9 +124,7 @@ struct ProjectionChangeKey {
 
 #[derive(Default)]
 struct ProjectionChangeState {
-    subscriptions: BTreeMap<String, BTreeSet<ContextProjectionRegistration>>,
-    source_revisions: BTreeMap<ProjectionChangeKey, String>,
-    pending: BTreeMap<ProjectionChangeKey, ContextProjectionChange>,
+    latest: BTreeMap<ProjectionChangeKey, (String, ContextProjectionChange)>,
 }
 
 #[derive(Clone, Default)]
@@ -135,24 +133,6 @@ struct ProjectionChangeQueue {
 }
 
 impl ProjectionChangeQueue {
-    fn activate(
-        &self,
-        root: &AdmittedRoot,
-        subscriptions: &BTreeSet<ContextProjectionRegistration>,
-    ) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state
-            .subscriptions
-            .insert(root.uri().to_owned(), subscriptions.clone());
-        state.pending.retain(|key, _| {
-            key.root_uri != root.uri()
-                || subscriptions.contains(&ContextProjectionRegistration {
-                    kind: key.kind.clone(),
-                    revision: TRACEDECAY_CONTEXT_REVISION,
-                })
-        });
-    }
-
     fn offer(&self, source_revision: String, change: ContextProjectionChange) {
         let key = ProjectionChangeKey {
             root_uri: change.root_uri.clone(),
@@ -160,33 +140,33 @@ impl ProjectionChangeQueue {
             kind: change.kind.clone(),
         };
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let registration = ContextProjectionRegistration {
-            kind: change.kind.clone(),
-            revision: change.revision,
-        };
-        if !state
-            .subscriptions
-            .get(&change.root_uri)
-            .is_some_and(|subscriptions| subscriptions.contains(&registration))
-            || state.source_revisions.get(&key) == Some(&source_revision)
+        if state
+            .latest
+            .get(&key)
+            .is_some_and(|(revision, current)| revision == &source_revision && current == &change)
         {
             return;
         }
-        state.source_revisions.insert(key.clone(), source_revision);
-        state.pending.insert(key, change);
+        state.latest.insert(key, (source_revision, change));
     }
 
-    fn drain(&self, root: &AdmittedRoot) -> Vec<ContextProjectionChange> {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let keys = state
-            .pending
-            .keys()
-            .filter(|key| key.root_uri == root.uri())
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut changes = keys
-            .into_iter()
-            .filter_map(|key| state.pending.remove(&key))
+    fn snapshot(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) -> Vec<ContextProjectionChange> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut changes = state
+            .latest
+            .iter()
+            .filter(|(key, _)| {
+                key.root_uri == root.uri()
+                    && subscriptions.contains(&ContextProjectionRegistration {
+                        kind: key.kind.clone(),
+                        revision: TRACEDECAY_CONTEXT_REVISION,
+                    })
+            })
+            .map(|(_, (_, change))| change.clone())
             .collect::<Vec<_>>();
         changes.sort_by_key(|change| {
             (
@@ -1136,13 +1116,12 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
-        self.changes.activate(root, subscriptions);
         let registration = ContextProjectionRegistration {
             kind: ContextProjectionKind::test_run_results(),
             revision: TRACEDECAY_CONTEXT_REVISION,
         };
         if !subscriptions.contains(&registration) {
-            return self.changes.drain(root);
+            return Vec::new();
         }
         let scopes = self
             .current_scopes
@@ -1196,7 +1175,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                 },
             );
         }
-        self.changes.drain(root)
+        self.changes.snapshot(root, subscriptions)
     }
 }
 
@@ -1972,8 +1951,7 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
-        self.changes.activate(root, subscriptions);
-        let mut changes = self.changes.drain(root);
+        let mut changes = self.changes.snapshot(root, subscriptions);
         changes.extend(self.test_runs.poll_changes(root, subscriptions));
         changes
     }
@@ -3014,14 +2992,14 @@ mod projection_tests {
     }
 
     #[test]
-    fn projection_changes_require_negotiation_coalesce_and_preserve_kind_order() {
+    fn projection_changes_replay_latest_negotiated_state_in_kind_order() {
         let root = AdmittedRoot::new("file:///root");
         let queue = ProjectionChangeQueue::default();
         queue.offer(
             "before-subscription".to_owned(),
             change(ContextProjectionKind::diagnostics(), 1),
         );
-        assert!(queue.drain(&root).is_empty());
+        assert!(queue.snapshot(&root, &BTreeSet::new()).is_empty());
 
         let subscriptions = [
             ContextProjectionKind::diagnostics(),
@@ -3035,7 +3013,6 @@ mod projection_tests {
             revision: TRACEDECAY_CONTEXT_REVISION,
         })
         .collect::<BTreeSet<_>>();
-        queue.activate(&root, &subscriptions);
         queue.offer(
             "diagnostics-1".to_owned(),
             change(ContextProjectionKind::diagnostics(), 1),
@@ -3052,7 +3029,7 @@ mod projection_tests {
             queue.offer(revision.to_owned(), change(kind, 1));
         }
 
-        let changes = queue.drain(&root);
+        let changes = queue.snapshot(&root, &subscriptions);
         assert_eq!(
             changes
                 .iter()
@@ -3066,18 +3043,20 @@ mod projection_tests {
             ]
         );
         assert_eq!(changes[0].generation, 2);
-        assert!(queue.drain(&root).is_empty());
+        assert_eq!(queue.snapshot(&root, &subscriptions), changes);
 
         queue.offer(
             "diagnostics-2".to_owned(),
             change(ContextProjectionKind::diagnostics(), 2),
         );
-        assert!(queue.drain(&root).is_empty());
+        assert_eq!(queue.snapshot(&root, &subscriptions), changes);
         queue.offer(
             "diagnostics-3".to_owned(),
             change(ContextProjectionKind::diagnostics(), 3),
         );
-        assert_eq!(queue.drain(&root).len(), 1);
+        let latest = queue.snapshot(&root, &subscriptions);
+        assert_eq!(latest.len(), 4);
+        assert_eq!(latest[0].generation, 3);
     }
 
     #[test]
