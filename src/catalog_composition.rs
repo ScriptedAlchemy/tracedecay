@@ -211,25 +211,30 @@ fn application_profile(
             RoutingFixtureExpectation::Reject,
         )?);
         let stage_hunks = CapabilityId::new("capability.git.stage-hunks")?;
-        let insufficient_capability_id = contributions
+        let insufficient_capability = contributions
             .iter()
             .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
-            .map(|capability| capability.capability_id())
-            .find(|capability_id| {
-                *capability_id == &stage_hunks && !capability_ids.contains(*capability_id)
+            .find(|capability| {
+                capability.capability_id() == &stage_hunks
+                    && !capability_ids.contains(capability.capability_id())
             })
             .or_else(|| {
                 contributions
                     .iter()
                     .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
-                    .map(|capability| capability.capability_id())
-                    .find(|capability_id| !capability_ids.contains(*capability_id))
+                    .find(|capability| !capability_ids.contains(capability.capability_id()))
             });
-        if let Some(capability_id) = insufficient_capability_id {
+        if let Some(capability) = insufficient_capability {
+            let query = capability
+                .routing()
+                .examples()
+                .first()
+                .cloned()
+                .unwrap_or_else(|| capability.routing().name().to_owned());
             routing_fixtures.push(RoutingFixtureV1::new(
-                "Stage these selected hunks",
+                query,
                 RoutingFixtureExpectation::InsufficientCapability {
-                    capability_id: capability_id.clone(),
+                    capability_id: capability.capability_id().clone(),
                 },
             )?);
         }
