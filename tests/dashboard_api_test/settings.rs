@@ -156,6 +156,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .as_str()
             .unwrap_or_else(|| panic!("missing configuration revision: {settings}"))
             .to_owned();
+        let user_revision = settings["user"]["user_settings_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing user settings revision: {settings}"))
+            .to_owned();
         let legacy_config_path = std::path::PathBuf::from(
             settings["project"]["legacy_config_path"]
                 .as_str()
@@ -330,27 +334,11 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(zero["validation_errors"][0]["field"], "max_file_size");
 
         let user_url = format!("{url}/user");
-        let (status, stale_user) = patch_json_body(
-            &agent,
-            &user_url,
-            &json!({
-                "expected_revision_id": previous_revision,
-                "upload_enabled": true
-            }),
-        );
-        assert_eq!(
-            status, 409,
-            "stale user patch should conflict: {stale_user}"
-        );
-        assert_eq!(stale_user["code"], "configuration_revision_conflict");
-        assert_eq!(stale_user["expected_revision_id"], previous_revision);
-        assert_eq!(stale_user["actual_revision_id"], revision);
-
         let (status, user) = patch_json_body(
             &agent,
             &user_url,
             &json!({
-                "expected_revision_id": revision,
+                "expected_revision_id": user_revision,
                 "upload_enabled": false,
                 "watcher_debounce": "15s"
             }),
@@ -362,12 +350,36 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
         assert_eq!(user["user"]["upload_enabled"], false);
         assert_eq!(user["user"]["watcher_debounce"], "15s");
+        let next_user_revision = user["user"]["user_settings_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("user mutation omitted revision: {user}"))
+            .to_owned();
+        assert_ne!(
+            next_user_revision, user_revision,
+            "a user mutation must publish a new user-settings revision"
+        );
+
+        let (status, stale_user) = patch_json_body(
+            &agent,
+            &user_url,
+            &json!({
+                "expected_revision_id": user_revision,
+                "upload_enabled": true
+            }),
+        );
+        assert_eq!(
+            status, 409,
+            "concurrent stale user patch should conflict: {stale_user}"
+        );
+        assert_eq!(stale_user["code"], "configuration_revision_conflict");
+        assert_eq!(stale_user["expected_revision_id"], user_revision);
+        assert_eq!(stale_user["actual_revision_id"], next_user_revision);
 
         let (status, upload_only) = patch_json_body(
             &agent,
             &user_url,
             &json!({
-                "expected_revision_id": revision,
+                "expected_revision_id": next_user_revision,
                 "upload_enabled": true
             }),
         );
@@ -389,7 +401,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &agent,
             &user_url,
             &json!({
-                "expected_revision_id": revision,
+                "expected_revision_id": next_user_revision,
                 "watcher_debounce": "1h"
             }),
         );

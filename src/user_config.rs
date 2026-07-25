@@ -10,9 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::canonical_sha256;
 
 use crate::automation::config::AutomationConfig;
 use crate::storage::{append_lock_path, retry_transient_file_op};
+
+const USER_CONFIG_REVISION_DOMAIN: &str = "tracedecay.user-config-revision.v1";
 
 /// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
@@ -192,6 +195,10 @@ pub enum ConfigSaveError {
     },
     /// Serializing the in-memory config to TOML failed.
     Serialize { message: String },
+    /// Computing the canonical content revision failed.
+    Digest { message: String },
+    /// The persisted user config changed since the caller read it.
+    RevisionConflict { expected: String, actual: String },
     /// Creating the parent directory, writing the temp file, or renaming it
     /// over the target failed.
     Io {
@@ -246,6 +253,15 @@ impl std::fmt::Display for ConfigSaveError {
             Self::Serialize { message } => {
                 write!(f, "failed to serialize config to TOML: {message}")
             }
+            Self::Digest { message } => {
+                write!(f, "failed to compute user config revision: {message}")
+            }
+            Self::RevisionConflict { expected, actual } => {
+                write!(
+                    f,
+                    "user config revision conflict (expected {expected}, actual {actual})"
+                )
+            }
             Self::Io {
                 path,
                 message,
@@ -271,6 +287,14 @@ impl std::error::Error for ConfigSaveError {
             _ => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct UserConfigMutation<T> {
+    pub config: UserConfig,
+    pub output: T,
+    pub backup: Option<PathBuf>,
+    pub revision_id: String,
 }
 
 /// Sibling temp path in the same directory as `path`, used for the atomic
@@ -364,6 +388,15 @@ impl UserConfig {
         parse_or_warn_default(&path, &contents)
     }
 
+    /// Canonical content revision for compare-and-swap callers.
+    pub fn revision_id(&self) -> std::result::Result<String, ConfigSaveError> {
+        canonical_sha256(&(USER_CONFIG_REVISION_DOMAIN, self))
+            .map(|digest| digest.as_str().to_owned())
+            .map_err(|error| ConfigSaveError::Digest {
+                message: error.to_string(),
+            })
+    }
+
     /// Saves the user-level config file atomically.
     ///
     /// The in-memory config is serialized up front so a serialize failure never
@@ -399,6 +432,70 @@ impl UserConfig {
     /// unbricking choice.
     pub fn save_with_recovery(&self) -> std::result::Result<Option<PathBuf>, ConfigSaveError> {
         self.save_inner(true)
+    }
+
+    /// Atomically reloads, revision-checks, mutates, and saves the user config.
+    ///
+    /// The sidecar lock covers both the revision check and the replacement, so
+    /// two writers holding the same revision cannot both commit.
+    pub fn mutate_with_recovery_if_revision<T>(
+        expected_revision_id: &str,
+        mutate: impl FnOnce(&mut Self) -> T,
+    ) -> std::result::Result<UserConfigMutation<T>, ConfigSaveError> {
+        let Some(path) = config_path() else {
+            return Err(ConfigSaveError::PathUnavailable);
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigSaveError::Io {
+                path: parent.to_path_buf(),
+                message: "failed to create config directory".to_string(),
+                source,
+            })?;
+        }
+
+        let lock_path = append_lock_path(&path);
+        let lock_file =
+            crate::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|source| {
+                ConfigSaveError::Lock {
+                    path: lock_path.clone(),
+                    source,
+                }
+            })?;
+        let result = (|| {
+            let mut config = match fs::read_to_string(&path) {
+                Ok(contents) => toml::from_str::<Self>(&contents).unwrap_or_default(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
+                Err(source) => {
+                    return Err(ConfigSaveError::ExistingUnreadable {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            };
+            let actual_revision_id = config.revision_id()?;
+            if expected_revision_id != actual_revision_id {
+                return Err(ConfigSaveError::RevisionConflict {
+                    expected: expected_revision_id.to_owned(),
+                    actual: actual_revision_id,
+                });
+            }
+
+            let output = mutate(&mut config);
+            let contents =
+                toml::to_string_pretty(&config).map_err(|error| ConfigSaveError::Serialize {
+                    message: error.to_string(),
+                })?;
+            let backup = Self::write_locked(&path, &contents, true)?;
+            let revision_id = config.revision_id()?;
+            Ok(UserConfigMutation {
+                config,
+                output,
+                backup,
+                revision_id,
+            })
+        })();
+        let _ = lock_file.unlock();
+        result
     }
 
     fn save_inner(&self, recover: bool) -> std::result::Result<Option<PathBuf>, ConfigSaveError> {
@@ -743,6 +840,58 @@ mod tests {
     fn path_unavailable_error_displays() {
         let err = ConfigSaveError::PathUnavailable;
         assert!(err.to_string().contains("user config path"));
+    }
+
+    #[test]
+    fn concurrent_revision_guarded_mutations_reject_one_stale_writer() {
+        let _lock = lock_user_data_dir_test_env();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
+        UserConfig::default().save().expect("initial config saves");
+        let expected_revision = UserConfig::load()
+            .revision_id()
+            .expect("initial revision is available");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+        let upload_writer = {
+            let expected_revision = expected_revision.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                UserConfig::mutate_with_recovery_if_revision(&expected_revision, |config| {
+                    config.upload_enabled = true;
+                })
+            })
+        };
+        let debounce_writer = {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                UserConfig::mutate_with_recovery_if_revision(&expected_revision, |config| {
+                    config.watcher_debounce = "15s".to_owned();
+                })
+            })
+        };
+
+        barrier.wait();
+        let outcomes = [
+            upload_writer.join().unwrap(),
+            debounce_writer.join().unwrap(),
+        ];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(ConfigSaveError::RevisionConflict { .. })))
+                .count(),
+            1
+        );
+        let saved = UserConfig::load();
+        assert_ne!(
+            (saved.upload_enabled, saved.watcher_debounce.as_str()),
+            (true, "15s"),
+            "the stale writer must not overwrite the winning mutation"
+        );
     }
 
     #[test]

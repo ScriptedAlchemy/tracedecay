@@ -334,7 +334,7 @@ function SettingsEditorPanel({
           Supported settings changes
         </h2>
         <span className="text-2xs text-text-muted">
-          validate → review → confirm against revision {editor.expectedRevisionId}
+          validate → review → confirm against the resource revision
         </span>
       </div>
 

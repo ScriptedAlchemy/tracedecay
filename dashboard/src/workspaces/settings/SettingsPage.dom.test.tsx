@@ -166,7 +166,7 @@ describe('SettingsPage authorized changes', () => {
     await user.click(screen.getByRole('button', { name: 'Review user changes' }));
     await user.click(
       screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision rev-42/,
+        name: /I confirm this change against configuration revision user-rev-7/,
       }),
     );
     await user.click(screen.getByRole('button', { name: 'Apply user settings' }));
@@ -181,7 +181,7 @@ describe('SettingsPage authorized changes', () => {
         method: 'PATCH',
         url: '/api/settings/user',
         body: {
-          expected_revision_id: 'rev-42',
+          expected_revision_id: 'user-rev-7',
           watcher_debounce: '15s',
         },
       },

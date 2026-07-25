@@ -129,7 +129,8 @@ export interface UserSettingsValues {
 }
 
 export interface SettingsEditor {
-  readonly expectedRevisionId: string;
+  readonly projectExpectedRevisionId: string;
+  readonly userExpectedRevisionId: string;
   readonly project: ProjectSettingsValues;
   readonly user: UserSettingsValues;
 }
@@ -268,7 +269,8 @@ export function buildSettingsEditor(payload: unknown): SettingsEditor | null {
   if (!isRecord(config)) return null;
   const telemetry = config['telemetry'];
   const sync = config['sync'];
-  const expectedRevisionId = project['configuration_revision_id'];
+  const projectExpectedRevisionId = project['configuration_revision_id'];
+  const userExpectedRevisionId = user['user_settings_revision_id'];
   const include = stringArray(config['include']);
   const exclude = stringArray(config['exclude']);
   const maxFileSize = unsignedIntegerString(config['max_file_size']);
@@ -277,8 +279,10 @@ export function buildSettingsEditor(payload: unknown): SettingsEditor | null {
     : null;
   const extractionTimeout = unsignedIntegerString(user['extraction_timeout_secs']);
   if (
-    typeof expectedRevisionId !== 'string' ||
-    expectedRevisionId.length === 0 ||
+    typeof projectExpectedRevisionId !== 'string' ||
+    projectExpectedRevisionId.length === 0 ||
+    typeof userExpectedRevisionId !== 'string' ||
+    userExpectedRevisionId.length === 0 ||
     include == null ||
     exclude == null ||
     maxFileSize == null ||
@@ -297,7 +301,8 @@ export function buildSettingsEditor(payload: unknown): SettingsEditor | null {
     return null;
   }
   return {
-    expectedRevisionId,
+    projectExpectedRevisionId,
+    userExpectedRevisionId,
     project: {
       include,
       exclude,
@@ -364,8 +369,8 @@ export function planProjectSettingsChange(
   if (Object.keys(sync).length > 0) patch.sync = sync;
 
   return Object.keys(patch).length === 0
-    ? { outcome: 'unchanged', expectedRevisionId: current.expectedRevisionId }
-    : { outcome: 'ready', expectedRevisionId: current.expectedRevisionId, patch };
+    ? { outcome: 'unchanged', expectedRevisionId: current.projectExpectedRevisionId }
+    : { outcome: 'ready', expectedRevisionId: current.projectExpectedRevisionId, patch };
 }
 
 export function planUserSettingsChange(
@@ -378,7 +383,7 @@ export function planUserSettingsChange(
       outcome: 'invalid',
       errors: [
         {
-          field: 'configuration_revision_id',
+          field: 'user_settings_revision_id',
           message: 'current editable settings and revision are unavailable',
         },
       ],
@@ -399,15 +404,20 @@ export function planUserSettingsChange(
     patch.extraction_timeout_secs = timeout;
   }
   return Object.keys(patch).length === 0
-    ? { outcome: 'unchanged', expectedRevisionId: current.expectedRevisionId }
-    : { outcome: 'ready', expectedRevisionId: current.expectedRevisionId, patch };
+    ? { outcome: 'unchanged', expectedRevisionId: current.userExpectedRevisionId }
+    : { outcome: 'ready', expectedRevisionId: current.userExpectedRevisionId, patch };
 }
 
 export function settingsRevisionConflict(
+  scope: 'project' | 'user',
   expectedRevisionId: string,
   payload: unknown,
 ): SettingsRevisionConflict | null {
-  const actualRevisionId = buildSettingsEditor(payload)?.expectedRevisionId ?? null;
+  const editor = buildSettingsEditor(payload);
+  const actualRevisionId =
+    scope === 'project'
+      ? (editor?.projectExpectedRevisionId ?? null)
+      : (editor?.userExpectedRevisionId ?? null);
   return actualRevisionId === expectedRevisionId
     ? null
     : { expectedRevisionId, actualRevisionId };
