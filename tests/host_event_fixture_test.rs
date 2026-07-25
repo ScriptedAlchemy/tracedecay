@@ -19,12 +19,12 @@ use tracedecay_domain::{
     LocatorDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
     ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass, SessionId,
-    SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1,
-    SourceContentStateV1, SourceCoverageV1, SourceCursorV1, SourceDefinitionV1,
-    SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
-    SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
-    SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1, UserProfileId,
-    canonical_sha256,
+    SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
+    SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
+    SourceCoverageV1, SourceCursorV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
+    SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1, SourceObjectRevisionV1,
+    SourcePartitionFrontierV1, SourcePartitionIdV1, SourceRefetchStrategyV1,
+    SourceSnapshotCompletionV1, SourceSnapshotIdV1, UserProfileId, canonical_sha256,
 };
 use tracedecay_store::ObservationReplayRequest;
 
@@ -424,8 +424,17 @@ fn assert_external_source_contract(
 
     let definition = SourceDefinitionV1::new(
         SourceInstanceId::new(format!("source.host-event.{provider}")).unwrap(),
-        envelope.provider().clone(),
         1,
+        SourceAcquisitionContractV1::new(
+            envelope.provider().clone(),
+            SourceAcquisitionCapabilitiesV1::new(
+                BTreeSet::from([SourceCaptureModeV1::Poll]),
+                BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
+                BTreeSet::from([SourceDeletionSemanticsV1::CompleteSnapshotAbsence]),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
         SourceCaptureModeV1::Poll,
         SourceRefetchStrategyV1::WholeRoot,
         SourceDeletionSemanticsV1::CompleteSnapshotAbsence,

@@ -110,7 +110,7 @@ impl SourceObjectRevisionV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceCaptureModeV1 {
     Event,
@@ -125,7 +125,7 @@ pub enum SourceRefreshCauseV1 {
     Poll,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceRefetchStrategyV1 {
     WholeRoot,
@@ -151,7 +151,7 @@ pub enum SourceEnvelopeKindV1 {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceDeletionSemanticsV1 {
     ExplicitOnly,
@@ -175,6 +175,112 @@ pub enum SourceContentStateV1 {
     TemporarilyUnavailable,
 }
 
+/// Provider capabilities decoded from one exact Plan 27 acquisition contract.
+///
+/// This is intentionally a closed capability set rather than a provider
+/// descriptor or connector registry. The provider adapter owns acquisition;
+/// the domain only pins the capabilities that admission may rely on.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceAcquisitionCapabilitiesV1 {
+    pub capture_modes: BTreeSet<SourceCaptureModeV1>,
+    pub refetch_strategies: BTreeSet<SourceRefetchStrategyV1>,
+    pub deletion_semantics: BTreeSet<SourceDeletionSemanticsV1>,
+}
+
+impl SourceAcquisitionCapabilitiesV1 {
+    pub fn new(
+        capture_modes: BTreeSet<SourceCaptureModeV1>,
+        refetch_strategies: BTreeSet<SourceRefetchStrategyV1>,
+        deletion_semantics: BTreeSet<SourceDeletionSemanticsV1>,
+    ) -> Result<Self, DomainError> {
+        let capabilities = Self {
+            capture_modes,
+            refetch_strategies,
+            deletion_semantics,
+        };
+        capabilities.validate()?;
+        Ok(capabilities)
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.capture_modes.is_empty()
+            || self.refetch_strategies.is_empty()
+            || self.deletion_semantics.is_empty()
+            || (self
+                .deletion_semantics
+                .contains(&SourceDeletionSemanticsV1::CompleteSnapshotAbsence)
+                && !self
+                    .refetch_strategies
+                    .iter()
+                    .copied()
+                    .any(SourceRefetchStrategyV1::supports_whole_root))
+        {
+            return Err(DomainError::NonCanonical {
+                field: "external source acquisition capabilities",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn supports(
+        &self,
+        capture_mode: SourceCaptureModeV1,
+        refetch_strategy: SourceRefetchStrategyV1,
+        deletion_semantics: SourceDeletionSemanticsV1,
+    ) -> bool {
+        self.capture_modes.contains(&capture_mode)
+            && self.refetch_strategies.contains(&refetch_strategy)
+            && self.deletion_semantics.contains(&deletion_semantics)
+    }
+}
+
+/// Exact provider/capability contract emitted by the Plan 27 adapter.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceAcquisitionContractV1 {
+    pub provider: ProviderId,
+    pub capabilities: SourceAcquisitionCapabilitiesV1,
+    pub contract_digest: ManifestDigest,
+}
+
+impl SourceAcquisitionContractV1 {
+    pub fn new(
+        provider: ProviderId,
+        capabilities: SourceAcquisitionCapabilitiesV1,
+    ) -> Result<Self, DomainError> {
+        provider.validate()?;
+        capabilities.validate()?;
+        let contract_digest = Self::compute_digest(&provider, &capabilities)?;
+        Ok(Self {
+            provider,
+            capabilities,
+            contract_digest,
+        })
+    }
+
+    fn compute_digest(
+        provider: &ProviderId,
+        capabilities: &SourceAcquisitionCapabilitiesV1,
+    ) -> Result<ManifestDigest, DomainError> {
+        canonical_sha256(&(
+            "tracedecay.plan27.source-acquisition-contract.v1",
+            provider,
+            capabilities,
+        ))
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.provider.validate()?;
+        self.capabilities.validate()?;
+        self.contract_digest.validate()?;
+        if Self::compute_digest(&self.provider, &self.capabilities)? != self.contract_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// Immutable provider-neutral source definition.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +292,8 @@ pub struct SourceDefinitionV1 {
     pub refetch_strategy: SourceRefetchStrategyV1,
     pub deletion_semantics: SourceDeletionSemanticsV1,
     pub max_partitions: u16,
+    pub acquisition_contract_digest: ManifestDigest,
+    pub acquisition_capabilities: SourceAcquisitionCapabilitiesV1,
     pub definition_digest: ManifestDigest,
 }
 
@@ -193,13 +301,17 @@ impl SourceDefinitionV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_id: SourceInstanceId,
-        provider: ProviderId,
         revision: u64,
+        acquisition_contract: SourceAcquisitionContractV1,
         capture_mode: SourceCaptureModeV1,
         refetch_strategy: SourceRefetchStrategyV1,
         deletion_semantics: SourceDeletionSemanticsV1,
         max_partitions: u16,
     ) -> Result<Self, DomainError> {
+        acquisition_contract.validate()?;
+        let provider = acquisition_contract.provider;
+        let acquisition_contract_digest = acquisition_contract.contract_digest;
+        let acquisition_capabilities = acquisition_contract.capabilities;
         let definition_digest = Self::compute_digest(
             &source_id,
             &provider,
@@ -208,6 +320,8 @@ impl SourceDefinitionV1 {
             refetch_strategy,
             deletion_semantics,
             max_partitions,
+            &acquisition_contract_digest,
+            &acquisition_capabilities,
         )?;
         let definition = Self {
             source_id,
@@ -217,6 +331,8 @@ impl SourceDefinitionV1 {
             refetch_strategy,
             deletion_semantics,
             max_partitions,
+            acquisition_contract_digest,
+            acquisition_capabilities,
             definition_digest,
         };
         definition.validate()?;
@@ -232,6 +348,8 @@ impl SourceDefinitionV1 {
         refetch_strategy: SourceRefetchStrategyV1,
         deletion_semantics: SourceDeletionSemanticsV1,
         max_partitions: u16,
+        acquisition_contract_digest: &ManifestDigest,
+        acquisition_capabilities: &SourceAcquisitionCapabilitiesV1,
     ) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&(
             "tracedecay.external-source.definition.v1",
@@ -242,22 +360,38 @@ impl SourceDefinitionV1 {
             refetch_strategy,
             deletion_semantics,
             max_partitions,
+            acquisition_contract_digest,
+            acquisition_capabilities,
         ))
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.source_id.validate()?;
         self.provider.validate()?;
+        self.acquisition_contract_digest.validate()?;
+        self.acquisition_capabilities.validate()?;
         self.definition_digest.validate()?;
         if self.revision == 0
             || self.max_partitions == 0
             || self.max_partitions > MAX_SOURCE_PARTITIONS_V1
             || (self.deletion_semantics == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
                 && !self.refetch_strategy.supports_whole_root())
+            || !self.acquisition_capabilities.supports(
+                self.capture_mode,
+                self.refetch_strategy,
+                self.deletion_semantics,
+            )
         {
             return Err(DomainError::NonCanonical {
                 field: "external source definition",
             });
+        }
+        if SourceAcquisitionContractV1::compute_digest(
+            &self.provider,
+            &self.acquisition_capabilities,
+        )? != self.acquisition_contract_digest
+        {
+            return Err(DomainError::DigestMismatch);
         }
         if Self::compute_digest(
             &self.source_id,
@@ -267,6 +401,8 @@ impl SourceDefinitionV1 {
             self.refetch_strategy,
             self.deletion_semantics,
             self.max_partitions,
+            &self.acquisition_contract_digest,
+            &self.acquisition_capabilities,
         )? != self.definition_digest
         {
             return Err(DomainError::DigestMismatch);
@@ -1608,6 +1744,19 @@ mod tests {
         }
     }
 
+    fn acquisition_contract() -> SourceAcquisitionContractV1 {
+        SourceAcquisitionContractV1::new(
+            ProviderId::new("fixture-provider").unwrap(),
+            SourceAcquisitionCapabilitiesV1::new(
+                BTreeSet::from([SourceCaptureModeV1::Poll]),
+                BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
+                BTreeSet::from([SourceDeletionSemanticsV1::CompleteSnapshotAbsence]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     fn envelope(
         page_sequence: u32,
         coverage: SourceCoverageV1,
@@ -1653,6 +1802,44 @@ mod tests {
                 "stable_signal_digest".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn definition_pins_and_enforces_the_acquisition_contract() {
+        let definition = SourceDefinitionV1::new(
+            SourceInstanceId::new("source.fixture").unwrap(),
+            1,
+            acquisition_contract(),
+            SourceCaptureModeV1::Poll,
+            SourceRefetchStrategyV1::WholeRoot,
+            SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            definition.acquisition_contract_digest,
+            acquisition_contract().contract_digest
+        );
+
+        let unsupported = SourceDefinitionV1::new(
+            SourceInstanceId::new("source.fixture").unwrap(),
+            1,
+            acquisition_contract(),
+            SourceCaptureModeV1::Event,
+            SourceRefetchStrategyV1::WholeRoot,
+            SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
+            1,
+        );
+        assert!(matches!(
+            unsupported,
+            Err(DomainError::NonCanonical {
+                field: "external source definition"
+            })
+        ));
+
+        let mut tampered = definition;
+        tampered.acquisition_contract_digest = digest('9');
+        assert_eq!(tampered.validate(), Err(DomainError::DigestMismatch));
     }
 
     #[test]
