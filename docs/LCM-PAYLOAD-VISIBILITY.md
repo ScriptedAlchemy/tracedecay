@@ -1,5 +1,10 @@
 # LCM external payload health — visibility spec
 
+> Historical pre-single-app specification. References to
+> `dashboard/lcm/dist`, plugin tabs, and design-time line anchors describe the
+> legacy UI now isolated at `/legacy`; current product UI lives in
+> `dashboard/src/workspaces/` and builds to `dashboard/app-dist`.
+
 Status: **spec** (normative for the implementation/tests follow-on). Companion to the
 lifetime & retention *contract* in [`LCM-PAYLOAD-LIFECYCLE.md`](./LCM-PAYLOAD-LIFECYCLE.md)
 (parent task `t_f14bb734`) and the storage/deletion audit (`t_c2443a7f`). This document

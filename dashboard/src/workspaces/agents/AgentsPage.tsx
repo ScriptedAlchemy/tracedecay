@@ -88,6 +88,16 @@ const DiagnosticsPayload = z
           .passthrough(),
       )
       .optional(),
+    hook_window: z
+      .object({
+        window_rows: z.number(),
+        rows_scanned: z.number(),
+        rows_included: z.number(),
+        truncated: z.boolean(),
+        total_rows_known: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
@@ -123,10 +133,19 @@ export function AgentsPage() {
         const dominance = summarizeDominance(rows);
         const diag =
           diagnostics.data?.outcome === 'ok' ? diagnostics.data.data : undefined;
+        const diagnosticsAvailable = diag?.available !== false;
+        const diagnosticsRead = diagnosticsAvailable ? diag : undefined;
         const window = describeWindow(
-          data.event_count ?? diag?.event_count,
-          diag?.events_per_hour,
+          data.available ? data.event_count : diagnosticsRead?.event_count,
+          diagnosticsRead?.events_per_hour,
         );
+        const hookNote = diagnosticsRead?.hook_window?.truncated
+          ? `recent suffix · ${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} rows scanned`
+          : diagnosticsRead?.hook_window
+            ? `${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} hook rows scanned`
+            : diagnosticsRead
+              ? 'hook window unreported'
+              : 'analytics diagnostics unavailable';
         return (
           <div
             className="flex h-full flex-col overflow-auto"
@@ -138,7 +157,9 @@ export function AgentsPage() {
               <h1 className="text-sm font-semibold tracking-tight">Agents</h1>
               <span className="min-w-0 truncate text-2xs text-text-muted">
                 {data.available
-                  ? `analytics_events · ${window.capped ? `most recent ${ANALYTICS_EVENT_LIMIT.toLocaleString()} (endpoint cap)` : `${window.events.toLocaleString()} events`}`
+                  ? window.events == null
+                    ? 'session-message fallback · event count unavailable'
+                    : `analytics_events · ${window.capped ? `most recent ${ANALYTICS_EVENT_LIMIT.toLocaleString()} (endpoint cap)` : `${window.events.toLocaleString()} events`}`
                   : 'analytics store unavailable'}
               </span>
             </div>
@@ -155,10 +176,12 @@ export function AgentsPage() {
               items={[
                 {
                   label: window.capped ? 'events (capped)' : 'events',
-                  value: window.events.toLocaleString(),
+                  value: window.events?.toLocaleString() ?? '—',
                   note: window.capped
                     ? 'the endpoint counts no further back'
-                    : 'every event on record',
+                    : window.events == null
+                      ? 'event count unavailable'
+                      : 'every event on record',
                 },
                 {
                   label: 'window',
@@ -173,20 +196,29 @@ export function AgentsPage() {
                 },
                 {
                   label: 'mcp tool calls',
-                  value: exact(diag?.mcp_tool_call_count),
+                  value: exact(diagnosticsRead?.mcp_tool_call_count),
                   note: 'inside the window',
                 },
                 {
                   label: 'hook calls',
-                  value: exact(diag?.hook_call_count),
-                  note: 'all time, hook log',
+                  value: exact(diagnosticsRead?.hook_call_count),
+                  note: hookNote,
                 },
               ]}
             />
 
             <OverviewGrid>
               <OverviewCard title="Where the events go">
-                <CategoryComposition dominance={dominance} counted={window.events} />
+                {!data.available ? (
+                  <UnavailableRead label="Usage analytics unavailable" />
+                ) : window.events == null && rows.length === 0 ? (
+                  <UnavailableRead label="Categorized usage events unavailable" />
+                ) : (
+                  <CategoryComposition
+                    dominance={dominance}
+                    counted={window.events ?? dominance.total}
+                  />
+                )}
               </OverviewCard>
 
               <OverviewCard title="Most-called tools">
@@ -195,7 +227,13 @@ export function AgentsPage() {
                   pending={diagnostics.isPending}
                   result={diagnostics.data}
                 >
-                  {(payload) => <ToolRanking rows={payload.by_mcp_tool ?? []} />}
+                  {(payload) =>
+                    payload.available === false ? (
+                      <UnavailableRead label="Analytics diagnostics unavailable" />
+                    ) : (
+                      <ToolRanking rows={payload.by_mcp_tool ?? []} />
+                    )
+                  }
                 </LegacyBoundary>
               </OverviewCard>
 
@@ -205,7 +243,13 @@ export function AgentsPage() {
                   pending={diagnostics.isPending}
                   result={diagnostics.data}
                 >
-                  {(payload) => <RecentTape rows={payload.recent_events ?? []} />}
+                  {(payload) =>
+                    payload.available === false ? (
+                      <UnavailableRead label="Analytics diagnostics unavailable" />
+                    ) : (
+                      <RecentTape rows={payload.recent_events ?? []} />
+                    )
+                  }
                 </LegacyBoundary>
               </OverviewCard>
 
@@ -215,19 +259,29 @@ export function AgentsPage() {
                   pending={diagnostics.isPending}
                   result={diagnostics.data}
                 >
-                  {(payload) => (
-                    <WindowComposition
-                      kinds={payload.by_event_kind ?? []}
-                      outcomes={payload.by_outcome ?? []}
-                      counted={payload.event_count ?? window.events}
-                    />
-                  )}
+                  {(payload) =>
+                    payload.available === false ? (
+                      <UnavailableRead label="Analytics diagnostics unavailable" />
+                    ) : (
+                      <WindowComposition
+                        kinds={payload.by_event_kind ?? []}
+                        outcomes={payload.by_outcome ?? []}
+                        counted={payload.event_count ?? window.events ?? 0}
+                      />
+                    )
+                  }
                 </LegacyBoundary>
               </OverviewCard>
 
               <OverviewCard title="Tool families the hint engine watches">
                 <LegacyBoundary title="Hints" pending={hints.isPending} result={hints.data}>
-                  {(hintData) => <FamilyList rows={(hintData.families ?? []) as FamilyRow[]} />}
+                  {(hintData) =>
+                    hintData.available === false ? (
+                      <UnavailableRead label="Hint diagnostics unavailable" />
+                    ) : (
+                      <FamilyList rows={(hintData.families ?? []) as FamilyRow[]} />
+                    )
+                  }
                 </LegacyBoundary>
               </OverviewCard>
             </OverviewGrid>
@@ -235,6 +289,14 @@ export function AgentsPage() {
         );
       }}
     </LegacyBoundary>
+  );
+}
+
+function UnavailableRead({ label }: { label: string }) {
+  return (
+    <p role="status" className="text-2xs leading-relaxed text-state-error">
+      {label}
+    </p>
   );
 }
 

@@ -106,9 +106,9 @@ a throwaway `HOME` and config directory. Only its auth file is copied in, mode
 `0400`; the copy is deleted on runner exit. The real Claude/Codex profile is
 never loaded or mutated.
 
-Live runs build a debug `tracedecay` binary from the checked-out candidate branch
-in the configured Cargo target (the machine-local `/fast/cargo-target` when
-available) and use it for fixture setup, MCP, hooks, and the throwaway Codex plugin install.
+Live runs build a debug `tracedecay` binary from the checked-out candidate
+branch with ordinary Cargo and use it for fixture setup, MCP, hooks, and the
+throwaway Codex plugin install.
 `TRACEDECAY_BIN` is an explicit override for release-binary comparisons. Every
 Claude condition, including `full`, loads the candidate `plugin/` via
 `--plugin-dir`; Codex `full` installs candidate assets into its throwaway

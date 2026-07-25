@@ -30,7 +30,11 @@ Dual-Graph intercepts prompts and pre-loads ranked files before the AI sees them
 
 **70+ specialized tools vs 5 generic ones.** tracedecay exposes tools for call graph traversal, impact analysis, dead code detection, test mapping, rename preview, type hierarchies, circular dependency detection, and more. Each tool is purpose-built for a specific question. Dual-Graph has a file retriever, a neighbor lookup, and a token counter.
 
-**libSQL vs JSON files.** tracedecay stores its graph in libSQL with FTS5 full-text search, WAL-mode concurrent reads, and indexed queries. Dual-Graph stores everything in JSON files (`info_graph.json`, `chat_action_graph.json`, `context-store.json`) -- every lookup is a full scan. The performance difference matters on large codebases.
+**Indexed SQLite vs JSON files.** tracedecay stores its graph in SQLite through
+the `rusqlite` runtime, with FTS5 full-text search, WAL-mode concurrent reads,
+and indexed queries. Dual-Graph stores everything in JSON files
+(`info_graph.json`, `chat_action_graph.json`, `context-store.json`) -- every
+lookup is a full scan. The performance difference matters on large codebases.
 
 **50+ languages vs 11.** tracedecay supports more than 50 languages with deep extraction including niche languages like Nix (with derivation field extraction and flake schema awareness), Protobuf (message/service/rpc as first-class nodes), COBOL, Fortran, and legacy BASIC variants. Dual-Graph covers 11 mainstream languages (TypeScript, JavaScript, Python, Go, Swift, Rust, Java, Kotlin, C#, Ruby, PHP) and nothing more.
 
