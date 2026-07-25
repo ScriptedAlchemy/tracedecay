@@ -326,6 +326,20 @@ async fn publish_parsed_compiler_diagnostics(
 /// the exact resolved finding set, so republishing an unchanged result
 /// converges while a changed result mints a new generation that clears the
 /// prior one.
+///
+/// KNOWN LIMITATION: the LSP feedback projection admits a record only when its
+/// `generation_id` equals the saved-edit cycle's code-index generation and its
+/// `file_occurrence_id` equals the cycle's impact-target file. Those identities
+/// are owned by the code-index generation authority
+/// (`CodeIndexSchedulerRegistryV1::latest_complete_fresh`, which mints
+/// `file.daemon.<digest>` file ids), which an MCP tool call cannot reach. Until
+/// the publication is driven from that authority, records published here are
+/// durable and readable through the diagnostics query surfaces, but the LSP
+/// projection refuses them with the named
+/// `FeedbackDiagnosticProjectionSkipV1::GenerationMismatch` reason rather than
+/// silently. `CleanGenerationDiagnosticScopeV1` already takes both identities
+/// from its caller, so wiring the code-index authority is a substitution here,
+/// not a redesign.
 fn compiler_publication_scope(
     root: &Path,
     resolved: &[crate::diagnostics_publication::ResolvedCompilerDiagnosticV1],
