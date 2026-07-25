@@ -2702,8 +2702,8 @@ mod tests {
 
     #[test]
     fn symbol_backed_semantic_identity_dedupes_with_lexical_evidence() {
-        let source = source_generation('s');
-        let mut chunk = canonical_chunk(&source, 's');
+        let source = source_generation('a');
+        let mut chunk = canonical_chunk(&source, 'a');
         let symbol = tracedecay_domain::SymbolOccurrenceId::new("symbol.fixture")
             .expect("symbol occurrence");
         chunk.anchor.symbol_occurrence_id = Some(symbol.clone());
