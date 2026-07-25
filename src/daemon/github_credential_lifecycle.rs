@@ -586,7 +586,7 @@ access = "public"
         let listener = TcpListener::bind("127.0.0.1:0").expect("permission verifier listener");
         let address = listener.local_addr().expect("listener address");
         let server = std::thread::spawn(move || {
-            for _ in 0..6 {
+            for _ in 0..4 {
                 let (mut stream, _) = listener.accept().expect("permission request");
                 let headers = read_headers(&mut stream).to_ascii_lowercase();
                 let repository_selection = if headers.contains("bearer github-token-selected") {
