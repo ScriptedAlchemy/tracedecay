@@ -151,7 +151,7 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(160, 32_000_000, 18_000).unwrap(),
+            ProfileBudget::new(192, 32_000_000, 18_000).unwrap(),
         ),
         (
             "profile.compact",
