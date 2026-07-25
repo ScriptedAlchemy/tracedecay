@@ -16,6 +16,9 @@ export function ExplorerSplit({
   filters,
   list,
   inspector,
+  header,
+  stackOnNarrow = false,
+  inspectorWidth = 'standard',
   className,
 }: {
   /** Workspace path — supplies the channel number in the header. Omit to
@@ -26,6 +29,11 @@ export function ExplorerSplit({
   filters?: ReactNode;
   list: ReactNode;
   inspector?: ReactNode;
+  /** Full-width workspace controls rendered above the split columns. */
+  header?: ReactNode;
+  /** Keep filters and inspector reachable by stacking them below `lg`. */
+  stackOnNarrow?: boolean;
+  inspectorWidth?: 'standard' | 'wide';
   className?: string;
 }) {
   const resultsRef = useRef<HTMLElement | null>(null);
@@ -68,7 +76,8 @@ export function ExplorerSplit({
   return (
     <div className={cn('flex h-full min-h-0 flex-col', className)}>
       {path && title ? <WorkspaceHeader path={path} title={title} note={note} /> : null}
-      {filters ? (
+      {header}
+      {filters && !stackOnNarrow ? (
         <div className="shrink-0 border-b border-edge-subtle bg-surface-1 lg:hidden">
           <button
             type="button"
@@ -98,11 +107,16 @@ export function ExplorerSplit({
           ) : null}
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1">
+      <div className={cn('flex min-h-0 flex-1', stackOnNarrow && 'max-lg:flex-col')}>
         {filters ? (
           <aside
             aria-label="Filters"
-            className="flex w-56 shrink-0 flex-col border-r border-edge-subtle bg-surface-1 max-lg:hidden"
+            className={cn(
+              'flex w-56 shrink-0 flex-col border-r border-edge-subtle bg-surface-1',
+              stackOnNarrow
+                ? 'max-lg:max-h-64 max-lg:w-full max-lg:border-b max-lg:border-r-0'
+                : 'max-lg:hidden',
+            )}
           >
             <BayLegend>Query</BayLegend>
             <div className="min-h-0 flex-1 overflow-auto p-2.5">{filters}</div>
@@ -119,7 +133,15 @@ export function ExplorerSplit({
         {inspector ? (
           <aside
             aria-label="Inspector"
-            className="w-[22rem] shrink-0 overflow-auto border-l border-edge-subtle bg-surface-1 max-xl:w-72 max-md:hidden"
+            className={cn(
+              'shrink-0 overflow-auto border-l border-edge-subtle bg-surface-1',
+              inspectorWidth === 'wide'
+                ? 'w-[30rem] max-xl:w-[23rem]'
+                : 'w-[22rem] max-xl:w-72',
+              stackOnNarrow
+                ? 'max-lg:h-72 max-lg:w-full max-lg:border-l-0 max-lg:border-t'
+                : 'max-md:hidden',
+            )}
           >
             {inspector}
           </aside>
@@ -199,19 +221,89 @@ export function DataRow({
   );
 }
 
+/** Fixed height shared by two-line result rows and their virtualizer. */
+export const RESULT_ROW_HEIGHT = 56;
+
+export function ResultRow({
+  selected,
+  onSelect,
+  railClassName,
+  children,
+  className,
+}: {
+  selected?: boolean;
+  onSelect?: () => void;
+  railClassName?: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected ?? false}
+      style={{ height: RESULT_ROW_HEIGHT }}
+      className={cn(
+        'relative flex w-full items-center gap-3 border-b border-edge-subtle pl-4 pr-3 text-left',
+        'hover:bg-surface-1 focus-visible:bg-surface-1',
+        selected && 'bg-surface-2',
+        className,
+      )}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          'absolute inset-y-0 left-0 w-[3px]',
+          railClassName ?? 'bg-edge-subtle',
+          selected ? 'opacity-100' : 'opacity-45',
+        )}
+      />
+      {children}
+    </button>
+  );
+}
+
+export function ListCaption({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <p
+      className={cn(
+        'sticky top-0 z-10 flex items-center gap-2 border-b border-edge-subtle bg-surface-0/95 px-4 py-2 text-2xs text-text-muted backdrop-blur',
+        className,
+      )}
+    >
+      {children}
+    </p>
+  );
+}
+
 export function InspectorPanel({
   title,
+  eyebrow,
   onClose,
   children,
 }: {
   title: string;
+  eyebrow?: ReactNode;
   onClose?: () => void;
   children: ReactNode;
 }) {
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
-        <h2 className="td-title truncate">{title}</h2>
+      <header className="flex min-h-10 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5 py-2">
+        <span className="flex min-w-0 flex-col gap-0.5">
+          {eyebrow ? (
+            <span className="flex items-center gap-1.5 text-2xs uppercase tracking-[0.08em] text-text-muted">
+              {eyebrow}
+            </span>
+          ) : null}
+          <h2 className="td-title truncate">{title}</h2>
+        </span>
         <span aria-hidden className="td-rule" />
         {onClose ? (
           <button
@@ -226,6 +318,25 @@ export function InspectorPanel({
       </header>
       <div className="min-h-0 flex-1 overflow-auto p-2.5">{children}</div>
     </div>
+  );
+}
+
+export function RawFields({
+  value,
+  label = 'Every field the daemon returned',
+}: {
+  value: unknown;
+  label?: string;
+}) {
+  return (
+    <details className="mt-4 border-t border-edge-subtle pt-3">
+      <summary className="cursor-pointer text-2xs uppercase tracking-[0.08em] text-text-muted hover:text-text-primary">
+        {label}
+      </summary>
+      <div className="mt-2">
+        <KeyValueTree value={value} />
+      </div>
+    </details>
   );
 }
 
