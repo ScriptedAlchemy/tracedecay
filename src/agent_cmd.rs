@@ -2692,7 +2692,7 @@ mod tests {
             .confirm_preview(&component_set.component_set, &request, &preview)
             .unwrap();
 
-        let registration_path = registration.registration_path.clone().unwrap();
+        let registration_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
         std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
         assert_eq!(
