@@ -4,15 +4,16 @@ use super::*;
 async fn client_identity_startup_replays_retained_profile_receipts() {
     let temp = TempDir::new().unwrap();
     let profile_root = temp.path().join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap();
-    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let first_admin = test_store_administration_for_profile(&profile_root);
+    let profile_identity = first_admin
+        .profile_identity()
+        .expect("test profile identity")
+        .clone();
     let identity = DaemonClientIdentity {
         profile_root: profile_root.clone(),
         global_db_path: profile_root.join("global.db"),
     };
 
-    let first_admin =
-        StoreAdministration::default().with_profile_identity(profile_identity.clone());
     let user_db = first_admin
         .registered_profile_session_database()
         .await

@@ -372,9 +372,15 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_refreshes_once_only_after_generation_change() {
+    let profile = TempDir::new().unwrap();
+    let profile_root = profile.path().join("profile");
     let mut handshake = test_handshake_defaults();
+    handshake.client_identity = DaemonClientIdentity {
+        global_db_path: profile_root.join("global.db"),
+        profile_root: profile_root.clone(),
+    };
     handshake.client_instance_id = test_client_instance_id(4);
-    let engine = super::super::DaemonEngine::default();
+    let engine = test_daemon_engine_for_profile(&profile_root);
 
     let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
     let initialize_responses =
@@ -405,7 +411,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     );
     assert_eq!(same_generation[0]["id"], json!(2));
 
-    let next_generation = super::super::DaemonEngine::default();
+    let next_generation = test_daemon_engine_for_profile(&profile_root);
     let first = daemon_round_trip(
         next_generation.clone(),
         &handshake,
@@ -438,8 +444,14 @@ async fn daemon_refreshes_once_only_after_generation_change() {
 #[cfg(unix)]
 #[tokio::test]
 async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
-    let engine = super::super::DaemonEngine::default();
+    let profile = TempDir::new().unwrap();
+    let profile_root = profile.path().join("profile");
+    let engine = test_daemon_engine_for_profile(&profile_root);
     let mut handshake = test_handshake_defaults();
+    handshake.client_identity = DaemonClientIdentity {
+        global_db_path: profile_root.join("global.db"),
+        profile_root,
+    };
     handshake.client_instance_id = test_client_instance_id(5);
     handshake.tool_list_changed_capable = true;
     handshake.catalog_version = "0.0.0-old".to_string();
