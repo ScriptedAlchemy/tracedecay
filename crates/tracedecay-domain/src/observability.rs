@@ -84,6 +84,75 @@ pub enum ObservabilityPayloadV1 {
     TelemetryDrop(TelemetryDropObservedV1),
 }
 
+impl ObservabilityPayloadV1 {
+    pub const fn event_kind(&self) -> &'static str {
+        match self {
+            Self::RetrievalQuery(_) => "retrieval.query.observed.v1",
+            Self::RetrievalPlanner(_) => "retrieval.planner.observed.v1",
+            Self::Retriever(_) => "retriever.observed.v1",
+            Self::RetrievalSynthesis(_) => "retrieval.synthesis.observed.v1",
+            Self::RetrievalSource(_) => "retrieval.source.observed.v1",
+            Self::ContextOutcome(_) => "context.outcome.observed.v1",
+            Self::RetrievalAblation(_) => "retrieval.ablation.observed.v1",
+            Self::AdoptionEligibility(_) => "adoption.eligibility.observed.v1",
+            Self::AdoptionOutcome(_) => "adoption.outcome.linked.v1",
+            Self::AnalyticsConsent(_) => "analytics.consent.changed.v1",
+            Self::OperationResource(_) => "operation.resource.observed.v1",
+            Self::TelemetryDrop(_) => "telemetry.drop.observed.v1",
+        }
+    }
+}
+
+impl ObservabilityEnvelopeV1 {
+    /// Rejects envelopes that cannot be projected without inventing source,
+    /// time, sampling, or event-type semantics.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for value in [
+            self.event_id.as_str(),
+            self.idempotency_key.as_str(),
+            self.trace_id.as_str(),
+            self.scope_ref.as_str(),
+            self.capability.as_str(),
+            self.operation.as_str(),
+            self.producer_revision.as_str(),
+            self.configuration_revision.as_str(),
+            self.policy_revision.as_str(),
+            self.watermark.as_str(),
+            self.process_boot_id.as_str(),
+        ] {
+            if value.is_empty()
+                || value.len() > 512
+                || value.trim() != value
+                || value.chars().any(char::is_control)
+            {
+                return Err("identifier");
+            }
+        }
+        if self.schema_revision != 1 || self.event_kind != self.payload.event_kind() {
+            return Err("event_kind");
+        }
+        if self.observation_time_micros < self.event_time_micros
+            || self
+                .valid_until_micros
+                .zip(self.valid_from_micros)
+                .is_some_and(|(until, from)| until < from)
+        {
+            return Err("temporal_range");
+        }
+        match (self.coverage, self.sampling_probability) {
+            (CoverageStateV1::Sampled, Some(probability))
+                if probability.is_finite() && probability > 0.0 && probability <= 1.0 => {}
+            (CoverageStateV1::Sampled, _) => return Err("sampling_probability"),
+            (_, Some(_)) => return Err("sampling_probability"),
+            _ => {}
+        }
+        if self.quantity.is_some_and(|value| !value.is_finite()) {
+            return Err("quantity");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RetrievalQueryObservedV1 {
     pub query_family: String,
@@ -271,5 +340,49 @@ mod tests {
             serde_json::to_string(&PerformanceDispositionV1::InsufficientEvidence).unwrap(),
             "\"insufficient_evidence\""
         );
+    }
+
+    #[test]
+    fn envelope_rejects_payload_kind_mismatch() {
+        let envelope = ObservabilityEnvelopeV1 {
+            event_id: "event:1".into(),
+            event_kind: "telemetry.drop.observed.v1".into(),
+            schema_revision: 1,
+            idempotency_key: "idempotency:1".into(),
+            trace_id: "trace:1".into(),
+            scope_ref: "scope:1".into(),
+            capability: "retrieval".into(),
+            operation: "query".into(),
+            event_time_micros: 1,
+            observation_time_micros: 1,
+            valid_from_micros: None,
+            valid_until_micros: None,
+            quantity: None,
+            unit: None,
+            terminal_result: None,
+            producer_revision: "producer.v1".into(),
+            configuration_revision: "config.v1".into(),
+            policy_revision: "policy.v1".into(),
+            watermark: "watermark:1".into(),
+            coverage: CoverageStateV1::Known,
+            sampling_probability: None,
+            retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+            emitted_count: 1,
+            delayed_count: 0,
+            dropped_count: 0,
+            process_boot_id: "boot:1".into(),
+            producer_sequence: 1,
+            payload: ObservabilityPayloadV1::RetrievalQuery(RetrievalQueryObservedV1 {
+                query_family: "exact_technical".into(),
+                enabled_lanes: vec!["exact_literal".into()],
+                candidate_budget: 1,
+                context_budget: 1,
+                token_budget: 1,
+                answered: true,
+                source_coverage: CoverageStateV1::Known,
+                lane_coverage: CoverageStateV1::Known,
+            }),
+        };
+        assert_eq!(envelope.validate(), Err("event_kind"));
     }
 }
