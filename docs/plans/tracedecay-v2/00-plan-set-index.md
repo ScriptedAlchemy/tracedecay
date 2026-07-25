@@ -143,12 +143,16 @@ records the rejected mechanism, the reason, and the retained replacement:
    authority. Actual remote/network boundaries still authenticate, native Git
    signing policy remains native Git's concern, and content digests may detect
    corruption without becoming signatures or attestations.
-5. **Work/Kanban in PR14 is rejected.** It would create a second or
-   session-derived task authority before the canonical product exists. PR14 is
-   exactly Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery,
-   Automations, Observatory, Costs, and Settings. Plan 24 owns the persistent
-   task/work graph and PR17 adds the first-class Work workspace and projections
-   over that authority; no independent Kanban store is allowed.
+5. **The PR14/PR17 Work allocation is plan authority, not a user rejection.**
+   The user did not enumerate the twelve PR14 workspaces and asked "ahat about
+   kanban/task graph etc" on 2026-07-25 without a recorded answer accepting
+   deferral. The written plan currently assigns Brain, Explorer, Loom, Sessions,
+   Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and
+   Settings to PR14, while Plan 24 owns the persistent task/work graph and PR17
+   adds Work. That allocation remains binding plan authority pending the open
+   scheduling decision recorded in Plans 11/11c; it must never be attributed to
+   the user. An independent or session-derived Kanban authority remains
+   architecturally rejected regardless of delivery timing.
 6. **The Cargo shim and `cargo-slot` are rejected.** The earlier local build
    shim was removed by explicit direction and is not product, contributor, CI,
    or release architecture. Stock Cargo behavior and portable repository
@@ -178,6 +182,97 @@ records the rejected mechanism, the reason, and the retained replacement:
     remediation operations; missing authority returns typed unavailable and
     remains with the named owning plan rather than being filled by a generic
     dispatcher.
+
+### Frontend rejection record
+
+The following entries come from the authoritative 2026-07-25 history brief.
+Quoted text is user speech; plan/design consequences are labeled separately.
+
+1. **Module Federation is rejected for the TraceDecay dashboard.** The user
+   said it "shouldn't be using Federation" there. The replacement is one
+   ordinary Rsbuild application and React tree.
+2. **Vite and bundler-ADR ceremony are rejected.** The exact instruction was
+   "use rsbuild. no adr. just pick rsbuild." Rsbuild is settled; do not reopen a
+   Vite comparison or write an ADR to restate the choice.
+3. **The pre-PR14 dashboard is rejected as an implementation base.** The user
+   said to "gut the existing dashboard" for a fresh, industry-leading
+   implementation. Retained API compatibility is not permission to restore its
+   frontend composition or visual language.
+4. **Foundation lanes styling or structuring the product are rejected.** The
+   historical instruction was "no styling or strucutring" for foundation
+   models. The named model has since been superseded, but one designated design
+   owner still owns styling, layout, and dependency selection.
+5. **Git-hash-tied record documents are rejected.** The user explicitly did
+   not want records "all iver the place tied to git hashes" because they waste
+   time and cause agents to redo work after commits. Never create per-commit
+   acceptance/evaluation documents, screenshot-record manifests, or evidence
+   packets. Direct tests, real-Chrome review, ordinary run output, and truthful
+   status in the owning plan replace them. A landed commit identifier may
+   annotate one authoritative implementation checkpoint; it does not create a
+   separate record or establish acceptance.
+6. **A dashboard that does not look world class is rejected.** Beauty is a hard
+   acceptance criterion: "its importsnt that it looks really beautiful and
+   functional" and "we wanna overhaul anything that isnt magnificent and
+   beautful." Function and beauty are simultaneous requirements on every page.
+7. **A generic, clinical, simple visual language is rejected.** This is the
+   user's named failure mode, not permission to invent a specific palette,
+   typeface, spacing system, or motion language on his behalf.
+8. **Bottom-panel chrome that steals graph space is rejected.** Controls and
+   evidence remain available without crowding the primary interactive field.
+9. **shadcn adoption is rejected for now.** The current instruction is "dont
+   use shadcn yet" and "just leave it for now"; this is a delivery-first hold,
+   not a permanent ban or a ban on investigating compatibility.
+10. **The sparse circular single-project Brain is rejected.** The circle
+    communicated no readable property and the selected-project view was too
+    sparse. Geometry must encode a named real measurement.
+11. **A Brain with no visible live neurons after real dogfooding is rejected.**
+    Real activity should visibly fire when agents work; missing activity must
+    remain truthful rather than simulated.
+12. **Bland vertical lists that consume large screen area are rejected.**
+    Lists remain accessible equivalents where needed, but cannot be the bland,
+    dominant visual treatment.
+13. **"Bland UML" is rejected as the structural idiom.** Structural views must
+    connect symbols, files, functions, callers/callees, sessions, facts, and
+    surrounding types in a comprehensible field.
+14. **Call chains drawn as service boxes are rejected.** They must show
+    function/type-level callers and callees, not resemble a service-architecture
+    diagram.
+15. **The embedded/in-IDE browser is rejected as the visual verification
+    surface.** Its viewport is too small. Use real Google Chrome, screenshot
+    every page, and manually click through every interaction state.
+16. **Anything not magnificent on any page is rejected.** The quality bar
+    applies across the dashboard, not only to hero graph surfaces.
+17. **Falsified UI is rejected categorically.** "All data must be fully wired
+    through to the frontend with no falsified ui"; missing backend behavior is
+    implementation work or a truthful typed unavailable state, never a
+    plausible zero, fake health, or decorative activity.
+18. **Vendored/forked Tailwind is an unconfirmed adjacent-workspace
+    inference, not a TraceDecay user rule.** The cited rejection came from a
+    bundler-benchmark workspace. TraceDecay may prefer upstream maintained
+    integration under the general library-first rule, but no plan may quote the
+    user as rejecting vendored Tailwind here without new TraceDecay-specific
+    evidence.
+
+**User-stated graph benchmark.** "Look at cosmograph.app i want visuals like
+that. relaly beautiful" sets the visual benchmark. It does not select or require
+the Cosmograph library; licensing, offline, accessibility, and product-authority
+constraints still govern implementation.
+
+**Unresolved desktop/responsive contradiction (owner: user/product owner).** On
+2026-07-06 the user said "desktop resolution only please." On 2026-07-25 he
+filed the hidden-below-1024px symbol-search bug and required verification at
+320/768 widths with axe violations at zero. Neither instruction is silently
+discarded. Until the owner decides, the working interpretation is desktop-sized
+screenshots in real Chrome while functionality remains present below `lg`; this
+is provisional, not a settled product-scope decision.
+
+**Unattributed design axes.** The complete history contains no user statement
+selecting typography, colour palette, dark/light preference, spacing scale,
+motion, or easing. Specific choices on those axes are design-owner/agent plan
+decisions and must never be presented as user preferences. The user's
+"kinestetic synastisya" direction was immediately hedged with "i dont wuite
+know but you get the idea"; it and "topography of the code base" are
+impressionistic direction, not a literal visual or motion specification.
 
 ## Retained semantic ownership
 
@@ -336,7 +431,9 @@ authorized configuration or remediation commands back through the daemon.
   Costs, and Settings — with renderer-neutral semantics, a permissive default
   renderer, keyboard/accessibility parity, typed SLOs, and denominator-safe
   measurements with provenance, coverage, cohort, temporal delta, uncertainty,
-  and calibration validity. Work is excluded until PR17.
+  and calibration validity. By current plan authority Work is allocated to
+  PR17; the user did not enumerate the twelve or accept that deferral, so the
+  timing remains the open owner question recorded above.
 - Plan 09 remains the sole Doctor use-case implementation/composition
   authority, Plan 14 its historical regression/behavior contract, and Plan 26
   the measurement authority; the Plan 11 UI renders supplied results and never
