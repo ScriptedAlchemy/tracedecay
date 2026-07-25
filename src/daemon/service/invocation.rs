@@ -3117,6 +3117,23 @@ struct SwitchableFeedbackCycleRuntimeV1 {
     current: RwLock<Arc<dyn FeedbackCycleRuntimePort>>,
 }
 
+struct UnavailableFeedbackCycleRuntimeV1;
+
+impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
+    fn execute(
+        &self,
+        _request: FeedbackCycleRequest,
+    ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
+        Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure>,
+    > {
+        Box::pin(async {
+            Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
+                "feedback-cycle-unavailable",
+            ))
+        })
+    }
+}
+
 impl SwitchableFeedbackCycleRuntimeV1 {
     fn new(current: Arc<dyn FeedbackCycleRuntimePort>) -> Self {
         Self {
@@ -3491,6 +3508,17 @@ impl DaemonFeedbackRuntimeRegistrar {
                 runtime,
             },
         );
+        drop(runtimes);
+        self.service
+            .feedback_cycle_inputs
+            .lock()
+            .await
+            .entry(project_root)
+            .or_insert_with(|| {
+                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
+                    UnavailableFeedbackCycleRuntimeV1,
+                )))
+            });
         Ok(publications)
     }
 
@@ -3570,18 +3598,28 @@ impl DaemonFeedbackRuntimeRegistrar {
             tests_operation,
             lsp_input,
         )?;
-        let cycle_input = Arc::new(SwitchableFeedbackCycleRuntimeV1::new(
-            production_proximity_feedback_cycle_input(
-                runtime.clone(),
-                production_lsp_input,
-                proximity,
-            ),
-        ));
-        self.service
+        let production_input = production_proximity_feedback_cycle_input(
+            runtime.clone(),
+            production_lsp_input,
+            proximity,
+        );
+        let cycle_input = self
+            .service
             .feedback_cycle_inputs
             .lock()
             .await
-            .insert(project_root.clone(), cycle_input);
+            .get(&project_root)
+            .cloned();
+        if let Some(cycle_input) = cycle_input {
+            cycle_input
+                .replace(production_input)
+                .map_err(|_| DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
+        } else {
+            self.service.feedback_cycle_inputs.lock().await.insert(
+                project_root.clone(),
+                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(production_input)),
+            );
+        }
         self.service
             .feedback_cycles
             .lock()
@@ -5785,15 +5823,20 @@ mod tests {
     async fn feedback_cycle_router_upgrades_existing_lsp_sessions_to_advisory_runtime() {
         let proximity_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let advisory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(CountingFeedbackCycle(
-            Arc::clone(&proximity_calls),
-        )));
+        let router =
+            SwitchableFeedbackCycleRuntimeV1::new(Arc::new(UnavailableFeedbackCycleRuntimeV1));
         let request = FeedbackCycleRequest {
             root_uri: "file:///project".to_owned(),
             document_uri: "file:///project/src/lib.rs".to_owned(),
             trigger: crate::daemon::lsp_gateway::DiagnosticTrigger::DocumentSave,
         };
 
+        assert!(router.execute(request.clone()).await.is_err());
+        router
+            .replace(Arc::new(CountingFeedbackCycle(Arc::clone(
+                &proximity_calls,
+            ))))
+            .unwrap();
         router.execute(request.clone()).await.unwrap();
         router
             .replace(Arc::new(CountingFeedbackCycle(Arc::clone(&advisory_calls))))
