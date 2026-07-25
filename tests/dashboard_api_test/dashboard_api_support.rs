@@ -189,15 +189,14 @@ pub(crate) async fn setup_project(
             ProjectId::new(format!("dashboard_fixture_{suffix}"))
                 .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
         });
+    let profile_root = project_root
+        .parent()
+        .unwrap_or(project_root)
+        .join("tracedecay-profile");
     let runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(
-            tracedecay::storage::default_profile_root()
-                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
-            project_root,
-            project_id,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
+        HostAdmissionTestRuntimeV1::project(profile_root, project_root, project_id)
+            .await
+            .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
     );
     let graph = runtime
         .initialize_project_graph_for_test(
