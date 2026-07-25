@@ -383,6 +383,43 @@ fn empty_observation_projection_is_absent() {
     );
 }
 
+#[test]
+fn retained_or_unreported_observation_history_is_not_absent() {
+    let model =
+        crate::application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+            &[],
+            1,
+            0,
+        )
+        .expect("retained projection");
+    assert_eq!(
+        observability_read_from_model(Ok(model)),
+        ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 0,
+            last_observed_at_micros: None,
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        }
+    );
+
+    let unknown =
+        crate::application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+            &[],
+            0,
+            1,
+        )
+        .expect("unknown projection");
+    assert_eq!(
+        observability_read_from_model(Ok(unknown)),
+        ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 0,
+            last_observed_at_micros: None,
+            coverage: DoctorCoverageCompletenessV1::Unknown,
+        }
+    );
+}
+
 // --- Storage mapper ---------------------------------------------------------
 
 #[test]

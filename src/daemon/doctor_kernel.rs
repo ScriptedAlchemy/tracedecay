@@ -595,7 +595,13 @@ pub fn observability_read_from_model(
     >,
 ) -> ObservabilityReadV1 {
     match model {
-        Ok(model) if model.total_count == 0 => ObservabilityReadV1::Absent,
+        Ok(model)
+            if model.total_count == 0
+                && model.denominators.eligible == 0
+                && model.denominators.incomplete_boots == 0 =>
+        {
+            ObservabilityReadV1::Absent
+        }
         Ok(model) => {
             use crate::application::feedback::observations::Plan26CoverageV1;
             let (state, coverage) = match model.coverage {
