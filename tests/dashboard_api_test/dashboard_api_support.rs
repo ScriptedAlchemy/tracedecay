@@ -66,6 +66,7 @@ pub(crate) struct DashboardFixture {
     pub(crate) _home_guard: EnvVarGuard,
     pub(crate) _userprofile_guard: EnvVarGuard,
     pub(crate) home: std::path::PathBuf,
+    pub(crate) global_db_path: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) host_runtime: Arc<HostAdmissionTestRuntimeV1>,
@@ -189,20 +190,19 @@ pub(crate) async fn setup_project(
             ProjectId::new(format!("dashboard_fixture_{suffix}"))
                 .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
         });
-    let profile_root = project_root
-        .parent()
-        .unwrap_or(project_root)
-        .join("tracedecay-profile");
+    let profile_root = tracedecay::storage::default_profile_root()
+        .unwrap_or_else(|error| panic!("resolve dashboard fixture profile root: {error}"));
+    let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: None,
+    };
     let runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(profile_root, project_root, project_id)
+        HostAdmissionTestRuntimeV1::project(&profile_root, project_root, project_id)
             .await
             .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
     );
     let graph = runtime
-        .initialize_project_graph_for_test(
-            project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions::default(),
-        )
+        .initialize_project_graph_for_test(project_root, open_options)
         .await
         .unwrap_or_else(|error| panic!("initialize dashboard fixture graph: {error}"));
     (graph, runtime)
@@ -708,8 +708,8 @@ async fn start_dashboard_fixture_with_options(
         .canonicalize()
         .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
     let project_root = tmp_root.join("project");
-    let global_db_path = tmp_root.join("global").join("global.db");
     let profile_root = tmp_root.join("profile").join(".tracedecay");
+    let global_db_path = profile_root.join("global.db");
     // Skill lifecycle endpoints re-export managed skills into agent configs
     // under the process home; point HOME at the fixture so tests never touch
     // the developer's real agent installations.
@@ -723,7 +723,7 @@ async fn start_dashboard_fixture_with_options(
     if let Err(err) = write_enrollment_marker(
         &project_root,
         &EnrollmentMarker {
-            project_id: "dashboard_fixture".to_string(),
+            project_id: "dashboard_fixture_project".to_string(),
             storage_mode: StorageMode::ProfileSharded,
         },
     ) {
@@ -763,6 +763,7 @@ async fn start_dashboard_fixture_with_options(
         _home_guard: home_guard,
         _userprofile_guard: userprofile_guard,
         home,
+        global_db_path,
         base_url,
         project_root,
         host_runtime,
