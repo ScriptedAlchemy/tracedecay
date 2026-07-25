@@ -325,20 +325,30 @@ fn component_assets(
     host: HostKindV1,
     component: HostBundleComponentV1,
 ) -> Result<Vec<(String, Vec<u8>)>, HostBundleRegistryError> {
+    // The managed Hermes plugin package is also written by the legacy installer
+    // that the compatibility registration adapter re-runs during apply, and the
+    // component-set transaction verifies installed digests afterwards. Deploy
+    // the installer's own rendered inventory (same bin resolution as
+    // `InstallContext::tracedecay_bin`) so both writers produce identical
+    // bytes. Rendering the inventory with the `"__TRACEDECAY_BIN__"` sentinel
+    // and then substituting it through `render_compiled_asset` resolved the
+    // binary from `std::env::current_exe()` instead, which disagrees with
+    // `which_tracedecay()` whenever the running binary lives outside the
+    // installed path (for example `./target/release/tracedecay reinstall`) and
+    // corrupted every Hermes transaction.
     if (host, component) == (HostKindV1::Hermes, HostBundleComponentV1::Core) {
-        return super::hermes::host_bundle_files("__TRACEDECAY_BIN__")
-            .map_err(|_| HostBundleRegistryError::Incompatible)
-            .map(|files| {
-                files
-                    .into_iter()
-                    .map(|(path, body)| {
-                        (
-                            format!(".hermes/plugins/tracedecay/{path}"),
-                            render_compiled_asset(&body).into_bytes(),
-                        )
-                    })
-                    .collect()
-            });
+        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let files = super::hermes::rendered_plugin_files(&bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        return Ok(files
+            .into_iter()
+            .map(|(relative, body)| {
+                (
+                    format!(".hermes/plugins/tracedecay/{relative}"),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
     }
 
     // The Cursor plugin directory is also written by the legacy installer the
@@ -772,6 +782,63 @@ mod tests {
         assert!(
             body.contains(&serde_json::to_string(&installed).unwrap()),
             "the catalog must render the installer's resolved binary"
+        );
+        if running != installed && !running.is_empty() {
+            assert!(
+                !body.contains(&running),
+                "the catalog must not render the running executable path"
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_catalog_assets_match_the_legacy_installer_rendering() {
+        let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let rendered = super::super::hermes::rendered_plugin_files(&bin).unwrap();
+        let bundle =
+            verified_embedded_host_bundle(HostKindV1::Hermes, HostBundleComponentV1::Core, 0)
+                .unwrap();
+
+        assert_eq!(bundle.contents.len(), rendered.len());
+        for (relative, body) in rendered {
+            let path = format!(".hermes/plugins/tracedecay/{relative}");
+            let content = bundle
+                .contents
+                .iter()
+                .find(|content| content.relative_path == path)
+                .unwrap_or_else(|| panic!("catalog is missing the deployed path {path}"));
+            assert_eq!(
+                content.bytes,
+                body.into_bytes(),
+                "{path} must match the legacy installer rendering"
+            );
+        }
+    }
+
+    /// Both writers must agree even when the running binary is not the
+    /// installed one — `./target/release/tracedecay reinstall` is exactly the
+    /// case that corrupted the Hermes transaction and left a pending
+    /// `component-set-journal.hermes.v1.json` behind.
+    #[test]
+    fn hermes_core_assets_do_not_depend_on_the_running_executable_path() {
+        let assets = component_assets(HostKindV1::Hermes, HostBundleComponentV1::Core).unwrap();
+        let running = std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let installed =
+            super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let tools = assets
+            .iter()
+            .find(|(path, _)| path == ".hermes/plugins/tracedecay/tools.py")
+            .expect("the Hermes core component deploys tools.py");
+        let body = String::from_utf8(tools.1.clone()).unwrap();
+        assert!(
+            body.contains(&serde_json::to_string(&installed).unwrap()),
+            "the catalog must render the installer's resolved binary"
+        );
+        assert!(
+            !body.contains("__TRACEDECAY_BIN__"),
+            "the catalog must not leave the bin sentinel unrendered"
         );
         if running != installed && !running.is_empty() {
             assert!(
