@@ -2291,6 +2291,7 @@ impl HostAdmissionTestRuntimeV1 {
         })?;
         let profile_database = Arc::clone(&self.profile_database);
         let profile_sessions = Arc::clone(&self.profile_registered);
+        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
                 .with_direct_databases(
@@ -2301,6 +2302,7 @@ impl HostAdmissionTestRuntimeV1 {
                     false,
                 );
         context.profile_root = Some(profile_root);
+        context.profile_identity = Some(profile_identity);
         context.host_admission_test_runtime = Some(Arc::new(self));
         Ok(context)
     }
