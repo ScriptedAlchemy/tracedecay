@@ -19,7 +19,7 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever,
+    LexicalLaneRetriever, lexical_query_parts,
 };
 use crate::query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, LexicalPostingReadPort, RetrievalPortError,
@@ -39,6 +39,22 @@ where
     <T as TryFrom<String>>::Error: fmt::Debug,
 {
     T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid fixture digest")
+}
+
+#[test]
+fn shared_query_parser_retains_phrase_and_identifier_subtokens() {
+    let parts =
+        lexical_query_parts("who calls VectorWatermark::merge_max").expect("lexical query parts");
+
+    assert_eq!(
+        parts.phrases,
+        ["who calls VectorWatermark::merge_max".to_owned()]
+    );
+    assert!(parts.whole_terms.contains(&"VectorWatermark".to_owned()));
+    assert!(parts.subtokens.contains(&"vector".to_owned()));
+    assert!(parts.subtokens.contains(&"watermark".to_owned()));
+    assert!(parts.subtokens.contains(&"merge".to_owned()));
+    assert!(parts.subtokens.contains(&"max".to_owned()));
 }
 
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {

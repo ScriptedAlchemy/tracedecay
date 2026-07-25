@@ -208,13 +208,12 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
         let mut literals = Vec::new();
         let mut seen = BTreeSet::new();
         let query = query_view.as_str();
-        if query.chars().any(char::is_whitespace)
-            && !query.contains('"')
+        if !query.contains('"')
             && !query
                 .split_whitespace()
                 .next()
                 .is_some_and(|atom| atom.contains(':'))
-            && exact_field_accepts(ExactFieldV1::CompilerOrRuntimeError, query)
+            && is_contextual_error_text(query)
         {
             let (canonical_bytes, _) =
                 canonicalize_exact(ExactFieldV1::CompilerOrRuntimeError, query);
@@ -337,6 +336,30 @@ fn exact_query_atoms(query: &str) -> Vec<ExactQueryAtom> {
         });
     }
     atoms
+}
+
+fn is_contextual_error_text(value: &str) -> bool {
+    value.split_whitespace().nth(1).is_some()
+        && value
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .any(|token| {
+                matches!(
+                    token.to_ascii_lowercase().as_str(),
+                    "cannot"
+                        | "denied"
+                        | "error"
+                        | "failed"
+                        | "failure"
+                        | "invalid"
+                        | "mismatch"
+                        | "missing"
+                        | "must"
+                        | "not"
+                        | "unavailable"
+                        | "unexpected"
+                )
+            })
 }
 
 fn exact_field_prefix(prefix: &str) -> Option<ExactFieldV1> {

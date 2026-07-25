@@ -36,6 +36,90 @@ pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
 /// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LexicalQueryPartsV1 {
+    pub whole_terms: Vec<String>,
+    pub subtokens: Vec<String>,
+    pub phrases: Vec<String>,
+}
+
+/// One shared tokenizer for production PR9 and its direct evaluator.
+///
+/// Multi-token sanitized input is also retained as a phrase. This gives exact
+/// diagnostic/error text and natural-language queries a bounded lexical phrase
+/// signal; protected exact admission remains solely authority-controlled.
+pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, RetrievalPortError> {
+    let query = query.trim();
+    if query.is_empty()
+        || query.len() > MAX_LEXICAL_QUERY_TERM_BYTES_V1
+        || query.chars().any(char::is_control)
+    {
+        return Err(RetrievalPortError::Contract(
+            "lexical query must be non-empty, trimmed, control-free, and within the v1 byte bound"
+                .to_owned(),
+        ));
+    }
+    let mut whole_terms = Vec::new();
+    let mut subtokens = Vec::new();
+    let split_identifiers = query.split_whitespace().nth(1).is_some();
+    for token in query.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
+        if token.is_empty() {
+            continue;
+        }
+        whole_terms.push(token.to_owned());
+        if split_identifiers {
+            let lowercase = token.to_ascii_lowercase();
+            subtokens.extend(split_identifier_parts(token).filter(|part| part != &lowercase));
+        }
+    }
+    whole_terms.sort();
+    whole_terms.dedup();
+    subtokens.sort();
+    subtokens.dedup();
+    let phrase = query
+        .strip_prefix('"')
+        .and_then(|query| query.strip_suffix('"'))
+        .unwrap_or(query);
+    let phrases: Vec<String> = phrase
+        .split_whitespace()
+        .nth(1)
+        .is_some()
+        .then(|| phrase.to_owned())
+        .into_iter()
+        .collect();
+    if whole_terms.is_empty() && phrases.is_empty() {
+        return Err(RetrievalPortError::Contract(
+            "lexical query has no searchable terms".to_owned(),
+        ));
+    }
+    Ok(LexicalQueryPartsV1 {
+        whole_terms,
+        subtokens,
+        phrases,
+    })
+}
+
+fn split_identifier_parts(token: &str) -> impl Iterator<Item = String> + '_ {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    for character in token.chars() {
+        if character == '_' || (character.is_ascii_uppercase() && !current.is_empty()) {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current).to_ascii_lowercase());
+            }
+            if character != '_' {
+                current.push(character);
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current.to_ascii_lowercase());
+    }
+    parts.into_iter()
+}
+
 /// Typed lexical fields over code-search result grains (Plan 15: typed
 /// result grains; Plan 25: whole exact terms and language-profiled subtokens
 /// are distinct fields).

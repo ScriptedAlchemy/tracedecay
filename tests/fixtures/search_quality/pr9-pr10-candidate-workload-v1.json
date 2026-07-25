@@ -6,7 +6,7 @@
       "query_execution": "serial_exact_workload_order",
       "query_workers": 1
     },
-    "exact_corpus_bytes": 306536,
+    "exact_corpus_bytes": 147447,
     "exact_eligible_chunks_10x": 19600,
     "exact_eligible_chunks_current": 1960,
     "exact_file_count": 13,
@@ -114,8 +114,8 @@
       "document_id": "generated_lock",
       "eligibility": "excluded_generated_vendor_noise",
       "language": "generated_metadata",
-      "path": "Cargo.lock",
-      "source_path": "Cargo.lock",
+      "path": "evals/agent_adoption/fixture/Cargo.lock",
+      "source_path": "evals/agent_adoption/fixture/Cargo.lock",
       "scope": "project"
     },
     {
@@ -363,10 +363,10 @@
         "anchors": [
           "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
         ],
-        "git_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
         "git_path": "crates/tracedecay-domain/src/session.rs",
         "literal": "pub struct ClosedUtcIntervalV1"
       },
+      "historical_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
       "partition": "train",
       "query": "ClosedUtcIntervalV1",
       "query_id": "train-012",

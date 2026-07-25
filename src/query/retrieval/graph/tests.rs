@@ -398,11 +398,11 @@ fn graph_projection_emits_one_canonical_occurrence_when_seeds_converge() {
     );
     assert_eq!(
         result.candidates[0].anchor_id.as_str(),
-        "code-chunk:chunk.symbol.target"
+        "code-symbol:symbol.target"
     );
     assert_eq!(
         result.candidates[0].logical_evidence_id.as_str(),
-        "code-chunk:chunk.symbol.target"
+        "code-symbol:symbol.target"
     );
     let evidence = &result.evidence_by_occurrence[&id("code-graph:symbol.target")];
     assert_eq!(evidence.path[0].from.as_str(), "symbol.seed-strong");

@@ -27,7 +27,7 @@ pub use candidate_output::{
 
 const DEFAULT_WORKLOAD: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
 const DEFAULT_WORKLOAD_SHA256: &str =
-    "ab61caafe8aa1a1b3a524973e065921244a3b2700f4c9f081367dcac4547e90a";
+    "e6f03514533fa71cf0237006e6018a4c82e90d407e117637d8eb86dda3d839a9";
 const PR9_BASELINE_PROFILE: &str = "pr9-fallback";
 const SEMANTIC_PROFILE: &str = "hybrid-conservative";
 const RERANK_PROFILE: &str = "hybrid-reranked";
@@ -1304,6 +1304,7 @@ mod tests {
             strata: vec![stratum.to_owned()],
             query: id.to_owned(),
             allowed_scopes: vec!["research".to_owned()],
+            historical_commit: None,
             label: Some(serde_json::json!({ "anchors": anchors })),
         }
     }

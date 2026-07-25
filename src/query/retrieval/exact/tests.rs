@@ -205,6 +205,24 @@ fn central_authority_admits_unprefixed_contextual_error_text() {
     }));
 }
 
+#[test]
+fn central_authority_does_not_promote_unprefixed_natural_language() {
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        "who writes to the config file",
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("query sanitizes");
+
+    assert!(
+        authority
+            .parse_literals(&query_view, &base_request(16))
+            .iter()
+            .all(|literal| literal.field != ExactFieldV1::CompilerOrRuntimeError)
+    );
+}
+
 /// Build one exact candidate/evidence pair whose proof is minted by the
 /// central authority for `request.literals[literal_index]`.
 fn exact_pair(

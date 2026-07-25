@@ -65,7 +65,7 @@ use crate::query::retrieval::hydrate::{
 };
 use crate::query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever,
+    LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
 use crate::query::retrieval::ports::CodeCandidateBindingV1;
 use tracedecay_application::ResolvedScope;
@@ -241,6 +241,8 @@ pub struct WorkloadQueryV1 {
     pub strata: Vec<String>,
     pub query: String,
     pub allowed_scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub historical_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<serde_json::Value>,
 }
@@ -563,7 +565,6 @@ struct OccurrenceMapEntry {
     document_id: String,
     scope: String,
     fixture_path: String,
-    display_anchor: String,
     display_anchors: Vec<String>,
 }
 
@@ -884,6 +885,16 @@ pub fn validate_workload_for_tuning(
             return Err(CandidateOutputError::Contract(format!(
                 "unknown partition {}",
                 query.partition
+            )));
+        }
+        if query
+            .historical_commit
+            .as_ref()
+            .is_some_and(|commit| GitOidV1::new(commit.clone()).is_err())
+        {
+            return Err(CandidateOutputError::Contract(format!(
+                "query {} has an invalid historical commit",
+                query.query_id
             )));
         }
         partitions.insert(query.partition.as_str());
@@ -1268,9 +1279,9 @@ fn retrieve_one_native_query(
         &retrieval_budget(),
     )?);
     validate_native_query_output(profile, &prepared.fallback, &native)?;
-    let mut ranked = map_ranked_candidate_list(published, &ranked)?;
+    let ranked = map_ranked_candidate_list(published, &ranked)?;
     let (historical, historical_ranked) = historical_candidates(published, query)?;
-    ranked.extend(historical_ranked);
+    let ranked = merge_candidate_timelines(query, ranked, historical_ranked);
     Ok(QueryCandidateRowV1 {
         query_id: query.query_id.clone(),
         abstained: ranked.is_empty(),
@@ -1729,9 +1740,9 @@ fn retrieve_one_query(
     query: &WorkloadQueryV1,
 ) -> Result<QueryCandidateRowV1, CandidateOutputError> {
     let composed = compose_production_query(published, profile, query)?;
-    let mut ranked = map_ranked_candidates(published, &composed)?;
+    let ranked = map_ranked_candidates(published, &composed)?;
     let (historical, historical_ranked) = historical_candidates(published, query)?;
-    ranked.extend(historical_ranked);
+    let ranked = merge_candidate_timelines(query, ranked, historical_ranked);
     let abstained = ranked.is_empty();
     Ok(QueryCandidateRowV1 {
         query_id: query.query_id.clone(),
@@ -1874,14 +1885,15 @@ fn prepare_production_query(
         output_candidates: retriever_outcome_candidate_count(&exact_outcome),
     };
 
-    let (whole_terms, subtokens) = lexical_terms(&query.query);
+    let lexical_parts = lexical_query_parts(query_view.as_str())
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let lexical_request = LexicalLaneRequest {
         base: request.clone(),
         query_view: &query_view,
         generation: generation_id.clone(),
-        whole_terms,
-        subtokens,
-        phrases: Vec::new(),
+        whole_terms: lexical_parts.whole_terms,
+        subtokens: lexical_parts.subtokens,
+        phrases: lexical_parts.phrases,
         field_filters: Vec::new(),
         fuzzy_budget: 8,
         lexical_profile_revision: id("lexical-profile.candidate.v1")?,
@@ -2201,9 +2213,14 @@ fn map_ranked_candidate_list(
         } else {
             "approximate"
         };
+        let anchor = ranked.candidate.anchor_id.as_str().to_owned();
+        let mut anchors = entry.display_anchors;
+        if !anchors.contains(&anchor) {
+            anchors.insert(0, anchor.clone());
+        }
         rows.push(RankedCandidateRowV1 {
-            anchor: entry.display_anchor,
-            anchors: entry.display_anchors,
+            anchor,
+            anchors,
             scope: entry.scope,
             document_id: entry.document_id,
             tier: tier.to_owned(),
@@ -2250,6 +2267,13 @@ fn historical_candidates(
     let scope = ResolvedScope::new(identity.0, identity.1, identity.2, None)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let authority = GitReadAuthorityV1::new(&published.repo_root, scope.clone());
+    let source_commit = query
+        .historical_commit
+        .as_deref()
+        .map(GitOidV1::new)
+        .transpose()
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
+        .unwrap_or_else(|| published.source_commit.clone());
 
     let paths: Vec<String> = published
         .corpus
@@ -2263,15 +2287,17 @@ fn historical_candidates(
         Some(
             HistoricalSourceAuthorizationV1::new(
                 scope.clone(),
-                [published.source_commit.clone()],
+                [source_commit.clone()],
                 paths.clone(),
             )
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         )
     };
-    let (terms, _) = lexical_terms(&query.query);
+    let terms = lexical_query_parts(&query.query)
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
+        .whole_terms;
     let request = HistoricalQueryRequestV1 {
-        commits: vec![published.source_commit.clone()],
+        commits: vec![source_commit],
         paths,
         terms,
         rename_mode: HistoricalRenameModeV1::FollowExactObjectRenames,
@@ -2336,8 +2362,24 @@ fn historical_candidates(
                     tier: "historical_exact".to_owned(),
                 });
             }
+            let mut seen = BTreeSet::new();
+            rows.retain(|row| seen.insert(row.anchor.clone()));
             Ok((HistoricalQueryExecutionV1::Complete, rows))
         }
+    }
+}
+
+fn merge_candidate_timelines(
+    query: &WorkloadQueryV1,
+    mut current: Vec<RankedCandidateRowV1>,
+    mut historical: Vec<RankedCandidateRowV1>,
+) -> Vec<RankedCandidateRowV1> {
+    if query.historical_commit.is_some() {
+        historical.append(&mut current);
+        historical
+    } else {
+        current.append(&mut historical);
+        current
     }
 }
 
@@ -2676,18 +2718,22 @@ fn publish_corpus_with_scale(
             .as_ref()
             .and_then(|symbol| qualified_names.get(symbol));
         let display_anchors = display_anchors_for_chunk(chunk, document, qualified_name);
-        let display = display_anchors
-            .first()
-            .cloned()
-            .unwrap_or_else(|| document.document_id.clone());
         if let Some(symbol) = &chunk.anchor.symbol_occurrence_id {
+            occurrence_map.insert(
+                format!("code-symbol:{}", symbol.as_str()),
+                OccurrenceMapEntry {
+                    document_id: document.document_id.clone(),
+                    scope: document.scope.clone(),
+                    fixture_path: document.path.clone(),
+                    display_anchors: display_anchors.clone(),
+                },
+            );
             occurrence_map.insert(
                 format!("code-graph:{}", symbol.as_str()),
                 OccurrenceMapEntry {
                     document_id: document.document_id.clone(),
                     scope: document.scope.clone(),
                     fixture_path: document.path.clone(),
-                    display_anchor: display.clone(),
                     display_anchors: display_anchors.clone(),
                 },
             );
@@ -2698,7 +2744,6 @@ fn publish_corpus_with_scale(
                 document_id: document.document_id.clone(),
                 scope: document.scope.clone(),
                 fixture_path: document.path.clone(),
-                display_anchor: display,
                 display_anchors,
             },
         );
@@ -2793,13 +2838,18 @@ fn display_anchors_for_chunk(
                 String::from_utf8_lossy(term.canonical_bytes())
             )
         })
+        .or_else(|| {
+            qualified_name.map(|qualified_name| display_qualified_anchor(document, qualified_name))
+        })
         .unwrap_or_else(|| {
-            if first.is_empty() {
-                document.document_id.clone()
-            } else {
-                format!("{}::{first}", document.document_id)
-            }
+            format!(
+                "{}:{}-{}",
+                document.document_id,
+                chunk.anchor.source_span.start_byte,
+                chunk.anchor.source_span.end_byte
+            )
         });
+    anchors.insert(primary.clone());
     let mut ordered = vec![primary.clone()];
     ordered.extend(anchors.into_iter().filter(|anchor| anchor != &primary));
     ordered
@@ -3113,56 +3163,6 @@ fn no_caps() -> Result<DiversityPolicy, CandidateOutputError> {
     })
 }
 
-fn lexical_terms(query: &str) -> (Vec<String>, Vec<String>) {
-    let mut whole = Vec::new();
-    let mut subtokens = Vec::new();
-    for token in query.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
-        if token.is_empty() {
-            continue;
-        }
-        whole.push(token.to_owned());
-        if token.contains('_')
-            || token
-                .chars()
-                .skip(1)
-                .any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
-        {
-            continue;
-        }
-        for part in split_identifier(token) {
-            if part != token {
-                subtokens.push(part);
-            }
-        }
-    }
-    whole.sort();
-    whole.dedup();
-    subtokens.sort();
-    subtokens.dedup();
-    (whole, subtokens)
-}
-
-fn split_identifier(token: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    for ch in token.chars() {
-        if ch == '_' || ch.is_uppercase() && !current.is_empty() {
-            if !current.is_empty() {
-                parts.push(std::mem::take(&mut current).to_ascii_lowercase());
-            }
-            if ch != '_' {
-                current.push(ch);
-            }
-        } else {
-            current.push(ch);
-        }
-    }
-    if !current.is_empty() {
-        parts.push(current.to_ascii_lowercase());
-    }
-    parts
-}
-
 fn id<T>(value: &str) -> Result<T, CandidateOutputError>
 where
     T: TryFrom<String>,
@@ -3438,17 +3438,18 @@ mod tests {
 
     #[test]
     fn technical_query_tokens_do_not_leak_common_subtokens() {
+        let absent = lexical_query_parts("qzxw_owner_validation_absent_551").expect("absent query");
         assert_eq!(
-            lexical_terms("qzxw_owner_validation_absent_551"),
-            (
-                vec!["qzxw_owner_validation_absent_551".to_owned()],
-                Vec::new()
-            )
+            absent.whole_terms,
+            ["qzxw_owner_validation_absent_551".to_owned()]
         );
+        assert!(absent.subtokens.is_empty());
+        let private = lexical_query_parts("SessionEvidenceMetadataV1").expect("private query");
         assert_eq!(
-            lexical_terms("SessionEvidenceMetadataV1"),
-            (vec!["SessionEvidenceMetadataV1".to_owned()], Vec::new())
+            private.whole_terms,
+            ["SessionEvidenceMetadataV1".to_owned()]
         );
+        assert!(private.subtokens.is_empty());
     }
 
     #[test]
@@ -3489,6 +3490,12 @@ mod tests {
         duplicate.queries[1].query_id = duplicate.queries[0].query_id.clone();
         let error = validate_workload_for_tuning(&duplicate).expect_err("duplicate query id");
         assert!(error.to_string().contains("duplicate query_id"));
+
+        let mut invalid_history = workload();
+        invalid_history.queries[0].historical_commit = Some("not-a-commit".to_owned());
+        let error =
+            validate_workload_for_tuning(&invalid_history).expect_err("invalid historical commit");
+        assert!(error.to_string().contains("invalid historical commit"));
     }
 
     #[test]
@@ -3620,6 +3627,11 @@ mod tests {
                 "missing exact chunk occurrence {chunk_occurrence}"
             );
             if let Some(symbol) = &chunk.anchor.symbol_occurrence_id {
+                let symbol_occurrence = format!("code-symbol:{}", symbol.as_str());
+                assert!(
+                    published.occurrence_map.contains_key(&symbol_occurrence),
+                    "missing fused symbol occurrence {symbol_occurrence}"
+                );
                 let graph_occurrence = format!("code-graph:{}", symbol.as_str());
                 assert!(
                     published.occurrence_map.contains_key(&graph_occurrence),
@@ -4031,6 +4043,61 @@ mod tests {
             generated, direct,
             "generator row must match direct production call bytes"
         );
+    }
+
+    #[test]
+    fn pr9_phrase_and_historical_queries_reach_their_checked_in_anchors() {
+        let fixture = authenticated_repo_fixture();
+        let workload = workload();
+        let retrieve = |query_id: &str| {
+            let bytes =
+                retrieve_partition_query_bytes(&fixture.root, &workload, "pr9-fallback", query_id)
+                    .expect("direct retrieve");
+            serde_json::from_slice::<QueryCandidateRowV1>(&bytes).expect("candidate row")
+        };
+
+        let diagnostic = retrieve("train-004");
+        let diagnostic_top = diagnostic.ranked.iter().take(10).collect::<Vec<_>>();
+        let diagnostic_target = diagnostic.ranked.iter().enumerate().find(|(_, candidate)| {
+            candidate.anchor == "error::DomainError::InvalidTimeInterval"
+                || candidate
+                    .anchors
+                    .iter()
+                    .any(|anchor| anchor == "error::DomainError::InvalidTimeInterval")
+        });
+        assert!(
+            diagnostic_top.iter().any(|candidate| {
+                candidate.anchor == "error::DomainError::InvalidTimeInterval"
+                    || candidate
+                        .anchors
+                        .iter()
+                        .any(|anchor| anchor == "error::DomainError::InvalidTimeInterval")
+            }),
+            "diagnostic target: {diagnostic_target:#?}; top 10: {diagnostic_top:#?}"
+        );
+
+        let exact_symbol = retrieve("train-001");
+        let unique_exact_symbol_anchors = exact_symbol
+            .ranked
+            .iter()
+            .map(|candidate| candidate.anchor.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            unique_exact_symbol_anchors.len(),
+            exact_symbol.ranked.len(),
+            "duplicate visible anchors: {:#?}",
+            exact_symbol.ranked
+        );
+
+        let historical = retrieve("train-012");
+        assert!(historical.ranked.iter().take(10).any(|candidate| {
+            candidate.anchor
+                == "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
+                || candidate.anchors.iter().any(|anchor| {
+                    anchor
+                        == "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
+                })
+        }));
     }
 
     #[test]
