@@ -25,7 +25,14 @@ import {
   StorageFindingsPayloadSchema,
   DoctorFindingsPayloadSchema,
 } from '../contracts/wire.ts';
-import { ProjectsPayloadSchema } from './brain/contracts.ts';
+import {
+  ProjectContextPayloadSchema,
+  ProjectsPayloadSchema,
+  ScopedAnalyticsOverviewSchema,
+  ScopedMemoryStatusSchema,
+  ScopedSubgraphPayloadSchema,
+} from './brain/contracts.ts';
+import { columnIndexFor, indexedMass } from './brain/field.ts';
 import { DeliveryProjectsPayloadSchema } from './delivery/contracts.ts';
 import {
   GraphOverviewPayloadSchema,
@@ -141,6 +148,65 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   it('GET /api/projects — brain (ProjectsPayloadSchema)', () => {
     const data = parse(ProjectsPayloadSchema, '/api/projects');
     expect(data.project_tree.length).toBeGreaterThanOrEqual(2);
+    // Density spec for Brain's field: the surface composes projects into five
+    // recency columns against a mass axis, so a fixture that lands everything
+    // in one column or at one mass renders a picture that cannot be reviewed.
+    const entries = data.project_tree.flatMap((group) => group.projects);
+    expect(entries.length).toBeGreaterThanOrEqual(20);
+    const columns = new Set(entries.map((e) => columnIndexFor(e.last_seen_at, Date.now() / 1000)));
+    expect(columns.size).toBe(5);
+    const masses = entries.map(indexedMass);
+    expect(Math.max(...masses) / Math.max(Math.min(...masses), 1)).toBeGreaterThan(20);
+  });
+
+  it('GET /api/projects/{id} — scoped brain backbone (ProjectContextPayloadSchema)', () => {
+    const data = parse(ProjectContextPayloadSchema, '/api/projects/tracedecay');
+    expect(data.project?.project_id).toBe('tracedecay');
+    const stores = data.stores ?? [];
+    expect(stores.length).toBeGreaterThanOrEqual(1);
+    expect((stores[0]?.graph_scopes ?? []).length).toBeGreaterThanOrEqual(2);
+    // Artifact byte sizes drive the rail's magnitude meters; without them the
+    // whole holdings panel renders em dashes.
+    expect(
+      (stores[0]?.artifacts ?? []).every((a) => (a.size_bytes ?? 0) > 0),
+    ).toBe(true);
+    expect((data.aliases ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('resolves the project-scoped gateway the way the daemon rewrites it', () => {
+    // src/dashboard/mod.rs binds `/api/projects/{id}/{*tail}` and serves
+    // `/api/{tail}` against that project's own state. If the fixture layer did
+    // not mirror that, every scoped read would resolve to the registry payload
+    // and the scoped surfaces would be audited against a shape the daemon never
+    // sends.
+    expect(resolveFixture('/api/projects/tracedecay/plugins/graph/overview')).toEqual(
+      resolveFixture('/api/plugins/graph/overview'),
+    );
+    expect(resolveFixture('/api/projects/tracedecay/plugins/holographic/status')).toEqual(
+      resolveFixture('/api/plugins/holographic/status'),
+    );
+  });
+
+  it('GET /api/plugins/graph/subgraph — scoped brain field (ScopedSubgraphPayloadSchema)', () => {
+    const data = parse(
+      ScopedSubgraphPayloadSchema,
+      '/api/projects/tracedecay/plugins/graph/subgraph',
+    );
+    expect((data.nodes ?? []).length).toBeGreaterThanOrEqual(20);
+    expect((data.edges ?? []).length).toBeGreaterThanOrEqual(20);
+  });
+
+  it('GET /api/plugins/holographic/status — scoped brain (ScopedMemoryStatusSchema)', () => {
+    const data = parse(ScopedMemoryStatusSchema, '/api/plugins/holographic/status');
+    expect(data.exists).toBe(true);
+    expect(data.memory?.fact_count).toBeGreaterThan(0);
+    expect(data.memory?.entity_count).toBeGreaterThan(0);
+  });
+
+  it('GET /api/plugins/analytics/overview — scoped brain (ScopedAnalyticsOverviewSchema)', () => {
+    const data = parse(ScopedAnalyticsOverviewSchema, '/api/plugins/analytics/overview');
+    expect(data.usage?.event_count).toBeGreaterThan(0);
+    expect((data.usage?.by_category ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
   it('GET /api/projects — delivery (DeliveryProjectsPayloadSchema)', () => {
