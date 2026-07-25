@@ -1636,6 +1636,7 @@ mod tests {
                     revision: 1,
                     evidence: Some(json!({ "canonical": true })),
                     omission_reason: None,
+                    next_retrieval_handle: None,
                 })
             })
         }

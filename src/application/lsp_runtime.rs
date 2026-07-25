@@ -1274,6 +1274,7 @@ impl OperationEventTestRunProjection {
                     ContextCoverage::Partial,
                     None,
                     Some("stale-generation".to_owned()),
+                    None,
                 ));
             }
             let current = ManagedTestRunCurrentScope {
@@ -1300,6 +1301,7 @@ impl OperationEventTestRunProjection {
                     ContextCoverage::Partial,
                     None,
                     Some("stale-generation".to_owned()),
+                    None,
                 ));
             }
             let end = record
@@ -1355,9 +1357,9 @@ impl OperationEventTestRunProjection {
                     "results": results,
                     "result_offset": result_offset,
                     "available_results": snapshot.results.len(),
-                    "next_retrieval_handle": next_retrieval_handle,
                 })),
                 omission_reason,
+                next_retrieval_handle,
             ))
         })
     }
@@ -2056,6 +2058,7 @@ fn context_expansion_envelope(
         revision: TRACEDECAY_CONTEXT_REVISION,
         evidence,
         omission_reason,
+        next_retrieval_handle: None,
     }
 }
 
@@ -2064,6 +2067,7 @@ fn context_expansion_envelope_for_test_run(
     coverage: ContextCoverage,
     evidence: Option<serde_json::Value>,
     omission_reason: Option<String>,
+    next_retrieval_handle: Option<String>,
 ) -> ContextExpansionEnvelope {
     ContextExpansionEnvelope {
         root_uri: record.root_uri,
@@ -2080,6 +2084,7 @@ fn context_expansion_envelope_for_test_run(
         revision: record.revision,
         evidence,
         omission_reason,
+        next_retrieval_handle,
     }
 }
 
