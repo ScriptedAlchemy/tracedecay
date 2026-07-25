@@ -99,7 +99,12 @@ pub(crate) async fn overview(
     if let Some(db) = &state.lcm_db {
         let provider = "cursor";
         let storage_root = lcm_storage_root(&state);
-        let detail = db
+        // Supplementary enrichment only: a failed probe must degrade to a
+        // typed-unavailable field, never take down the otherwise-valid
+        // overview. This exact coupling 500'd the whole Loom workspace when
+        // the probe hit the migration-SQL materialization limit on a large
+        // profile.
+        match db
             .lcm_payload_health_detail(
                 &storage_root,
                 provider,
@@ -109,13 +114,20 @@ pub(crate) async fn overview(
                 &LcmGcConfig::default(),
             )
             .await
-            .map_err(|e| {
-                err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("overview payload health failed: {e}"),
-                )
-            })?;
-        payload.insert("payload_health".into(), payload_health_value(&detail));
+        {
+            Ok(detail) => {
+                payload.insert("payload_health".into(), payload_health_value(&detail));
+            }
+            Err(error) => {
+                payload.insert(
+                    "payload_health".into(),
+                    serde_json::json!({
+                        "state": "unavailable",
+                        "reason": error.to_string(),
+                    }),
+                );
+            }
+        }
     } else {
         payload.insert("payload_health".into(), Value::Null);
     }
