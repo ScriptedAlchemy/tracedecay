@@ -489,27 +489,28 @@ fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<Sto
         .map(|record| record.epoch);
     let generation = match daemon_generation {
         Some(generation) => generation,
-        None => {
-            let raw = process_run_id
-                .get(..16)
-                .and_then(|prefix| u64::from_str_radix(prefix, 16).ok())
-                .or_else(|| {
-                    process_run_id
-                        .strip_prefix("mcp-")
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .map(|timestamp| timestamp ^ u64::from(std::process::id()))
-                })
-                .ok_or_else(|| {
-                    session_registry_error(
-                        "create store incarnation",
-                        "process runtime generation has an unsupported format".to_owned(),
-                    )
-                })?;
-            raw.max(1)
-        }
+        None => process_runtime_generation(process_run_id).ok_or_else(|| {
+            session_registry_error(
+                "create store incarnation",
+                "process runtime generation has an unsupported format".to_owned(),
+            )
+        })?,
     };
     StoreIncarnationV1::new(generation)
         .map_err(|error| session_registry_error("create store incarnation", error.to_string()))
+}
+
+fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
+    let raw = process_run_id
+        .get(..16)
+        .and_then(|prefix| u64::from_str_radix(prefix, 16).ok())
+        .or_else(|| {
+            process_run_id
+                .strip_prefix("mcp-")
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|timestamp| timestamp ^ u64::from(std::process::id()))
+        })?;
+    Some((raw & i64::MAX as u64).max(1))
 }
 
 async fn open_runtime(
@@ -622,6 +623,18 @@ fn session_registry_error(operation: &'static str, message: String) -> TraceDeca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_runtime_generation_always_fits_sqlite_integer() {
+        assert_eq!(
+            process_runtime_generation("ffffffffffffffff0000000000000000"),
+            Some(i64::MAX as u64)
+        );
+        assert_eq!(
+            process_runtime_generation("00000000000000000000000000000000"),
+            Some(1)
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn daemon_restart_fences_the_previous_session_runtime_binding() {
