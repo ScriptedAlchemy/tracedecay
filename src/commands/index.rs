@@ -128,7 +128,14 @@ async fn handle_init_with_daemon_availability(
         "init bootstrap",
     )?;
 
-    maintenance_bootstrap_init(&project_path, &skip_folders, &include_folders, &handshake).await
+    maintenance_bootstrap_init(
+        &project_path,
+        &skip_folders,
+        &include_folders,
+        &handshake,
+        &lifecycle_lease,
+    )
+    .await
 }
 
 async fn brokered_init(
@@ -168,6 +175,7 @@ async fn maintenance_bootstrap_init(
     skip_folders: &[String],
     include_folders: &[String],
     handshake: &tracedecay::daemon::DaemonHandshake,
+    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     if !project_path.is_dir() {
         return Err(tracedecay::errors::TraceDecayError::Config {
@@ -199,7 +207,9 @@ async fn maintenance_bootstrap_init(
         });
     }
 
-    let mut cg = TraceDecay::init_with_options(project_path, open_options).await?;
+    let mut cg =
+        TraceDecay::init_with_exclusive_maintenance(project_path, open_options, lifecycle_lease)
+            .await?;
     cg.add_skip_folders(skip_folders);
     cg.add_include_folders(include_folders);
     if let Err(error) = cg.index_all().await {
@@ -277,6 +287,7 @@ mod init_bootstrap_tests {
         let profile = temp.path().join("profile");
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::create_dir_all(project.join("ignored")).unwrap();
+        gix::init(&project).unwrap();
         std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
         std::fs::write(project.join("ignored/skip.rs"), "fn skipped() {}\n").unwrap();
         let handshake = test_handshake(&project, &profile);
@@ -305,7 +316,7 @@ mod init_bootstrap_tests {
             };
         assert!(
             direct_open_error.to_string().contains(
-                "database access requires managed-daemon or exclusive-maintenance authority"
+                "configuration authority unavailable: a registered project session runtime is required"
             ),
             "unexpected direct-open error: {direct_open_error}"
         );
@@ -321,7 +332,7 @@ mod init_bootstrap_tests {
             "inspect daemonless init test",
         )
         .unwrap();
-        let cg = TraceDecay::open_with_options(&project, open_options)
+        let cg = TraceDecay::open_with_exclusive_maintenance(&project, open_options, &lifecycle)
             .await
             .unwrap();
         let files = cg.get_all_files().await.unwrap();

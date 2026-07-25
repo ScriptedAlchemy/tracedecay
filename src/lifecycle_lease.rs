@@ -324,22 +324,44 @@ fn lifecycle_lock_path() -> Result<PathBuf> {
         message: "could not determine TraceDecay user data directory for lifecycle lease"
             .to_string(),
     })?;
+    let root_existed = root.exists();
     std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
         message: format!(
             "failed to create TraceDecay user data directory '{}': {error}",
             root.display()
         ),
     })?;
+    if !root_existed {
+        crate::storage::set_private_dir_permissions(&root).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to secure TraceDecay user data directory '{}': {error}",
+                    root.display()
+                ),
+            }
+        })?;
+    }
     Ok(root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
 fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
+    let root_existed = profile_root.exists();
     std::fs::create_dir_all(profile_root).map_err(|error| TraceDecayError::Config {
         message: format!(
             "failed to create TraceDecay profile root '{}': {error}",
             profile_root.display()
         ),
     })?;
+    if !root_existed {
+        crate::storage::set_private_dir_permissions(profile_root).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to secure TraceDecay profile root '{}': {error}",
+                    profile_root.display()
+                ),
+            }
+        })?;
+    }
     Ok(profile_root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
