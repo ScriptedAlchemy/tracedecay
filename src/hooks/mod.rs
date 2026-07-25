@@ -13,7 +13,6 @@ mod claude;
 mod codex;
 mod cursor;
 mod cursor_compact;
-mod cursor_shell;
 pub mod hint_outcomes;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -54,11 +53,6 @@ pub use cursor::{
     hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
-pub use cursor_shell::{
-    CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
-    cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
-    is_git_state_changing_command, resolve_worktree_add_root,
-};
 pub use kiro::{
     evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
