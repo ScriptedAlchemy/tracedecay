@@ -388,17 +388,25 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
     ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
         let canonical_root = project_root.canonicalize().ok()?;
-        let latest = self.latest_complete_fresh(&canonical_root).await;
         let scheduler = {
             let mounted = self.mounted.lock().await;
             Arc::clone(&mounted.get(&canonical_root)?.scheduler)
         };
-        let scheduler = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let hook_hint_count = scheduler.pending_hint_count();
-        let (repository_id, worktree_id, source_reference, generation_id, content_identity, sealed) =
-            latest
+        tokio::task::spawn_blocking(move || {
+            let mut scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let reconciled = scheduler.ensure_fresh_for_query().is_ok();
+            let latest = reconciled.then(|| scheduler.latest_complete()).flatten();
+            let hook_hint_count = scheduler.pending_hint_count();
+            let (
+                repository_id,
+                worktree_id,
+                source_reference,
+                generation_id,
+                content_identity,
+                sealed,
+            ) = latest
                 .as_ref()
                 .map_or((None, None, None, None, None, None), |latest| {
                     let generation = &latest.generation;
@@ -418,7 +426,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         Some(generation.manifest().seal.sealed_at.0),
                     )
                 });
-        Some(
             crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 repository_id,
@@ -429,7 +436,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 sealed_at_micros: sealed,
                 last_reconcile_micros: Some(scheduler.last_reconciled_at_micros()),
                 staleness_state: Some(
-                    if latest.is_some() {
+                    if !reconciled {
+                        "unknown"
+                    } else if latest.is_some() {
                         "fresh"
                     } else {
                         "indexing"
@@ -437,14 +446,18 @@ impl CodeIndexSchedulerRegistryV1 {
                     .to_owned(),
                 ),
                 hook_hint_count,
-                coverage: if hook_hint_count.is_some() {
+                coverage: if !reconciled {
+                    "unknown_reconcile_failed"
+                } else if hook_hint_count.is_some() {
                     "complete"
                 } else {
                     "partial_hook_hint_overflow"
                 }
                 .to_owned(),
-            },
-        )
+            }
+        })
+        .await
+        .ok()
     }
 
     /// Query-admission entry point: run the freshness ladder (tier-1 git

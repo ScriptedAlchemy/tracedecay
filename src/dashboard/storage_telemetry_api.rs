@@ -36,8 +36,8 @@ use tracedecay_domain::UtcMicros;
 
 use super::DashboardState;
 use super::read_model::{
-    DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
-    DashboardLegalActionRefV1, now_micros, scope_from_state,
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
+    DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
 
 /// One store's telemetry entry. One entry per distinct store **file**, not per
@@ -228,7 +228,8 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
         return Vec::new();
     };
     let status =
-        crate::application::primitives::production::canonical_storage_status(graph.as_ref(), false);
+        crate::application::primitives::production::canonical_storage_status(graph.as_ref(), false)
+            .await;
     let Some(path) = status.store_path else {
         return Vec::new();
     };
@@ -262,15 +263,33 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
             free_bytes: 0,
         })
         .collect();
-    vec![SampledStoreV1 {
-        store: store_name,
-        path,
-        roles: vec!["graph".to_owned()],
-        read: StorageTelemetryReadV1::ObservedBytes {
+    let read = match (
+        status.page_size_bytes,
+        status.page_count,
+        status.freelist_pages,
+    ) {
+        (Some(page_size_bytes), Some(page_count), Some(freelist_pages)) => {
+            StorageTelemetryReadV1::Observed {
+                sample: StoreSizeSampleV1 {
+                    store,
+                    page_size_bytes,
+                    page_count,
+                    freelist_pages,
+                    observed_at: UtcMicros(observed_at),
+                },
+            }
+        }
+        _ => StorageTelemetryReadV1::ObservedBytes {
             store,
             total_bytes: tracedecay_application::storage::identity::StorageByteSizeV1(total_bytes),
             observed_at: UtcMicros(observed_at),
         },
+    };
+    vec![SampledStoreV1 {
+        store: store_name,
+        path,
+        roles: vec!["graph".to_owned()],
+        read,
         history,
         history_coverage,
     }]
@@ -280,6 +299,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
 pub(crate) async fn telemetry(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<StorageTelemetryPayloadV1>> {
+    let authority_attached = state.project_graph.is_some();
     // The owner-configured soft budgets, resolved once per read from the pinned
     // runtime configuration.
     let retention = &state.retention_config;
@@ -291,27 +311,24 @@ pub(crate) async fn telemetry(
         .collect();
 
     let total = entries.len() as u64;
-    let observed = entries
+    let fully_observed = entries
         .iter()
-        .filter(|entry| {
-            matches!(
-                entry.read,
-                StorageTelemetryReadV1::Observed { .. }
-                    | StorageTelemetryReadV1::ObservedBytes { .. }
-            )
-        })
+        .filter(|entry| matches!(entry.read, StorageTelemetryReadV1::Observed { .. }))
         .count() as u64;
 
     // Coverage is over the canonical stores enumerated by StorageStatus. A
     // complete claim therefore always carries a real denominator.
-    let coverage = if observed == total {
+    let coverage = if fully_observed == total {
         DashboardCoverageV1::complete(total, "canonical_storage_status_stores")
     } else {
         DashboardCoverageV1::partial(
             total,
-            observed,
+            fully_observed,
             "canonical_storage_status_stores",
-            vec!["canonical StorageStatus read did not produce a size".to_string()],
+            vec![
+                "canonical StorageStatus did not produce complete page and free-list telemetry"
+                    .to_string(),
+            ],
         )
     };
 
@@ -321,11 +338,31 @@ pub(crate) async fn telemetry(
         growth_note: GROWTH_NOTE.to_string(),
     };
 
-    let envelope = DashboardEnvelopeV1::ready(scope_from_state(&state), coverage, payload)
-        .with_legal_actions(vec![DashboardLegalActionRefV1::new(
-            DashboardLegalActionKindV1::Refresh,
-            "use-case.dashboard.storage.telemetry.refresh",
-        )]);
+    let envelope = if !authority_attached {
+        DashboardEnvelopeV1::unsupported(scope_from_state(&state), payload)
+    } else if total > 0 && fully_observed == total {
+        DashboardEnvelopeV1::ready(scope_from_state(&state), coverage, payload)
+    } else {
+        DashboardEnvelopeV1::new(
+            scope_from_state(&state),
+            if total == 0 {
+                DashboardDomainStateV1::Unknown
+            } else {
+                DashboardDomainStateV1::Partial
+            },
+            if total == 0 {
+                DashboardCoverageV1::unknown()
+            } else {
+                coverage
+            },
+            DashboardFreshnessV1::unknown(),
+            payload,
+        )
+    }
+    .with_legal_actions(vec![DashboardLegalActionRefV1::new(
+        DashboardLegalActionKindV1::Refresh,
+        "use-case.dashboard.storage.telemetry.refresh",
+    )]);
     Json(envelope)
 }
 
@@ -466,7 +503,86 @@ fn store_file_name(path: &str) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::RetentionConfig;
+    use crate::dashboard::read_model::DashboardDomainStateV1;
+    use std::sync::Arc;
+    use tracedecay_domain::ProjectId;
+
+    async fn states_for_test() -> (
+        tempfile::TempDir,
+        HostAdmissionTestRuntimeV1,
+        DashboardState,
+        DashboardState,
+    ) {
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            ProjectId::new("project.dashboard-storage").expect("project id"),
+        )
+        .await
+        .expect("registered test runtime");
+        let graph = Arc::new(
+            runtime
+                .initialize_project_graph_for_test(
+                    project.path(),
+                    crate::tracedecay::TraceDecayOpenOptions::default(),
+                )
+                .await
+                .expect("project init"),
+        );
+        let direct = crate::dashboard::build_state(graph.as_ref())
+            .await
+            .expect("direct dashboard state");
+        let retained = crate::dashboard::build_state_with_automation_reconciler(
+            graph,
+            None,
+            None,
+            None,
+            None,
+            crate::dashboard::direct_dashboard_automation_writer(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("retained dashboard state");
+        (project, runtime, direct, retained)
+    }
+
+    #[tokio::test]
+    async fn telemetry_requires_retained_application_authority() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, direct, _retained) = states_for_test().await;
+
+        let Json(envelope) = telemetry(State(direct)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
+        assert!(envelope.payload.stores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn telemetry_projects_runtime_page_truth_and_durable_history() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, _direct, retained) = states_for_test().await;
+
+        let Json(first) = telemetry(State(retained.clone())).await;
+        let Json(second) = telemetry(State(retained)).await;
+
+        assert_eq!(first.domain_state, DashboardDomainStateV1::Ready);
+        assert!(first.coverage.is_complete());
+        let store = second.payload.stores.first().expect("project store");
+        assert!(store.total_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(store.free_bytes.is_some());
+        assert!(store.free_page_ratio.is_some());
+        assert!(matches!(
+            store.growth,
+            StoreGrowthDimensionV1::Observed { sample_count, .. } if sample_count >= 2
+        ));
+    }
 
     #[test]
     fn telemetry_entry_projects_durable_observed_bytes() {

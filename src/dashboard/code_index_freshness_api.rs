@@ -4,17 +4,10 @@
 //! The authoritative source is the daemon-owned
 //! `crate::daemon::code_index_scheduler` registry, which holds the map of live
 //! per-worktree schedulers, their latest sealed generation identity, last
-//! reconcile, staleness-ladder state, and hook-hint queues. That registry lives
-//! in the daemon runtime and is **not** threaded into [`DashboardState`], so the
-//! dashboard cannot read it today.
-//!
-//! Rather than fabricate a generation identity or a "fresh" claim, this route is
-//! typed `unsupported` (plan §"Known backend gaps") and reports the exact seam
-//! required to feed it: a read port over `CodeIndexSchedulerRegistry`
-//! (latest-generation id, last-reconcile watermark, staleness-threshold state,
-//! and hook-hint counts) added to `DashboardState`. The intended per-worktree
-//! payload shape is modelled here so the frontend contract is generated against
-//! the real shape even while the source is unwired.
+//! reconcile, staleness-ladder state, and hook-hint queues. Daemon-owned
+//! dashboard construction threads an exact read port into [`DashboardState`].
+//! Direct dashboard construction remains typed `unsupported` rather than
+//! fabricating a generation identity or a "fresh" claim.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -27,11 +20,11 @@ use serde::Serialize;
 
 use super::DashboardState;
 use super::read_model::{
-    DashboardEnvelopeV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1, scope_from_state,
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessStateV1,
+    DashboardFreshnessV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1, scope_from_state,
 };
 
-/// Freshness/generation state for one mounted worktree. Unpopulated until the
-/// scheduler-registry read port is wired into the dashboard state.
+/// Freshness/generation state for one mounted worktree.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct CodeIndexWorktreeFreshnessV1 {
     /// Display path of the mounted worktree root.
@@ -83,10 +76,10 @@ pub(crate) async fn freshness(
         Some(reader) => reader(state.project_root.clone()).await,
         None => None,
     };
-    let ready = read.is_some();
+    let live = read.as_ref();
     let payload = CodeIndexFreshnessPayloadV1 {
-        worktrees: read.into_iter().collect(),
-        note: if ready {
+        worktrees: read.clone().into_iter().collect(),
+        note: if live.is_some() {
             LIVE_NOTE
         } else if authority_attached {
             "the daemon scheduler registry has no mounted scheduler for this project"
@@ -95,17 +88,53 @@ pub(crate) async fn freshness(
         }
         .to_string(),
     };
-    let envelope = if ready {
-        DashboardEnvelopeV1::ready(
+    let envelope = match live {
+        Some(worktree)
+            if worktree.latest_generation_id.is_some()
+                && worktree.coverage == "complete"
+                && worktree.staleness_state.as_deref() == Some("fresh") =>
+        {
+            DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(1, "mounted_worktree"),
+                payload,
+            )
+        }
+        Some(worktree) if worktree.latest_generation_id.is_none() => DashboardEnvelopeV1::new(
             scope_from_state(&state),
-            super::read_model::DashboardCoverageV1::complete(
-                payload.worktrees.len() as u64,
-                "mounted_worktree",
-            ),
+            if worktree.staleness_state.as_deref() == Some("indexing") {
+                DashboardDomainStateV1::Loading
+            } else {
+                DashboardDomainStateV1::Unknown
+            },
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
             payload,
-        )
-    } else {
-        DashboardEnvelopeV1::unsupported(scope_from_state(&state), payload)
+        ),
+        Some(_) => DashboardEnvelopeV1::new(
+            scope_from_state(&state),
+            DashboardDomainStateV1::Partial,
+            DashboardCoverageV1::partial(
+                1,
+                0,
+                "mounted_worktree",
+                vec!["scheduler freshness coverage is incomplete".to_owned()],
+            ),
+            DashboardFreshnessV1::unknown(),
+            payload,
+        ),
+        None if authority_attached => DashboardEnvelopeV1::new(
+            scope_from_state(&state),
+            DashboardDomainStateV1::Unknown,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1 {
+                state: DashboardFreshnessStateV1::Absent,
+                observed_at_micros: None,
+                watermark: None,
+            },
+            payload,
+        ),
+        None => DashboardEnvelopeV1::unsupported(scope_from_state(&state), payload),
     }
     .with_legal_actions(vec![DashboardLegalActionRefV1::new(
         DashboardLegalActionKindV1::Refresh,
@@ -196,5 +225,45 @@ mod tests {
             Some("repository.fixture")
         );
         assert_eq!(worktree.staleness_state.as_deref(), Some("fresh"));
+    }
+
+    #[tokio::test]
+    async fn mounted_scheduler_without_a_generation_is_loading_not_ready() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|root| {
+            Box::pin(async move {
+                Some(CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: root.display().to_string(),
+                    repository_id: None,
+                    worktree_id: None,
+                    source_reference: None,
+                    latest_generation_id: None,
+                    snapshot_content_identity: None,
+                    sealed_at_micros: None,
+                    last_reconcile_micros: Some(42),
+                    staleness_state: Some("indexing".to_owned()),
+                    hook_hint_count: Some(0),
+                    coverage: "complete".to_owned(),
+                })
+            })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Loading);
+        assert!(!envelope.coverage.is_complete());
+    }
+
+    #[tokio::test]
+    async fn attached_registry_without_a_mount_is_unknown_not_unsupported() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { None })));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
+        assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Absent);
     }
 }

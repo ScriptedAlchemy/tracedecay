@@ -273,6 +273,12 @@ pub struct StorageStatusPrimitiveResult {
     pub status: String,
     pub read_only: bool,
     pub database_bytes: Option<u64>,
+    #[serde(default)]
+    pub page_size_bytes: Option<u32>,
+    #[serde(default)]
+    pub page_count: Option<u64>,
+    #[serde(default)]
+    pub freelist_pages: Option<u64>,
     pub details: Vec<String>,
     #[serde(default)]
     pub project_id: Option<String>,
