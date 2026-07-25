@@ -888,7 +888,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
-    pub(crate) fn new(
+    fn new(
         graph: Arc<TraceDecay>,
         database: Database,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
