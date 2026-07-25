@@ -2,6 +2,7 @@
 //! and message-family materialization consolidation tests.
 
 use super::*;
+use crate::db::engine::DatabaseAttachmentExecutor;
 
 async fn session_runtime(fixture: &Fixture, project_id: &str) -> HostAdmissionTestRuntimeV1 {
     let runtime =
@@ -29,6 +30,18 @@ async fn execute_owned_session_sql(fixture: &Fixture, project_id: &str, sql: &st
     transaction.execute_batch(sql).await.unwrap();
     transaction.commit().await.unwrap();
     database.checkpoint().await;
+}
+
+async fn execute_session_sql_at(path: &Path, sql: &str) {
+    let (database, _) = test_open(path).await;
+    let transaction = database
+        .begin_write_transaction("mutate consolidation session fixture")
+        .await
+        .unwrap();
+    transaction.execute_batch(sql).await.unwrap();
+    transaction.commit().await.unwrap();
+    database.checkpoint().await.unwrap();
+    database.close();
 }
 
 async fn set_lcm_schema_version(path: &Path, version: i64) {
@@ -253,9 +266,11 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
     )
     .await
     .unwrap_err();
-    execute_owned_session_sql(
-        &fixture,
-        &fixture.target_id,
+    let sessions = report
+        .destination_data_root
+        .join(storage::SESSIONS_DB_FILENAME);
+    execute_session_sql_at(
+        &sessions,
         "UPDATE sessions SET ended_at=42 WHERE session_id='legacy-session'",
     )
     .await;
@@ -269,9 +284,8 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
         "{error}"
     );
 
-    execute_owned_session_sql(
-        &fixture,
-        &fixture.target_id,
+    execute_session_sql_at(
+        &sessions,
         "UPDATE sessions SET ended_at=1800000001 WHERE session_id='legacy-session';
          UPDATE session_messages SET text='corrupted text'
          WHERE message_id='message-legacy-session';",
@@ -287,9 +301,8 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
         "{error}"
     );
 
-    execute_owned_session_sql(
-        &fixture,
-        &fixture.target_id,
+    execute_session_sql_at(
+        &sessions,
         "UPDATE session_messages SET text='message from legacy-session'
          WHERE message_id='message-legacy-session';
          UPDATE lcm_raw_messages SET content_hash='corrupted-hash'
@@ -881,10 +894,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
         .await
         .unwrap();
     writer
-        .execute(
-            "ATTACH DATABASE ?1 AS source_input",
-            params![staged_source.to_string_lossy().to_string()],
-        )
+        .attach_database(&staged_source, "source_input")
         .await
         .unwrap();
     sqlite::build_consolidation_message_map(&writer, "source_input", "main", &fixture.source_id)
@@ -945,7 +955,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
     assert!(
         reserved_plan
             .iter()
-            .any(|detail| detail.contains("SEARCH r USING")),
+            .any(|detail| detail.starts_with("SEARCH r ") && detail.contains("USING PRIMARY KEY")),
         "reserved-reference lookup must use its primary key: {reserved_plan:?}"
     );
 
