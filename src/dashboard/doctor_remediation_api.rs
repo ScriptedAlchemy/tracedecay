@@ -343,6 +343,7 @@ impl DoctorRemediationDispatcherV1 {
         target.validate_for(&operation, kind)?;
         let target_digest = target.digest()?;
         let expected_operation_id = operation_id_for_command(&command)?;
+        let mut owner_command = command.clone();
         if let Some(root) = &self.durable_receipt_root {
             if let Some(key) = &idempotency_key
                 && let Some(record) = read_idempotency_record(root, &operation, key)?
@@ -353,6 +354,14 @@ impl DoctorRemediationDispatcherV1 {
                 if record.operation.phase != DoctorRemediationOperationPhaseV1::Running {
                     return Ok(record.operation);
                 }
+                owner_command = DoctorRemediationDispatchCommandV1::Resume {
+                    operation: record.operation.owning_operation,
+                    target: record.target,
+                    preview_id: record.operation.preview_id,
+                    idempotency_key: record
+                        .idempotency_key
+                        .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?,
+                };
             }
             let intent = DurableDoctorRemediationRecordV1 {
                 schema_version: 1,
@@ -381,7 +390,7 @@ impl DoctorRemediationDispatcherV1 {
                 write_idempotency_record(root, &operation, &intent)?;
             }
         }
-        let outcome = (self.dispatch)(command).await?;
+        let outcome = (self.dispatch)(owner_command).await?;
         validate_outcome(outcome.clone())?;
         if let Some(root) = &self.durable_receipt_root {
             if outcome.operation_id != expected_operation_id {
@@ -883,6 +892,13 @@ mod tests {
 
     async fn initialize_project(project_root: &std::path::Path) -> TraceDecay {
         let profile_root = crate::config::user_data_dir().expect("isolated profile root");
+        std::fs::create_dir_all(&profile_root).expect("create isolated profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("secure isolated profile root");
+        }
         let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
             &profile_root,
             "doctor remediation fixture initialization",
@@ -1396,5 +1412,49 @@ mod tests {
                 .unwrap(),
             recovered
         );
+    }
+
+    #[tokio::test]
+    async fn durable_apply_retry_resumes_instead_of_replaying_fresh_apply() {
+        let root = tempfile::tempdir().expect("receipt root");
+        let command = DoctorRemediationDispatchCommandV1::Apply {
+            operation: configuration_operation(),
+            target: configuration_apply_target(),
+            preview_id: Some(PreviewId::new("preview.apply-recovery").unwrap()),
+            idempotency_key: IdempotencyKey::new("idempotency.apply-recovery").unwrap(),
+        };
+        let mut recovered = failed_operation();
+        recovered.operation_id = operation_id_for_command(&command).unwrap();
+        recovered.preview_id = Some(PreviewId::new("preview.apply-recovery").unwrap());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatcher = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
+            Arc::new({
+                let calls = Arc::clone(&calls);
+                let recovered = recovered.clone();
+                move |owner_command| {
+                    let call = calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let recovered = recovered.clone();
+                    Box::pin(async move {
+                        if call == 0 {
+                            return Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable);
+                        }
+                        assert!(matches!(
+                            owner_command,
+                            DoctorRemediationDispatchCommandV1::Resume { .. }
+                        ));
+                        Ok(recovered)
+                    })
+                }
+            }),
+        );
+
+        assert_eq!(
+            dispatcher.dispatch(command.clone()).await,
+            Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable)
+        );
+        assert_eq!(dispatcher.dispatch(command).await.unwrap(), recovered);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }
