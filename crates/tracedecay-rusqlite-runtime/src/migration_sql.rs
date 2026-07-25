@@ -1349,10 +1349,10 @@ impl TransactionCompletion {
     fn finish(self, connection: &Connection) -> Result<(), MigrationSqlError> {
         let mut cleanup_error = None;
         for attachment in self.attachments.into_iter().rev() {
-            if let Err(error) = detach_database(connection, attachment.database_name(), None) {
-                if cleanup_error.is_none() {
-                    cleanup_error = Some(error);
-                }
+            if let Err(error) = detach_database(connection, attachment.database_name(), None)
+                && cleanup_error.is_none()
+            {
+                cleanup_error = Some(error);
             }
         }
         if let Some(previous) = self.previous_attachment_limit
