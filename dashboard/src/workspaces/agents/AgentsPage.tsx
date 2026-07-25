@@ -128,7 +128,12 @@ export function AgentsPage() {
           diag?.events_per_hour,
         );
         return (
-          <div className="flex h-full flex-col overflow-auto">
+          <div
+            className="flex h-full flex-col overflow-auto"
+            tabIndex={0}
+            role="region"
+            aria-label="Agents content"
+          >
             <div className="flex items-baseline gap-3 border-b border-edge-subtle px-4 py-2">
               <h1 className="text-sm font-semibold tracking-tight">Agents</h1>
               <span className="min-w-0 truncate text-2xs text-text-muted">
@@ -404,9 +409,13 @@ function RecentTape({ rows }: { rows: ReadonlyArray<Record<string, unknown>> }) 
               {event.tool || event.kind || '—'}
             </span>
             <span
+              // The state word is the signal, not its hue: `--raw-state-stale`
+              // at the legend tier (10px) measures 4.39:1 on the light
+              // substrate, just under AA, and every element on this row is at
+              // that tier. Weight and the word itself carry it instead.
               className={cn(
                 'td-legend shrink-0',
-                event.outcome === 'error' ? 'text-state-stale' : 'text-text-muted',
+                event.outcome === 'error' ? 'text-text-primary' : 'text-text-muted',
               )}
             >
               {event.outcome || event.kind}
@@ -548,10 +557,13 @@ function FamilyList({ rows }: { rows: readonly FamilyRow[] }) {
                   {row.family.replace(/_/g, ' ')}
                 </span>
                 <span
+                  // Same reason as the tape's outcome column: a hue that fails
+                  // AA at 10px is not a signal, it is a defect. The three
+                  // verdicts are separated by text weight and by the word.
                   className={cn(
                     'td-legend shrink-0',
                     verdict.state === 'underused'
-                      ? 'text-state-stale'
+                      ? 'text-text-primary'
                       : verdict.state === 'covered'
                         ? 'text-text-secondary'
                         : 'text-text-muted',

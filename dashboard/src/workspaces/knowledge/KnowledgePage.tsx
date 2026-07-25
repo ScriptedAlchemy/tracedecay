@@ -432,7 +432,12 @@ function HrrCoveragePlate({ rows }: { rows: readonly HrrCoverageRow[] }) {
                   </span>
                 ) : null}
               </span>
-              <span className="td-legend truncate text-state-stale">
+              {/* `--raw-state-stale` measures 4.39:1 against the light
+                * substrate at this 10px legend tier — under AA. The status is
+                * already the only thing on the row that is not a number, and
+                * only non-ready banks get a row at all, so the word carries the
+                * signal without a hue that cannot be read. */}
+              <span className="td-legend truncate text-text-primary">
                 {hrrStatusLabel(row.status)}
               </span>
             </li>
