@@ -271,6 +271,12 @@ impl AgentIntegration for KimiIntegration {
         }
     }
 
+    fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        let code_home = kimi_code_home(&ctx.home);
+        remove_kimi_installed_entry(&code_home);
+        Ok(())
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
         // Migration shim: the legacy `~/.kimi/mcp.json` branch exists only so
         // upgrade tracking still notices installs written before the plugin

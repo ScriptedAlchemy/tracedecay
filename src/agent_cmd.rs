@@ -307,6 +307,17 @@ struct CompatibilityAgentRegistrationDelegate {
     registration_stage_completed: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompatibilityRegistrationMode {
+    /// The component artifacts are discovered directly by the host. The
+    /// transaction's artifact verification is the complete lifecycle.
+    ArtifactOnly,
+    /// The host needs only a native registry entry after assets are deployed.
+    DeployedActivation,
+    /// Core-only compatibility hosts still use their bounded legacy editor.
+    LegacyIntegration,
+}
+
 impl CompatibilityAgentRegistrationDelegate {
     fn new(
         agent_id: &str,
@@ -417,6 +428,64 @@ impl CompatibilityAgentRegistrationDelegate {
         fs::read(self.apply_marker_path(operation_id))
             .ok()
             .is_some_and(|bytes| bytes == b"1")
+    }
+
+    fn registration_mode(
+        &self,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> CompatibilityRegistrationMode {
+        let includes_core = component_set.components.iter().any(|component| {
+            component.manifest.component
+                == tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
+        });
+        if self.project_path.is_some() {
+            CompatibilityRegistrationMode::LegacyIntegration
+        } else if self.integration.id() == "kimi"
+            || (self.integration.id() == "opencode"
+                && component_set.components.iter().any(|component| {
+                    matches!(
+                        component.manifest.component,
+                        tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
+                            | tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp
+                            | tracedecay::agents::host_bundle_v2::HostBundleComponentV1::OperatorMcp
+                    )
+                }))
+        {
+            CompatibilityRegistrationMode::DeployedActivation
+        } else if matches!(self.integration.id(), "opencode" | "cursor") || !includes_core {
+            CompatibilityRegistrationMode::ArtifactOnly
+        } else {
+            CompatibilityRegistrationMode::LegacyIntegration
+        }
+    }
+
+    fn requires_competing_analyzer_preflight(
+        &self,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> bool {
+        self.integration.id() == "opencode"
+            && component_set.components.iter().any(|component| {
+                component.manifest.component
+                    == tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
+            })
+    }
+
+    fn component_registration_revision(
+        &self,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> Result<[u8; 32], tracedecay::agents::host_bundle_v2::HostBundleError> {
+        match self.registration_mode(component_set) {
+            CompatibilityRegistrationMode::ArtifactOnly
+                if !self.requires_competing_analyzer_preflight(component_set) =>
+            {
+                Ok(Sha256::digest(b"tracedecay.host-registration.none.v1").into())
+            }
+            CompatibilityRegistrationMode::ArtifactOnly
+            | CompatibilityRegistrationMode::DeployedActivation
+            | CompatibilityRegistrationMode::LegacyIntegration => {
+                self.current_registration_revision(component_set)
+            }
+        }
     }
 
     fn competing_opencode_analyzer_present(&self) -> bool {
@@ -625,7 +694,7 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         _request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<[u8; 32], tracedecay::agents::host_bundle_v2::HostBundleError> {
-        self.current_registration_revision(component_set)
+        self.component_registration_revision(component_set)
     }
 
     fn confirm_preview(
@@ -636,7 +705,7 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
         if preview.operation_id != request.operation_id
             || preview.current_registration_revision != preview.base_registration_revision
-            || self.current_registration_revision(component_set)?
+            || self.component_registration_revision(component_set)?
                 != preview.base_registration_revision
         {
             return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
@@ -650,13 +719,19 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         _request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        if self.requires_competing_analyzer_preflight(component_set)
+            && self.competing_opencode_analyzer_present()
+        {
+            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
+        }
+        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
+            self.should_apply = false;
+            return Ok(());
+        }
         if let Some(expected) = self.confirmed_registration_revision
             && self.current_registration_revision(component_set)? != expected
         {
             return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
-        }
-        if self.competing_opencode_analyzer_present() {
-            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
         }
         let states = component_set
             .components
@@ -696,6 +771,19 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        if self.requires_competing_analyzer_preflight(component_set)
+            && self.competing_opencode_analyzer_present()
+        {
+            return Err(tracedecay::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
+        }
+        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
+            if let Some(expected) = self.confirmed_registration_revision
+                && self.component_registration_revision(component_set)? != expected
+            {
+                return Err(tracedecay::agents::host_bundle_v2::HostBundleError::StalePreview);
+            }
+            return Ok(());
+        }
         if let Some(expected) = self.confirmed_registration_revision
             && self.current_registration_revision(component_set)? != expected
         {
@@ -708,9 +796,32 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
 
     fn apply(
         &mut self,
-        _component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        match self.registration_mode(component_set) {
+            CompatibilityRegistrationMode::ArtifactOnly => return Ok(()),
+            CompatibilityRegistrationMode::DeployedActivation => {
+                let components = component_set
+                    .components
+                    .iter()
+                    .map(|component| component.manifest.component)
+                    .collect::<Vec<_>>();
+                return match request.lifecycle.operation {
+                    tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
+                        .integration
+                        .deactivate_deployed_host_component_registration(&components, &self.context)
+                        .map_err(Self::registration_error),
+                    tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
+                    | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                    | tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
+                        .integration
+                        .activate_deployed_host_component_registration(&components, &self.context)
+                        .map_err(Self::registration_error),
+                };
+            }
+            CompatibilityRegistrationMode::LegacyIntegration => {}
+        }
         if !self.should_apply {
             return Ok(());
         }
@@ -747,6 +858,9 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
+            return Ok(());
+        }
         let expected = if request.lifecycle.operation
             == tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall
         {
@@ -775,9 +889,16 @@ impl tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1
 
     fn rollback(
         &mut self,
-        _component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
+        component_set: &tracedecay::agents::host_bundle_v2::HostComponentSetV1,
         request: &tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), tracedecay::agents::host_bundle_v2::HostBundleError> {
+        match self.registration_mode(component_set) {
+            CompatibilityRegistrationMode::ArtifactOnly => return Ok(()),
+            CompatibilityRegistrationMode::DeployedActivation => {
+                return self.restore_registration(request.operation_id);
+            }
+            CompatibilityRegistrationMode::LegacyIntegration => {}
+        }
         if !self.registration_stage_completed && !self.backup_dir(request.operation_id).is_dir() {
             return Ok(());
         }
@@ -2418,9 +2539,10 @@ pub(crate) async fn handle_uninstall_command(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
 
@@ -2432,9 +2554,35 @@ mod tests {
         canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
     };
 
-    fn seed_opencode_non_context_state(
-        home: &std::path::Path,
-    ) -> (PathBuf, PathBuf, PathBuf) {
+    const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
+"#;
+    const OPENCODE_SIMPLE_CONFIG: &[u8] = br#"{"unrelated":{"keep":true}}
+"#;
+    static HOST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => unsafe { std::env::set_var(self.key, previous) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
         let config_path = home.join(".config/opencode/opencode.json");
         let core_path = home.join(".config/opencode/plugins/tracedecay.ts");
         let agent_set = canonical_host_component_set(
@@ -2449,17 +2597,14 @@ mod tests {
         for path in [&config_path, &core_path, &agent_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         }
-        std::fs::write(&config_path, b"{\"unrelated\":{\"keep\":true}}\n").unwrap();
+        std::fs::write(&config_path, OPENCODE_UNRELATED_CONFIG).unwrap();
         std::fs::write(&core_path, b"core-sentinel\n").unwrap();
         std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
         (config_path, core_path, agent_path)
     }
 
     fn assert_opencode_non_context_state(paths: &(PathBuf, PathBuf, PathBuf)) {
-        assert_eq!(
-            std::fs::read(&paths.0).unwrap(),
-            b"{\"unrelated\":{\"keep\":true}}\n"
-        );
+        assert_eq!(std::fs::read(&paths.0).unwrap(), OPENCODE_UNRELATED_CONFIG);
         assert_eq!(std::fs::read(&paths.1).unwrap(), b"core-sentinel\n");
         assert_eq!(std::fs::read(&paths.2).unwrap(), b"agent-sentinel\n");
     }
@@ -2658,6 +2803,254 @@ mod tests {
             .unwrap();
 
         assert_opencode_non_context_state(&preserved);
+    }
+
+    #[test]
+    fn explicit_core_component_lifecycle_preserves_opencode_companions() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        let context_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let agent_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Agent),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let context_path = home
+            .path()
+            .join(&context_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        let agent_path = home
+            .path()
+            .join(&agent_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        for path in [&config_path, &context_path, &agent_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&config_path, OPENCODE_SIMPLE_CONFIG).unwrap();
+        std::fs::write(&context_path, b"context-sentinel\n").unwrap();
+        std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
+        let core_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Core),
+            dry_run: false,
+            yes: true,
+        };
+
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Update,
+            HostBundleCliOperation::Repair,
+            HostBundleCliOperation::Uninstall,
+        ] {
+            apply_canonical_component_set(
+                "opencode",
+                operation,
+                &core_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(&config_path).unwrap(), OPENCODE_SIMPLE_CONFIG);
+            assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
+            assert_eq!(std::fs::read(&agent_path).unwrap(), b"agent-sentinel\n");
+        }
+    }
+
+    #[test]
+    fn opencode_core_refuses_a_competing_analyzer_without_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, OPENCODE_UNRELATED_CONFIG).unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Core),
+            dry_run: false,
+            yes: true,
+        };
+
+        let error = apply_canonical_component_set(
+            "opencode",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ownership conflict"));
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            OPENCODE_UNRELATED_CONFIG
+        );
+        for artifact in &component_set.component_set.components[0].manifest.artifacts {
+            assert!(!home.path().join(&artifact.relative_path).exists());
+        }
+    }
+
+    #[test]
+    fn kimi_canonical_component_set_uses_deployed_registration_lifecycle() {
+        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &installed_path,
+            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
+"#,
+        )
+        .unwrap();
+        let component_set = canonical_host_component_set("kimi", None, 0)
+            .unwrap()
+            .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+        };
+
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Update,
+            HostBundleCliOperation::Repair,
+        ] {
+            apply_canonical_component_set(
+                "kimi",
+                operation,
+                &component_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+        }
+
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
+        assert_eq!(installed["unrelated"], "keep");
+        assert!(
+            installed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["id"] == "foreign")
+        );
+        assert!(
+            installed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["id"] == "tracedecay")
+        );
+        assert!(
+            code_home
+                .join("plugins/managed/tracedecay/.kimi-plugin/plugin.json")
+                .is_file()
+        );
+        assert!(
+            !home
+                .path()
+                .join(".tracedecay/host-bundle-stage/kimi")
+                .exists(),
+            "the component transaction deploys assets directly; registration must not rerun the legacy installer"
+        );
+
+        apply_canonical_component_set(
+            "kimi",
+            HostBundleCliOperation::Uninstall,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
+        assert_eq!(installed["unrelated"], "keep");
+        assert_eq!(installed["plugins"].as_array().unwrap().len(), 1);
+        assert_eq!(installed["plugins"][0]["id"], "foreign");
+        assert!(!code_home.join("plugins/managed/tracedecay").exists());
+    }
+
+    #[test]
+    fn kimi_registration_rollback_survives_delegate_restart() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        let original =
+            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
+"#;
+        std::fs::write(&installed_path, original).unwrap();
+        let component_set = canonical_host_component_set("kimi", None, 0)
+            .unwrap()
+            .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        drop(registration);
+
+        let mut restarted = CompatibilityAgentRegistrationDelegate::new(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        restarted
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_eq!(std::fs::read(installed_path).unwrap(), original);
     }
 
     #[test]
