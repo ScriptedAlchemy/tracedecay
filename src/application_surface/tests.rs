@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use tracedecay_application::{
     CancellationContext, CancellationSignal, CancellationState, CapabilityGrantId,
@@ -25,7 +25,8 @@ use super::{
     HttpCancellationRegistry, HttpDisconnectCancellation, HttpOperationEventState,
     PrimitiveCodeSurfaceRequest, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    http_operation_event_router, parse_application_surface_request, plan26_sse_stream_event,
+    http_operation_event_router, normalize_application_tool_args,
+    parse_application_surface_request, plan26_sse_stream_event,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
     surface_rejection_metadata,
 };
@@ -1125,5 +1126,33 @@ fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
     assert_eq!(
         surface_rejection_metadata(&ApplicationSurfaceAdapterError::DaemonUnavailable),
         None
+    );
+}
+
+#[test]
+fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
+    assert_eq!(
+        ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics"),
+        Some(ApplicationSurfaceOperation::DiagnosticsRead)
+    );
+    assert_eq!(
+        ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics_read"),
+        Some(ApplicationSurfaceOperation::DiagnosticsRead)
+    );
+    assert_eq!(
+        normalize_application_tool_args("tracedecay_diagnostics", json!({})).unwrap(),
+        json!({"scope": "workspace", "maximum_diagnostics": 1000, "cursor": null})
+    );
+    assert_eq!(
+        normalize_application_tool_args(
+            "tracedecay_diagnostics",
+            json!({"scope": "file", "path": "src/lib.rs"}),
+        )
+        .unwrap(),
+        json!({"scope": {"file": "src/lib.rs"}, "maximum_diagnostics": 1000, "cursor": null})
+    );
+    assert!(
+        normalize_application_tool_args("tracedecay_diagnostics", json!({"scope": "package"}),)
+            .is_err()
     );
 }

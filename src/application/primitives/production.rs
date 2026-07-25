@@ -56,6 +56,10 @@ use crate::code_index::test_attribution::{
     GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinV1,
 };
 use crate::db::Database;
+use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use crate::diagnostics_query::{
+    DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
+};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::session_temporal::GlobalDbCursorKeyProvider;
 use crate::mcp::tools::handlers::git::{
@@ -130,6 +134,116 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
         budget: OperationBudgetUsage::default(),
         cancellation: None,
     })
+}
+
+fn diagnostics_unavailable(
+    finished_at: UtcMicros,
+    reason: OmissionReason,
+) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
+    RetrievalPortOutcome::Unavailable(RetrievalEvidence {
+        payload: None,
+        temporal: TemporalState {
+            freshness: if reason == OmissionReason::Stale {
+                FreshnessState::Stale
+            } else {
+                FreshnessState::Unknown
+            },
+            ..TemporalState::current(finished_at)
+        },
+        evidence_authorities: Vec::new(),
+        coverage: EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Diagnostic],
+            visited: None,
+            eligible: None,
+            returned: 0,
+            completeness: CoverageCompleteness::Unknown,
+            domains: Vec::new(),
+        },
+        omissions: vec![Omission {
+            domain: EvidenceDomain::Diagnostic,
+            count: 0,
+            reason,
+        }],
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: PageState::first_page(
+            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
+            1,
+            None,
+            0,
+        )
+        .unwrap_or_else(|_| panic!("diagnostic unavailable page")),
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+    })
+}
+
+fn diagnostics_result(
+    generation_id: CodeGenerationId,
+    watermark_digest: ManifestDigest,
+    diagnostics: Vec<DiagnosticPrimitiveRecord>,
+    complete: bool,
+    next_cursor: Option<String>,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
+    let returned = diagnostics.len() as u64;
+    let completeness = if complete {
+        CoverageCompleteness::Complete
+    } else {
+        CoverageCompleteness::Partial
+    };
+    let evidence = RetrievalEvidence {
+        payload: Some(DiagnosticsPrimitiveResult {
+            generation_id: generation_id.clone(),
+            clean_generation: true,
+            findings_cleared: complete && returned == 0,
+            diagnostics,
+            next_cursor,
+        }),
+        temporal: TemporalState {
+            source_generation: Some(generation_id),
+            watermark_digest: Some(watermark_digest),
+            ..TemporalState::current(finished_at)
+        },
+        evidence_authorities: Vec::new(),
+        coverage: EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Diagnostic],
+            visited: complete.then_some(returned),
+            eligible: complete.then_some(returned),
+            returned,
+            completeness,
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Diagnostic,
+                completeness,
+            }],
+        },
+        omissions: (!complete)
+            .then_some(Omission {
+                domain: EvidenceDomain::Diagnostic,
+                count: 0,
+                reason: OmissionReason::Budget,
+            })
+            .into_iter()
+            .collect(),
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: PageState::first_page(
+            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
+            1,
+            complete.then_some(returned),
+            returned,
+        )
+        .unwrap_or_else(|_| panic!("diagnostic result page")),
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+    };
+    if complete {
+        RetrievalPortOutcome::Completed(evidence)
+    } else {
+        RetrievalPortOutcome::Partial(evidence)
+    }
 }
 
 fn coverage(files_scanned: u64, returned: u64, truncated: bool) -> PrimitiveCoverageV1 {
@@ -662,11 +776,24 @@ fn public_module_symbols(nodes: Vec<Node>, path: &str) -> Vec<SymbolPrimitiveRec
 
 pub struct TraceDecayExtendedPrimitivePortV1 {
     graph: Arc<TraceDecay>,
+    database: Database,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub fn new(
+        graph: Arc<TraceDecay>,
+        database: Database,
+        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    ) -> Self {
+        Self {
+            graph,
+            database,
+            code_index,
+            diagnostic_identity,
+        }
     }
 }
 
@@ -901,19 +1028,154 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn diagnostics<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
-        _request: &'a DiagnosticsPrimitiveRequest,
+        context: RetrievalPortContext<'a>,
+        request: &'a DiagnosticsPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult> {
         Box::pin(async move {
-            // Diagnostic publication is owned by the feedback/LSP brokers; when
-            // none are mounted for this project the authoritative answer is an
-            // empty completed page, not a fabricated Unavailable problem.
-            completed(
-                DiagnosticsPrimitiveResult {
-                    diagnostics: Vec::<DiagnosticPrimitiveRecord>::new(),
+            let finished_at = now_observed();
+            if !(1..=1_000).contains(&request.maximum_diagnostics) {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+            }
+            let Some(identity) = self
+                .diagnostic_identity
+                .resolve(self.graph.project_root().to_path_buf())
+                .await
+            else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
+            let scope = context.request.scope();
+            if identity.repository() != &scope.repository_id
+                || identity.worktree() != Some(&scope.worktree_id)
+                || identity.reference() != scope.reference.as_ref()
+            {
+                return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+            }
+            let document_path = match &request.scope {
+                super::runtime::DiagnosticsPrimitiveScope::Workspace => None,
+                super::runtime::DiagnosticsPrimitiveScope::File(path) => {
+                    let Some(path) = crate::diagnostics_publication::code_index_logical_path(
+                        self.graph.project_root(),
+                        path,
+                    ) else {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                    };
+                    if identity.file(&path).is_none() {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                    }
+                    Some(path)
+                }
+                super::runtime::DiagnosticsPrimitiveScope::Package(_) => {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                }
+            };
+            let current_index = match self
+                .code_index
+                .current_identity(
+                    self.graph.project_root().to_path_buf(),
+                    document_path.clone(),
+                )
+                .await
+            {
+                Ok(identity) => identity,
+                Err(_) => {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
+            };
+            if current_index.code_generation_id != *identity.generation_id() {
+                return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+            }
+            let query = DiagnosticsQuery::new(self.database.conn());
+            let current = query.current_generation().await;
+            let Some(current_generation) = current.generation else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
+            if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            }
+            if current_generation != *identity.generation_id() {
+                return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+            }
+            let selected_file = document_path
+                .as_deref()
+                .and_then(|path| identity.file(path).map(|(file, _)| file));
+            let cursor = match request.cursor.as_deref() {
+                Some(cursor) => match DiagnosticQueryCursor::decode(cursor) {
+                    Ok(cursor) => Some(cursor),
+                    Err(_) => {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                    }
                 },
-                EvidenceDomain::Diagnostic,
-                now_observed(),
+                None => None,
+            };
+            let page_request =
+                DiagnosticPageRequest::new(request.maximum_diagnostics as usize, cursor);
+            let page = match selected_file {
+                Some(file) => {
+                    query
+                        .current_by_file(&current_generation, file, &page_request)
+                        .await
+                }
+                None => {
+                    query
+                        .current_by_generation(&current_generation, &page_request)
+                        .await
+                }
+            };
+            let Ok(page) = page else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
+            let complete = match page.coverage {
+                DiagnosticQueryCoverage::Complete => true,
+                DiagnosticQueryCoverage::Truncated => false,
+                DiagnosticQueryCoverage::StoreUnavailable { .. } => {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
+            };
+            let next_cursor = page
+                .next_cursor
+                .as_ref()
+                .map(|cursor| cursor.encode().to_owned());
+            let mut diagnostics = Vec::new();
+            for diagnostic in page.records {
+                if diagnostic.repository != *identity.repository()
+                    || diagnostic.worktree.as_ref() != identity.worktree()
+                    || diagnostic.reference.as_ref() != identity.reference()
+                    || diagnostic.source_revision.as_ref() != identity.source_revision()
+                    || diagnostic.generation_id != *identity.generation_id()
+                    || !diagnostic.is_current()
+                {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                let Some((logical_path, expected_digest)) = identity
+                    .logical_path(&diagnostic.file_occurrence_id)
+                    .and_then(|path| identity.file(path).map(|(_, digest)| (path, digest)))
+                else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                };
+                if expected_digest != &diagnostic.content_digest {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                if selected_file.is_none_or(|file| file == &diagnostic.file_occurrence_id) {
+                    diagnostics.push(DiagnosticPrimitiveRecord {
+                        logical_path: logical_path.to_owned(),
+                        diagnostic,
+                    });
+                }
+            }
+            diagnostics.sort_by(|left, right| {
+                left.logical_path.cmp(&right.logical_path).then(
+                    left.diagnostic
+                        .diagnostic_anchor
+                        .cmp(&right.diagnostic.diagnostic_anchor),
+                )
+            });
+            diagnostics_result(
+                identity.generation_id().clone(),
+                current_index.snapshot_digest,
+                diagnostics,
+                complete,
+                next_cursor,
+                finished_at,
             )
         })
     }
@@ -1454,6 +1716,7 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
     session_db: Arc<RegisteredGlobalDb>,
     project_root: PathBuf,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
@@ -1495,8 +1758,14 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
     let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
         Arc::new(ProductionManagedTestRunCurrentScope {
             project_root,
-            code_index,
+            code_index: Arc::clone(&code_index),
         });
+    let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
+        Arc::clone(&graph),
+        database.clone(),
+        code_index,
+        diagnostic_identity,
+    ));
     open_pr12_primitive_project_runtime(
         database,
         Arc::clone(&graph),
@@ -1507,7 +1776,7 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
         Arc::new(TraceDecayTemporalPortV1::new(session_db)),
         Arc::new(TraceDecaySourceLinesPortV1::new(Arc::clone(&graph))),
         Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&graph))),
-        Arc::new(TraceDecayExtendedPrimitivePortV1::new(Arc::clone(&graph))),
+        extended,
         Arc::new(TraceDecayOperationalPrimitivePortV1::new(graph)),
         scope,
         access,
