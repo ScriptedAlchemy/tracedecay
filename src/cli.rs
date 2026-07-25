@@ -703,7 +703,7 @@ pub enum LspAction {
         stdio: bool,
         /// Explicit project root to authorize for this session
         #[arg(long)]
-        project: String,
+        project: Option<String>,
     },
 }
 
