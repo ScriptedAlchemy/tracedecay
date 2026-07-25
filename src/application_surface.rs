@@ -102,6 +102,7 @@ pub enum ApplicationSurfaceOperation {
     FeedbackGet,
     FeedbackExpand,
     FeedbackList,
+    FeedbackAdvisoryCycle,
     FeedbackImpact,
     AffectedTests,
     TestResults,
@@ -169,6 +170,7 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 64] = [
     ApplicationSurfaceOperation::FeedbackGet,
     ApplicationSurfaceOperation::FeedbackExpand,
     ApplicationSurfaceOperation::FeedbackList,
+    ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
     ApplicationSurfaceOperation::FeedbackImpact,
     ApplicationSurfaceOperation::AffectedTests,
     ApplicationSurfaceOperation::TestResults,
@@ -238,6 +240,7 @@ impl ApplicationSurfaceOperation {
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
             Self::FeedbackList => "feedback_list",
+            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::TestResults => "test_results",
@@ -345,6 +348,27 @@ pub fn normalize_application_tool_args(
 #[serde(deny_unknown_fields)]
 pub struct FeedbackSurfaceRequest {
     pub request_handle: String,
+}
+
+/// Canonical explicit PR13 trigger. Project/root/scope/provider identities and
+/// the resulting read handle are all minted by the authenticated daemon.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackAdvisoryCycleSurfaceRequest {
+    pub document_uri: String,
+}
+
+impl FeedbackAdvisoryCycleSurfaceRequest {
+    fn validate(&self) -> Result<(), ApplicationSurfaceAdapterError> {
+        if self.document_uri.is_empty()
+            || self.document_uri.trim() != self.document_uri
+            || self.document_uri.len() > MAX_REQUEST_HANDLE_BYTES * 16
+            || self.document_uri.chars().any(char::is_control)
+        {
+            return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+        }
+        Ok(())
+    }
 }
 
 impl FeedbackSurfaceRequest {
@@ -951,6 +975,7 @@ pub enum ApplicationSurfaceRequest {
     GitPreview(GitPreviewSurfaceRequest),
     GitApply(GitApplySurfaceRequest),
     Feedback(FeedbackSurfaceRequest),
+    FeedbackAdvisoryCycle(FeedbackAdvisoryCycleSurfaceRequest),
     FeedbackImpact(FeedbackImpactSurfaceRequest),
     AffectedTests(AffectedTestsSurfaceRequest),
     TestResults(TestResultsSurfaceRequest),
@@ -1772,6 +1797,10 @@ impl ApplicationSurfaceRequest {
                         | ApplicationSurfaceOperation::FeedbackList
                 )
                 | (
+                    Self::FeedbackAdvisoryCycle(_),
+                    ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+                )
+                | (
                     Self::FeedbackImpact(_),
                     ApplicationSurfaceOperation::FeedbackImpact
                 )
@@ -2416,6 +2445,12 @@ pub fn parse_application_surface_request(
                 FeedbackSurfaceRequest::new(request.request_handle)?,
             ))
         }
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => {
+            let request: FeedbackAdvisoryCycleSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            request.validate()?;
+            Ok(ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request))
+        }
     }
 }
 
@@ -2471,6 +2506,15 @@ pub async fn execute_application_surface(
                 request_id.as_str(),
                 operation,
                 request.request_handle,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
+        ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request) => {
+            crate::daemon::DaemonInvocationRequest::feedback_advisory_cycle(
+                request_id.as_str(),
+                request.document_uri,
                 observed_at,
                 deadline,
                 cancellation_context,
@@ -2761,6 +2805,9 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         ApplicationSurfaceOperation::FeedbackGet => Plan26FeedbackOperationV1::FeedbackGet,
         ApplicationSurfaceOperation::FeedbackExpand => Plan26FeedbackOperationV1::FeedbackExpand,
         ApplicationSurfaceOperation::FeedbackList => Plan26FeedbackOperationV1::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => {
+            Plan26FeedbackOperationV1::FeedbackCycle
+        }
         ApplicationSurfaceOperation::FeedbackImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
         ApplicationSurfaceOperation::AffectedTests => {
             Plan26FeedbackOperationV1::PrimitiveAffectedTests
@@ -2835,6 +2882,7 @@ fn plan26_surface_is_observable(operation: ApplicationSurfaceOperation) -> bool 
             | ApplicationSurfaceOperation::FeedbackGet
             | ApplicationSurfaceOperation::FeedbackExpand
             | ApplicationSurfaceOperation::FeedbackList
+            | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
             | ApplicationSurfaceOperation::FeedbackImpact
             | ApplicationSurfaceOperation::AffectedTests
             | ApplicationSurfaceOperation::TestResults
@@ -3141,6 +3189,9 @@ fn application_operation_for_http(
         HttpApplicationOperation::FeedbackGet => ApplicationSurfaceOperation::FeedbackGet,
         HttpApplicationOperation::FeedbackExpand => ApplicationSurfaceOperation::FeedbackExpand,
         HttpApplicationOperation::FeedbackList => ApplicationSurfaceOperation::FeedbackList,
+        HttpApplicationOperation::FeedbackAdvisoryCycle => {
+            ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+        }
         HttpApplicationOperation::FeedbackImpact => ApplicationSurfaceOperation::FeedbackImpact,
         HttpApplicationOperation::AffectedTests => ApplicationSurfaceOperation::AffectedTests,
         HttpApplicationOperation::TestResults => ApplicationSurfaceOperation::TestResults,

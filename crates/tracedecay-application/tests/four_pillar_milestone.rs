@@ -383,9 +383,10 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
         .map(|binding| binding.operation().as_str())
         .collect();
     assert!(operations.contains("feedback_diagnostics"));
-    assert!(operations.contains("github_review_ingest"));
-    assert!(operations.contains("ci_failure_localize"));
-    assert!(operations.contains("feedback_proximity"));
+    assert!(operations.contains("feedback_advisory_cycle"));
+    assert!(!operations.contains("github_review_ingest"));
+    assert!(!operations.contains("ci_failure_localize"));
+    assert!(!operations.contains("feedback_proximity"));
     for capability in catalog.capabilities() {
         assert!(capability.availability().is_callable());
     }
