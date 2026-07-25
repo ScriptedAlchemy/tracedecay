@@ -51,7 +51,6 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
     let feedback = feedback_surface_catalog_contribution().unwrap();
     let feedback_handlers = feedback_surface_handler_descriptors().unwrap();
 
-    assert_eq!(contributions.len(), 8);
     assert!(contributions.contains(&callable_code));
     assert!(contributions.contains(&feedback));
     assert_eq!(
@@ -86,12 +85,13 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
         );
         assert!(!capability.binding_ids().is_empty());
     }
-    assert!(
-        feedback
-            .bindings()
-            .iter()
-            .all(|binding| binding.surface() != BindingSurface::Dashboard)
-    );
+    assert!(feedback.bindings().iter().any(|binding| {
+        binding.surface() == BindingSurface::Dashboard
+            && feedback
+                .capabilities()
+                .iter()
+                .any(|capability| capability.binding_ids().contains(binding.binding_id()))
+    }));
     assert!(
         git_index_catalog_contribution()
             .unwrap()

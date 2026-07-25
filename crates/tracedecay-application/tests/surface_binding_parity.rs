@@ -1,4 +1,4 @@
-//! CLI/MCP/HTTP semantic parity for Git and feedback surface contracts.
+//! Surface semantic parity for Git, feedback, configuration, and PR14 reads.
 
 use tracedecay_application::{
     ApplicationHandlerDescriptor, configuration_surface_catalog_contribution,
@@ -14,6 +14,12 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         BindingSurface::Cli,
         BindingSurface::Mcp,
         BindingSurface::Http,
+    ];
+    const DASHBOARD_READ_SURFACES: [BindingSurface; 4] = [
+        BindingSurface::Cli,
+        BindingSurface::Mcp,
+        BindingSurface::Http,
+        BindingSurface::Dashboard,
     ];
     const CLI_MCP_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
     const ADVISORY_SURFACES: [BindingSurface; 4] = [
@@ -65,7 +71,7 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
     assert_surface_contract_parity(
         &feedback,
         &feedback_handlers,
-        &TRANSPORT_SURFACES,
+        &DASHBOARD_READ_SURFACES,
         &advisory_overrides,
     );
 }
@@ -83,6 +89,7 @@ fn configuration_bindings_have_declared_surface_parity() {
             BindingSurface::Cli,
             BindingSurface::Mcp,
             BindingSurface::Http,
+            BindingSurface::Dashboard,
         ],
         &[],
     );

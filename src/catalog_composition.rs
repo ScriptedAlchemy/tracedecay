@@ -142,7 +142,7 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(256, 80_000_000, 18_000)?,
+            ProfileBudget::new(288, 80_000_000, 18_000)?,
             true,
         ),
         (
@@ -317,6 +317,141 @@ fn unique_routing_fixture_utterance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_application::handlers::CanonicalApplicationDispatcher;
+    use tracedecay_application::{
+        ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
+    };
+    use tracedecay_tool_catalog::SurfaceOperationName;
+
+    const DASHBOARD_OPERATIONS: [&str; 23] = [
+        "feedback_diagnostics",
+        "feedback_get",
+        "feedback_expand",
+        "feedback_list",
+        "feedback_impact",
+        "affected_tests",
+        "test_results",
+        "health_read",
+        "storage_status",
+        "diagnostics_read",
+        "configuration_list",
+        "configuration_explain",
+        "configuration_get",
+        "configuration_set",
+        "configuration_unset",
+        "configuration_batch",
+        "configuration_write_credential",
+        "configuration_observed_state",
+        "configuration_protected_preview",
+        "configuration_protected_apply",
+        "configuration_rollback_preview",
+        "configuration_rollback_apply",
+        "configuration_audit",
+    ];
+
+    #[derive(Clone, Copy)]
+    enum ParityOutcome {
+        Ready,
+        Unavailable,
+        Denied,
+    }
+
+    #[derive(Clone)]
+    struct ParityRequest {
+        outcome: ParityOutcome,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ParityResult {
+        capability_id: CapabilityId,
+        use_case_id: UseCaseId,
+        outcome: Result<&'static str, ApplicationProblem>,
+    }
+
+    struct ParityDispatcher;
+
+    impl CanonicalApplicationDispatcher<ParityRequest> for ParityDispatcher {
+        type Output = ParityResult;
+
+        fn invoke(&self, operation: &ApplicationOperation, request: ParityRequest) -> Self::Output {
+            let outcome = match request.outcome {
+                ParityOutcome::Ready => Ok("canonical-result"),
+                ParityOutcome::Unavailable => {
+                    Err(ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "application.fixture.unavailable".to_owned(),
+                        message: "The canonical owner is unavailable".to_owned(),
+                    }))
+                }
+                ParityOutcome::Denied => Err(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                )),
+            };
+            ParityResult {
+                capability_id: operation.capability_id().clone(),
+                use_case_id: operation.use_case_id().clone(),
+                outcome,
+            }
+        }
+    }
+
+    fn invoke_pre_render(
+        composition: &ApplicationCatalogComposition<ParityDispatcher>,
+        surface: BindingSurface,
+        operation: &str,
+        outcome: ParityOutcome,
+    ) -> ParityResult {
+        let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
+        let operation = SurfaceOperationName::new(operation).expect("surface operation");
+        let capability = composition
+            .snapshot()
+            .resolve_binding(&profile, surface, &operation, 1, &BTreeSet::new())
+            .unwrap_or_else(|| panic!("{operation} must resolve on {surface:?}"));
+        composition
+            .handler(capability.use_case_id())
+            .expect("resolved capability has its canonical application handler")
+            .invoke(ParityRequest { outcome })
+    }
+
+    #[test]
+    fn dashboard_requests_invoke_the_same_pre_render_handlers_as_http() {
+        let composition =
+            compose_application_catalog(ParityDispatcher).expect("application composition");
+
+        for operation in DASHBOARD_OPERATIONS {
+            for outcome in [
+                ParityOutcome::Ready,
+                ParityOutcome::Unavailable,
+                ParityOutcome::Denied,
+            ] {
+                let http =
+                    invoke_pre_render(&composition, BindingSurface::Http, operation, outcome);
+                let dashboard =
+                    invoke_pre_render(&composition, BindingSurface::Dashboard, operation, outcome);
+                assert_eq!(dashboard, http, "{operation} changed before rendering");
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_does_not_advertise_an_uncallable_metadata_only_binding() {
+        let composition =
+            compose_application_catalog(ParityDispatcher).expect("application composition");
+        let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
+        let operation = SurfaceOperationName::new("git_apply").expect("surface operation");
+
+        assert!(
+            composition
+                .snapshot()
+                .resolve_binding(
+                    &profile,
+                    BindingSurface::Dashboard,
+                    &operation,
+                    1,
+                    &BTreeSet::new(),
+                )
+                .is_none()
+        );
+    }
 
     #[test]
     fn default_profile_capacity_tracks_composed_runtime() {
@@ -335,8 +470,8 @@ mod tests {
                     && default_profile.enables_surface(binding.surface())
             })
             .count();
-        assert_eq!(default_binding_count, 235);
-        assert_eq!(default_profile.budget().maximum_bindings(), 256);
+        assert_eq!(default_binding_count, 258);
+        assert_eq!(default_profile.budget().maximum_bindings(), 288);
         assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
         let mut default_schemas = std::collections::BTreeMap::new();
         for capability in contributions
