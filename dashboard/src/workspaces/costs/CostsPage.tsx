@@ -39,9 +39,17 @@ export function CostsPage() {
         const ledger = data.savings.available ? data.savings.ledger : undefined;
         const lifetime = data.savings.lifetime_counters;
         const spread = summarizeProjectSpread(lifetime?.projects ?? []);
-        const mix = data.sessions.actual ? summarizeTokenMix(data.sessions.actual) : null;
-        const coverage = summarizeCoverage(data.sessions);
-        const perTurn = costPerTurn(data.turns.total_cost_usd, data.turns.turn_count);
+        const mix =
+          data.sessions.available && data.sessions.actual
+            ? summarizeTokenMix(data.sessions.actual)
+            : null;
+        const coverage = data.sessions.available ? summarizeCoverage(data.sessions) : null;
+        const perTurn = data.turns.available
+          ? costPerTurn(data.turns.total_cost_usd, data.turns.turn_count)
+          : null;
+        const projectTitle = lifetime?.projects_truncated
+          ? `Savings by project (top ${(lifetime.projects?.length ?? lifetime.projects_limit ?? 0).toLocaleString()} of ${(lifetime.project_total ?? 0).toLocaleString()} projects)`
+          : 'Savings by project (lifetime)';
         return (
           <div
             className="flex h-full flex-col overflow-auto"
@@ -69,7 +77,7 @@ export function CostsPage() {
                 {
                   label: 'total cost',
                   value:
-                    data.turns.total_cost_usd != null
+                    data.turns.available && data.turns.total_cost_usd != null
                       ? `$${data.turns.total_cost_usd.toLocaleString(undefined, {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
@@ -86,16 +94,25 @@ export function CostsPage() {
                 },
                 {
                   label: 'turns',
-                  ...splitTokens(data.turns.turn_count),
+                  ...splitTokens(data.turns.available ? data.turns.turn_count : undefined),
                   note: 'priced turn ledger',
                 },
                 {
                   label: 'tokens',
-                  ...splitTokens(data.turns.total_tokens),
+                  ...splitTokens(data.turns.available ? data.turns.total_tokens : undefined),
                   note: 'across those turns',
                 },
               ]}
             />
+            {!data.turns.available ? (
+              <p
+                role="status"
+                className="border-b border-state-error/30 bg-state-error/5 px-4 py-2 text-xs text-state-error"
+              >
+                Priced turn ledger read failed
+                {data.turns.error ? `: ${data.turns.error}` : '.'}
+              </p>
+            ) : null}
 
             {/* The four windows are nested: today is inside 7d is inside 30d
              * is inside all-time. So each one's rail is truthfully its share
@@ -134,10 +151,24 @@ export function CostsPage() {
                 },
               ]}
             />
+            {!data.savings.available ? (
+              <p
+                role="status"
+                className="border-b border-state-error/30 bg-state-error/5 px-4 py-2 text-xs text-state-error"
+              >
+                Savings ledger read failed
+                {data.savings.error ? `: ${data.savings.error}` : '.'}
+              </p>
+            ) : null}
 
             <OverviewGrid>
               <OverviewCard title="Where the tokens go">
-                {mix ? (
+                {!data.sessions.available ? (
+                  <ReadFailure
+                    label="Session ledger read failed"
+                    detail={data.sessions.error}
+                  />
+                ) : mix ? (
                   <TokenMixPlate mix={mix} sessions={data.sessions} />
                 ) : (
                   <p className="text-2xs text-text-muted">
@@ -146,8 +177,10 @@ export function CostsPage() {
                 )}
               </OverviewCard>
 
-              <OverviewCard title="Savings by project (lifetime)">
-                {spread ? (
+              <OverviewCard title={projectTitle}>
+                {!data.savings.available ? (
+                  <ReadFailure label="Savings ledger read failed" detail={data.savings.error} />
+                ) : spread ? (
                   <ProjectSpreadPlate spread={spread} />
                 ) : (
                   <p className="text-2xs text-text-muted">no per-project savings recorded</p>
@@ -155,7 +188,12 @@ export function CostsPage() {
               </OverviewCard>
 
               <OverviewCard title="How much of the ledger is measured">
-                {coverage ? (
+                {!data.sessions.available ? (
+                  <ReadFailure
+                    label="Session ledger read failed"
+                    detail={data.sessions.error}
+                  />
+                ) : coverage ? (
                   <figure className="flex flex-col gap-2">
                     <p className="text-xs leading-relaxed text-text-primary">
                       {Math.round(coverage.measuredShare * 100)}% of{' '}
@@ -404,6 +442,15 @@ function ShareRow({
         {value.toLocaleString()}
       </span>
     </div>
+  );
+}
+
+function ReadFailure({ label, detail }: { label: string; detail?: string | undefined }) {
+  return (
+    <p role="status" className="text-2xs leading-relaxed text-state-error">
+      {label}
+      {detail ? `: ${detail}` : '.'}
+    </p>
   );
 }
 

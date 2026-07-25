@@ -213,9 +213,10 @@ evidence only and never becomes a correctness label.
 ### Concrete GitHub and CI defaults
 
 - Use existing `ureq` transport and one shared set of typed Serde DTOs for
-  GitHub review and CI responses. Keep GraphQL documents as static audited
-  query text with fixed response DTOs. This replaces provider-local HTTP/JSON
-  wrappers and dynamic GraphQL parsing without changing exact
+  GitHub review and CI responses. Keep exactly one GraphQL document as
+  compile-time static audited query text with fixed response DTOs. This
+  replaces provider-local HTTP/JSON wrappers and dynamic GraphQL parsing
+  without changing exact
   repository/PR/run identity, overlap pagination, cursor publication,
   freshness, coverage, rate-limit, lifecycle, or read-only semantics.
 - Keep `gh api` as a documented manual acquisition/troubleshooting fallback,
@@ -294,9 +295,12 @@ feedback requires exact saved-content or clean-generation identity.
   outdated, resolved, edited, deleted, complete, partial, unavailable, denied,
   rate-limited, stale, and failed cases. Rejected writes make zero network
   calls.
-- CI fixtures localize current supported input and preserve stale, partial,
-  unavailable, and denied source state without exposing raw logs or claiming
-  execution.
+- GitHub/CI provider acceptance uses checked-in real native fixtures with
+  recorded origin/version/digest, replayed through the real sanitizer and
+  consuming path. Synthetic, lookalike, or invented protocol fields are
+  non-binding. Those fixtures localize current supported input and preserve
+  stale, partial, unavailable, and denied source state without exposing raw
+  logs or claiming execution.
 - Proximity fixtures cover immediate and above/below-threshold cases, pin the
   effective Plan 20 setting, expire/dedupe correctly, reveal no hidden peer,
   and create no lock or schedule.

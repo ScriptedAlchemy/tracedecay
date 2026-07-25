@@ -85,6 +85,28 @@ export const MemoryOverviewPayloadSchema = z
         error: z.string().optional(),
         facts: z.array(FactRowSchema).optional(),
         entities: z.array(EntityRowSchema).optional(),
+        reads: z
+          .object({
+            facts: z
+              .object({ state: z.enum(['pending', 'ready', 'error']), error: z.string().optional() })
+              .passthrough(),
+            entities: z
+              .object({ state: z.enum(['pending', 'ready', 'error']), error: z.string().optional() })
+              .passthrough(),
+            graph: z
+              .object({ state: z.enum(['pending', 'ready', 'error']), error: z.string().optional() })
+              .passthrough(),
+          })
+          .passthrough()
+          .optional(),
+        facts_coverage: z
+          .object({
+            completeness: z.literal('bounded'),
+            limit: z.number(),
+            query_applied_after_limit: z.boolean(),
+          })
+          .passthrough()
+          .optional(),
         overview: z
           .object({
             facts: z.number().optional(),
