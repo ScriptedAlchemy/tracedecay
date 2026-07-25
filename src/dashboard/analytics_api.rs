@@ -942,13 +942,16 @@ fn read_hook_analytics_file(
     let Ok((lines, reached_file_start)) = read_hook_analytics_tail(path, window_rows) else {
         return;
     };
+    // `rows_scanned` counts every line in the window; `rows_total` keeps its
+    // original meaning of well-formed rows, so malformed lines stay visible as
+    // the difference between the two rather than inflating the parsed count.
+    let rows_scanned = lines.len() as i64;
     let mut rows_total = 0i64;
     let mut rows_included = 0i64;
     let mut rows_malformed = 0i64;
     let mut first_malformed_offset = None;
     let mut first_malformed_error = None;
     for (index, line) in lines.iter().enumerate() {
-        rows_total += 1;
         let row = match serde_json::from_str::<Value>(line) {
             Ok(row) => row,
             Err(err) => {
@@ -966,6 +969,7 @@ fn read_hook_analytics_file(
                 continue;
             }
         };
+        rows_total += 1;
         let included = match project_filter {
             None => true,
             Some(root) => hook_row_matches_project(&row, root),
@@ -975,12 +979,13 @@ fn read_hook_analytics_file(
             out.rows.push(row);
         }
     }
-    out.window.rows_scanned += rows_total;
+    out.window.rows_scanned += rows_scanned;
     out.window.truncated |= !reached_file_start;
     out.sources.push(json!({
         "path": path.display().to_string(),
         // Counts describe the trailing window only. `window_truncated` is true
         // when the file extends past it, so `rows_total` is not the file total.
+        "rows_scanned": rows_scanned,
         "rows_total": rows_total,
         "rows_included": rows_included,
         "rows_malformed": rows_malformed,
@@ -1257,6 +1262,7 @@ mod tests {
 
         assert_eq!(rows.rows.len(), 2);
         assert_eq!(rows.sources.len(), 1);
+        assert_eq!(rows.sources[0]["rows_scanned"], 3);
         assert_eq!(rows.sources[0]["rows_total"], 2);
         assert_eq!(rows.sources[0]["rows_included"], 2);
         assert_eq!(rows.sources[0]["rows_malformed"], 1);
