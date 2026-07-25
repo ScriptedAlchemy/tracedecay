@@ -741,7 +741,7 @@ function HubCard({
           {file || '—'}
         </span>
         <span
-          className="td-value min-w-0 flex-1 truncate text-right text-3xs text-text-muted max-lg:hidden"
+          className="td-value min-w-0 flex-1 truncate text-right text-3xs text-text-muted max-2xl:hidden"
           title={node.file_path ?? undefined}
         >
           {elideStart(module.replace(/\/$/, ''), 24)}
