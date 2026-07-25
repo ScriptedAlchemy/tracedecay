@@ -273,8 +273,27 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   it('GET /api/plugins/graph/overview — code (GraphOverviewPayloadSchema)', () => {
     const data = parse(GraphOverviewPayloadSchema, '/api/plugins/graph/overview');
     const hubs = (data.top_connected ?? []) as Array<Record<string, unknown>>;
-    expect(hubs.length).toBeGreaterThanOrEqual(15);
-    for (const hub of hubs) expect(typeof hub['degree']).toBe('number');
+    // `graph_queries::top_connected_rows` is a `LIMIT 12` subquery selecting
+    // exactly five columns, so the fixture must serve twelve rows of that
+    // shape and no more. The old bound (>= 15) locked in a fixture that
+    // emitted eighteen FULL node records — a payload the daemon cannot
+    // produce — which meant the Code workspace was being designed and audited
+    // against fields (`qualified_name`, `signature`, `start_line`) this route
+    // never returns.
+    expect(hubs.length).toBe(12);
+    for (const hub of hubs) {
+      expect(typeof hub['degree']).toBe('number');
+      expect(Object.keys(hub).sort()).toEqual([
+        'degree',
+        'file_path',
+        'id',
+        'kind',
+        'name',
+      ]);
+    }
+    // Degrees arrive already ranked, highest first.
+    const degrees = hubs.map((hub) => hub['degree'] as number);
+    expect([...degrees].sort((a, b) => b - a)).toEqual(degrees);
     expect(data.totals.nodes).toBeGreaterThan(0);
   });
 
