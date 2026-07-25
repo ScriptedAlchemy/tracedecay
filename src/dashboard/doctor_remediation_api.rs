@@ -19,27 +19,105 @@ use tracedecay_application::doctor::{
 use tracedecay_application::{
     EffectReceipt, IdempotencyKey, OperationReceipt, PreviewId, RequestId,
 };
+use tracedecay_domain::ManifestDigest;
 
 use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, scope_from_state,
 };
+use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostKindV1};
 use crate::application::operation_stream::OperationId;
+use crate::application_surface::{
+    ConfigurationProtectedApplySurfaceRequest, ConfigurationProtectedPreviewSurfaceRequest,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DoctorRemediationDispatchCommandV1 {
     Preview {
         operation: DoctorOwningOperationRefV1,
+        target: DoctorRemediationTargetV1,
     },
     Apply {
         operation: DoctorOwningOperationRefV1,
+        target: DoctorRemediationTargetV1,
         preview_id: Option<PreviewId>,
         idempotency_key: IdempotencyKey,
     },
     Status {
         operation_id: OperationId,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "owner_operation", content = "target", rename_all = "snake_case")]
+pub(crate) enum DoctorRemediationTargetV1 {
+    StorageRetentionCollect,
+    StorageCollectOrphanStore,
+    StorageBranchGc,
+    StorageQuarantineAndCollectDebris,
+    ConfigurationProtectedPreview(ConfigurationProtectedPreviewSurfaceRequest),
+    ConfigurationProtectedApply(ConfigurationProtectedApplySurfaceRequest),
+    ConfigurationPinAuthority,
+    RuntimeRecoverDaemon,
+    HostRepairIntegration {
+        host: HostKindV1,
+        components: Vec<HostBundleComponentV1>,
+    },
+    CodeIndexRemount,
+}
+
+impl DoctorRemediationTargetV1 {
+    fn operation(&self) -> &'static str {
+        use tracedecay_application::doctor::operations;
+        match self {
+            Self::StorageRetentionCollect => operations::STORAGE_RETENTION_COLLECT,
+            Self::StorageCollectOrphanStore => operations::STORAGE_COLLECT_ORPHAN_STORE,
+            Self::StorageBranchGc => operations::STORAGE_BRANCH_GC,
+            Self::StorageQuarantineAndCollectDebris => {
+                operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS
+            }
+            Self::ConfigurationProtectedPreview(_) | Self::ConfigurationProtectedApply(_) => {
+                operations::CONFIGURATION_PROTECTED_APPLY
+            }
+            Self::ConfigurationPinAuthority => operations::CONFIGURATION_PIN_AUTHORITY,
+            Self::RuntimeRecoverDaemon => operations::RUNTIME_RECOVER_DAEMON,
+            Self::HostRepairIntegration { .. } => operations::HOST_REPAIR_INTEGRATION,
+            Self::CodeIndexRemount => operations::CODE_INDEX_REMOUNT,
+        }
+    }
+
+    fn validate_for(
+        &self,
+        operation: &DoctorOwningOperationRefV1,
+        kind: DoctorRemediationKindV1,
+    ) -> Result<(), DoctorRemediationDispatchErrorV1> {
+        let phase_matches = match (self, kind) {
+            (Self::ConfigurationProtectedPreview(_), DoctorRemediationKindV1::Preview)
+            | (Self::ConfigurationProtectedApply(_), DoctorRemediationKindV1::Action) => true,
+            (Self::ConfigurationProtectedPreview(_) | Self::ConfigurationProtectedApply(_), _) => {
+                false
+            }
+            (Self::RuntimeRecoverDaemon, DoctorRemediationKindV1::Preview) => false,
+            (Self::HostRepairIntegration { components, .. }, _) => {
+                !components.is_empty()
+                    && components.len() <= 4
+                    && !components
+                        .iter()
+                        .enumerate()
+                        .any(|(index, current)| components[index + 1..].contains(current))
+            }
+            _ => true,
+        };
+        (phase_matches && operation.as_str() == self.operation())
+            .then_some(())
+            .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)
+    }
+
+    pub(crate) fn digest(&self) -> Result<ManifestDigest, DoctorRemediationDispatchErrorV1> {
+        tracedecay_domain::canonical_sha256(&("tracedecay.doctor-remediation-target.v1", self))
+            .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +141,16 @@ pub(crate) struct DoctorRemediationOperationV1 {
     pub preview_id: Option<PreviewId>,
     pub execution: Option<OperationReceipt>,
     pub effect_receipt: Option<EffectReceipt>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DurableDoctorRemediationRecordV1 {
+    schema_version: u16,
+    kind: DoctorRemediationKindV1,
+    target_digest: ManifestDigest,
+    idempotency_key: Option<IdempotencyKey>,
+    operation: DoctorRemediationOperationV1,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -162,26 +250,126 @@ impl DoctorRemediationDispatcherV1 {
     ) -> Result<DoctorRemediationOperationV1, DoctorRemediationDispatchErrorV1> {
         if let (Some(root), DoctorRemediationDispatchCommandV1::Status { operation_id }) =
             (&self.durable_receipt_root, &command)
-            && let Some(operation) = read_durable_operation(root, operation_id)?
+            && let Some(record) = read_durable_operation(root, operation_id)?
         {
-            let kind = if operation.phase == DoctorRemediationOperationPhaseV1::Previewed {
-                DoctorRemediationKindV1::Preview
-            } else {
-                DoctorRemediationKindV1::Action
-            };
-            let reference = DoctorRemediationRefV1::new(operation.owning_operation.clone(), kind);
+            validate_outcome(record.operation.clone())?;
+            let reference =
+                DoctorRemediationRefV1::new(record.operation.owning_operation.clone(), record.kind);
             if self.legal_actions(&reference).await.is_empty() {
                 return Err(DoctorRemediationDispatchErrorV1::Denied);
             }
-            return Ok(operation);
+            return Ok(record.operation);
         }
-        let operation = (self.dispatch)(command).await?;
+        let (kind, operation, target, idempotency_key) = match &command {
+            DoctorRemediationDispatchCommandV1::Preview { operation, target } => (
+                DoctorRemediationKindV1::Preview,
+                operation.clone(),
+                target.clone(),
+                None,
+            ),
+            DoctorRemediationDispatchCommandV1::Apply {
+                operation,
+                target,
+                idempotency_key,
+                ..
+            } => (
+                DoctorRemediationKindV1::Action,
+                operation.clone(),
+                target.clone(),
+                Some(idempotency_key.clone()),
+            ),
+            DoctorRemediationDispatchCommandV1::Status { .. } => {
+                return (self.dispatch)(command).await;
+            }
+        };
+        target.validate_for(&operation, kind)?;
+        let target_digest = target.digest()?;
+        let expected_operation_id = operation_id_for_command(&command)?;
         if let Some(root) = &self.durable_receipt_root {
-            validate_outcome(operation.clone())?;
-            write_durable_operation(root, &operation)?;
+            if let Some(key) = &idempotency_key
+                && let Some(record) = read_idempotency_record(root, &operation, key)?
+            {
+                if record.target_digest != target_digest || record.kind != kind {
+                    return Err(DoctorRemediationDispatchErrorV1::InvalidReference);
+                }
+                return Ok(record.operation);
+            }
+            let intent = DurableDoctorRemediationRecordV1 {
+                schema_version: 1,
+                kind,
+                target_digest: target_digest.clone(),
+                idempotency_key: idempotency_key.clone(),
+                operation: DoctorRemediationOperationV1 {
+                    operation_id: expected_operation_id.clone(),
+                    owning_operation: operation.clone(),
+                    phase: DoctorRemediationOperationPhaseV1::Running,
+                    preview_id: match &command {
+                        DoctorRemediationDispatchCommandV1::Apply { preview_id, .. } => {
+                            preview_id.clone()
+                        }
+                        _ => None,
+                    },
+                    execution: None,
+                    effect_receipt: None,
+                },
+            };
+            write_durable_record(root, &intent)?;
+            if idempotency_key.is_some() {
+                write_idempotency_record(root, &operation, &intent)?;
+            }
         }
-        Ok(operation)
+        let outcome = (self.dispatch)(command).await?;
+        validate_outcome(outcome.clone())?;
+        if let Some(root) = &self.durable_receipt_root {
+            if outcome.operation_id != expected_operation_id {
+                return Err(DoctorRemediationDispatchErrorV1::InvalidReference);
+            }
+            let record = DurableDoctorRemediationRecordV1 {
+                schema_version: 1,
+                kind,
+                target_digest,
+                idempotency_key: idempotency_key.clone(),
+                operation: outcome.clone(),
+            };
+            write_durable_record(root, &record)?;
+            if idempotency_key.is_some() {
+                write_idempotency_record(root, &operation, &record)?;
+            }
+        }
+        Ok(outcome)
     }
+}
+
+pub(crate) fn operation_id_for_command(
+    command: &DoctorRemediationDispatchCommandV1,
+) -> Result<OperationId, DoctorRemediationDispatchErrorV1> {
+    let digest = match command {
+        DoctorRemediationDispatchCommandV1::Preview { operation, target } => {
+            tracedecay_domain::canonical_sha256(&(
+                "tracedecay.doctor-remediation-preview-operation.v1",
+                operation,
+                target.digest()?,
+            ))
+        }
+        DoctorRemediationDispatchCommandV1::Apply {
+            operation,
+            target,
+            idempotency_key,
+            ..
+        } => tracedecay_domain::canonical_sha256(&(
+            "tracedecay.doctor-remediation-apply-operation.v1",
+            operation,
+            target.digest()?,
+            idempotency_key,
+        )),
+        DoctorRemediationDispatchCommandV1::Status { operation_id } => {
+            return Ok(operation_id.clone());
+        }
+    }
+    .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    RequestId::new(format!("request.doctor-remediation.{}", digest.as_str()))
+        .map(OperationId::from_request)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)
 }
 
 fn durable_operation_path(
@@ -199,45 +387,103 @@ fn durable_operation_path(
 fn read_durable_operation(
     root: &std::path::Path,
     operation_id: &OperationId,
-) -> Result<Option<DoctorRemediationOperationV1>, DoctorRemediationDispatchErrorV1> {
-    crate::storage::PrivateStoreIo::create_dir_all(root)
-        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+) -> Result<Option<DurableDoctorRemediationRecordV1>, DoctorRemediationDispatchErrorV1> {
     let path = durable_operation_path(root, operation_id)?;
-    let lock_path = crate::storage::append_lock_path(&path);
-    let _lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path)
+    read_record_path(&path)?.map_or(Ok(None), |record| {
+        (record.schema_version == 1 && record.operation.operation_id == *operation_id)
+            .then_some(Some(record))
+            .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)
+    })
+}
+
+fn write_durable_record(
+    root: &std::path::Path,
+    record: &DurableDoctorRemediationRecordV1,
+) -> Result<(), DoctorRemediationDispatchErrorV1> {
+    let path = durable_operation_path(root, &record.operation.operation_id)?;
+    write_record_path(&path, record)
+}
+
+fn idempotency_record_path(
+    root: &std::path::Path,
+    operation: &DoctorOwningOperationRefV1,
+    key: &IdempotencyKey,
+) -> Result<std::path::PathBuf, DoctorRemediationDispatchErrorV1> {
+    let digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.doctor-remediation-idempotency.v1",
+        operation,
+        key,
+    ))
+    .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    Ok(root
+        .join("idempotency")
+        .join(format!("{}.json", digest.as_str())))
+}
+
+fn read_idempotency_record(
+    root: &std::path::Path,
+    operation: &DoctorOwningOperationRefV1,
+    key: &IdempotencyKey,
+) -> Result<Option<DurableDoctorRemediationRecordV1>, DoctorRemediationDispatchErrorV1> {
+    let path = idempotency_record_path(root, operation, key)?;
+    read_record_path(&path)
+}
+
+fn write_idempotency_record(
+    root: &std::path::Path,
+    operation: &DoctorOwningOperationRefV1,
+    record: &DurableDoctorRemediationRecordV1,
+) -> Result<(), DoctorRemediationDispatchErrorV1> {
+    let key = record
+        .idempotency_key
+        .as_ref()
+        .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    write_record_path(&idempotency_record_path(root, operation, key)?, record)
+}
+
+fn read_record_path(
+    path: &std::path::Path,
+) -> Result<Option<DurableDoctorRemediationRecordV1>, DoctorRemediationDispatchErrorV1> {
+    let parent = path
+        .parent()
+        .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    crate::storage::PrivateStoreIo::create_dir_all(parent)
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-    match std::fs::symlink_metadata(&path) {
+    let _lock =
+        crate::storage::acquire_sidecar_lock_blocking(&crate::storage::append_lock_path(path))
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(DoctorRemediationDispatchErrorV1::InvalidReference)
         }
-        Ok(_) => {
-            let bytes = std::fs::read(&path)
-                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-            let operation: DoctorRemediationOperationV1 = serde_json::from_slice(&bytes)
-                .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
-            (operation.operation_id == *operation_id)
-                .then_some(Some(operation))
-                .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)
-        }
+        Ok(_) => std::fs::read(path)
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)
+            .and_then(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)
+            })
+            .map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable),
     }
 }
 
-fn write_durable_operation(
-    root: &std::path::Path,
-    operation: &DoctorRemediationOperationV1,
+fn write_record_path(
+    path: &std::path::Path,
+    record: &DurableDoctorRemediationRecordV1,
 ) -> Result<(), DoctorRemediationDispatchErrorV1> {
-    crate::storage::PrivateStoreIo::create_dir_all(root)
+    let parent = path
+        .parent()
+        .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    crate::storage::PrivateStoreIo::create_dir_all(parent)
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-    let path = durable_operation_path(root, &operation.operation_id)?;
-    let lock_path = crate::storage::append_lock_path(&path);
-    let _lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path)
-        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-    let bytes = serde_json::to_vec(operation)
+    let _lock =
+        crate::storage::acquire_sidecar_lock_blocking(&crate::storage::append_lock_path(path))
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let bytes = serde_json::to_vec(record)
         .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
     let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    crate::storage::PrivateStoreIo::write_file_atomically(&path, &temp_path, &bytes)
+    crate::storage::PrivateStoreIo::write_file_atomically(path, &temp_path, &bytes)
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)
 }
 
@@ -245,12 +491,14 @@ fn write_durable_operation(
 #[serde(deny_unknown_fields)]
 pub(crate) struct DoctorRemediationPreviewRequestV1 {
     operation: DoctorOwningOperationRefV1,
+    target: DoctorRemediationTargetV1,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DoctorRemediationApplyRequestV1 {
     operation: DoctorOwningOperationRefV1,
+    target: DoctorRemediationTargetV1,
     preview_id: Option<PreviewId>,
     idempotency_key: IdempotencyKey,
     confirmed: bool,
@@ -271,7 +519,12 @@ pub(crate) async fn preview(
     State(state): State<DashboardState>,
     Json(request): Json<DoctorRemediationPreviewRequestV1>,
 ) -> Json<DashboardEnvelopeV1<DoctorRemediationPayloadV1>> {
-    if !reference_is_registered(&request.operation, DoctorRemediationKindV1::Preview) {
+    if !reference_is_registered(&request.operation, DoctorRemediationKindV1::Preview)
+        || request
+            .target
+            .validate_for(&request.operation, DoctorRemediationKindV1::Preview)
+            .is_err()
+    {
         return response(
             &state,
             Err(DoctorRemediationDispatchErrorV1::InvalidReference),
@@ -293,6 +546,7 @@ pub(crate) async fn preview(
     let result = dispatcher
         .dispatch(DoctorRemediationDispatchCommandV1::Preview {
             operation: request.operation,
+            target: request.target,
         })
         .await
         .and_then(|outcome| {
@@ -314,7 +568,12 @@ pub(crate) async fn apply(
             Err(DoctorRemediationDispatchErrorV1::ConfirmationRequired),
         );
     }
-    if !reference_is_registered(&request.operation, DoctorRemediationKindV1::Action) {
+    if !reference_is_registered(&request.operation, DoctorRemediationKindV1::Action)
+        || request
+            .target
+            .validate_for(&request.operation, DoctorRemediationKindV1::Action)
+            .is_err()
+    {
         return response(
             &state,
             Err(DoctorRemediationDispatchErrorV1::InvalidReference),
@@ -338,6 +597,7 @@ pub(crate) async fn apply(
     let result = dispatcher
         .dispatch(DoctorRemediationDispatchCommandV1::Apply {
             operation: request.operation,
+            target: request.target,
             preview_id: request.preview_id,
             idempotency_key: request.idempotency_key,
         })
@@ -555,6 +815,67 @@ mod tests {
         .unwrap()
     }
 
+    fn configuration_preview_target() -> DoctorRemediationTargetV1 {
+        DoctorRemediationTargetV1::ConfigurationProtectedPreview(
+            ConfigurationProtectedPreviewSurfaceRequest {
+                change:
+                    tracedecay_domain::configuration::ProtectedChange::ReplaceWorkTopologyPolicy(
+                        tracedecay_domain::configuration::safe_work_topology_policy_v1(),
+                    ),
+                expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId::new(
+                    "configuration-revision.doctor-preview",
+                )
+                .unwrap(),
+            },
+        )
+    }
+
+    fn configuration_apply_target() -> DoctorRemediationTargetV1 {
+        DoctorRemediationTargetV1::ConfigurationProtectedApply(
+            ConfigurationProtectedApplySurfaceRequest {
+                plan_id: tracedecay_domain::configuration::ChangePlanId::new(
+                    "change-plan.doctor-apply",
+                )
+                .unwrap(),
+                expected_base_revision_id:
+                    tracedecay_domain::configuration::ConfigurationRevisionId::new(
+                        "configuration-revision.doctor-apply",
+                    )
+                    .unwrap(),
+                operation_digest: ManifestDigest::new(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+                idempotency_key:
+                    tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
+                        "configuration-idempotency.doctor-apply",
+                    )
+                    .unwrap(),
+            },
+        )
+    }
+
+    #[test]
+    fn typed_target_rejects_a_different_registered_operation() {
+        let target = DoctorRemediationTargetV1::StorageRetentionCollect;
+
+        assert!(
+            target
+                .validate_for(
+                    &DoctorOwningOperationRefV1::new(
+                        tracedecay_application::doctor::operations::STORAGE_RETENTION_COLLECT,
+                    )
+                    .unwrap(),
+                    DoctorRemediationKindV1::Action,
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            target.validate_for(&configuration_operation(), DoctorRemediationKindV1::Action),
+            Err(DoctorRemediationDispatchErrorV1::InvalidReference)
+        );
+    }
+
     fn failed_operation() -> DoctorRemediationOperationV1 {
         DoctorRemediationOperationV1 {
             operation_id: OperationId::from_request(
@@ -584,6 +905,7 @@ mod tests {
             State(state),
             Json(DoctorRemediationPreviewRequestV1 {
                 operation: configuration_operation(),
+                target: configuration_preview_target(),
             }),
         )
         .await;
@@ -610,6 +932,7 @@ mod tests {
             State(state),
             Json(DoctorRemediationApplyRequestV1 {
                 operation: configuration_operation(),
+                target: configuration_apply_target(),
                 preview_id: Some(PreviewId::new("preview.denied").unwrap()),
                 idempotency_key: IdempotencyKey::new("idempotency.denied").unwrap(),
                 confirmed: true,
@@ -639,6 +962,7 @@ mod tests {
             State(state),
             Json(DoctorRemediationApplyRequestV1 {
                 operation: configuration_operation(),
+                target: configuration_apply_target(),
                 preview_id: Some(PreviewId::new("preview.different").unwrap()),
                 idempotency_key: IdempotencyKey::new("idempotency.different").unwrap(),
                 confirmed: true,
@@ -694,6 +1018,7 @@ mod tests {
             State(state),
             Json(DoctorRemediationApplyRequestV1 {
                 operation: runtime_recovery_operation(),
+                target: DoctorRemediationTargetV1::RuntimeRecoverDaemon,
                 preview_id: None,
                 idempotency_key: IdempotencyKey::new("idempotency.runtime-recovery").unwrap(),
                 confirmed: true,
@@ -716,6 +1041,7 @@ mod tests {
             State(state),
             Json(DoctorRemediationApplyRequestV1 {
                 operation: configuration_operation(),
+                target: configuration_apply_target(),
                 preview_id: Some(PreviewId::new("preview.unconfirmed").unwrap()),
                 idempotency_key: IdempotencyKey::new("idempotency.unconfirmed").unwrap(),
                 confirmed: false,
@@ -761,6 +1087,7 @@ mod tests {
             State(first_state),
             Json(DoctorRemediationPreviewRequestV1 {
                 operation: configuration_operation(),
+                target: configuration_preview_target(),
             }),
         )
         .await;
@@ -783,7 +1110,12 @@ mod tests {
     #[tokio::test]
     async fn durable_dispatcher_resumes_terminal_receipt_after_rebuild() {
         let root = tempfile::tempdir().expect("receipt root");
-        let failed = failed_operation();
+        let command = DoctorRemediationDispatchCommandV1::Preview {
+            operation: configuration_operation(),
+            target: configuration_preview_target(),
+        };
+        let mut failed = failed_operation();
+        failed.operation_id = operation_id_for_command(&command).unwrap();
         let first = DoctorRemediationDispatcherV1::new_durable(
             root.path().to_path_buf(),
             Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestDryRun] })),
@@ -796,9 +1128,7 @@ mod tests {
             }),
         );
         first
-            .dispatch(DoctorRemediationDispatchCommandV1::Preview {
-                operation: configuration_operation(),
-            })
+            .dispatch(command)
             .await
             .expect("persist terminal operation");
 
@@ -817,5 +1147,80 @@ mod tests {
             .expect("resume durable terminal operation");
 
         assert_eq!(resumed, failed);
+    }
+
+    #[tokio::test]
+    async fn durable_apply_reuses_idempotent_owner_result_without_redispatch() {
+        let root = tempfile::tempdir().expect("receipt root");
+        let command = DoctorRemediationDispatchCommandV1::Apply {
+            operation: configuration_operation(),
+            target: configuration_apply_target(),
+            preview_id: Some(PreviewId::new("preview.durable-idempotency").unwrap()),
+            idempotency_key: IdempotencyKey::new("idempotency.durable-apply").unwrap(),
+        };
+        let mut failed = failed_operation();
+        failed.operation_id = operation_id_for_command(&command).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatcher = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
+            Arc::new({
+                let calls = Arc::clone(&calls);
+                let failed = failed.clone();
+                move |_| {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let failed = failed.clone();
+                    Box::pin(async move { Ok(failed) })
+                }
+            }),
+        );
+
+        let first = dispatcher.dispatch(command.clone()).await.unwrap();
+        let second = dispatcher.dispatch(command).await.unwrap();
+
+        assert_eq!(first, failed);
+        assert_eq!(second, failed);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_status_rechecks_current_owner_authority() {
+        let root = tempfile::tempdir().expect("receipt root");
+        let command = DoctorRemediationDispatchCommandV1::Preview {
+            operation: configuration_operation(),
+            target: configuration_preview_target(),
+        };
+        let mut failed = failed_operation();
+        failed.operation_id = operation_id_for_command(&command).unwrap();
+        DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestDryRun] })),
+            Arc::new({
+                let failed = failed.clone();
+                move |_| {
+                    let failed = failed.clone();
+                    Box::pin(async move { Ok(failed) })
+                }
+            }),
+        )
+        .dispatch(command)
+        .await
+        .unwrap();
+        let rebuilt = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { Vec::new() })),
+            Arc::new(|_| {
+                Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
+            }),
+        );
+
+        assert_eq!(
+            rebuilt
+                .dispatch(DoctorRemediationDispatchCommandV1::Status {
+                    operation_id: failed.operation_id,
+                })
+                .await,
+            Err(DoctorRemediationDispatchErrorV1::Denied)
+        );
     }
 }
