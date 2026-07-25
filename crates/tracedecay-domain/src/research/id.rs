@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Deref;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::error::DomainError;
@@ -22,7 +23,7 @@ pub(crate) fn validate_canonical_string(
 macro_rules! string_id {
     ($($name:ident),+ $(,)?) => {$(
         #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -99,7 +100,7 @@ fn validate_integrity_digest(value: &str, field: &'static str) -> Result<(), Dom
 macro_rules! digest_id {
     ($($name:ident),+ $(,)?) => {$(
         #[doc = concat!("Strongly typed algorithm-tagged integrity digest: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 

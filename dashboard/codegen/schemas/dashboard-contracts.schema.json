@@ -1,9 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://tracedecay.dev/schemas/dashboard-contracts.json",
-  "title": "DashboardContracts",
-  "schemaRevision": "read-model-v1",
-  "description": "Fixture mirroring the Rust serde model in src/dashboard/read_model.rs (DashboardEnvelopeV1<T> plus the closed snake_case enums). This is the generation source for the frontend wire boundary (src/contracts/generated.ts). Until the real schemars JSON Schema export is wired, this fixture is hand-kept in lockstep with read_model.rs; the generated module is hand-maintained from the same source of truth.",
+  "$id": "https://tracedecay.dev/schemas/tests/dashboard-codegen.json",
+  "title": "DashboardCodegenTestFixture",
+  "schemaRevision": 1,
+  "description": "Synthetic fixture for focused TypeScript generator unit tests. Production generation never reads this file; dashboard/codegen/src/cli.ts exports fresh Serialize-contract JSON Schema from Rust.",
   "$defs": {
     "Authorization": {
       "type": "object",

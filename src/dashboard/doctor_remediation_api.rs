@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::doctor::{
     DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
@@ -42,7 +43,7 @@ pub(crate) enum DoctorRemediationDispatchCommandV1 {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationOperationPhaseV1 {
     Previewed,
@@ -55,7 +56,7 @@ pub(crate) enum DoctorRemediationOperationPhaseV1 {
     EffectUnknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub(crate) struct DoctorRemediationOperationV1 {
     pub operation_id: OperationId,
     pub owning_operation: DoctorOwningOperationRefV1,
@@ -65,7 +66,7 @@ pub(crate) struct DoctorRemediationOperationV1 {
     pub effect_receipt: Option<EffectReceipt>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationDispatchErrorV1 {
     Unsupported,
@@ -241,13 +242,13 @@ fn write_durable_operation(
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DoctorRemediationPreviewRequestV1 {
     operation: DoctorOwningOperationRefV1,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DoctorRemediationApplyRequestV1 {
     operation: DoctorOwningOperationRefV1,
@@ -256,7 +257,7 @@ pub(crate) struct DoctorRemediationApplyRequestV1 {
     confirmed: bool,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationPayloadV1 {
     Operation {

@@ -36,18 +36,18 @@ describe("contracts generator", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
     const order = [
-      "interface Authorization",
-      "interface Coverage",
-      "type DashboardDomainState",
+      "const AuthorizationSchema",
+      "const CoverageSchema",
+      "const DashboardDomainStateSchema",
       "interface DashboardEnvelope",
-      "interface FindingPayload",
-      "interface Freshness",
-      "type LegalActionKind",
-      "interface LegalActionRef",
-      "interface Scope",
-      "interface Time",
-      "interface Version",
-      "interface Watermark",
+      "const FindingPayloadSchema",
+      "const FreshnessSchema",
+      "const LegalActionKindSchema",
+      "const LegalActionRefSchema",
+      "const ScopeSchema",
+      "const TimeSchema",
+      "const VersionSchema",
+      "const WatermarkSchema",
     ].map((needle) => generated.indexOf(needle));
     expect(order.every((i) => i >= 0)).toBe(true);
     const sorted = [...order].sort((a, b) => a - b);
@@ -89,15 +89,12 @@ describe("contracts generator", () => {
     expect(generated).toContain("outcome");
   });
 
-  it("emits a preview index that re-exports the generated preview module", () => {
+  it("emits the live index that re-exports the generated contract", () => {
     const { files } = generateContracts(bundles);
-    expect(files[OUTPUT_FILES.INDEX_FILE]!).toContain('export * from "./contracts.generated";');
+    expect(files[OUTPUT_FILES.INDEX_FILE]!).toContain('export * from "./generated";');
   });
 
-  it("maps a minimal synthetic tagged-union bundle to the unsupported fallback shape", () => {
-    // The generator still supports internally-tagged `oneOf` unions with a
-    // synthesized `unsupported_schema` branch (exercised here even though the
-    // read_model.rs domain state is now a flat string enum).
+  it("maps a synthetic tagged union without inventing variants", () => {
     const bundle: JsonSchema = {
       schemaRevision: "test.1",
       $defs: {
@@ -119,8 +116,8 @@ describe("contracts generator", () => {
     };
     const { files } = generateContracts([bundle]);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
-    expect(generated).toContain("export type Signal =");
-    expect(generated).toContain('kind: "unsupported_schema";');
-    expect(generated).toContain('SCHEMA_REVISION = "test.1"');
+    expect(generated).toContain('z.discriminatedUnion("kind"');
+    expect(generated).not.toContain('kind: "unsupported_schema";');
+    expect(generated).toContain('WIRE_SCHEMA_REVISION = "test.1"');
   });
 });
