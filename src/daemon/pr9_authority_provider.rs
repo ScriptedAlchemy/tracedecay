@@ -169,19 +169,14 @@ impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
         let project_root = self.project_root.clone();
         Box::pin(async move {
             let scope = committed.scope.clone();
-            if committed.state.active().compatibility().semantic.is_some() {
-                return registry
-                    .mount_semantic_query_authority_from_committed(&project_root, &scope, committed)
-                    .await
-                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable);
-            }
+            let semantic_enabled = committed.state.active().compatibility().semantic.is_some();
+            provider
+                .update_after_successful_activation(scope.clone(), committed.state.clone())
+                .map_err(map_update_observer_error)?;
             registry
                 .clear_semantic_query_authority(&scope)
                 .await
                 .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
-            provider
-                .update_after_successful_activation(scope.clone(), committed.state)
-                .map_err(map_update_observer_error)?;
             registry
                 .clear_pr9_query_authority(&scope)
                 .await
@@ -193,7 +188,14 @@ impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
                 &provider,
             )
             .await
-            .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)
+            .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+            if semantic_enabled {
+                registry
+                    .mount_semantic_query_authority_from_committed(&project_root, &scope, committed)
+                    .await
+                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+            }
+            Ok(())
         })
     }
 }
@@ -438,14 +440,30 @@ fn map_update_observer_error(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::config::retrieval::{PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1};
+    use crate::application::semantic_runtime::{
+        CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
+        SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
+    };
+    use crate::config::retrieval::{
+        PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1, RetrievalProfileAuditEventV1,
+        RetrievalProfileStateSnapshotV1, SemanticCompatibilityPinsV1,
+        SemanticResourceRequirementV1,
+    };
+    use crate::query::retrieval::semantic::SemanticCalibrationProfileV1;
     use crate::search_eval::{
         DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
         DirectQualityMetricsV1, DirectRatioMetricV1, OptionalStageMeasurementV1,
         OptionalStageMeasurementsV1,
     };
+    use std::{path::Path, process::Command};
+    use tempfile::TempDir;
+    use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
     use tracedecay_domain::{
-        CalibrationProfileId, DiversityPolicy, FusionProfile, RetrievalBudget,
+        CalibrationProfileId, ChunkerRevision, ComponentRevision, DiversityPolicy,
+        EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
+        EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, FusionProfile,
+        ManifestDigest, ProjectId, RetrievalBudget, UtcMicros, VectorGenerationIdV1,
+        canonical_sha256,
     };
 
     fn id<T>(value: &str) -> T
@@ -504,6 +522,18 @@ pub(crate) mod tests {
         evaluated_profile_id: &str,
         lanes: &[RetrieverKind],
     ) -> AcceptedRetrievalProfileV1 {
+        accepted_profile_with_compatibility(
+            evaluated_profile_id,
+            lanes,
+            RetrievalCompatibilityPinsV1::default(),
+        )
+    }
+
+    fn accepted_profile_with_compatibility(
+        evaluated_profile_id: &str,
+        lanes: &[RetrieverKind],
+        compatibility: RetrievalCompatibilityPinsV1,
+    ) -> AcceptedRetrievalProfileV1 {
         let evaluation = PassingRetrievalEvaluationV1::from_report(
             &passing_report(evaluated_profile_id),
             evaluated_profile_id,
@@ -548,14 +578,161 @@ pub(crate) mod tests {
             per_copy_cluster: None,
             per_evidence_role: None,
         };
-        AcceptedRetrievalProfileV1::new(
-            profile,
-            diversity,
-            None,
-            RetrievalCompatibilityPinsV1::default(),
-            evaluation,
+        AcceptedRetrievalProfileV1::new(profile, diversity, None, compatibility, evaluation)
+            .expect("accepted profile")
+    }
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+    }
+
+    fn semantic_pins() -> SemanticCompatibilityPinsV1 {
+        let artifact = digest('a');
+        let projection = EmbeddingProjectionKeyV1 {
+            model_artifact_digest: artifact.clone(),
+            tokenizer_digest: digest('b'),
+            config_digest: digest('c'),
+            query_instruction_digest: None,
+            document_instruction_digest: None,
+            pooling: EmbeddingPoolingV1::Mean,
+            truncation_side: EmbeddingTruncationSideV1::Right,
+            truncation_length: 128,
+            runtime_backend: "fastembed-ort".to_owned(),
+            runtime_build_revision: "runtime.pr9-activation-test.v1".to_owned(),
+            device_class: EmbeddingDeviceClassV1::Cpu,
+            dimensions: 4,
+            metric: EmbeddingMetricV1::Cosine,
+            normalization: EmbeddingNormalizationV1::L2,
+            precision: EmbeddingPrecisionV1::Fp32,
+            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+            chunker_revision: id::<ChunkerRevision>("chunker.pr9-activation-test.v1"),
+            privacy_domain: id("privacy.pr9-activation-test"),
+            privacy_key_epoch: 1,
+        }
+        .admit()
+        .expect("admitted semantic projection");
+        let vector_generation_id = VectorGenerationIdV1::new(digest('d'));
+        SemanticCompatibilityPinsV1 {
+            implementation_revision: ComponentRevision::new("semantic.pr9-activation-test.v1")
+                .expect("implementation revision"),
+            fusion_revision: ComponentRevision::new("fusion.pr9-activation-test.v1")
+                .expect("fusion revision"),
+            artifact_manifest_digest: artifact,
+            runtime_compatibility_digest: digest('e'),
+            calibration: SemanticCalibrationProfileV1 {
+                calibration_profile_id: id("calibration.semantic.pr9-activation-test"),
+                cohort_digest: digest('f'),
+                projection_key: projection.projection_key().clone(),
+                vector_generation: vector_generation_id.clone(),
+                capability_manifest_digest: digest('1'),
+                maximum_distance_micros: 2_000_000,
+                minimum_margin_micros: 0,
+            },
+            projection,
+            vector_generation_id,
+            resources: SemanticResourceRequirementV1 {
+                model_bytes: 10,
+                tokenizer_bytes: 5,
+                resident_bytes: 20,
+                threads: 2,
+                batch_size: 4,
+                sequence_length: 128,
+                load_deadline_ms: 1_000,
+            },
+        }
+    }
+
+    fn semantic_committed_state(scope: ResolvedScope) -> CommittedRetrievalProfileStateV1 {
+        let pr9 = accepted_profile("pr9-baseline", &RetrieverKind::PR9_FALLBACK_LANES);
+        let pins = semantic_pins();
+        let semantic = accepted_profile_with_compatibility(
+            "semantic-active",
+            &[
+                RetrieverKind::ExactLiteral,
+                RetrieverKind::Lexical,
+                RetrieverKind::Graph,
+                RetrieverKind::Semantic,
+            ],
+            RetrievalCompatibilityPinsV1 {
+                semantic: Some(pins.clone()),
+                rerank: None,
+            },
+        );
+        let base_revision = id::<ConfigurationRevisionId>("configuration.pr9-activation-test.1");
+        let result_revision = id::<ConfigurationRevisionId>("configuration.pr9-activation-test.2");
+        let actor_id = id("actor.pr9-activation-test");
+        let operation = RetrievalProfileAuditOperationV1::Activate;
+        let freshness_vector_digest = digest('2');
+        let occurred_at = UtcMicros(20);
+        let audit = RetrievalProfileAuditEventV1 {
+            event_id: canonical_sha256(&(
+                "tracedecay.retrieval.profile-audit.v1",
+                &actor_id,
+                &operation,
+                &pr9.profile().profile_id,
+                &semantic.profile().profile_id,
+                pr9.profile_digest(),
+                semantic.profile_digest(),
+                &semantic.profile().evaluation_result_anchor,
+                &freshness_vector_digest,
+                &base_revision,
+                &result_revision,
+                occurred_at,
+            ))
+            .expect("audit digest"),
+            actor_id,
+            operation,
+            prior_active_profile_id: pr9.profile().profile_id.clone(),
+            resulting_active_profile_id: semantic.profile().profile_id.clone(),
+            prior_active_digest: pr9.profile_digest().clone(),
+            resulting_active_digest: semantic.profile_digest().clone(),
+            evaluation_anchor: semantic.profile().evaluation_result_anchor.clone(),
+            freshness_vector_digest,
+            base_revision,
+            result_revision: result_revision.clone(),
+            occurred_at,
+        };
+        let state = serde_json::from_value::<RetrievalProfileStateSnapshotV1>(serde_json::json!({
+            "configuration_revision": result_revision,
+            "active": semantic,
+            "rollback": pr9,
+            "audit": [audit],
+        }))
+        .expect("persisted semantic retrieval state")
+        .into_state()
+        .expect("semantic retrieval state");
+        let configuration = SemanticConfigurationPinV1 {
+            revision_id: state.configuration_revision().clone(),
+            snapshot_id: id::<ConfigurationSnapshotId>(
+                "configuration.snapshot.pr9-activation-test",
+            ),
+            effective_behavior_digest: digest('3'),
+        };
+        let command = SemanticActivationCommandV1::new(
+            configuration,
+            SemanticActivationRequestV1::new(pins.vector_generation_id.clone(), None, None)
+                .expect("semantic activation request"),
         )
-        .expect("accepted profile")
+        .expect("semantic activation command");
+        let receipt = SemanticActivationReceiptV1::issue(&command, UtcMicros(30))
+            .expect("semantic activation receipt");
+        CommittedRetrievalProfileStateV1 {
+            scope,
+            state,
+            current_activation: Some(
+                SemanticCurrentLinkedActivationV1::new(receipt, pins)
+                    .expect("current semantic activation"),
+            ),
+        }
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .status()
+            .expect("run git fixture command");
+        assert!(status.success(), "git fixture command failed: {args:?}");
     }
 
     #[test]
@@ -635,5 +812,58 @@ pub(crate) mod tests {
             exact_pr9_profile_from_slots(&first, Some(&second)),
             Err(Pr9AuthorityUnavailableReasonV1::AmbiguousActivatedProfile)
         ));
+    }
+
+    #[tokio::test]
+    async fn semantic_activation_keeps_the_exact_pr9_fallback_available() {
+        let project = TempDir::new().expect("project root");
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project.path(),
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+        std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+            .expect("source file");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "fixture"]);
+
+        let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+            project.path(),
+            &ProjectId::new("project.pr9-semantic-activation").expect("project id"),
+        )
+        .expect("resolved scope");
+        let store = TempDir::new().expect("store root");
+        let registry = super::super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(project.path(), store.path().to_path_buf(), None)
+            .await
+            .expect("mount code index");
+        let provider = DaemonPr9AuthorityProviderV1::default();
+        let registrar = DaemonPr9ActivationRegistrarV1::new(
+            provider.clone(),
+            registry.clone(),
+            project.path().to_path_buf(),
+        );
+
+        registrar
+            .activation_committed(semantic_committed_state(scope.clone()))
+            .await
+            .expect("semantic activation registration");
+
+        assert!(matches!(
+            provider.status(Some(&scope)),
+            Pr9AuthorityProviderStatusV1::Available { profile_id, .. }
+                if profile_id.as_str() == "profile.pr9-baseline"
+        ));
+        assert!(
+            registry
+                .pr9_query_authority_for_scope(&scope)
+                .await
+                .is_some(),
+            "semantic activation must keep the mounted PR9 fallback query authority"
+        );
+        registry.shutdown().await;
     }
 }
