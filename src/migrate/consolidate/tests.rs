@@ -210,7 +210,14 @@ fn full_tree_snapshot(root: &Path) -> BTreeMap<PathBuf, TreeSnapshotEntry> {
                 || name.ends_with(".writer.lock")
                 || name.ends_with(".writer.owner")
         });
-        if is_database_authority_artifact {
+        let is_transient_sqlite_sidecar = relative.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.ends_with("-shm") || (name.ends_with("-wal") && metadata.len() == 0)
+        });
+        if is_database_authority_artifact
+            || is_coordination_lock(&relative)
+            || is_transient_sqlite_sidecar
+        {
             continue;
         }
         if metadata.is_dir() {
