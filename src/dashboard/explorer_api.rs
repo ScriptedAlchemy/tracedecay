@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
@@ -33,7 +34,7 @@ const MAX_QUERY_RUNS: usize = 256;
 const QUERY_LIMIT_DEFAULT: i64 = 25;
 const QUERY_LIMIT_MAX: i64 = 100;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExplorerQueryRequestV1 {
     query: String,
@@ -47,9 +48,9 @@ const fn default_query_limit() -> i64 {
     QUERY_LIMIT_DEFAULT
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum ExplorerSourceIdV1 {
+pub(super) enum ExplorerSourceIdV1 {
     CodeGraph,
     Sessions,
     Knowledge,
@@ -65,9 +66,9 @@ impl ExplorerSourceIdV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum ExplorerRunStateV1 {
+pub(super) enum ExplorerRunStateV1 {
     Pending,
     Completed,
     Partial,
@@ -75,9 +76,9 @@ enum ExplorerRunStateV1 {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum ExplorerFinalityV1 {
+pub(super) enum ExplorerFinalityV1 {
     Pending,
     Complete,
     Partial,
@@ -85,18 +86,18 @@ enum ExplorerFinalityV1 {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum ExplorerSourcePhaseV1 {
+pub(super) enum ExplorerSourcePhaseV1 {
     Queued,
     Reading,
     Completed,
     Cancelled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum ExplorerSourceOutcomeV1 {
+pub(super) enum ExplorerSourceOutcomeV1 {
     Pending,
     Ready,
     Unavailable,
@@ -104,8 +105,8 @@ enum ExplorerSourceOutcomeV1 {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct ExplorerResultPageV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct ExplorerResultPageV1 {
     offset: i64,
     limit: i64,
     total: Option<u64>,
@@ -114,8 +115,8 @@ struct ExplorerResultPageV1 {
     metadata: Value,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct ExplorerSourceProgressV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct ExplorerSourceProgressV1 {
     source_id: ExplorerSourceIdV1,
     source_label: &'static str,
     phase: ExplorerSourcePhaseV1,
@@ -181,8 +182,8 @@ impl ExplorerSourceProgressV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct ExplorerQueryRunV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct ExplorerQueryRunV1 {
     run_id: String,
     request: ExplorerQueryRequestV1,
     request_revision: &'static str,
