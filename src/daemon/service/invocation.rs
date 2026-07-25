@@ -877,6 +877,24 @@ impl DaemonInvocationRequest {
             ) | (
                 crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
                 crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::References(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
             )
         ));
         Self {
@@ -8858,6 +8876,42 @@ mod tests {
                 && carried_deadline == deadline
                 && carried_cancellation == cancellation
         ));
+    }
+
+    #[test]
+    fn callable_code_invocation_accepts_facets_surface_variant() {
+        let scope = tracedecay_application::CodeQueryScope::new(
+            tracedecay_domain::CodeGenerationId::new("generation.callable-code")
+                .expect("generation"),
+            None,
+        )
+        .expect("scope");
+        let meta = crate::application_surface::CallableCodeSurfaceMeta {
+            projection: tracedecay_application::ResultProjection::Evidence,
+            order: tracedecay_application::RetrievalOrder::Relevance,
+        };
+        let request = crate::application_surface::CallableCodeSurfaceRequest::Facets(
+            crate::application_surface::CodeFacetSurfaceRequest {
+                dimension: tracedecay_application::CodeFacetDimension::Kind,
+                scope,
+                meta,
+            },
+        );
+
+        let invocation = DaemonInvocationRequest::callable_code(
+            "request.callable-code.facets",
+            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+            request,
+            tracedecay_application::PageRequest::first(16).expect("page"),
+            UtcMicros(30),
+            Deadline::new(UtcMicros(90)).expect("deadline"),
+            CancellationContext::active("cancel.callable-code.facets").expect("cancellation"),
+        );
+
+        assert_eq!(
+            invocation.operation(),
+            DaemonInvocationOperation::CodeFacets
+        );
     }
 
     #[test]
