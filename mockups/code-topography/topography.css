@@ -1,0 +1,337 @@
+/* Code-topography mockups — shared surface.
+ *
+ * These are CONCEPT MOCKUPS, not production code. The token block below is a
+ * transcription of dashboard/src/theme/tokens.css so the pages can be opened
+ * as bare files (no build, no dev server) and still wear the instrument
+ * language: graphite face, hairline rules, square corners, tabular mono
+ * numerals, colour that reports rather than decorates.
+ *
+ * House rule that governs every page here: a position, a size, a width or an
+ * elevation is a MEASUREMENT or it is not drawn. Captions name the measurement.
+ */
+
+:root {
+  --raw-surface-0: oklch(0.145 0.003 260);
+  --raw-surface-1: oklch(0.178 0.0035 260);
+  --raw-surface-2: oklch(0.215 0.004 260);
+  --raw-surface-3: oklch(0.262 0.0045 260);
+  --raw-text-primary: oklch(0.945 0.002 260);
+  --raw-text-secondary: oklch(0.79 0.003 260);
+  --raw-text-muted: oklch(0.685 0.004 260);
+  --raw-edge-subtle: oklch(0.315 0.004 260);
+  --raw-edge-strong: oklch(0.46 0.006 260);
+  --raw-accent: oklch(0.75 0.15 200);
+  --raw-accent-emphasis: oklch(0.64 0.16 200);
+  --raw-grid: oklch(0.24 0.004 260);
+  --raw-grid-minor: oklch(0.195 0.003 260);
+
+  --raw-state-ready: oklch(0.72 0.14 155);
+  --raw-state-partial: oklch(0.78 0.14 85);
+  --raw-state-stale: oklch(0.74 0.11 85);
+  --raw-state-unknown: oklch(0.6 0.015 260);
+  --raw-state-error: oklch(0.62 0.18 25);
+
+  --raw-sev-info: oklch(0.68 0.06 250);
+  --raw-sev-low: oklch(0.7 0.1 85);
+  --raw-sev-medium: oklch(0.7 0.13 55);
+  --raw-sev-high: oklch(0.64 0.16 35);
+  --raw-sev-critical: oklch(0.58 0.19 25);
+
+  --raw-graph-field:
+    radial-gradient(85% 70% at 50% 42%, oklch(0.245 0.035 262 / 0.75) 0%, transparent 62%),
+    radial-gradient(140% 120% at 50% 45%, oklch(0.165 0.014 264) 0%, oklch(0.105 0.012 268) 100%);
+  --raw-membrane-lift: oklch(0.34 0.016 262 / 0.55);
+  --raw-depth: oklch(0.07 0.012 262 / 0.6);
+  --raw-well: oklch(0.118 0.0035 262);
+  --raw-raised: oklch(0.228 0.004 260);
+  --shadow-well: inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
+  --shadow-raised: inset 0 1px 0 var(--raw-membrane-lift), 0 1px 2px var(--raw-depth);
+
+  /* Relief ink: the colour a contour line is drawn in. On graphite the lines
+   * are light scored into a dark mass; on paper they are ink on a pale one. */
+  --relief-line: oklch(0.62 0.02 250 / 0.85);
+  --relief-line-index: oklch(0.86 0.03 250 / 0.9);
+  --relief-fill-lo: oklch(0.20 0.012 250);
+  --relief-fill-hi: oklch(0.34 0.02 250);
+
+  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', 'JetBrains Mono', monospace;
+  --grid-cell: 32px;
+  --radius-standard: 2px;
+}
+
+[data-theme='light'] {
+  --raw-surface-0: oklch(0.985 0.001 260);
+  --raw-surface-1: oklch(0.962 0.0015 260);
+  --raw-surface-2: oklch(0.936 0.002 260);
+  --raw-surface-3: oklch(0.9 0.0025 260);
+  --raw-text-primary: oklch(0.2 0.004 260);
+  --raw-text-secondary: oklch(0.37 0.005 260);
+  --raw-text-muted: oklch(0.45 0.005 260);
+  --raw-edge-subtle: oklch(0.855 0.003 260);
+  --raw-edge-strong: oklch(0.7 0.005 260);
+  --raw-accent: oklch(0.47 0.14 220);
+  --raw-accent-emphasis: oklch(0.43 0.15 220);
+  --raw-grid: oklch(0.895 0.002 260);
+  --raw-grid-minor: oklch(0.945 0.001 260);
+
+  --raw-state-ready: oklch(0.52 0.14 155);
+  --raw-state-partial: oklch(0.56 0.13 85);
+  --raw-state-stale: oklch(0.55 0.11 85);
+  --raw-state-unknown: oklch(0.46 0.015 260);
+  --raw-state-error: oklch(0.48 0.19 25);
+
+  --raw-sev-info: oklch(0.55 0.08 250);
+  --raw-sev-low: oklch(0.55 0.12 85);
+  --raw-sev-medium: oklch(0.53 0.14 55);
+  --raw-sev-high: oklch(0.5 0.17 35);
+  --raw-sev-critical: oklch(0.45 0.2 25);
+
+  --raw-graph-field:
+    radial-gradient(85% 70% at 50% 42%, oklch(0.995 0.008 250 / 0.9) 0%, transparent 62%),
+    radial-gradient(140% 120% at 50% 45%, oklch(0.965 0.008 264) 0%, oklch(0.918 0.012 268) 100%);
+  --raw-membrane-lift: oklch(1 0 0 / 0.9);
+  --raw-depth: oklch(0.52 0.03 262 / 0.16);
+  --raw-well: oklch(0.945 0.0018 260);
+  --raw-raised: oklch(1 0 0);
+
+  --relief-line: oklch(0.55 0.025 250 / 0.55);
+  --relief-line-index: oklch(0.34 0.04 250 / 0.8);
+  --relief-fill-lo: oklch(0.955 0.004 250);
+  --relief-fill-hi: oklch(0.87 0.014 250);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--raw-surface-0);
+  color: var(--raw-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- typography: the two extremes of the scale are the two extremes of fit */
+
+.td-legend {
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--raw-text-muted);
+  white-space: nowrap;
+}
+.td-title {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--raw-text-secondary);
+}
+.td-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  color: var(--raw-text-primary);
+}
+.td-unit {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--raw-text-muted);
+}
+.td-display {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 0.92;
+  color: var(--raw-text-primary);
+}
+.td-rule {
+  flex: 1 1 0%;
+  height: 1px;
+  min-width: 8px;
+  background: var(--raw-edge-subtle);
+}
+.td-caption {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--raw-text-secondary);
+}
+.td-caption b {
+  font-weight: 600;
+  color: var(--raw-text-primary);
+}
+.td-caption code, .mono {
+  font-family: var(--font-mono);
+  font-size: 0.94em;
+}
+
+/* ---- chassis ---- */
+
+.page {
+  width: 1440px;
+  margin: 0 auto;
+  padding: 0 0 28px;
+}
+
+.spine {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 18px 28px 12px;
+  border-bottom: 1px solid var(--raw-edge-subtle);
+  background: var(--raw-surface-1);
+}
+.spine h1 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 22px;
+  letter-spacing: 0.24em;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+.spine .sub {
+  font-size: 12px;
+  color: var(--raw-text-secondary);
+  max-width: 640px;
+}
+.spine .chan {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--raw-accent);
+  letter-spacing: 0.1em;
+}
+
+.readbar {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--raw-edge-subtle);
+  background: var(--raw-surface-1);
+}
+.readout {
+  padding: 9px 20px;
+  border-right: 1px solid var(--raw-edge-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.readout .v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  letter-spacing: -0.02em;
+  color: var(--raw-text-primary);
+}
+.readout .v .u {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--raw-text-muted);
+  margin-left: 5px;
+}
+.readout.grow { flex: 1 1 auto; border-right: none; }
+
+/* A milled region: hairline bezel plus four corner brackets. */
+.panel {
+  position: relative;
+  border: 1px solid var(--raw-edge-subtle);
+  background: var(--raw-surface-1);
+}
+.panel > .corner {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-color: var(--raw-edge-strong);
+  pointer-events: none;
+}
+.corner.tl { left: -1px; top: -1px; border-left: 1px solid; border-top: 1px solid; }
+.corner.tr { right: -1px; top: -1px; border-right: 1px solid; border-top: 1px solid; }
+.corner.bl { left: -1px; bottom: -1px; border-left: 1px solid; border-bottom: 1px solid; }
+.corner.br { right: -1px; bottom: -1px; border-right: 1px solid; border-bottom: 1px solid; }
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--raw-edge-subtle);
+}
+
+.field {
+  background: var(--raw-graph-field);
+  box-shadow: var(--shadow-well);
+  position: relative;
+}
+
+.graticule {
+  background-image:
+    linear-gradient(to right, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to right, var(--raw-grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid-minor) 1px, transparent 1px);
+  background-size:
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    var(--grid-cell) var(--grid-cell),
+    var(--grid-cell) var(--grid-cell);
+  background-position: center center;
+}
+
+/* The instrument plate a legend is engraved on: raised, not recessed, because
+ * a legend is read OFF the face. */
+.plate {
+  background: var(--raw-raised);
+  box-shadow: var(--shadow-raised);
+  border: 1px solid var(--raw-edge-subtle);
+  padding: 10px 12px;
+}
+
+.note {
+  margin: 18px 28px 0;
+  border: 1px solid var(--raw-edge-subtle);
+  background: var(--raw-surface-1);
+  display: grid;
+  grid-template-columns: 1.15fr 1fr 0.85fr;
+}
+.note section { padding: 13px 16px; border-right: 1px solid var(--raw-edge-subtle); }
+.note section:last-child { border-right: none; }
+.note h2 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--raw-text-secondary);
+}
+.note p { margin: 0 0 7px; }
+.note p:last-child { margin-bottom: 0; }
+.note dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+.note dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--raw-accent);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.note dd { margin: 0; font-size: 11px; line-height: 1.4; color: var(--raw-text-secondary); }
+
+/* Absence is drawn, not cropped: this is the hatch every page uses for a
+ * region TraceDecay does not hold. */
+.absence-hatch {
+  fill: none;
+  stroke: var(--raw-text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  opacity: 0.55;
+}
+
+svg text { font-family: var(--font-mono); fill: var(--raw-text-secondary); }
+svg .lbl { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; fill: var(--raw-text-muted); }
+svg .name { font-size: 11px; fill: var(--raw-text-primary); letter-spacing: -0.01em; }
+svg .num { font-size: 9px; fill: var(--raw-text-muted); font-variant-numeric: tabular-nums; }

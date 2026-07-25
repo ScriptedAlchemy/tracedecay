@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TRACE — one function as a watershed</title>
+<link rel="stylesheet" href="topography.css" />
+<style>
+  .hero { position: relative; }
+  .keystrip { display: flex; border-top: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1); }
+  .keycell { padding: 11px 16px; border-right: 1px solid var(--raw-edge-subtle); flex: 1 1 0; min-width: 0; }
+  .keycell:last-child { border-right: none; }
+  .keycell .cap { font-size: 10.5px; line-height: 1.42; color: var(--raw-text-secondary); margin-top: 7px; }
+  .keycell .cap b { color: var(--raw-text-primary); font-weight: 600; }
+  .keyhead { display: flex; align-items: center; gap: 8px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="spine">
+    <span class="chan">02</span>
+    <h1>Trace</h1>
+    <span class="sub">One symbol as a watershed. Callers are the tributary system above it, callees the delta below it,
+      width is call sites, and the whole system is drawn over the dimmed relief of sheet 01 so every crossing of a
+      shoreline is a call leaving its module.</span>
+  </header>
+
+  <div class="readbar">
+    <div class="readout"><span class="td-legend">Focus</span><span class="v" style="font-size:13px">RetrievalService::resolve_context</span></div>
+    <div class="readout"><span class="td-legend">Callers ≤ 3 hops</span><span class="v">12 <span class="u">53 call sites</span></span></div>
+    <div class="readout"><span class="td-legend">Callees ≤ 3 hops</span><span class="v">14 <span class="u">61 call sites</span></span></div>
+    <div class="readout"><span class="td-legend">Depth limit</span><span class="v">3 ↑ / 3 ↓</span></div>
+    <div class="readout"><span class="td-legend">Beyond the limit</span><span class="v">41 <span class="u">not drawn</span></span></div>
+    <div class="readout"><span class="td-legend">Types entered</span><span class="v">4 <span class="u">membranes</span></span></div>
+    <div class="readout grow"><span class="td-legend">Modules crossed</span><span class="v">7 <span class="u">shorelines: 9</span></span></div>
+  </div>
+
+  <div class="hero field graticule"><svg id="trace" viewBox="0 0 1440 1160" width="100%"></svg></div>
+
+  <div class="keystrip">
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Width</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 210 34" width="100%" height="34" id="k-width"></svg>
+      <div class="cap"><b>Call sites on that one edge.</b> Volume is not conserved: a function reached 58 times may
+        call the next one 34 times, so a channel legitimately narrows without anything branching off it.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Direction</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 210 34" width="100%" height="34" id="k-dir"></svg>
+      <div class="cap">Two hues off the same <code>kindColor.ts</code> arc. Upstream channels also <b>widen</b> as they
+        converge; downstream channels <b>narrow</b> as they fan. Hue and taper say the same thing twice, on purpose.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Membrane</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 210 34" width="100%" height="34" id="k-mem"></svg>
+      <div class="cap">A translucent enclosure is <b>one type</b> — an <code>impl</code> block, solid edge; a
+        <code>trait</code>, dashed edge, because the concrete side is chosen at run time. Ports mark where flow
+        crosses the boundary.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Underlay</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 210 34" width="100%" height="34" id="k-under"></svg>
+      <div class="cap">Sheet 01's relief for the <b>7 modules this trace touches</b>, dimmed to 22 %. Nothing about
+        it is decorative: shorelines are module boundaries, and the flow crossing one is a cross-module call.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Rows</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 210 34" width="100%" height="34" id="k-rows"></svg>
+      <div class="cap"><b>Hop distance from the focus</b>, not elevation. It happens to run downhill here because the
+        call graph is acyclic through this symbol; where it is not, a row is captioned as a hop ring only.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Absence</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 210 34" width="100%" height="34" id="k-abs"></svg>
+      <div class="cap">A channel that ends in a <b>dashed mouth</b> has left the graph: dynamic dispatch through a
+        trait object with no resolvable impl. The channel is drawn to its full width and then stops. It is not
+        deleted and it is not guessed at.</div>
+    </div>
+  </div>
+
+  <div class="note">
+    <section>
+      <h2>What this is</h2>
+      <p class="td-caption">The answer to "who calls this, and what does it call" drawn as <b>one hydrological
+      system</b> rather than two lists or a route map. Fifty-three call sites converge from four modules into one
+      basin; sixty-one leave it and disperse into five.</p>
+      <p class="td-caption">Callers and callees are the same picture because they are the same water. The reader
+      does not trace a path between two points — they see a catchment: how wide it is, where it drains from, and
+      which types the water has to pass <i>through</i>. The membranes are the part that makes this structural rather
+      than topological: a call is not just an arrow between functions, it is an entry into a type, a movement
+      between that type's methods, and an exit.</p>
+    </section>
+    <section>
+      <h2>Channel → data</h2>
+      <dl>
+        <dt>row</dt><dd>hop distance on <code>calls</code> edges, depth-limited to 3 in each direction. Real (callers / callees).</dd>
+        <dt>channel width</dt><dd>call-site count on that single edge. Real; per-edge call-site counts exist.</dd>
+        <dt>node width</dt><dd>the symbol's <code>degree</code>. Real; it is on every node payload.</dd>
+        <dt>node hue</dt><dd><code>kind</code> through <code>kindColor.ts</code>, unchanged.</dd>
+        <dt>membrane</dt><dd><code>contains</code> edges from an impl/trait node to its methods. Real; <code>contains</code> is an edge kind.</dd>
+        <dt>underlay</dt><dd>sheet 01's relief, filtered to the modules holding a traced <code>file_path</code>. Real.</dd>
+        <dt>dashed mouth</dt><dd>a <code>calls</code> edge whose target failed to resolve. Real — it is the absence the extractor already records.</dd>
+      </dl>
+      <p class="td-caption" style="margin-top:8px">26 nodes at ≤3 hops, well inside the subgraph endpoint's 80–250
+      band, so this sheet is a <b>direct render</b> — no aggregation, unlike sheet 01.</p>
+    </section>
+    <section>
+      <h2>Open question</h2>
+      <p class="td-caption">Membranes and modules are two different containments drawn as two different kinds of
+      enclosure, and at three hops they already overlap awkwardly — a type whose methods live in two files cannot be
+      one convex membrane. Options: (a) let a membrane be non-convex and let it look like the mess it is; (b) drop
+      the module underlay on this sheet and keep only types; (c) draw the membrane as a <i>tint on the flow</i> —
+      the water changes colour while it is inside a type — instead of an enclosure at all. (c) is the only one that
+      composes at 6 hops, but it loses the "you are inside something" feeling that makes this sheet work.</p>
+      <p class="td-caption">Also unresolved: at depth 3 this is legible; at depth 5 the tributary count roughly
+      cubes. Does the sheet degrade by aggregating far rows into single channels with a count, or by refusing and
+      saying so?</p>
+    </section>
+  </div>
+</div>
+
+<script src="topography.js"></script>
+<script>
+(function () {
+  'use strict';
+  var T = window.TOPO;
+  var el = T.el, text = T.text;
+
+  // Two hues off the same arc, far enough apart to be told apart at 1 px:
+  // 'upstream' lands at 229, 'downstream' at 328.
+  var UP = T.paint('upstream');
+  var DOWN = T.paint('downstream');
+
+  /* ---- rows: hop distance from the focus -------------------------------- */
+  var ROW = { u3: 118, u2: 268, u1: 420, focus: 590, d1: 760, d2: 906, d3: 1046 };
+
+  /* ---- the traced symbols ----------------------------------------------- */
+  var N = {};
+  function node(id, spec) { spec.id = id; N[id] = spec; return spec; }
+
+  node('dispatch',   { x: 250,  y: ROW.u3, name: 'dispatch_tool_call',  kind: 'method',   deg: 31, mod: 'hooks/session' });
+  node('replay',     { x: 500,  y: ROW.u3, name: 'replay_transcript',   kind: 'method',   deg: 18, mod: 'hooks/session' });
+  node('mount',      { x: 790,  y: ROW.u3, name: 'mount_graph_plugin',  kind: 'function', deg: 9,  mod: 'api/plugins' });
+  node('ctest',      { x: 1120, y: ROW.u3, name: 'contributes_catalog', kind: 'test',     deg: 4,  mod: 'tests' });
+
+  node('ctxroute',   { x: 300,  y: ROW.u2, name: 'context_route',       kind: 'method',   deg: 24, mod: 'api/routes' });
+  node('schroute',   { x: 545,  y: ROW.u2, name: 'search_route',        kind: 'method',   deg: 17, mod: 'api/routes' });
+  node('profile',    { x: 880,  y: ROW.u2, name: 'build_profile',       kind: 'function', deg: 22, mod: 'tool-catalog/snapshot' });
+  node('bind',       { x: 1180, y: ROW.u2, name: 'bind_surfaces',       kind: 'method',   deg: 15, mod: 'application/git', source: 'no callers ≤3 hops — public surface' });
+
+  node('hctx',       { x: 405,  y: ROW.u1, name: 'handle_context_request', kind: 'function', deg: 46, mod: 'application/handlers' });
+  node('hsearch',    { x: 680,  y: ROW.u1, name: 'handle_search_request',  kind: 'function', deg: 28, mod: 'application/handlers' });
+  node('lookup',     { x: 1030, y: ROW.u1, name: 'lookup_callable',        kind: 'method',   deg: 19, mod: 'application/retrieval' });
+
+  node('focus',      { x: 640, y: ROW.focus, name: 'resolve_context',      kind: 'method', deg: 63, mod: 'application/retrieval', focus: true });
+  node('sibgraph',   { x: 855, y: ROW.focus, name: 'symbol_graph_for',     kind: 'method', deg: 21, mod: 'application/retrieval' });
+  node('sibcall',    { x: 430, y: ROW.focus, name: 'hydrate_callable',     kind: 'method', deg: 17, mod: 'application/retrieval' });
+
+  node('neighbors',  { x: 300,  y: ROW.d1, name: 'neighbors_of',       kind: 'function', deg: 26, mod: 'application/retrieval' });
+  node('assemble',   { x: 560,  y: ROW.d1, name: 'assemble_context',   kind: 'method',   deg: 14, mod: 'application/retrieval' });
+  node('evaluate',   { x: 800,  y: ROW.d1, name: 'evaluate_decision',  kind: 'method',   deg: 20, mod: 'policy/authorization' });
+  node('fetchn',     { x: 1030, y: ROW.d1, name: 'fetch_nodes',        kind: 'method',   deg: 33, mod: 'store/repository' });
+  node('fetche',     { x: 1250, y: ROW.d1, name: 'fetch_edges',        kind: 'method',   deg: 29, mod: 'store/repository' });
+
+  node('adjacency',  { x: 265,  y: ROW.d2, name: 'adjacency_of',       kind: 'function', deg: 38, mod: 'domain/graph' });
+  node('nodeview',   { x: 545,  y: ROW.d2, name: 'node_view',          kind: 'struct',   deg: 41, mod: 'domain/graph' });
+  node('rules',      { x: 800,  y: ROW.d2, name: 'rules_for',          kind: 'function', deg: 12, mod: 'policy/configuration' });
+  node('acquire',    { x: 1140, y: ROW.d2, name: 'acquire',            kind: 'method',   deg: 22, mod: 'rusqlite/reader' });
+
+  node('edgeindex',  { x: 265,  y: ROW.d3, name: 'edge_index',         kind: 'struct',   deg: 30, mod: 'domain/graph' });
+  node('checkout',   { x: 1140, y: ROW.d3, name: 'checkout',           kind: 'method',   deg: 11, mod: 'rusqlite/reader' });
+  // The absence beat, given a real position and a real width.
+  node('unresolved', { x: 545, y: ROW.d3, name: 'dyn ContextSource', kind: 'unresolved', deg: 0,
+    mod: null, unresolved: '1 call site · trait object, impl not in graph' });
+
+  /* Every edge carries its own call-site count. Volume is NOT conserved. */
+  var EDGES = [
+    // upstream, converging
+    ['dispatch', 'ctxroute', 41, 'up'], ['replay', 'schroute', 18, 'up'],
+    ['mount', 'ctxroute', 6, 'up'],     ['ctest', 'profile', 3, 'up'],
+    ['ctxroute', 'hctx', 58, 'up'],     ['schroute', 'hsearch', 23, 'up'],
+    ['profile', 'hctx', 9, 'up'],       ['bind', 'lookup', 14, 'up'],
+    ['hctx', 'focus', 34, 'up'],        ['hsearch', 'focus', 12, 'up'],
+    ['lookup', 'focus', 7, 'up'],
+    // inside the focus type: a call that entered RetrievalService and moves
+    // between its methods before leaving.
+    ['focus', 'sibgraph', 9, 'in'],     ['focus', 'sibcall', 5, 'in'],
+    // downstream, fanning
+    ['sibgraph', 'neighbors', 21, 'down'], ['focus', 'assemble', 11, 'down'],
+    ['focus', 'evaluate', 8, 'down'],      ['sibcall', 'fetchn', 16, 'down'],
+    ['fetchn', 'fetche', 6, 'in'],
+    ['neighbors', 'adjacency', 21, 'down'], ['assemble', 'nodeview', 11, 'down'],
+    ['evaluate', 'rules', 8, 'down'],       ['fetche', 'acquire', 16, 'down'],
+    ['adjacency', 'edgeindex', 14, 'down'], ['acquire', 'checkout', 16, 'down'],
+    ['nodeview', 'unresolved', 1, 'lost'],
+  ];
+
+  /* Membranes: a `contains` edge from an impl/trait node to its methods. */
+  var MEMBRANES = [
+    { label: 'impl GraphRoutes', file: 'crates/tracedecay-api/src/routes/graph.rs',
+      of: ['ctxroute', 'schroute'], kind: 'impl' },
+    { label: 'impl RetrievalService', file: 'crates/tracedecay-application/src/retrieval/service.rs',
+      of: ['sibcall', 'focus', 'sibgraph'], kind: 'impl', hero: true },
+    { label: 'impl SqliteRepository', file: 'crates/tracedecay-store/src/repository/sqlite.rs',
+      of: ['fetchn', 'fetche'], kind: 'impl' },
+    { label: 'trait ContextSource', file: 'crates/tracedecay-domain/src/graph/source.rs',
+      of: ['nodeview', 'unresolved'], kind: 'trait' },
+  ];
+
+  /* The dimmed relief underlay: sheet 01's regions, filtered to the modules
+   * this trace actually lands in. Radius comes from symbol mass, exactly as
+   * on sheet 01; the centre is the centroid of the traced members. */
+  var REGIONS = [
+    { mod: 'hooks/session', sym: 92, of: ['dispatch', 'replay'] },
+    { mod: 'api', sym: 179, of: ['mount', 'ctxroute', 'schroute'] },
+    { mod: 'tool-catalog + tests', sym: 64, of: ['ctest', 'profile'] },
+    { mod: 'application/handlers', sym: 156, of: ['hctx', 'hsearch'] },
+    { mod: 'application/retrieval', sym: 214, of: ['lookup', 'focus', 'sibgraph', 'sibcall', 'neighbors', 'assemble'] },
+    { mod: 'application/git', sym: 88, of: ['bind'] },
+    { mod: 'policy', sym: 109, of: ['evaluate', 'rules'] },
+    { mod: 'store + rusqlite', sym: 234, of: ['fetchn', 'fetche', 'acquire', 'checkout'] },
+    { mod: 'domain/graph', sym: 148, of: ['adjacency', 'nodeview', 'edgeindex'] },
+  ];
+
+  var svg = document.getElementById('trace');
+  function width(calls) { return 2.2 + Math.sqrt(calls) * 1.15; }
+  function nodeWidth(deg) { return 16 + deg * 0.62; }   // degree, straight off the payload
+
+  /* ---- 1. underlay: the dimmed relief ----------------------------------- */
+  var gUnder = el('g', { opacity: 0.22 }, svg);
+  REGIONS.forEach(function (region) {
+    var members = region.of.map(function (id) { return N[id]; });
+    var cx = members.reduce(function (a, n) { return a + n.x; }, 0) / members.length;
+    var cy = members.reduce(function (a, n) { return a + n.y; }, 0) / members.length;
+    var spreadX = Math.max.apply(null, members.map(function (n) { return Math.abs(n.x - cx); }));
+    var spreadY = Math.max.apply(null, members.map(function (n) { return Math.abs(n.y - cy); }));
+    var mass = Math.sqrt(region.sym) * 3.4;
+    var rx = spreadX + mass, ry = spreadY + mass * 0.62;
+    var seed = T.hashKind(region.mod);
+    el('path', { d: T.blobPath(cx, cy, rx, ry, seed, 0.11), fill: 'var(--relief-fill-lo)',
+      stroke: 'var(--relief-line-index)', 'stroke-width': 1.6 }, gUnder);
+    [0.72, 0.46].forEach(function (k, i) {
+      el('path', { d: T.blobPath(cx, cy, rx * k, ry * k, seed + i * 11, 0.09), fill: 'none',
+        stroke: 'var(--relief-line)', 'stroke-width': 0.8 }, gUnder);
+    });
+    region.cx = cx; region.cy = cy; region.rx = rx; region.ry = ry;
+  });
+  // Region names sit ON the shoreline, at full strength — the underlay is dim,
+  // its labels are not, because a boundary you cannot name is decoration.
+  var gUnderNames = el('g', {}, svg);
+  REGIONS.forEach(function (region) {
+    var t = text(gUnderNames, region.cx - region.rx * 0.62, region.cy + region.ry * 0.94,
+      region.mod + '/', 'lbl');
+    t.setAttribute('fill', 'var(--raw-text-muted)');
+    t.setAttribute('stroke', 'var(--raw-surface-0)');
+    t.setAttribute('stroke-width', '3');
+    t.setAttribute('paint-order', 'stroke');
+  });
+
+  /* ---- 2. membranes: the types the flow passes through ------------------ */
+  var gMem = el('g', {}, svg);
+  MEMBRANES.forEach(function (m) {
+    var members = m.of.map(function (id) { return N[id]; });
+    var xs = members.map(function (n) { return n.x; });
+    var ys = members.map(function (n) { return n.y; });
+    var padX = 64, padY = 54;
+    var x0 = Math.min.apply(null, xs) - padX, x1 = Math.max.apply(null, xs) + padX;
+    var y0 = Math.min.apply(null, ys) - padY, y1 = Math.max.apply(null, ys) + padY;
+    el('rect', {
+      x: x0, y: y0, width: x1 - x0, height: y1 - y0, rx: Math.min((y1 - y0) / 2, 74),
+      fill: m.hero ? 'color-mix(in oklab, var(--raw-accent) 9%, transparent)'
+                   : 'color-mix(in oklab, var(--raw-text-primary) 5%, transparent)',
+      stroke: m.hero ? 'var(--raw-accent)' : 'var(--raw-edge-strong)',
+      'stroke-width': m.hero ? 1.4 : 1,
+      'stroke-dasharray': m.kind === 'trait' ? '5 4' : null,
+      'stroke-opacity': m.hero ? 0.8 : 0.7,
+    }, gMem);
+    var tab = text(gMem, x0 + 12, y0 - 7, m.label, 'lbl');
+    tab.setAttribute('fill', m.hero ? 'var(--raw-accent)' : 'var(--raw-text-muted)');
+    tab.setAttribute('stroke', 'var(--raw-surface-0)');
+    tab.setAttribute('stroke-width', '3');
+    tab.setAttribute('paint-order', 'stroke');
+    var file = text(gMem, x1 - 12, y0 - 7, m.file.split('/').slice(-2).join('/'), 'num',
+      { 'text-anchor': 'end' });
+    file.setAttribute('stroke', 'var(--raw-surface-0)');
+    file.setAttribute('stroke-width', '3');
+    file.setAttribute('paint-order', 'stroke');
+    m.box = { x0: x0, y0: y0, x1: x1, y1: y1 };
+  });
+
+  /* ---- 3. flow ---------------------------------------------------------- */
+  var gFlow = el('g', {}, svg);
+  var ports = [];
+  EDGES.forEach(function (edge) {
+    var from = N[edge[0]], to = N[edge[1]], calls = edge[2], dir = edge[3];
+    var w = width(calls);
+    var pts;
+    if (dir === 'in') {
+      // Movement between two methods of one type: an arc that stays inside the
+      // membrane. This is the sheet's whole argument, so it is drawn, not implied.
+      var lift = 46;
+      pts = [[from.x, from.y], [(from.x + to.x) / 2, from.y - lift], [to.x, to.y]];
+    } else {
+      var mid = (from.y + to.y) / 2;
+      // Bundle toward the focus column so tributaries braid rather than radiate.
+      var pull = dir === 'up' ? 0.42 : 0.34;
+      pts = [
+        [from.x, from.y],
+        [from.x + (N.focus.x - from.x) * pull * 0.5, mid - (to.y - from.y) * 0.18],
+        [to.x + (N.focus.x - to.x) * pull * 0.12, mid + (to.y - from.y) * 0.2],
+        [to.x, to.y],
+      ];
+    }
+    var hue = dir === 'down' || dir === 'lost' ? DOWN : UP;
+    // Upstream widens as it converges; downstream narrows as it fans. Taper and
+    // hue say direction twice.
+    var wStart = dir === 'up' ? w * 0.78 : w;
+    var wEnd = dir === 'up' ? w : w * 0.78;
+    el('path', {
+      d: T.ribbonPath(pts, wStart, wEnd),
+      fill: hue, opacity: dir === 'lost' ? 0.18 : 0.42,
+      stroke: hue, 'stroke-width': 0.8, 'stroke-opacity': dir === 'lost' ? 0.5 : 0.62,
+      'stroke-dasharray': dir === 'lost' ? '4 4' : null,
+    }, gFlow);
+    if (calls >= 9 || dir === 'lost') {
+      ports.push({ x: (pts[0][0] + pts[pts.length - 1][0]) / 2,
+                   y: (from.y + to.y) / 2 + (dir === 'in' ? -30 : 0), v: calls, hue: hue });
+    }
+  });
+
+  /* ---- 4. membrane ports: where flow crosses a type boundary ------------ */
+  var gPorts = el('g', {}, svg);
+  MEMBRANES.forEach(function (m) {
+    var b = m.box;
+    m.of.forEach(function (id) {
+      var n = N[id];
+      // A port is drawn where the node's own channels cross the enclosure, on
+      // the top and bottom edges — the two directions this sheet has.
+      [b.y0, b.y1].forEach(function (edgeY) {
+        el('line', { x1: n.x - 9, y1: edgeY, x2: n.x + 9, y2: edgeY,
+          stroke: m.hero ? 'var(--raw-accent)' : 'var(--raw-edge-strong)', 'stroke-width': 2.4 }, gPorts);
+      });
+    });
+  });
+
+  /* ---- 5. nodes: a sill whose WIDTH is the symbol's degree -------------- */
+  var gNodes = el('g', {}, svg);
+  Object.keys(N).forEach(function (id) {
+    var n = N[id];
+    if (n.focus) return;
+    var w = nodeWidth(n.deg);
+    if (n.unresolved) {
+      el('rect', { x: n.x - 34, y: n.y - 5, width: 68, height: 10, rx: 5, class: 'absence-hatch' }, gNodes);
+      return;
+    }
+    var hue = T.paint(n.kind);
+    el('rect', { x: n.x - w / 2, y: n.y - 5, width: w, height: 10, rx: 5, fill: hue, opacity: 0.9 }, gNodes);
+    el('rect', { x: n.x - w / 2, y: n.y - 5, width: w, height: 10, rx: 5, fill: 'none',
+      stroke: 'var(--raw-surface-0)', 'stroke-width': 1, 'stroke-opacity': 0.5 }, gNodes);
+  });
+
+  /* ---- 6. the focus basin ----------------------------------------------- */
+  var f = N.focus;
+  var gFocus = el('g', {}, svg);
+  for (var r = 4; r >= 1; r -= 1) {
+    el('path', { d: T.blobPath(f.x, f.y, 20 + r * 15, 12 + r * 8, 77 + r * 13, 0.07),
+      fill: r === 1 ? 'var(--raw-accent)' : 'none',
+      'fill-opacity': r === 1 ? 0.85 : 0,
+      stroke: 'var(--raw-accent)', 'stroke-width': r === 1 ? 1.6 : 0.9,
+      'stroke-opacity': 0.25 + (5 - r) * 0.16 }, gFocus);
+  }
+
+  /* ---- 7. labels, set last ---------------------------------------------- */
+  var gLabels = el('g', {}, svg);
+  function halo(node, weight) {
+    node.setAttribute('stroke', 'var(--raw-surface-0)');
+    node.setAttribute('stroke-width', String(weight || 3));
+    node.setAttribute('paint-order', 'stroke');
+    return node;
+  }
+  Object.keys(N).forEach(function (id) {
+    var n = N[id];
+    if (n.focus) return;
+    var above = n.y <= ROW.focus;
+    var dy = above ? -14 : 22;
+    var nm = halo(text(gLabels, n.x, n.y + dy, n.name, 'name', { 'text-anchor': 'middle' }));
+    if (n.unresolved) {
+      nm.setAttribute('fill', 'var(--raw-text-muted)');
+      halo(text(gLabels, n.x, n.y + dy + 12, n.unresolved, 'num', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-state-unknown)');
+      halo(text(gLabels, n.x, n.y + dy - 12, 'CHANNEL ENDS — TARGET NOT IN GRAPH', 'lbl',
+        { 'text-anchor': 'middle' })).setAttribute('fill', 'var(--raw-state-unknown)');
+      return;
+    }
+    var meta = halo(text(gLabels, n.x, n.y + dy + (above ? -11 : 11),
+      n.mod + '/ · deg ' + n.deg, 'num', { 'text-anchor': 'middle' }));
+    meta.setAttribute('fill', 'var(--raw-text-muted)');
+    if (n.source) {
+      halo(text(gLabels, n.x, n.y + dy - 22, n.source, 'lbl', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-state-partial)');
+    }
+  });
+
+  // The focus's own readout, set on the basin.
+  halo(text(gLabels, f.x, f.y + 4, 'resolve_context', 'name', { 'text-anchor': 'middle' }), 4)
+    .setAttribute('font-size', '15');
+  halo(text(gLabels, f.x, f.y + 24, '53 in · 61 out · degree 63 · cyclomatic 14', 'num',
+    { 'text-anchor': 'middle' }));
+  halo(text(gLabels, f.x, f.y + 37, 'retrieval/service.rs:212–318', 'lbl',
+    { 'text-anchor': 'middle' })).setAttribute('fill', 'var(--raw-accent)');
+
+  // Per-channel call-site readings, last of all, so they survive every crossing.
+  var gCalls = el('g', {}, svg);
+  ports.forEach(function (p) {
+    var t = halo(text(gCalls, p.x, p.y + 3, String(p.v), 'num', { 'text-anchor': 'middle' }), 3.4);
+    t.setAttribute('fill', p.hue);
+  });
+
+  /* ---- row rules and hop labels ----------------------------------------- */
+  var gRows = el('g', {}, svg);
+  [['u3', '3 hops up'], ['u2', '2 hops up'], ['u1', '1 hop up'], ['focus', 'FOCUS'],
+   ['d1', '1 hop down'], ['d2', '2 hops down'], ['d3', '3 hops down']].forEach(function (pair) {
+    var y = ROW[pair[0]];
+    el('line', { x1: 96, y1: y, x2: 1416, y2: y, stroke: 'var(--raw-grid)', 'stroke-width': 1,
+      'stroke-dasharray': pair[0] === 'focus' ? null : '1 6',
+      'stroke-opacity': pair[0] === 'focus' ? 0.9 : 1 }, gRows);
+    var t = text(gRows, 88, y + 3, pair[1], 'lbl', { 'text-anchor': 'end' });
+    if (pair[0] === 'focus') t.setAttribute('fill', 'var(--raw-accent)');
+  });
+  halo(text(gRows, 88, 40, 'HOP RING ↓', 'lbl', { 'text-anchor': 'end' }));
+  halo(text(gRows, 1416, 40,
+    'DEPTH LIMIT 3 — 41 FURTHER SYMBOLS EXIST BEYOND THIS FRAME AND ARE NOT DRAWN', 'lbl',
+    { 'text-anchor': 'end' }));
+
+  /* ---- key strip figures ------------------------------------------------ */
+  (function keys() {
+    var kw = document.getElementById('k-width');
+    [[58, 9], [16, 20], [3, 30]].forEach(function (pair) {
+      var w = width(pair[0]);
+      el('rect', { x: 8, y: pair[1] - w / 2, width: 74, height: w, fill: UP, opacity: 0.42,
+        stroke: UP, 'stroke-width': 0.8, 'stroke-opacity': 0.62 }, kw);
+      text(kw, 90, pair[1] + 3, pair[0] + ' call sites', 'num');
+    });
+
+    var kd = document.getElementById('k-dir');
+    el('path', { d: T.ribbonPath([[8, 26], [55, 18], [100, 10]], 4, 11), fill: UP, opacity: 0.42,
+      stroke: UP, 'stroke-width': 0.8 }, kd);
+    var a = text(kd, 106, 13, 'upstream', 'num'); a.setAttribute('fill', UP);
+    el('path', { d: T.ribbonPath([[8, 30], [55, 30], [100, 30]], 11, 4), fill: DOWN, opacity: 0.42,
+      stroke: DOWN, 'stroke-width': 0.8 }, kd);
+    var b = text(kd, 106, 33, 'downstream', 'num'); b.setAttribute('fill', DOWN);
+
+    var km = document.getElementById('k-mem');
+    el('rect', { x: 8, y: 6, width: 82, height: 24, rx: 9,
+      fill: 'color-mix(in oklab, var(--raw-accent) 9%, transparent)', stroke: 'var(--raw-accent)',
+      'stroke-width': 1.2, 'stroke-opacity': 0.8 }, km);
+    text(km, 12, 40, 'impl', 'lbl');
+    el('rect', { x: 108, y: 6, width: 82, height: 24, rx: 9,
+      fill: 'color-mix(in oklab, var(--raw-text-primary) 5%, transparent)',
+      stroke: 'var(--raw-edge-strong)', 'stroke-width': 1, 'stroke-dasharray': '5 4' }, km);
+    text(km, 112, 40, 'trait', 'lbl');
+    el('line', { x1: 40, y1: 6, x2: 58, y2: 6, stroke: 'var(--raw-accent)', 'stroke-width': 2.4 }, km);
+    el('line', { x1: 40, y1: 30, x2: 58, y2: 30, stroke: 'var(--raw-accent)', 'stroke-width': 2.4 }, km);
+
+    var ku = document.getElementById('k-under');
+    el('g', { opacity: 0.22 }, ku).appendChild((function () {
+      var g = document.createElementNS(T.NS, 'g');
+      el('path', { d: T.blobPath(56, 17, 46, 13, 5, 0.12), fill: 'var(--relief-fill-lo)',
+        stroke: 'var(--relief-line-index)', 'stroke-width': 1.6 }, g);
+      el('path', { d: T.blobPath(56, 17, 30, 8, 9, 0.1), fill: 'none', stroke: 'var(--relief-line)',
+        'stroke-width': 0.8 }, g);
+      return g;
+    })());
+    el('path', { d: T.ribbonPath([[16, 34], [56, 17], [96, 2]], 7, 7), fill: DOWN, opacity: 0.42,
+      stroke: DOWN, 'stroke-width': 0.8 }, ku);
+    text(ku, 104, 16, 'crossing =', 'lbl');
+    text(ku, 104, 30, 'a cross-module call', 'lbl');
+
+    var kr = document.getElementById('k-rows');
+    [4, 12, 20, 28].forEach(function (y, i) {
+      el('line', { x1: 8, y1: y, x2: 120, y2: y, stroke: 'var(--raw-grid)', 'stroke-width': 1,
+        'stroke-dasharray': i === 2 ? null : '1 6' }, kr);
+    });
+    text(kr, 126, 8, '3 · 2 · 1 hops', 'lbl');
+    var fo = text(kr, 126, 23, 'FOCUS', 'lbl'); fo.setAttribute('fill', 'var(--raw-accent)');
+
+    var ka = document.getElementById('k-abs');
+    el('path', { d: T.ribbonPath([[8, 17], [44, 17], [80, 17]], 7, 7), fill: DOWN, opacity: 0.18,
+      stroke: DOWN, 'stroke-width': 0.8, 'stroke-dasharray': '4 4' }, ka);
+    el('rect', { x: 90, y: 12, width: 34, height: 10, rx: 5, class: 'absence-hatch' }, ka);
+    text(ka, 130, 20, 'not in graph', 'lbl');
+  })();
+
+  var q = new URLSearchParams(location.search).get('theme');
+  if (q === 'light') document.documentElement.setAttribute('data-theme', 'light');
+})();
+</script>
+</body>
+</html>
