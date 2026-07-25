@@ -12,6 +12,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,17 +27,18 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, CallableCodeAuthorizationPort, CallableCodeOperationKind,
     CallableCodeQueryService, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
-    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidencePacket,
-    EvidenceScore, GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
+    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
+    DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
+    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, EvidenceScore,
+    GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
     GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey, Omission,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyConsumerV1, PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
-    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestContext,
-    RequestId, ResolvedScope, RetrieverContribution, RetryDirective, SafeDiagnostic, TemporalState,
-    callable_code_operations,
+    OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest,
+    PageState, PolicyConsumerV1, PolicyDecisionRef, PolicyEvaluationContextV1,
+    PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
+    ReconciliationState, RequestContext, RequestId, ResolvedScope, RetrieverContribution,
+    RetryDirective, SafeDiagnostic, TemporalState, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -57,7 +59,7 @@ use tracedecay_policy::{
     AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1,
     TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
-use tracedecay_tool_catalog::{EffectClass, SortContractId, UseCaseId};
+use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
@@ -116,7 +118,7 @@ use crate::application::semantic_runtime::{
 };
 use crate::application_surface::{
     ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
-    GitPreviewSurfaceRequest,
+    GitPreviewSurfaceRequest, GitReadSurfaceRequest,
 };
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::git_transactions::{
@@ -163,6 +165,11 @@ const MAX_OPAQUE_HANDLE_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationOperation {
+    GitStatus,
+    GitDiff,
+    GitHistory,
+    GitBlame,
+    GitHunks,
     GitPreview,
     GitApply,
     FeedbackDiagnostics,
@@ -192,6 +199,11 @@ pub(crate) enum DaemonInvocationOperation {
 impl DaemonInvocationOperation {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitHistory => "git_history",
+            Self::GitBlame => "git_blame",
+            Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
@@ -273,6 +285,13 @@ pub(crate) struct DaemonInvocationRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationPayload {
+    GitRead {
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: GitReadSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     GitPreview {
         request: GitPreviewSurfaceRequest,
         observed_at: UtcMicros,
@@ -404,6 +423,29 @@ pub(crate) enum DaemonInvocationPayload {
 }
 
 impl DaemonInvocationRequest {
+    pub(crate) fn git_read(
+        request_id: impl Into<String>,
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: GitReadSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::GitRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn git_preview(
         request_id: impl Into<String>,
         request: GitPreviewSurfaceRequest,
@@ -528,7 +570,12 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::CodeCallees => {
                 unreachable!("callable code operations use their typed constructor")
             }
-            crate::application_surface::ApplicationSurfaceOperation::GitPreview
+            crate::application_surface::ApplicationSurfaceOperation::GitStatus
+            | crate::application_surface::ApplicationSurfaceOperation::GitDiff
+            | crate::application_surface::ApplicationSurfaceOperation::GitHistory
+            | crate::application_surface::ApplicationSurfaceOperation::GitBlame
+            | crate::application_surface::ApplicationSurfaceOperation::GitHunks
+            | crate::application_surface::ApplicationSurfaceOperation::GitPreview
             | crate::application_surface::ApplicationSurfaceOperation::GitApply => {
                 unreachable!("Git operations use their typed constructors")
             }
@@ -892,6 +939,26 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn operation(&self) -> DaemonInvocationOperation {
         match self.payload {
+            DaemonInvocationPayload::GitRead {
+                surface_operation, ..
+            } => match surface_operation {
+                crate::application_surface::ApplicationSurfaceOperation::GitStatus => {
+                    DaemonInvocationOperation::GitStatus
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitDiff => {
+                    DaemonInvocationOperation::GitDiff
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitHistory => {
+                    DaemonInvocationOperation::GitHistory
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitBlame => {
+                    DaemonInvocationOperation::GitBlame
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitHunks => {
+                    DaemonInvocationOperation::GitHunks
+                }
+                _ => unreachable!("Git read payloads use a Git read surface operation"),
+            },
             DaemonInvocationPayload::GitPreview { .. } => DaemonInvocationOperation::GitPreview,
             DaemonInvocationPayload::GitApply { .. } => DaemonInvocationOperation::GitApply,
             DaemonInvocationPayload::FeedbackDiagnostics { .. } => {
@@ -958,7 +1025,12 @@ impl DaemonInvocationRequest {
     pub(crate) fn requires_project(&self) -> bool {
         matches!(
             self.operation(),
-            DaemonInvocationOperation::GitPreview
+            DaemonInvocationOperation::GitStatus
+                | DaemonInvocationOperation::GitDiff
+                | DaemonInvocationOperation::GitHistory
+                | DaemonInvocationOperation::GitBlame
+                | DaemonInvocationOperation::GitHunks
+                | DaemonInvocationOperation::GitPreview
                 | DaemonInvocationOperation::GitApply
                 | DaemonInvocationOperation::FeedbackDiagnostics
                 | DaemonInvocationOperation::FeedbackGet
@@ -992,7 +1064,13 @@ impl DaemonInvocationRequest {
             return Err(DaemonInvocationProblem::InvalidRequest);
         }
         match &self.payload {
-            DaemonInvocationPayload::GitPreview {
+            DaemonInvocationPayload::GitRead {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::GitPreview {
                 observed_at,
                 deadline,
                 cancellation,
@@ -2063,7 +2141,7 @@ fn callable_code_request_context(
     let grant = CapabilityGrantSnapshot::new(
         grant_id,
         1,
-        grant_digest,
+        grant_digest.clone(),
         access.requester.clone(),
         observed_at,
         expires_at,
@@ -3413,6 +3491,10 @@ fn configuration_problem(error: ConfigurationError) -> ApplicationProblem {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationOutcome {
+    GitRead {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
     GitPreview {
         scope: ResolvedScope,
         preview: DaemonGitPreviewResult,
@@ -4240,9 +4322,7 @@ impl DaemonFeedbackRuntimeRegistrar {
             .lock()
             .await
             .entry(project_root)
-            .or_insert_with(|| {
-                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle))
-            });
+            .or_insert_with(|| Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle)));
         Ok(publications)
     }
 
@@ -4914,6 +4994,329 @@ impl GitIndexTransactionPort for SharedGitTransactionPort {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn git_read_evidence_packet(
+    request_id: &str,
+    request: &crate::application::git_reads::GitReadRequestV1,
+    current: &DaemonGitAuthorityStateV1,
+    result: crate::application::git_reads::GitReadResultV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<EvidencePacket<serde_json::Value>, ApplicationProblem> {
+    let capability_id =
+        CapabilityId::new(request.capability_id()).map_err(|_| invalid_git_request())?;
+    let use_case_id = UseCaseId::new(request.use_case_id()).map_err(|_| invalid_git_request())?;
+    if !current.effective_capabilities.contains(&capability_id) {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    let grant_digest = stable_digest(&(
+        &current.scope,
+        &current.requester,
+        &current.policy_digest,
+        &current.configuration_digest,
+        &current.catalog_digest,
+        &current.privacy_digest,
+        &capability_id,
+        &use_case_id,
+    ))?;
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!(
+            "grant.daemon.git-read.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))
+        .map_err(|_| invalid_git_request())?,
+        current.policy_revision,
+        grant_digest.clone(),
+        current.requester.clone(),
+        current.evaluated_at,
+        current.grant_expires_at,
+        current.scope.clone(),
+        std::collections::BTreeSet::from([capability_id]),
+        std::collections::BTreeSet::from([use_case_id]),
+        DisclosureClass::Sensitive,
+    )
+    .map_err(|_| invalid_git_request())?;
+    let context = RequestContext::new(
+        current.requester.clone(),
+        current.scope.clone(),
+        grant,
+        RequestId::new(request_id).map_err(|_| invalid_git_request())?,
+        deadline.clone(),
+        cancellation,
+    )
+    .map_err(|_| invalid_git_request())?;
+    let authority = AuthorityReceipt::from_context(
+        &context,
+        PolicyDecisionRef::new(
+            "policy.daemon.git-read.v1",
+            current.policy_revision,
+            current.policy_digest.clone(),
+            ComponentVersion::new("tracedecay.daemon.git-policy.v2")
+                .map_err(|_| invalid_git_request())?,
+        )
+        .map_err(|_| invalid_git_request())?,
+        current.evaluated_at,
+    )
+    .map_err(|_| invalid_git_request())?;
+    let native_coverage = match &result {
+        crate::application::git_reads::GitReadResultV1::Status(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Diff(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::History(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Blame(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Hunks(envelope) => &envelope.coverage,
+    };
+    let coverage = if native_coverage.is_complete() {
+        EvidenceCoverage::complete(vec![EvidenceDomain::Source], 1, 1, 1)
+            .map_err(|_| invalid_git_request())?
+    } else {
+        let coverage = EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Source],
+            visited: Some(1),
+            eligible: Some(1),
+            returned: 1,
+            completeness: CoverageCompleteness::Partial,
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Source,
+                completeness: CoverageCompleteness::Partial,
+            }],
+        };
+        coverage.validate().map_err(|_| invalid_git_request())?;
+        coverage
+    };
+    let mut omission_counts = BTreeMap::<OmissionReason, u64>::new();
+    for degradation in &native_coverage.degradations {
+        use tracedecay_domain::git::GitDegradationV1;
+        let reason = match degradation {
+            GitDegradationV1::TruncatedOutput => OmissionReason::Budget,
+            GitDegradationV1::ConflictedState | GitDegradationV1::InProgressOperation => {
+                OmissionReason::Conflict
+            }
+            GitDegradationV1::UnreadableState => OmissionReason::Failed,
+            GitDegradationV1::IgnoredCollision
+            | GitDegradationV1::DetachedHead
+            | GitDegradationV1::UnbornBranch
+            | GitDegradationV1::SparseCheckout
+            | GitDegradationV1::SplitIndex
+            | GitDegradationV1::SubmoduleState
+            | GitDegradationV1::UnsupportedObjectFormat
+            | GitDegradationV1::ShallowBoundary => OmissionReason::Unsupported,
+        };
+        omission_counts
+            .entry(reason)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+    }
+    let omissions = omission_counts
+        .into_iter()
+        .map(|(reason, count)| Omission {
+            domain: EvidenceDomain::Source,
+            count,
+            reason,
+        })
+        .collect();
+    let execution = OperationReceipt::completed(
+        observed_at,
+        current_micros(),
+        deadline,
+        OperationBudgetUsage::default(),
+    )
+    .map_err(|_| invalid_git_request())?;
+    let payload = serde_json::to_value(result).map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "git_read.result_encoding_failed".to_owned(),
+            message: "The Git read result could not be encoded".to_owned(),
+        })
+    })?;
+    let evidence_digest = stable_digest(&(
+        "tracedecay.native-git-read-evidence.v1",
+        request,
+        &current.scope,
+        &current.configuration_digest,
+        &current.catalog_digest,
+        &payload,
+    ))?;
+    Ok(EvidencePacket {
+        temporal: TemporalState::current(execution.ended_at),
+        authority,
+        evidence_authorities: vec![EvidenceAuthority {
+            evidence_id: EvidenceIdentity::new(format!(
+                "evidence.git-read.{}",
+                evidence_digest.as_str().trim_start_matches("sha256:")
+            ))
+            .map_err(|_| invalid_git_request())?,
+            source_kind: "native_git".to_owned(),
+            producer: "git_query".to_owned(),
+            scope: current.scope.clone(),
+            revision: ComponentVersion::new("tracedecay.git-read.v1")
+                .map_err(|_| invalid_git_request())?,
+            horizon: Some(current.evaluated_at),
+        }],
+        coverage,
+        omissions,
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: PageState::first_page(
+            SortContractId::new("sort.git-read.stable.v1").map_err(|_| invalid_git_request())?,
+            1,
+            Some(1),
+            1,
+        )
+        .map_err(|_| invalid_git_request())?,
+        execution,
+        payload: Some(payload),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_git_read(
+    wire_request_id: String,
+    project_root: Option<&Path>,
+    owner: Option<DaemonGitInvocationOwner>,
+    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    request: GitReadSurfaceRequest,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(owner) = owner else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let Some(project_root) = project_root.map(Path::to_path_buf) else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let expected_operation = match &request.request {
+        crate::application::git_reads::GitReadRequestV1::Status => {
+            crate::application_surface::ApplicationSurfaceOperation::GitStatus
+        }
+        crate::application::git_reads::GitReadRequestV1::Diff { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitDiff
+        }
+        crate::application::git_reads::GitReadRequestV1::History { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitHistory
+        }
+        crate::application::git_reads::GitReadRequestV1::Blame { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitBlame
+        }
+        crate::application::git_reads::GitReadRequestV1::Hunks { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitHunks
+        }
+    };
+    if surface_operation != expected_operation {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    }
+    if cancellation.is_cancelled() {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::cancelled_before_admission(),
+        );
+    }
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::timed_out_before_admission(),
+        );
+    }
+    let initial = match owner.current_read_authority(&request.request) {
+        Ok(authority) => authority,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    let remaining_micros = deadline
+        .expires_at
+        .0
+        .saturating_sub(current_micros().0)
+        .max(0) as u64;
+    let bounds = crate::git_query::GitQueryBounds {
+        max_entries: request.max_entries,
+        max_bytes: request.max_bytes,
+        deadline: Some(std::time::Instant::now() + Duration::from_micros(remaining_micros)),
+        cancel: Some(Arc::new(AtomicBool::new(false))),
+    };
+    let selected_scope = initial.scope.clone();
+    let read_request = request.request.clone();
+    let authority = crate::application::git_reads::GitReadAuthorityV1::new(
+        project_root,
+        selected_scope.clone(),
+    );
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::application::git_reads::execute_git_read(
+            Some(&authority),
+            &selected_scope,
+            &read_request,
+            &bounds,
+        )
+    })
+    .await
+    .unwrap_or(
+        crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::ReadFailed,
+        },
+    );
+    let terminal = match owner.current_read_authority(&request.request) {
+        Ok(authority) => authority,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    if initial.scope != terminal.scope
+        || initial.requester != terminal.requester
+        || initial.effective_capabilities != terminal.effective_capabilities
+        || initial.grant_expires_at != terminal.grant_expires_at
+        || initial.policy_revision != terminal.policy_revision
+        || initial.policy_digest != terminal.policy_digest
+        || initial.configuration_digest != terminal.configuration_digest
+        || initial.catalog_digest != terminal.catalog_digest
+        || initial.privacy_digest != terminal.privacy_digest
+        || current_micros() >= terminal.grant_expires_at
+    {
+        return concealed_application_problem(wire_request_id);
+    }
+    match outcome {
+        crate::application::git_reads::GitReadOutcomeV1::Complete { scope, result }
+            if scope == terminal.scope =>
+        {
+            let packet = match git_read_evidence_packet(
+                &wire_request_id,
+                &request.request,
+                &terminal,
+                result,
+                observed_at,
+                deadline,
+                cancellation,
+            ) {
+                Ok(packet) => packet,
+                Err(problem) => return application_problem(wire_request_id, problem),
+            };
+            DaemonInvocationResponse::with_outcome(
+                wire_request_id,
+                DaemonInvocationOutcome::GitRead {
+                    scope,
+                    result: DaemonFeedbackResult::from_application(packet),
+                },
+            )
+        }
+        crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
+        } => application_problem(
+            wire_request_id,
+            ApplicationProblem::cancelled_before_admission(),
+        ),
+        crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
+        } => application_problem(
+            wire_request_id,
+            ApplicationProblem::timed_out_before_admission(),
+        ),
+        crate::application::git_reads::GitReadOutcomeV1::Complete { .. }
+        | crate::application::git_reads::GitReadOutcomeV1::Unavailable { .. } => {
+            DaemonInvocationResponse::problem(wire_request_id, DaemonInvocationProblem::Unavailable)
+        }
+    }
+}
+
 async fn execute_git_preview(
     operation_events: &OperationEventAuthority,
     wire_request_id: String,
@@ -5104,6 +5507,7 @@ async fn publish_invocation_terminal(
 
 fn invocation_operation_receipt(response: &DaemonInvocationResponse) -> Option<OperationReceipt> {
     match &response.outcome {
+        DaemonInvocationOutcome::GitRead { result, .. } => Some(result.execution.clone()),
         DaemonInvocationOutcome::GitPreview { preview, .. } => Some(preview.execution.clone()),
         DaemonInvocationOutcome::GitApply { effect, .. } => Some(effect.execution.clone()),
         DaemonInvocationOutcome::Feedback { result, .. } => Some(result.execution.clone()),
@@ -5640,6 +6044,25 @@ impl DaemonInvocationService {
         let lsp_owner = self.lsp_owner(project_root).await;
 
         let response = match request.payload {
+            DaemonInvocationPayload::GitRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_git_read(
+                    request_id,
+                    project_root,
+                    git_service,
+                    surface_operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::GitPreview {
                 request,
                 observed_at,
@@ -6330,6 +6753,11 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
+        | DaemonInvocationOperation::GitStatus
+        | DaemonInvocationOperation::GitDiff
+        | DaemonInvocationOperation::GitHistory
+        | DaemonInvocationOperation::GitBlame
+        | DaemonInvocationOperation::GitHunks
         | DaemonInvocationOperation::GitPreview
         | DaemonInvocationOperation::GitApply => Plan26FeedbackOperationV1::FeedbackCycle,
     }
@@ -6348,7 +6776,8 @@ fn emit_plan26_invocation_event(
 
 fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26FeedbackOutcomeV1 {
     match &response.outcome {
-        DaemonInvocationOutcome::GitPreview { .. }
+        DaemonInvocationOutcome::GitRead { .. }
+        | DaemonInvocationOutcome::GitPreview { .. }
         | DaemonInvocationOutcome::GitApply { .. }
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
@@ -6724,10 +7153,137 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn git_read_packet_binds_catalog_authority_and_native_coverage() {
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.git-read-packet").expect("project"),
+            tracedecay_domain::RepositoryId::new("repository.git-read-packet").expect("repository"),
+            tracedecay_domain::WorktreeId::new("worktree.git-read-packet").expect("worktree"),
+            Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
+        )
+        .expect("scope");
+        let request = crate::application::git_reads::GitReadRequestV1::Status;
+        let capability = tracedecay_tool_catalog::CapabilityId::new(request.capability_id())
+            .expect("capability");
+        let digest =
+            || ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("manifest digest");
+        let authority = DaemonGitAuthorityStateV1 {
+            scope: scope.clone(),
+            requester: ActorId::new("actor.git-read-packet").expect("actor"),
+            effective_capabilities: std::collections::BTreeSet::from([capability]),
+            grant_expires_at: UtcMicros(i64::MAX),
+            policy_revision: 1,
+            policy_digest: digest(),
+            configuration_digest: digest(),
+            catalog_digest: digest(),
+            privacy_digest: digest(),
+            evaluated_at: UtcMicros(1),
+        };
+        let result = crate::application::git_reads::GitReadResultV1::Status(
+            crate::git_query::GitQueryEnvelopeV1 {
+                value: crate::git_query::GitStatusSummaryV1 {
+                    repository: scope.repository_id.clone(),
+                    head: GitHeadStateV1::Unborn {
+                        branch: "refs/heads/main".to_owned(),
+                    },
+                    operation: tracedecay_domain::git::GitOperationStateV1::None,
+                    staged: 0,
+                    unstaged: 0,
+                    conflicted: 0,
+                    untracked: 0,
+                    ignored: 0,
+                    changed_paths: Vec::new(),
+                    schema_version: crate::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                },
+                coverage: tracedecay_domain::git::GitCoverageV1::complete(),
+                truncated_by_bound: false,
+            },
+        );
+
+        let packet = git_read_evidence_packet(
+            "request.git-read-packet",
+            &request,
+            &authority,
+            result,
+            UtcMicros(2),
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active("cancel.git-read-packet").expect("cancellation"),
+        )
+        .expect("Git read packet");
+
+        assert_eq!(packet.authority.authorized_scope_digest, scope.scope_digest);
+        assert_eq!(
+            packet.coverage.completeness,
+            tracedecay_application::CoverageCompleteness::Complete
+        );
+        assert_eq!(packet.page.returned, 1);
+        assert!(packet.payload.is_some());
+        assert!(matches!(
+            packet.evidence_authorities.as_slice(),
+            [EvidenceAuthority { source_kind, .. }] if source_kind == "native_git"
+        ));
+        let complete_evidence_id = packet.evidence_authorities[0].evidence_id.clone();
+
+        let partial = git_read_evidence_packet(
+            "request.git-read-packet-partial",
+            &request,
+            &authority,
+            crate::application::git_reads::GitReadResultV1::Status(
+                crate::git_query::GitQueryEnvelopeV1 {
+                    value: crate::git_query::GitStatusSummaryV1 {
+                        repository: scope.repository_id,
+                        head: GitHeadStateV1::Unborn {
+                            branch: "refs/heads/main".to_owned(),
+                        },
+                        operation: tracedecay_domain::git::GitOperationStateV1::None,
+                        staged: 0,
+                        unstaged: 0,
+                        conflicted: 0,
+                        untracked: 0,
+                        ignored: 0,
+                        changed_paths: Vec::new(),
+                        schema_version: crate::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                    },
+                    coverage: tracedecay_domain::git::GitCoverageV1::degraded(vec![
+                        tracedecay_domain::git::GitDegradationV1::TruncatedOutput,
+                        tracedecay_domain::git::GitDegradationV1::ConflictedState,
+                    ]),
+                    truncated_by_bound: true,
+                },
+            ),
+            UtcMicros(3),
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active("cancel.git-read-packet-partial").expect("cancellation"),
+        )
+        .expect("partial Git read packet");
+        assert_eq!(
+            partial.coverage.completeness,
+            tracedecay_application::CoverageCompleteness::Partial
+        );
+        assert!(matches!(
+            partial.omissions.as_slice(),
+            [
+                Omission {
+                    domain: EvidenceDomain::Source,
+                    reason: OmissionReason::Budget,
+                    ..
+                },
+                Omission {
+                    domain: EvidenceDomain::Source,
+                    reason: OmissionReason::Conflict,
+                    ..
+                }
+            ]
+        ));
+        assert_ne!(
+            partial.evidence_authorities[0].evidence_id,
+            complete_evidence_id,
+            "native Git evidence identity must bind the captured result"
+        );
+    }
+
     #[derive(Default)]
-    struct RecordingFeedbackCycleObservations(
-        std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>,
-    );
+    struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
 
     impl Plan26FeedbackObservationEmitterV1 for RecordingFeedbackCycleObservations {
         fn observe_source_event(
@@ -6851,9 +7407,9 @@ mod tests {
         let proximity_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let advisory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observations = Arc::new(RecordingFeedbackCycleObservations::default());
-        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
-            unavailable_feedback_cycle(Arc::clone(&observations)),
-        ));
+        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(unavailable_feedback_cycle(
+            Arc::clone(&observations),
+        )));
         let request = FeedbackCycleRequest {
             root_uri: "file:///project".to_owned(),
             document_uri: "file:///project/src/lib.rs".to_owned(),
