@@ -167,6 +167,7 @@ export function costPerTurn(
 export interface LedgerCoverage {
   messages: number;
   usage: number;
+  tokenized: number;
   estimated: number;
   unknownModel: number;
   /** Share of messages whose token counts came from the provider, 0–1. */
@@ -182,6 +183,7 @@ export interface LedgerCoverage {
 export function summarizeCoverage(sessions: {
   messages?: number | undefined;
   usage_messages?: number | undefined;
+  tokenized_messages?: number | undefined;
   estimated_messages?: number | undefined;
   unknown_model_messages?: number | undefined;
 }): LedgerCoverage | null {
@@ -191,6 +193,7 @@ export function summarizeCoverage(sessions: {
   return {
     messages,
     usage,
+    tokenized: sessions.tokenized_messages ?? 0,
     estimated: sessions.estimated_messages ?? 0,
     unknownModel: sessions.unknown_model_messages ?? 0,
     measuredShare: usage / messages,
