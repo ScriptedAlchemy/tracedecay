@@ -2,12 +2,12 @@ use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::{
     AnchoredObservationWrite, EvidenceAssemblyWriteV1, FactWriteBatch, ObservationCursorAdvance,
     ProjectReadOperationV1, ProjectReadResultV1, RetrievalAnchorDerivativeV1,
-    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
+    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1, SourceCommitV1,
 };
 
 use super::{
-    DiagnosticExecutor, EvidenceAssemblyExecutor, FactExecutor, ObservationExecutor,
-    RetrievalAnchorExecutor,
+    DiagnosticExecutor, EvidenceAssemblyExecutor, ExternalSourceExecutor, FactExecutor,
+    ObservationExecutor, RetrievalAnchorExecutor,
 };
 
 #[derive(Clone, Default)]
@@ -16,6 +16,7 @@ pub struct ProjectExecutor {
     observation: ObservationExecutor,
     diagnostics: DiagnosticExecutor,
     evidence_assembly: EvidenceAssemblyExecutor,
+    external_source: ExternalSourceExecutor,
     retrieval_anchor: RetrievalAnchorExecutor,
 }
 
@@ -58,6 +59,22 @@ impl ProjectExecutor {
         write: &EvidenceAssemblyWriteV1,
     ) -> rusqlite::Result<()> {
         self.evidence_assembly.execute_write(savepoint, write)
+    }
+
+    pub fn execute_external_source_write(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        commit: &SourceCommitV1,
+    ) -> rusqlite::Result<()> {
+        self.external_source.execute_write(savepoint, commit)
+    }
+
+    pub fn execute_external_source_read(
+        &mut self,
+        snapshot: &Transaction<'_>,
+        operation: &tracedecay_store::ExternalSourceReadOperationV1,
+    ) -> rusqlite::Result<tracedecay_store::ExternalSourceReadResultV1> {
+        self.external_source.execute_read(snapshot, operation)
     }
 
     pub fn execute_retrieval_anchor_disposition_write(

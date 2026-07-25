@@ -7,6 +7,7 @@ pub mod configuration;
 pub mod context;
 pub mod edit;
 pub mod evidence_assembly;
+pub(crate) mod external_source_store;
 pub mod feedback;
 pub mod git_reads;
 pub mod host_admission;

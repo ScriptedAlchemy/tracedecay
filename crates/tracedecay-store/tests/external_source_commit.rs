@@ -4,11 +4,13 @@ use tracedecay_domain::{
     AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest, ManifestDigest,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
     ResolutionAuthorizationV1, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
-    ScopeResolutionId, SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1,
-    SourceCaptureModeV1, SourceContentStateV1, SourceCoverageV1, SourceCursorV1,
-    SourceDefinitionV1, SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1,
-    SourceObjectObservationV1, SourceObjectRevisionV1, SourcePartitionFrontierV1,
-    SourcePartitionIdV1, SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1,
+    ScopeResolutionId,
+    SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
+    SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
+    SourceCoverageV1, SourceCursorV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
+    SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1, SourceObjectRevisionV1,
+    SourcePartitionFrontierV1, SourcePartitionIdV1, SourceRefetchStrategyV1,
+    SourceSnapshotCompletionV1, SourceSnapshotIdV1,
 };
 use tracedecay_store::{
     SourceCommitApplyOutcomeV1, SourceCommitV1, SourceObjectMutationV1, SourceObjectTransitionV1,
@@ -24,10 +26,16 @@ fn definition() -> SourceDefinitionV1 {
 }
 
 fn definition_with_max(max_partitions: u16) -> SourceDefinitionV1 {
+    let capabilities = SourceAcquisitionCapabilitiesV1::new(
+        BTreeSet::from([SourceCaptureModeV1::Poll]),
+        BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
+        BTreeSet::from([SourceDeletionSemanticsV1::CompleteSnapshotAbsence]),
+    )
+    .unwrap();
     SourceDefinitionV1::new(
         SourceInstanceId::new("source.github-review").unwrap(),
-        ProviderId::new("github").unwrap(),
         1,
+        SourceAcquisitionContractV1::new(ProviderId::new("github").unwrap(), capabilities).unwrap(),
         SourceCaptureModeV1::Poll,
         SourceRefetchStrategyV1::WholeRoot,
         SourceDeletionSemanticsV1::CompleteSnapshotAbsence,

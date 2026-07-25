@@ -5,6 +5,7 @@ mod coverage;
 mod edges;
 pub(crate) mod engine;
 mod evidence_assembly;
+mod external_source;
 mod files;
 mod fingerprints;
 mod maintenance;

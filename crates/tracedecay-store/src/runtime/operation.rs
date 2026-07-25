@@ -7,7 +7,7 @@ use crate::{
     AnchoredObservationWrite, ConfigurationCommitV1, EvidenceAssemblyWriteV1, FactWriteBatch,
     GitIndexTransactionRecordV1, ObservationCursorAdvance, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
-    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1, SourceCommitV1,
     TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
@@ -804,6 +804,7 @@ pub enum RepositoryWritePayloadV1 {
     ObservationCursorAdvance(Box<ObservationCursorAdvance>),
     Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
     EvidenceAssembly(Box<EvidenceAssemblyWriteV1>),
+    ExternalSource(Box<SourceCommitV1>),
     RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
     RetrievalAnchorDerivative(Box<RetrievalAnchorDerivativeV1>),
     SessionProjection(Box<SessionTemporalProjectionBatchV1>),
@@ -823,6 +824,7 @@ impl RepositoryWritePayloadV1 {
             Self::ObservationCursorAdvance(_) => "advance observation source cursor",
             Self::Diagnostics(_) => "publish diagnostics",
             Self::EvidenceAssembly(_) => "publish evidence assembly",
+            Self::ExternalSource(_) => "commit external source",
             Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
             Self::RetrievalAnchorDerivative(_) => "publish retrieval anchor derivative",
             Self::SessionProjection(_) => "persist temporal projection",
@@ -847,6 +849,7 @@ impl RepositoryWritePayloadV1 {
             | Self::EvidenceAssembly(_)
             | Self::RetrievalAnchorDisposition(_)
             | Self::RetrievalAnchorDerivative(_) => "project",
+            Self::ExternalSource(_) => "external_source",
             Self::SessionProjection(_) | Self::SessionSummary(_) => "sessions",
             Self::GitIndexTransaction(_) => "code",
             Self::EnqueueOutbox(_) | Self::ApplyInbox(_) | Self::AcknowledgeOutbox(_) => "effects",
@@ -939,6 +942,11 @@ impl RepositoryWritePayloadV1 {
                 }
             }),
             Self::EvidenceAssembly(write) => write.validate().map_err(|_| {
+                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                }
+            }),
+            Self::ExternalSource(commit) => commit.validate().map_err(|_| {
                 StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                     payload: self.name(),
                 }
