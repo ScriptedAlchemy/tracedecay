@@ -104,6 +104,14 @@ pub(crate) type CodeIndexHookNotifyFuture =
 pub(crate) type CodeIndexHookSink =
     Arc<dyn Fn(PathBuf, Vec<String>) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
+/// Type-erased bridge from a tool handler to the daemon-owned code-index
+/// generation authority. The daemon constructs this from its cloneable
+/// `CodeIndexSchedulerRegistryV1`; direct (non-daemon) servers leave it `None`,
+/// and a producer without it publishes nothing rather than minting its own file
+/// identity.
+pub(crate) type CodeIndexPublicationIdentityResolver =
+    Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1 + 'static>;
+
 /// Search policy crossing the MCP/daemon boundary. The daemon owns profile,
 /// generation, query-MAC, and semantic calibration authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,6 +364,10 @@ pub struct McpServer {
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
     code_index_hook_sink: Option<CodeIndexHookSink>,
+    /// Daemon-owned bridge to the code-index generation authority, the single
+    /// mint for `file.daemon.<digest>` file identity and the generation every
+    /// diagnostic producer must publish under. `None` for direct servers.
+    code_index_publication_identity: Option<CodeIndexPublicationIdentityResolver>,
     /// Daemon-owned, authority-gated PR9/PR10 search bridge.
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
     /// Daemon-owned, authority-gated PR9 typed Git-read bridge.
@@ -681,6 +693,7 @@ impl McpServer {
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
+            code_index_publication_identity,
             code_index_search_executor,
             git_read_executor,
             code_index_search_authority,
@@ -702,9 +715,12 @@ impl McpServer {
         // `Command::output()` can sit on slow disks.
         let worktree_mismatch = {
             let project_root = cg.project_root().to_path_buf();
+            let scope_prefix = scope_prefix.clone();
             tokio::task::spawn_blocking(move || {
-                let cwd = std::env::current_dir().ok()?;
-                crate::worktree::detect_worktree_index_mismatch(&cwd, &project_root)
+                crate::worktree::detect_scoped_worktree_index_mismatch(
+                    &project_root,
+                    scope_prefix.as_deref(),
+                )
             })
             .await
             .ok()
@@ -852,6 +868,7 @@ impl McpServer {
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
+            code_index_publication_identity,
             code_index_search_executor,
             git_read_executor,
             source_edit_executor: tokio::sync::OnceCell::new(),

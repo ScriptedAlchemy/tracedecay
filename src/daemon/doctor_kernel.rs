@@ -528,6 +528,211 @@ pub async fn collect_unregistered_store_findings(
     )
 }
 
+/// Evaluate every owner-configured soft budget against the daemon's retained
+/// project, registry, and session stores. A configured key that is not mounted
+/// is emitted as typed unknown telemetry rather than silently omitted.
+pub async fn collect_over_budget_store_findings(
+    graph: &crate::db::Database,
+    registry: &crate::global_db::RegisteredGlobalDb,
+    profile_sessions: &crate::global_db::RegisteredGlobalDb,
+    project_sessions: &crate::global_db::RegisteredGlobalDb,
+    retention: &crate::config::RetentionConfig,
+    observed_at_secs: i64,
+) -> DoctorStorageFamilyReadV1 {
+    use std::collections::BTreeMap;
+    use tracedecay_application::storage::{
+        StorageTelemetryReadV1, StoreKeyV1, StoreSizeSampleV1, over_budget_finding,
+    };
+
+    fn key(path: &Path) -> Option<StoreKeyV1> {
+        StoreKeyV1::new(path.file_name()?.to_str()?.to_owned()).ok()
+    }
+
+    fn read(
+        store: StoreKeyV1,
+        counts: crate::errors::Result<(u64, u64, u64)>,
+        observed_at_secs: i64,
+    ) -> StorageTelemetryReadV1 {
+        let Ok((page_size, page_count, freelist_pages)) = counts else {
+            return StorageTelemetryReadV1::Unknown { store };
+        };
+        let Ok(page_size_bytes) = u32::try_from(page_size) else {
+            return StorageTelemetryReadV1::Unknown { store };
+        };
+        StorageTelemetryReadV1::Observed {
+            sample: StoreSizeSampleV1 {
+                store,
+                page_size_bytes,
+                page_count,
+                freelist_pages,
+                observed_at: tracedecay_domain::UtcMicros(
+                    observed_at_secs.saturating_mul(1_000_000),
+                ),
+            },
+        }
+    }
+
+    let mut reads = BTreeMap::new();
+    if let Some(store) = key(graph.database_path()) {
+        reads.insert(
+            store.as_str().to_owned(),
+            read(store, graph.storage_page_counts().await, observed_at_secs),
+        );
+    }
+    for database in [registry, profile_sessions, project_sessions] {
+        if let Some(store) = key(database.db_path()) {
+            reads
+                .entry(store.as_str().to_owned())
+                .or_insert_with(|| read(store, database.storage_page_counts(), observed_at_secs));
+        }
+    }
+
+    let mut findings = Vec::new();
+    for configured_store in retention.store_soft_budgets_bytes.keys() {
+        let Ok(Some(budget)) = retention.store_soft_budget(configured_store) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let read =
+            reads
+                .remove(configured_store)
+                .unwrap_or_else(|| StorageTelemetryReadV1::Unknown {
+                    store: budget.store.clone(),
+                });
+        let Ok(finding) =
+            over_budget_finding(&budget, &read, DoctorCoverageCompletenessV1::Complete)
+        else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
+/// Observe current-project branch stores against live local refs.
+pub fn collect_stale_branch_store_findings(
+    project_root: &Path,
+    layout: &crate::storage::StoreLayout,
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_application::storage::{
+        BranchRefV1, StaleBranchDbRecordV1, StorageByteSizeV1, StoreKeyV1, stale_branch_dbs_finding,
+    };
+
+    if !layout.branch_meta_path.exists() {
+        return DoctorStorageFamilyReadV1::Absent;
+    }
+    let Some(meta) = crate::branch_meta::load_branch_meta(&layout.data_root) else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let mut findings = Vec::new();
+    for (branch, entry) in meta.branches {
+        if branch == meta.default_branch || entry.gc_protected {
+            continue;
+        }
+        let Ok(store) = StoreKeyV1::new(entry.db_file.clone()) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let Ok(branch_ref) = BranchRefV1::new(branch.clone()) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let db_path = layout.data_root.join(&entry.db_file);
+        let size_bytes = ["", "-wal", "-shm"]
+            .into_iter()
+            .map(|suffix| {
+                let mut path = db_path.as_os_str().to_os_string();
+                path.push(suffix);
+                std::fs::metadata(PathBuf::from(path))
+            })
+            .filter_map(Result::ok)
+            .map(|metadata| metadata.len())
+            .fold(0_u64, u64::saturating_add);
+        let record = StaleBranchDbRecordV1 {
+            store,
+            branch: branch_ref,
+            ref_present: crate::branch::is_branch_ref_present(project_root, &branch),
+            size_bytes: StorageByteSizeV1(size_bytes),
+        };
+        let Ok(finding) = stale_branch_dbs_finding(&record, DoctorCoverageCompletenessV1::Complete)
+        else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
+/// Scan every registered profile-sharded store for loose or quarantined
+/// recovery debris and map the exhaustive census through the Plan 38 producer.
+pub async fn collect_incident_debris_findings(
+    registry: &crate::global_db::RegisteredGlobalDb,
+    profile_root: &Path,
+    observed_at_secs: i64,
+) -> DoctorStorageFamilyReadV1 {
+    let Ok(census) =
+        crate::retention::orphan_stores::build_store_census(registry, profile_root).await
+    else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let mut findings = Vec::new();
+    for entry in &census {
+        let Ok(scan) = crate::retention::incident_debris::scan_incident_debris(
+            entry,
+            profile_root,
+            observed_at_secs,
+        ) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let Ok(finding) = tracedecay_application::storage::incident_debris_finding(&scan) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
+/// Read the configured session-retention backlog from the retained session
+/// store. This mirrors the retention SQL in read-only form and emits clean
+/// zero-byte records when a configured window has no eligible rows.
+pub async fn collect_retention_backlog_findings(
+    profile_sessions: &crate::global_db::RegisteredGlobalDb,
+    retention: &crate::config::RetentionConfig,
+    observed_at_secs: i64,
+) -> DoctorStorageFamilyReadV1 {
+    let Some(file_name) = profile_sessions
+        .db_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let Ok(store) = tracedecay_application::storage::StoreKeyV1::new(file_name.to_owned()) else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let Ok(snapshot) = profile_sessions.read_snapshot().await else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let Ok(records) = crate::sessions::lcm::retention::read_session_retention_backlog(
+        &snapshot,
+        store,
+        &retention.session_lcm,
+        observed_at_secs,
+    )
+    .await
+    else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let mut findings = Vec::new();
+    for record in records {
+        let Ok(finding) = tracedecay_application::storage::retention_backlog_finding(
+            &record,
+            DoctorCoverageCompletenessV1::Complete,
+        ) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
 /// Adapter over storage retention/size findings (Storage family).
 pub struct StorageDoctorAdapterV1 {
     read: DoctorStorageFamilyReadV1,
@@ -639,6 +844,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     graph: crate::db::Database,
     registry: Arc<crate::global_db::RegisteredGlobalDb>,
     profile_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
     profile_root: PathBuf,
     retention: crate::config::RetentionConfig,
     schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -650,6 +856,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let graph = graph.clone();
         let registry = Arc::clone(&registry);
         let profile_sessions = Arc::clone(&profile_sessions);
+        let project_sessions = Arc::clone(&project_sessions);
         let profile_root = profile_root.clone();
         let retention = retention.clone();
         let schedulers = schedulers.clone();
@@ -705,7 +912,36 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 now,
             )
             .await;
-            let storage = merge_storage_reads(orphan, unregistered);
+            let over_budget = collect_over_budget_store_findings(
+                &graph,
+                registry.as_ref(),
+                profile_sessions.as_ref(),
+                project_sessions.as_ref(),
+                &retention,
+                now,
+            )
+            .await;
+            let stale_branches = collect_stale_branch_store_findings(&project_root, &layout);
+            let incident_debris =
+                collect_incident_debris_findings(registry.as_ref(), &profile_root, now).await;
+            let profile_retention_backlog =
+                collect_retention_backlog_findings(profile_sessions.as_ref(), &retention, now)
+                    .await;
+            let project_retention_backlog =
+                collect_retention_backlog_findings(project_sessions.as_ref(), &retention, now)
+                    .await;
+            let storage = [
+                orphan,
+                unregistered,
+                over_budget,
+                stale_branches,
+                incident_debris,
+                profile_retention_backlog,
+                project_retention_backlog,
+            ]
+            .into_iter()
+            .reduce(merge_storage_reads)
+            .unwrap_or(DoctorStorageFamilyReadV1::Absent);
             let inputs = DoctorKernelInputsV1 {
                 configuration: configuration_read_from_pin::<crate::errors::TraceDecayError>(
                     &pinned,

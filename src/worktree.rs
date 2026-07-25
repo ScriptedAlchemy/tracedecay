@@ -137,6 +137,19 @@ pub fn detect_worktree_index_mismatch(
     })
 }
 
+/// Detect a borrowed index for the client scope represented by a daemon-held
+/// project. The daemon process's own current directory is unrelated to the
+/// client and must never participate in this decision.
+pub(crate) fn detect_scoped_worktree_index_mismatch(
+    index_root: &Path,
+    scope_prefix: Option<&str>,
+) -> Option<WorktreeIndexMismatch> {
+    let start_path = scope_prefix
+        .map(|prefix| index_root.join(prefix))
+        .unwrap_or_else(|| index_root.to_path_buf());
+    detect_worktree_index_mismatch(&start_path, index_root)
+}
+
 /// Verbose multi-line warning for `tracedecay status` and similar contexts
 /// where the answer can sit alongside a heads-up block.
 pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
@@ -267,6 +280,43 @@ mod tests {
             std::fs::canonicalize(&worktree).unwrap()
         );
         assert_eq!(mismatch.index_root, std::fs::canonicalize(&main).unwrap());
+    }
+
+    #[test]
+    fn scoped_detection_uses_the_client_scope_instead_of_process_cwd() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree = main.join(".worktrees").join("feature");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        run_git(
+            &main,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+
+        assert!(detect_scoped_worktree_index_mismatch(&main, None).is_none());
+        let mismatch = detect_scoped_worktree_index_mismatch(&main, Some(".worktrees/feature"))
+            .expect("nested client worktree must be compared with the main index");
+        assert_eq!(
+            mismatch.worktree_root,
+            std::fs::canonicalize(&worktree).unwrap()
+        );
     }
 
     #[test]

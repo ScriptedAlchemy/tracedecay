@@ -460,6 +460,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
     pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
+    /// The code-index generation authority producers resolve identity through.
+    pub code_index_publication_identity:
+        Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
     pub code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
     pub git_read_executor: Option<crate::mcp::server::GitReadExecutor>,
     pub source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
@@ -489,6 +492,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_request_id: None,
             application_deadline: None,
             application_cancellation: None,
+            code_index_publication_identity: None,
             code_index_search_executor: None,
             git_read_executor: None,
             source_edit_executor: None,
@@ -1174,7 +1178,14 @@ async fn dispatch_session_workflow_tools(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
-        "tracedecay_diagnose" => workflow::handle_diagnose(cg, args.clone()).await,
+        "tracedecay_diagnose" => {
+            workflow::handle_diagnose(
+                cg,
+                args.clone(),
+                options.code_index_publication_identity.as_deref(),
+            )
+            .await
+        }
         "tracedecay_run_affected_tests" => {
             workflow::handle_run_affected_tests(
                 cg,

@@ -95,6 +95,7 @@ impl DashboardFixture {
             store_root: project_root.clone(),
             config_path: project_root.join("config.json"),
             dashboard_root: project_root.join("dashboard"),
+            retention_config: crate::config::RetentionConfig::default(),
             curation_activity: Arc::new(RwLock::new(Vec::new())),
             token_counts: Arc::new(token_count::TokenCountCache::new()),
             code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(

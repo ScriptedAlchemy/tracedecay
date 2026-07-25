@@ -42,6 +42,7 @@ use crate::daemon::lsp_gateway::{
     LspRuntimeFailure, LspRuntimeFuture, Pr12FeedbackCycleAdapter,
 };
 use crate::db::Database;
+use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
 use crate::tracedecay::TraceDecay;
 
 use super::concrete::{
@@ -263,6 +264,7 @@ pub fn open_pr12_feedback_cycle_runtime(
     graph_operation: ApplicationOperation,
     tests_operation: ApplicationOperation,
     lsp_input: Pr12FeedbackCycleLspInput,
+    code_index_identity: Option<Arc<dyn CodeIndexPublicationIdentityPortV1>>,
 ) -> Result<Arc<Pr12FeedbackCycleRuntime>, Pr12FeedbackCycleRuntimeError> {
     if provider_admissions.is_empty() {
         return Err(Pr12FeedbackCycleRuntimeError::NoManagedDiagnosticProviders);
@@ -285,6 +287,7 @@ pub fn open_pr12_feedback_cycle_runtime(
         route_authorization.clone(),
         graph_operation,
         tests_operation,
+        code_index_identity,
     );
     let service = FeedbackCycleService::new(
         SharedFeedbackRuntimeState(runtime_state),
@@ -607,6 +610,11 @@ struct DirectFeedbackImpactAdapter {
     authorization: ProjectFeedbackRouteAuthorization,
     graph_operation: ApplicationOperation,
     tests_operation: ApplicationOperation,
+    /// The code-index generation authority — the single mint for
+    /// `file.daemon.<digest>` file identity. Absent for runtimes opened outside
+    /// the daemon, where the adapter reports no affected files rather than
+    /// minting raw-path identities the rest of the system cannot match.
+    code_index_identity: Option<Arc<dyn CodeIndexPublicationIdentityPortV1>>,
 }
 
 impl DirectFeedbackImpactAdapter {
@@ -616,6 +624,7 @@ impl DirectFeedbackImpactAdapter {
         authorization: ProjectFeedbackRouteAuthorization,
         graph_operation: ApplicationOperation,
         tests_operation: ApplicationOperation,
+        code_index_identity: Option<Arc<dyn CodeIndexPublicationIdentityPortV1>>,
     ) -> Self {
         Self {
             graph,
@@ -623,7 +632,42 @@ impl DirectFeedbackImpactAdapter {
             authorization,
             graph_operation,
             tests_operation,
+            code_index_identity,
         }
+    }
+
+    /// Resolves graph-node file paths onto code-index file identity.
+    ///
+    /// This adapter used to mint `FileOccurrenceId::new(node.file_path)` — a
+    /// raw repository-relative path — which disagreed with every other file
+    /// identity in the system. Identity is now resolved from the same authority
+    /// that mints the cycle's impact target; a node the current generation does
+    /// not contain contributes nothing, and no resolver at all yields no
+    /// affected files. Either way the impact stays `Partial`, which is the
+    /// honest report, rather than carrying a guessed identity.
+    async fn resolved_affected_files(
+        &self,
+        generation: &tracedecay_domain::CodeGenerationId,
+        file_paths: &[String],
+    ) -> Vec<FileOccurrenceId> {
+        let Some(resolver) = self.code_index_identity.as_ref() else {
+            return Vec::new();
+        };
+        let root = self.graph.project_root().to_path_buf();
+        let Some(identity) = resolver.resolve(root.clone()).await else {
+            return Vec::new();
+        };
+        if identity.generation_id() != generation {
+            return Vec::new();
+        }
+        let mut files = file_paths
+            .iter()
+            .filter_map(|path| code_index_logical_path(&root, path))
+            .filter_map(|logical| identity.file(&logical).map(|(file, _)| file.clone()))
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
+        files
     }
 }
 
@@ -663,13 +707,19 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
             }
 
-            let mut affected_files = subgraph
+            let node_file_paths = subgraph
                 .nodes
                 .iter()
-                .filter_map(|node| FileOccurrenceId::new(node.file_path.clone()).ok())
+                .map(|node| node.file_path.clone())
                 .collect::<Vec<_>>();
-            affected_files.sort();
-            affected_files.dedup();
+            let affected_files = self
+                .resolved_affected_files(&generation, &node_file_paths)
+                .await;
+            match context.admission_at(request.input.observed_at) {
+                RequestAdmission::Admitted => {}
+                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
+                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+            }
             let mut affected_callers = subgraph
                 .nodes
                 .iter()

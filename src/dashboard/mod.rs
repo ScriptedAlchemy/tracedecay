@@ -218,6 +218,9 @@ pub(crate) struct DashboardState {
     pub(crate) config_path: PathBuf,
     /// Resolved dashboard sidecar root inside the active project store.
     pub(crate) dashboard_root: PathBuf,
+    /// Retention policy resolved with the owning runtime configuration.
+    /// Dashboard reads must not re-open mutable config input per request.
+    pub(crate) retention_config: crate::config::RetentionConfig,
     /// Recent deterministic curation activity emitted by the standalone dashboard.
     pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
     /// In-process BPE token-count cache for the Savings & Cost tab (backed
@@ -425,6 +428,7 @@ async fn build_state_inner(
         store_root,
         config_path,
         dashboard_root,
+        retention_config: cg.get_config().sync.retention.clone(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),

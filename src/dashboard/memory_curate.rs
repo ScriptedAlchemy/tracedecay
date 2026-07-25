@@ -148,6 +148,7 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         store_root: store_layout.data_root.clone(),
         config_path: store_layout.config_path.clone(),
         dashboard_root: store_layout.dashboard_root.clone(),
+        retention_config: cg.get_config().sync.retention.clone(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
@@ -189,6 +190,7 @@ fn user_state(
         store_root: profile_root.to_path_buf(),
         config_path: profile_root.join("config.json"),
         dashboard_root: dashboard_root.to_path_buf(),
+        retention_config: crate::config::RetentionConfig::default(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
