@@ -840,6 +840,7 @@ pub(crate) async fn register_project_open_production_owners(
         Arc::clone(&session_db),
         project_root.to_path_buf(),
         Arc::new(invocation.code_index_schedulers.clone()),
+        Arc::new(invocation.code_index_schedulers.clone()),
         scope.clone(),
         access.clone(),
         admitted_root_uri.clone(),

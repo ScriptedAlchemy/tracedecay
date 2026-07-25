@@ -131,6 +131,13 @@ pub struct DiagnosticAnchorLookup {
     pub coverage: DiagnosticQueryCoverage,
 }
 
+/// Exact clean generation currently eligible for active diagnostic reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentDiagnosticGeneration {
+    pub generation: Option<CodeGenerationId>,
+    pub coverage: DiagnosticQueryCoverage,
+}
+
 /// One persisted finding republished by a successor generation under a new
 /// anchor: the prior record and its successor share one logical finding key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +298,26 @@ impl<'a> DiagnosticsQuery<'a> {
         Self {
             conn,
             store: DiagnosticsStore::new_runtime(conn),
+        }
+    }
+
+    /// Reads the clean-generation publication pointer. A completed empty
+    /// publication returns `Some(generation)` even when it contains no
+    /// findings; no pointer is distinct from a clean result.
+    pub async fn current_generation(&self) -> CurrentDiagnosticGeneration {
+        let operation = "diagnostics query current_generation";
+        match self.store.current_generation().await {
+            Ok(generation) => CurrentDiagnosticGeneration {
+                generation,
+                coverage: DiagnosticQueryCoverage::Complete,
+            },
+            Err(error) => CurrentDiagnosticGeneration {
+                generation: None,
+                coverage: DiagnosticQueryCoverage::StoreUnavailable {
+                    operation,
+                    reason: error.to_string(),
+                },
+            },
         }
     }
 
@@ -996,6 +1023,30 @@ mod tests {
             vec!["anchor.diagnostic.3", "anchor.diagnostic.4"]
         );
         assert_eq!(full.coverage, DiagnosticQueryCoverage::Complete);
+    }
+
+    #[tokio::test]
+    async fn current_generation_distinguishes_clean_empty_from_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
+        DiagnosticsStore::new_runtime(&conn)
+            .publish_clean_generation(&id(GEN1), &[])
+            .await
+            .expect("publish clean empty generation");
+        let query = DiagnosticsQuery::new(&conn);
+        let current = query.current_generation().await;
+        assert_eq!(current.generation, Some(id(GEN1)));
+        assert_eq!(current.coverage, DiagnosticQueryCoverage::Complete);
+
+        conn.execute_batch("DROP TABLE diagnostic_generation_publications;")
+            .await
+            .expect("drop current-generation authority");
+        let unavailable = query.current_generation().await;
+        assert!(unavailable.generation.is_none());
+        assert!(matches!(
+            unavailable.coverage,
+            DiagnosticQueryCoverage::StoreUnavailable { .. }
+        ));
     }
 
     #[tokio::test]

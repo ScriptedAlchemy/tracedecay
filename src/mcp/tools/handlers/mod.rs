@@ -453,8 +453,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
-    pub doctor_remediation_dispatcher:
-        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
@@ -638,9 +637,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     if let Some(result) = dispatch_admin_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) =
-        dispatch_analysis_tools(tool_name, cg, &args, scope_prefix, &options).await
-    {
+    if let Some(result) = dispatch_analysis_tools(tool_name, cg, &args, scope_prefix).await {
         return result;
     }
     if let Some(result) = dispatch_git_tools(tool_name, cg, &args, &options).await {
@@ -866,11 +863,22 @@ async fn dispatch_application_surface_tools(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    let normalized_args = match crate::application_surface::normalize_application_tool_args(
+        tool_name,
+        args.clone(),
+    ) {
+        Ok(args) => args,
+        Err(error) => {
+            return Some(Err(TraceDecayError::Config {
+                message: error.to_string(),
+            }));
+        }
+    };
     Some(
         application_surface::handle_application_surface(
             cg,
             operation,
-            args,
+            &normalized_args,
             options.application_invocation_client,
             options.application_request_id.clone(),
             options.application_deadline.clone(),
@@ -904,7 +912,6 @@ async fn dispatch_analysis_tools(
     cg: &TraceDecay,
     args: &Value,
     scope_prefix: Option<&str>,
-    options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args.clone(), scope_prefix).await,
@@ -932,16 +939,6 @@ async fn dispatch_analysis_tools(
         "tracedecay_god_class" => analysis::handle_god_class(cg, args.clone(), scope_prefix).await,
         "tracedecay_unsafe_patterns" => {
             analysis::handle_unsafe_patterns(cg, args.clone(), scope_prefix).await
-        }
-        "tracedecay_diagnostics" => {
-            analysis::handle_diagnostics(
-                cg,
-                args.clone(),
-                options.diagnostics_cache,
-                options.diagnostics_lsp,
-                options.registered_project_session_db.as_deref(),
-            )
-            .await
         }
         "tracedecay_constructors" => {
             analysis::handle_constructors(cg, args.clone(), scope_prefix).await
