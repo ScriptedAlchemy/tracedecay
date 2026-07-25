@@ -27,18 +27,18 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, CallableCodeAuthorizationPort, CallableCodeOperationKind,
     CallableCodeQueryService, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
-    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity,
-    EvidencePacket, EvidenceScore,
+    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
+    DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
+    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, EvidenceScore,
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
     GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey, Omission,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyConsumerV1, PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
-    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestContext,
-    RequestId, ResolvedScope, RetrieverContribution, RetryDirective, SafeDiagnostic, TemporalState,
-    callable_code_operations,
+    OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest,
+    PageState, PolicyConsumerV1, PolicyDecisionRef, PolicyEvaluationContextV1,
+    PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
+    ReconciliationState, RequestContext, RequestId, ResolvedScope, RetrieverContribution,
+    RetryDirective, SafeDiagnostic, TemporalState, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
@@ -4207,9 +4207,7 @@ impl DaemonFeedbackRuntimeRegistrar {
             .lock()
             .await
             .entry(project_root)
-            .or_insert_with(|| {
-                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle))
-            });
+            .or_insert_with(|| Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle)));
         Ok(publications)
     }
 
@@ -4898,7 +4896,7 @@ fn git_read_evidence_packet(
         ))
         .map_err(|_| invalid_git_request())?,
         current.policy_revision,
-        grant_digest,
+        grant_digest.clone(),
         current.requester.clone(),
         current.evaluated_at,
         current.grant_expires_at,
@@ -4930,6 +4928,62 @@ fn git_read_evidence_packet(
         current.evaluated_at,
     )
     .map_err(|_| invalid_git_request())?;
+    let native_coverage = match &result {
+        crate::application::git_reads::GitReadResultV1::Status(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Diff(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::History(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Blame(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Hunks(envelope) => &envelope.coverage,
+    };
+    let coverage = if native_coverage.is_complete() {
+        EvidenceCoverage::complete(vec![EvidenceDomain::Source], 1, 1, 1)
+            .map_err(|_| invalid_git_request())?
+    } else {
+        let coverage = EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Source],
+            visited: Some(1),
+            eligible: Some(1),
+            returned: 1,
+            completeness: CoverageCompleteness::Partial,
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Source,
+                completeness: CoverageCompleteness::Partial,
+            }],
+        };
+        coverage.validate().map_err(|_| invalid_git_request())?;
+        coverage
+    };
+    let mut omission_counts = BTreeMap::<OmissionReason, u64>::new();
+    for degradation in &native_coverage.degradations {
+        use tracedecay_domain::git::GitDegradationV1;
+        let reason = match degradation {
+            GitDegradationV1::TruncatedOutput => OmissionReason::Budget,
+            GitDegradationV1::ConflictedState | GitDegradationV1::InProgressOperation => {
+                OmissionReason::Conflict
+            }
+            GitDegradationV1::UnreadableState => OmissionReason::Failed,
+            GitDegradationV1::IgnoredCollision
+            | GitDegradationV1::DetachedHead
+            | GitDegradationV1::UnbornBranch
+            | GitDegradationV1::SparseCheckout
+            | GitDegradationV1::SplitIndex
+            | GitDegradationV1::SubmoduleState
+            | GitDegradationV1::UnsupportedObjectFormat
+            | GitDegradationV1::ShallowBoundary => OmissionReason::Unsupported,
+        };
+        omission_counts
+            .entry(reason)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+    }
+    let omissions = omission_counts
+        .into_iter()
+        .map(|(reason, count)| Omission {
+            domain: EvidenceDomain::Source,
+            count,
+            reason,
+        })
+        .collect();
     let execution = OperationReceipt::completed(
         observed_at,
         current_micros(),
@@ -4959,9 +5013,8 @@ fn git_read_evidence_packet(
                 .map_err(|_| invalid_git_request())?,
             horizon: Some(current.evaluated_at),
         }],
-        coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Source], 1, 1, 1)
-            .map_err(|_| invalid_git_request())?,
-        omissions: Vec::new(),
+        coverage,
+        omissions,
         scores: Vec::new(),
         contributions: Vec::new(),
         page: PageState::first_page(
@@ -6805,18 +6858,16 @@ mod tests {
     fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         let scope = ResolvedScope::new(
             ProjectId::new("project.git-read-packet").expect("project"),
-            tracedecay_domain::RepositoryId::new("repository.git-read-packet")
-                .expect("repository"),
+            tracedecay_domain::RepositoryId::new("repository.git-read-packet").expect("repository"),
             tracedecay_domain::WorktreeId::new("worktree.git-read-packet").expect("worktree"),
             Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
         )
         .expect("scope");
         let request = crate::application::git_reads::GitReadRequestV1::Status;
-        let capability =
-            tracedecay_tool_catalog::CapabilityId::new(request.capability_id()).expect("capability");
-        let digest = || {
-            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("manifest digest")
-        };
+        let capability = tracedecay_tool_catalog::CapabilityId::new(request.capability_id())
+            .expect("capability");
+        let digest =
+            || ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("manifest digest");
         let authority = DaemonGitAuthorityStateV1 {
             scope: scope.clone(),
             requester: ActorId::new("actor.git-read-packet").expect("actor"),
@@ -6895,6 +6946,7 @@ mod tests {
                     },
                     coverage: tracedecay_domain::git::GitCoverageV1::degraded(vec![
                         tracedecay_domain::git::GitDegradationV1::TruncatedOutput,
+                        tracedecay_domain::git::GitDegradationV1::ConflictedState,
                     ]),
                     truncated_by_bound: true,
                 },
@@ -6910,18 +6962,23 @@ mod tests {
         );
         assert!(matches!(
             partial.omissions.as_slice(),
-            [Omission {
-                domain: EvidenceDomain::Operational,
-                reason: OmissionReason::Budget,
-                ..
-            }]
+            [
+                Omission {
+                    domain: EvidenceDomain::Source,
+                    reason: OmissionReason::Budget,
+                    ..
+                },
+                Omission {
+                    domain: EvidenceDomain::Source,
+                    reason: OmissionReason::Conflict,
+                    ..
+                }
+            ]
         ));
     }
 
     #[derive(Default)]
-    struct RecordingFeedbackCycleObservations(
-        std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>,
-    );
+    struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
 
     impl Plan26FeedbackObservationEmitterV1 for RecordingFeedbackCycleObservations {
         fn observe_source_event(
@@ -7045,9 +7102,9 @@ mod tests {
         let proximity_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let advisory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observations = Arc::new(RecordingFeedbackCycleObservations::default());
-        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
-            unavailable_feedback_cycle(Arc::clone(&observations)),
-        ));
+        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(unavailable_feedback_cycle(
+            Arc::clone(&observations),
+        )));
         let request = FeedbackCycleRequest {
             root_uri: "file:///project".to_owned(),
             document_uri: "file:///project/src/lib.rs".to_owned(),

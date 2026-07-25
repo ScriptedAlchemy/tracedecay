@@ -220,7 +220,7 @@ fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
         (
             ApplicationSurfaceOperation::GitHistory,
             serde_json::json!({
-                "count": 1_001,
+                "count": 1_000,
                 "path": "src/lib.rs",
                 "follow": true,
                 "first_parent": true,
@@ -259,6 +259,29 @@ fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
         assert_eq!(request.request.capability_id(), capability);
         assert_eq!(request.max_entries, 1_000);
         assert_eq!(request.max_bytes, 4 * 1024 * 1024);
+    }
+}
+
+#[test]
+fn git_read_parser_rejects_values_outside_the_catalog_schema() {
+    for (operation, args) in [
+        (
+            ApplicationSurfaceOperation::GitStatus,
+            serde_json::json!({"max_entries": 0}),
+        ),
+        (
+            ApplicationSurfaceOperation::GitStatus,
+            serde_json::json!({"max_bytes": 4_194_305}),
+        ),
+        (
+            ApplicationSurfaceOperation::GitHistory,
+            serde_json::json!({"count": 1_001}),
+        ),
+    ] {
+        assert!(matches!(
+            parse_application_surface_request(operation, args),
+            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        ));
     }
 }
 
