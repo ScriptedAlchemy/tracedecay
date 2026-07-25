@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "visual:audit": "tsx stories/audit.ts",
+    "visual:topography": "tsx stories/topography-audit.ts",
     "live:sweep": "tsx stories/live-sweep.ts"
   },
   "dependencies": {
