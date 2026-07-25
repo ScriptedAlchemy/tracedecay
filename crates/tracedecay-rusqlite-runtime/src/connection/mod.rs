@@ -9,6 +9,7 @@ use std::{
 
 use rusqlite::{
     Connection, OpenFlags, Transaction,
+    config::DbConfig,
     hooks::{AuthAction, AuthContext, Authorization},
     limits::Limit,
 };
@@ -420,6 +421,9 @@ fn apply_pragmas(
         .busy_timeout(Duration::ZERO)
         .map_err(|source| policy("busy timeout", source))?;
     connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .map_err(|source| policy("checkpoint-on-close", source))?;
+    connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|source| policy("foreign keys", source))?;
     connection
@@ -451,6 +455,17 @@ fn apply_pragmas(
 
     verify_pragma_i64(connection, "foreign_keys", 1)?;
     verify_pragma_i64(connection, "trusted_schema", 0)?;
+    if !connection
+        .db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)
+        .map_err(|source| policy("checkpoint-on-close verification", source))?
+    {
+        return Err(policy(
+            "checkpoint-on-close verification",
+            rusqlite::Error::InvalidParameterName(
+                "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE=false, expected true".to_owned(),
+            ),
+        ));
+    }
     match mode {
         ConnectionMode::Writer => {
             verify_pragma_text(connection, "journal_mode", "wal")?;

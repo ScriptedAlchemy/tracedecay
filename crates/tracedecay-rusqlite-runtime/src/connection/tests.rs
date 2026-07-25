@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{Connection, ErrorCode, limits::Limit};
+use rusqlite::{Connection, ErrorCode, config::DbConfig, limits::Limit};
 use tempfile::NamedTempFile;
 
 use super::{
@@ -43,6 +43,11 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
     assert_eq!(pragma_i64(&connection, "synchronous"), 1);
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
     assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
+    assert!(
+        connection
+            .db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)
+            .unwrap()
+    );
     connection
         .execute("INSERT INTO items VALUES (2)", [])
         .expect("ordinary writer DML");
@@ -58,6 +63,29 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
         .execute_batch("CREATE TABLE initialized(value)")
         .expect("non-destructive writer initialization");
     assert!(connection.execute_batch("DROP TABLE initialized").is_err());
+}
+
+#[test]
+fn writer_close_never_bypasses_explicit_checkpoint_policy() {
+    let file = database();
+    let wal = sidecar_path(file.path(), "-wal");
+    let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");
+    connection
+        .execute("INSERT INTO items VALUES (2)", [])
+        .expect("write WAL frame");
+    let wal_bytes = std::fs::metadata(&wal)
+        .expect("WAL exists before close")
+        .len();
+    assert!(wal_bytes > 0);
+
+    drop(connection);
+
+    assert_eq!(
+        std::fs::metadata(&wal)
+            .expect("close must retain uncheckpointed WAL")
+            .len(),
+        wal_bytes
+    );
 }
 
 #[test]

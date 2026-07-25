@@ -537,11 +537,15 @@ impl TraceDecay {
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
-        Self::auto_track_active_branch(
+        Self::auto_track_active_branch_with_registered_configuration(
             project_root,
             &store_layout.data_root,
             active_branch.as_deref(),
             open_options.clone(),
+            &store_layout,
+            &configuration_database,
+            &profile_database,
+            &runtime_registry,
         )
         .await?;
 
@@ -902,22 +906,54 @@ impl TraceDecay {
         })
     }
 
-    async fn auto_track_active_branch(
+    /// Mirrors automatic branch tracking for a daemon-owned project open.
+    ///
+    /// The ordinary branch helper reopens through the public standalone API,
+    /// which intentionally has no configuration authority. A registered open
+    /// must retain its exact registered project session while preparing and
+    /// syncing the branch instead.
+    async fn auto_track_active_branch_with_registered_configuration(
         project_root: &Path,
         tracedecay_dir: &Path,
         active_branch: Option<&str>,
         open_options: TraceDecayOpenOptions,
+        store_layout: &StoreLayout,
+        configuration_database: &Arc<RegisteredGlobalDb>,
+        profile_database: &Arc<RegisteredGlobalDb>,
+        runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<()> {
         let Some(branch_name) = active_branch else {
             return Ok(());
         };
-        let _ = Self::add_branch_tracking_in_layout(
+        let prepared =
+            branch::prepare_branch_tracking_in_layout(project_root, branch_name, tracedecay_dir)
+                .await?;
+        let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
+            return Ok(());
+        };
+        let sync_result = Self::sync_new_branch_with_registered_configuration(
             project_root,
             branch_name,
-            tracedecay_dir,
             open_options,
+            store_layout.clone(),
+            Arc::clone(configuration_database),
+            Arc::clone(profile_database),
+            Arc::clone(runtime_registry),
         )
-        .await?;
+        .await;
+        if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
+            return Ok(());
+        } else if let Err(error) = sync_result {
+            return match branch::rollback_prepared_branch_tracking(tracedecay_dir, &prepared) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(TraceDecayError::Config {
+                    message: format!(
+                        "branch sync failed: {error}; published branch rollback also failed: {rollback_error}"
+                    ),
+                }),
+            };
+        }
+        branch::finalize_prepared_branch_tracking(tracedecay_dir, &prepared);
         Ok(())
     }
 
@@ -1130,6 +1166,41 @@ impl TraceDecay {
         }
     }
 
+    async fn sync_new_branch_with_registered_configuration(
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    ) -> Result<()> {
+        let mut attempts = 0;
+        loop {
+            let graph = Self::open_branch_with_registered_configuration_access(
+                project_root,
+                branch_name,
+                open_options.clone(),
+                store_layout.clone(),
+                Arc::clone(&configuration_database),
+                Arc::clone(&profile_database),
+                Arc::clone(&runtime_registry),
+                DatabaseAccessMode::ReadWrite,
+                "sync newly tracked branch",
+                false,
+            )
+            .await?;
+            match graph.sync().await {
+                Ok(_) => return Ok(()),
+                Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Resolves which DB file to open for a given branch.
     ///
     /// Returns `(db_path, serving_branch, fallback_warning)`.
@@ -1216,6 +1287,33 @@ impl TraceDecay {
         profile_database: Arc<RegisteredGlobalDb>,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
+        Self::open_branch_with_registered_configuration_access(
+            project_root,
+            branch_name,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+            DatabaseAccessMode::ReadOnly,
+            "open branch snapshot",
+            true,
+        )
+        .await
+    }
+
+    async fn open_branch_with_registered_configuration_access(
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+        access_mode: DatabaseAccessMode,
+        operation: &'static str,
+        read_only: bool,
+    ) -> Result<Self> {
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {
                 message: "no branch tracking configured — run `tracedecay branch add` first"
@@ -1244,8 +1342,8 @@ impl TraceDecay {
             &store_layout,
             &db_path,
             Some(branch_name),
-            "open branch snapshot",
-            DatabaseAccessMode::ReadOnly,
+            operation,
+            access_mode,
         )
         .await?;
         let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
@@ -1276,7 +1374,7 @@ impl TraceDecay {
             active_branch: Some(branch_name.to_string()),
             serving_branch: Some(branch_name.to_string()),
             fallback_warning: None,
-            read_only: true,
+            read_only,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
         })

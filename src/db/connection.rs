@@ -1329,6 +1329,85 @@ impl Database {
         self.checkpoint_unguarded().await
     }
 
+    /// Forces a complete WAL truncation through the retained writer actor.
+    ///
+    /// This is narrower than the pressure-based runtime checkpoint policy:
+    /// only an exclusive-maintenance authority may use it, and success means
+    /// SQLite reported no busy readers and no remaining log frames. Offline
+    /// migration artifacts need that proof before they can be attached.
+    pub(crate) async fn truncate_wal_for_offline_maintenance(&self) -> Result<()> {
+        self.require_active_write_scope("truncate WAL for offline maintenance")?;
+        let authority = self.write_authority()?;
+        if authority.role() != super::DatabaseAuthorityRole::Maintenance {
+            return Err(TraceDecayError::Database {
+                message: "WAL truncation requires exclusive maintenance authority".to_owned(),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            });
+        }
+        let _writer = self.writer().await;
+        let mut rows = self
+            .inner
+            .conn
+            .checkpoint_wal_truncate()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to truncate WAL through the writer actor: {error}"),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read WAL truncation result: {error}"),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "WAL truncation returned no result".to_owned(),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            })?;
+        let busy = row
+            .get::<i64>(0)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid WAL truncation busy result: {error}"),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            })?;
+        let log_frames = row
+            .get::<i64>(1)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid WAL truncation frame result: {error}"),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            })?;
+        let checkpointed_frames = row
+            .get::<i64>(2)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid WAL truncation checkpoint result: {error}"),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            })?;
+        if busy != 0 || log_frames != 0 || checkpointed_frames != 0 {
+            return Err(TraceDecayError::Database {
+                message: format!(
+                    "WAL truncation incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+                ),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            });
+        }
+        if rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to finish WAL truncation result: {error}"),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            })?
+            .is_some()
+        {
+            return Err(TraceDecayError::Database {
+                message: "WAL truncation returned multiple results".to_owned(),
+                operation: "truncate WAL for offline maintenance".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
         let authority = self.write_authority()?;
         let request = CheckpointRequest::new(

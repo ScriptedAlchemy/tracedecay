@@ -26,6 +26,7 @@ struct FrozenPublicationReceipt {
 }
 
 pub(super) async fn merge_observation_authority(conn: &impl Executor) -> Result<()> {
+    seed_legacy_observation_backfill_watermarks(conn).await?;
     conn.execute_batch(
         "INSERT OR IGNORE INTO sanitization_receipts(
              receipt_id, sanitizer_version, payload_digest, receipt_json
@@ -103,6 +104,29 @@ pub(super) async fn merge_observation_authority(conn: &impl Executor) -> Result<
     merge_source_cursors(conn).await?;
     merge_source_cursor_advances(conn).await?;
     projection::merge(conn).await
+}
+
+/// Older completed backfills predate persisted watermarks. Preserve their
+/// established target frontier before importing source rows and re-arming the
+/// marker, so the resumed pass covers only the appended tail.
+async fn seed_legacy_observation_backfill_watermarks(conn: &impl Executor) -> Result<()> {
+    for migration in [
+        crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+        crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+    ] {
+        conn.execute(
+            "INSERT OR IGNORE INTO observation_backfill_watermarks(
+                 migration, backfilled_through
+             )
+             SELECT migration, COALESCE((SELECT MAX(sequence) FROM observations), 0)
+             FROM global_schema_migrations
+             WHERE migration = ?1",
+            params![migration],
+        )
+        .await
+        .map_err(|error| db_error("seed legacy observation backfill watermark", error))?;
+    }
+    Ok(())
 }
 
 pub(in super::super) async fn verify_observation_merge(conn: &impl Executor) -> Result<()> {

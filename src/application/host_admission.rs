@@ -1113,7 +1113,7 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Reopens an existing project graph through this retained registered runtime.
     #[doc(hidden)]
-    #[cfg(feature = "test-transport")]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn open_project_graph_for_test(
         &self,
         project_root: &Path,
@@ -1152,6 +1152,52 @@ impl HostAdmissionTestRuntimeV1 {
         )
         .await
     }
+
+    /// Reopens an existing project graph read-only through the retained
+    /// registered runtime without inferring configuration authority.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub async fn open_project_graph_read_only_for_test(
+        &self,
+        project_root: &Path,
+        open_options: crate::tracedecay::TraceDecayOpenOptions,
+    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        let project_id =
+            self.project_id
+                .as_ref()
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                    message: "read-only project graph open requires project-scoped test authority"
+                        .to_owned(),
+                })?;
+        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "read-only project graph open requires a registered project session"
+                    .to_owned(),
+            }
+        })?;
+        let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            self.profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "project graph identity differs from registered test authority".to_owned(),
+            });
+        }
+        crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            project_database,
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self._session_registry),
+        )
+        .await
+    }
+
     pub fn facade(&self) -> HostAdmissionFacade<'_> {
         match (self.project_id.as_ref(), self.project_registered.as_ref()) {
             (Some(project_id), Some(project_registered)) => HostAdmissionFacade::new(
