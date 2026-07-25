@@ -679,6 +679,142 @@ function buildBaseGraph(): BaseGraph {
 
 const BASE_GRAPH = buildBaseGraph();
 
+/* ---- GET /api/plugins/graph/node/{id}/neighbors -------------------------
+ *
+ * Wire-true against `graph_service.rs::neighbors_payload`, which composes
+ * three `graph_queries.rs` reads. The shape details this fixture exists to
+ * reproduce, because the TRACE drill-in derives every figure it prints from
+ * them:
+ *
+ *  - `caller_rows` / `callee_rows` select `NODE_COLUMNS_N` plus `edge_kind`
+ *    and `edge_line`, filtered to `e.kind = 'calls'`, joined through `edges`.
+ *    So they emit ONE ROW PER EDGE: a caller with four call sites appears
+ *    four times, same node columns, different `edge_line`. The call-site
+ *    count of a pair is the number of its rows, and nothing else on the wire
+ *    carries it.
+ *  - each row then passes through `node_with_span` (adds `span`) and
+ *    `attach_degrees` (adds `degree`, the node's total in+out edge count over
+ *    ALL edge kinds — 0 when the node has none).
+ *  - `neighborhood_edge_rows` returns `source, target, kind, line,
+ *    source_name, target_name` for every edge kind where `source = ?1 OR
+ *    target = ?1`. That WHERE clause is why a `contains` row in this payload
+ *    always has the requested node as one endpoint: it is the container OF
+ *    the requested node, never a sibling's container.
+ *  - `neighborhood_edge_counts` groups the same incident set by kind.
+ *
+ * The generated neighbourhood is deterministic in the node id, so hop-2
+ * expansion (the drill-in fetches its hop-1 neighbours' neighbours) resolves
+ * to a stable field for the audit and the DOM tests.
+ */
+
+function fixtureHash(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  return hash;
+}
+
+/** Container pool, so several neighbours share an enclosure and the drill-in
+ * can derive a membrane from real `contains` rows rather than from guesswork. */
+const GRAPH_CONTAINERS = [
+  { id: 'impl-retrieval', name: 'impl RetrievalService' },
+  { id: 'impl-graph-routes', name: 'impl GraphRoutes' },
+  { id: 'trait-context-source', name: 'trait ContextSource' },
+] as const;
+
+interface NeighborPair {
+  readonly index: number;
+  readonly id: string;
+  readonly calls: number;
+}
+
+/** The distinct neighbours of a node on one side, with their call-site counts. */
+function neighborPairs(nodeId: string, side: 'callers' | 'callees'): NeighborPair[] {
+  const hash = fixtureHash(`${nodeId}:${side}`);
+  const count = 3 + (hash % 5);
+  const pairs: NeighborPair[] = [];
+  const seen = new Set<number>();
+  for (let i = 0; i < count; i += 1) {
+    const index = (hash + i * 11 + (side === 'callers' ? 0 : 5)) % 40;
+    if (seen.has(index)) continue;
+    seen.add(index);
+    // Call sites per pair: power-law-ish, one dominant channel then a tail —
+    // the shape a real `calls` edge multiset has, and what makes the channel
+    // widths and spring stiffnesses on this surface tellable apart.
+    const id = `sym-${index}`;
+    pairs.push({ index, id, calls: 1 + (fixtureHash(`${nodeId}->${id}:${side}`) % 11) });
+  }
+  return pairs;
+}
+
+/** GET /api/plugins/graph/node/{node_id}/neighbors. */
+function neighborsPayload(nodeId: string, limit: number): Record<string, unknown> {
+  const callerPairs = neighborPairs(nodeId, 'callers');
+  const calleePairs = neighborPairs(nodeId, 'callees');
+  const edges: Record<string, unknown>[] = [];
+  const byKind = new Map<string, number>();
+  const bump = (kind: string) => byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
+
+  const expand = (pairs: NeighborPair[], side: 'callers' | 'callees') =>
+    pairs.flatMap((pair) => {
+      const degree = BASE_GRAPH.degreeById.get(pair.id) ?? 0;
+      const base = graphNode(pair.index, 'sym', degree);
+      return Array.from({ length: pair.calls }, (_, site) => {
+        const line = 60 + pair.index * 13 + site * 4;
+        edges.push({
+          source: side === 'callers' ? pair.id : nodeId,
+          target: side === 'callers' ? nodeId : pair.id,
+          kind: 'calls',
+          line,
+          source_name: side === 'callers' ? base['name'] : nodeId,
+          target_name: side === 'callers' ? nodeId : base['name'],
+        });
+        bump('calls');
+        return { ...base, edge_kind: 'calls', edge_line: line };
+      });
+    });
+
+  const callers = expand(callerPairs, 'callers').slice(0, limit);
+  const callees = expand(calleePairs, 'callees').slice(0, limit);
+
+  // The container OF this node — one `contains` row, with this node as the
+  // target, exactly as the endpoint's `source = ?1 OR target = ?1` filter
+  // allows. Membranes on the drill-in are the transitive result of collecting
+  // these across the focus and its expanded neighbours.
+  const container = pick(GRAPH_CONTAINERS, fixtureHash(nodeId) % 3);
+  edges.push({
+    source: container.id,
+    target: nodeId,
+    kind: 'contains',
+    line: 12,
+    source_name: container.name,
+    target_name: nodeId,
+  });
+  bump('contains');
+  // One non-call, non-contains kind, so a consumer that assumes `edges` is
+  // homogeneous fails here rather than in production.
+  edges.push({
+    source: nodeId,
+    target: `sym-${(fixtureHash(nodeId) + 3) % 40}`,
+    kind: 'references',
+    line: 240,
+    source_name: nodeId,
+    target_name: `sym_${(fixtureHash(nodeId) + 3) % 40}`,
+  });
+  bump('references');
+
+  return {
+    node_id: nodeId,
+    depth: 1,
+    limit,
+    callers,
+    callees,
+    edges: edges.slice(0, limit),
+    edges_by_kind: [...byKind]
+      .map(([kind, count]) => ({ kind, count }))
+      .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind)),
+  };
+}
+
 /** GET /api/plugins/graph/subgraph[?node_id=]. Unseeded returns the full hub
  * overview (mode "default"); a node_id returns that node’s neighborhood
  * (mode "seeded"), matching graph_service.rs subgraph_payload. */
@@ -1488,6 +1624,18 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (pathname === '/api/plugins/graph/subgraph') {
     const nodeId = new URLSearchParams(search).get('node_id');
     return subgraphPayload(nodeId);
+  }
+  // Must precede the FIXTURE_PREFIXES sweep: `/api/plugins/graph` is a prefix
+  // fixture, so without this branch every neighbors read would resolve to the
+  // overview payload and the TRACE drill-in would be audited against a shape
+  // the daemon never sends on this route.
+  const neighbors = /^\/api\/plugins\/graph\/node\/([^/]+)\/neighbors$/.exec(pathname);
+  if (neighbors) {
+    // `coerce_limit(params.limit, 50, 200)` in graph_api.rs: default 50, hard
+    // cap 200, and a non-positive or unparsable value falls back to default.
+    const raw = Number(new URLSearchParams(search).get('limit'));
+    const limit = Number.isFinite(raw) && raw > 0 ? Math.min(200, Math.trunc(raw)) : 50;
+    return neighborsPayload(decodeURIComponent(neighbors[1]!), limit);
   }
   if (pathname in FIXTURES) return FIXTURES[pathname];
   for (const [prefix, payload] of FIXTURE_PREFIXES) {
