@@ -5,6 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use tracedecay::agents::host_component_registration::{
+    HostComponentRegistrationDelegate as CompatibilityAgentRegistrationDelegate,
+    project_local_registration_path,
+};
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
     apply_project_config_patch, load_project_config, project_config_path,
@@ -293,8 +297,6 @@ fn apply_canonical_component_set(
     Ok(())
 }
 
-use tracedecay::agents::host_component_registration::HostComponentRegistrationDelegate as CompatibilityAgentRegistrationDelegate;
-
 fn apply_default_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -326,28 +328,6 @@ fn apply_default_canonical_component_set(
         &lifecycle_root,
     )?;
     Ok(true)
-}
-
-fn project_local_registration_path(
-    agent_id: &str,
-    home: &Path,
-    project_path: &Path,
-) -> Option<PathBuf> {
-    match agent_id {
-        "claude" => Some(project_path.join(".claude/CLAUDE.md")),
-        // `install_local` deploys the Codex repo plugin bundle at the
-        // repository root (`codex_repo_plugin_install_dir`), not under
-        // `.codex/`.
-        "codex" => Some(project_path.join("plugins/tracedecay/.codex-plugin/plugin.json")),
-        // Cursor's project-local install registers the shared home plugin;
-        // the project itself carries only receipt markers.
-        "cursor" => Some(home.join(".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json")),
-        "kimi" => Some(project_path.join(".kimi-code/mcp.json")),
-        "opencode" => Some(project_path.join("opencode.json")),
-        "roo-code" => Some(project_path.join(".roo/mcp.json")),
-        "kilo" => Some(project_path.join("kilo.json")),
-        _ => None,
-    }
 }
 
 fn apply_project_local_component_set(
