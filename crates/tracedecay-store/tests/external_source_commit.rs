@@ -629,3 +629,63 @@ fn evidence_must_match_binding_privacy_and_object_revision() {
         .remove("source_authorization_digest");
     assert!(serde_json::from_value::<SourceObservationEvidenceV1>(wire).is_err());
 }
+
+#[test]
+fn stale_binding_revision_cannot_replay_or_advance_source_state() {
+    let definition = definition();
+    let binding = binding(&definition);
+    let live = object();
+    let first = commit(
+        &definition,
+        &binding,
+        None,
+        SourceCoverageV1::Complete,
+        vec![mutation(
+            &binding,
+            &partition(),
+            live.clone(),
+            None,
+            SourceObjectTransitionV1::Initial,
+            '2',
+        )],
+        Some(BTreeSet::from([live.native_object().clone()])),
+        '2',
+    );
+    let state = committed(apply_source_commit(None, first).unwrap());
+    let stale_binding = SourceBindingV1::new(
+        &definition,
+        binding.owner.clone(),
+        binding.privacy_domain.clone(),
+        binding.native_root.clone(),
+        binding.binding_revision + 1,
+    )
+    .unwrap();
+
+    let replay = commit(
+        &definition,
+        &stale_binding,
+        None,
+        SourceCoverageV1::Complete,
+        Vec::new(),
+        Some(BTreeSet::new()),
+        '2',
+    );
+    assert!(matches!(
+        apply_source_commit(Some(&state), replay),
+        Err(SourceStoreErrorV1::BindingConflict)
+    ));
+
+    let advance = commit(
+        &definition,
+        &stale_binding,
+        Some(state.source_frontier().clone()),
+        SourceCoverageV1::Partial,
+        Vec::new(),
+        None,
+        '3',
+    );
+    assert!(matches!(
+        apply_source_commit(Some(&state), advance),
+        Err(SourceStoreErrorV1::BindingConflict)
+    ));
+}

@@ -1033,6 +1033,12 @@ pub fn apply_source_commit(
     commit.validate()?;
     if let Some(current) = current {
         current.validate()?;
+        if &current.definition != commit.definition() {
+            return Err(SourceStoreErrorV1::DefinitionConflict);
+        }
+        if &current.binding != commit.binding() {
+            return Err(SourceStoreErrorV1::BindingConflict);
+        }
         if let Some(receipt) = current.receipt_by_idempotency_key(commit.idempotency_key()) {
             return if receipt.request_digest() == commit.request_digest() {
                 Ok(SourceCommitApplyOutcomeV1::ExactDuplicate(Box::new(
@@ -1041,12 +1047,6 @@ pub fn apply_source_commit(
             } else {
                 Err(SourceStoreErrorV1::IdempotencyConflict)
             };
-        }
-        if &current.definition != commit.definition() {
-            return Err(SourceStoreErrorV1::DefinitionConflict);
-        }
-        if current.binding.immutable_identity()? != commit.binding().immutable_identity()? {
-            return Err(SourceStoreErrorV1::BindingConflict);
         }
         if commit.expected_frontier() != Some(current.source_frontier()) {
             return Err(SourceStoreErrorV1::FrontierConflict);
