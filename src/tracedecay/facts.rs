@@ -58,9 +58,12 @@ impl TraceDecay {
         if self.db_path() == self.store_layout.graph_db_path {
             Ok(ProjectMemoryDbHandle::Active(&self.db))
         } else {
-            Ok(ProjectMemoryDbHandle::Owned(Box::new(
-                self.open_project_store_db().await?,
-            )))
+            let database = if self.read_only {
+                self.open_project_store_db_read_only().await?
+            } else {
+                self.open_project_store_db().await?
+            };
+            Ok(ProjectMemoryDbHandle::Owned(Box::new(database)))
         }
     }
 
