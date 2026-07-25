@@ -1042,9 +1042,10 @@ impl NativeGitIntelligence {
     /// or staged diff, against the exact current index/HEAD/worktree state.
     ///
     /// These references are read-only identity evidence: applying them is a
-    /// PR11 daemon mutation path. Commit-range diffs, binary files,
-    /// submodule entries, and unmerged paths cannot produce an applicable
-    /// `HunkRefV1` (Plan 36 capability rule) and fail truthfully.
+    /// PR11 daemon mutation path. Commit-range diffs are never mintable.
+    /// Per-file binary, submodule, symlink, mode-only, and unmerged entries
+    /// remain explicit read-only capability evidence in [`GitDiffV1`] and are
+    /// omitted here without suppressing safe text refs from the same diff.
     pub fn hunk_refs(
         &self,
         scope: &GitDiffScopeV1,
@@ -1065,10 +1066,7 @@ impl NativeGitIntelligence {
         for joined_entry in joined.entries {
             let entry = joined_entry.raw;
             let Some(patch_file) = joined_entry.patch else {
-                return Err(GitIntelligenceError::UnmintableHunkKind {
-                    path: entry.path,
-                    reason: "unmerged index stages cannot mint an applicable HunkRef",
-                });
+                continue;
             };
             let submodule = entry
                 .new_mode
@@ -1077,30 +1075,33 @@ impl NativeGitIntelligence {
                 .is_some_and(GitFileModeV1::is_submodule)
                 || patch_file.submodule;
             if submodule {
-                return Err(GitIntelligenceError::UnmintableHunkKind {
-                    path: entry.path,
-                    reason: "submodule entries are read-only and cannot mint an applicable HunkRef",
-                });
+                continue;
             }
             if patch_file.binary {
-                return Err(GitIntelligenceError::UnmintableHunkKind {
-                    path: entry.path,
-                    reason: "binary changes are read-only and cannot mint an applicable HunkRef",
-                });
+                continue;
             }
             if patch_file.hunks.is_empty() {
-                return Err(GitIntelligenceError::UnmintableHunkKind {
-                    path: entry.path,
-                    reason: "mode-only or rename-only changes have no applicable text hunk",
-                });
+                continue;
+            }
+            if entry
+                .old_mode
+                .iter()
+                .chain(entry.new_mode.iter())
+                .any(GitFileModeV1::is_symlink)
+            {
+                continue;
             }
 
             let index_entry = self.index_entry_expectation(&entry.path)?;
             if index_entry.unmerged_stage.is_some() {
-                return Err(GitIntelligenceError::UnmintableHunkKind {
-                    path: entry.path,
-                    reason: "unmerged index stages cannot mint an applicable HunkRef",
-                });
+                continue;
+            }
+            if index_entry
+                .mode
+                .as_ref()
+                .is_some_and(GitFileModeV1::is_symlink)
+            {
+                continue;
             }
 
             let expected_base_blob = match direction {
@@ -1115,10 +1116,7 @@ impl NativeGitIntelligence {
                 HunkDirectionV1::WorkingTreeToIndex => {
                     let mode = worktree_mode(&self.repo_root.join(&entry.path));
                     if mode.as_ref().is_some_and(GitFileModeV1::is_symlink) {
-                        return Err(GitIntelligenceError::UnmintableHunkKind {
-                            path: entry.path,
-                            reason: "symlink changes are read-only and cannot mint an applicable HunkRef",
-                        });
+                        continue;
                     }
                     (Some(self.worktree_blob_expectation(&entry.path)?), mode)
                 }
@@ -2603,8 +2601,117 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn hunk_refs_reject_range_binary_and_unmerged() {
+    fn hunk_refs_keep_text_from_mixed_unstaged_diff() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(fixture) = Fixture::standard() else {
+            return;
+        };
+        fixture.write("a-safe.txt", "before\n");
+        fixture.write("mode-only.txt", "mode\n");
+        std::fs::write(fixture.path().join("blob.bin"), [0u8, 1, 0, 2]).unwrap();
+        fixture.commit_all("add mixed fixtures");
+
+        fixture.write("a-safe.txt", "after\n");
+        fixture.write(
+            "src/main.txt",
+            "line1\nchanged\nline3\nline4\nline5\nline6\nline7\nline8\n",
+        );
+        std::fs::write(fixture.path().join("blob.bin"), [0u8, 3, 0, 4]).unwrap();
+        let mode_path = fixture.path().join("mode-only.txt");
+        let mut permissions = std::fs::metadata(&mode_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(mode_path, permissions).unwrap();
+
+        let adapter = fixture.adapter();
+        let diff = adapter.diff(&GitDiffScopeV1::WorkingTree).unwrap();
+        assert!(
+            diff.files
+                .iter()
+                .any(|file| file.path == "blob.bin" && file.binary && file.hunks.is_empty())
+        );
+        assert!(diff.files.iter().any(|file| {
+            file.path == "mode-only.txt" && file.old_mode != file.new_mode && file.hunks.is_empty()
+        }));
+
+        let snapshot_digest = ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap();
+        let references = adapter
+            .hunk_refs(
+                &GitDiffScopeV1::WorkingTree,
+                "preview.mixed-unstaged",
+                &snapshot_digest,
+            )
+            .unwrap();
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.path.as_str())
+                .collect::<Vec<_>>(),
+            ["a-safe.txt", "src/main.txt"]
+        );
+        assert!(references.iter().all(|reference| {
+            reference.direction == HunkDirectionV1::WorkingTreeToIndex
+                && reference.preview_id == "preview.mixed-unstaged"
+                && reference.snapshot_digest == snapshot_digest
+                && reference.repository == adapter.repository
+                && reference.worktree == adapter.worktree
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hunk_refs_keep_text_from_mixed_staged_diff_without_symlink_ref() {
+        use std::os::unix::fs::symlink;
+
+        let Some(fixture) = Fixture::standard() else {
+            return;
+        };
+        fixture.write(
+            "src/main.txt",
+            "line1\nstaged\nline3\nline4\nline5\nline6\nline7\nline8\n",
+        );
+        std::fs::write(fixture.path().join("staged.bin"), [0u8, 5, 0, 6]).unwrap();
+        symlink("src/main.txt", fixture.path().join("staged-link")).unwrap();
+        fixture.git_ok(&["add", "src/main.txt", "staged.bin", "staged-link"]);
+
+        let adapter = fixture.adapter();
+        let diff = adapter.diff(&GitDiffScopeV1::Staged).unwrap();
+        assert!(
+            diff.files
+                .iter()
+                .any(|file| file.path == "staged.bin" && file.binary && file.hunks.is_empty())
+        );
+        assert!(diff.files.iter().any(|file| {
+            file.path == "staged-link"
+                && file
+                    .new_mode
+                    .as_ref()
+                    .is_some_and(GitFileModeV1::is_symlink)
+        }));
+
+        let snapshot_digest = ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap();
+        let references = adapter
+            .hunk_refs(
+                &GitDiffScopeV1::Staged,
+                "preview.mixed-staged",
+                &snapshot_digest,
+            )
+            .unwrap();
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/main.txt"]
+        );
+        assert_eq!(references[0].direction, HunkDirectionV1::IndexToHead);
+        assert_eq!(references[0].preview_id, "preview.mixed-staged");
+    }
+
+    #[test]
+    fn hunk_refs_reject_range_and_omit_read_only_file_kinds() {
         let Some(fixture) = Fixture::standard() else {
             return;
         };
@@ -2627,26 +2734,31 @@ mod tests {
         std::fs::write(fixture.path().join("blob.bin"), [0u8, 1, 0, 2]).unwrap();
         fixture.commit_all("add binary");
         std::fs::write(fixture.path().join("blob.bin"), [0u8, 3, 0, 4]).unwrap();
-        assert!(matches!(
-            adapter.hunk_refs(
-                &GitDiffScopeV1::WorkingTree,
-                "preview.fixture",
-                &snapshot_digest,
-            ),
-            Err(GitIntelligenceError::UnmintableHunkKind { .. })
-        ));
+        assert!(
+            adapter
+                .hunk_refs(
+                    &GitDiffScopeV1::WorkingTree,
+                    "preview.fixture",
+                    &snapshot_digest,
+                )
+                .unwrap()
+                .is_empty()
+        );
 
         let Some(conflicted) = conflicted_fixture() else {
             return;
         };
-        assert!(matches!(
-            conflicted.adapter().hunk_refs(
-                &GitDiffScopeV1::WorkingTree,
-                "preview.fixture",
-                &snapshot_digest,
-            ),
-            Err(GitIntelligenceError::UnmintableHunkKind { .. })
-        ));
+        assert!(
+            conflicted
+                .adapter()
+                .hunk_refs(
+                    &GitDiffScopeV1::WorkingTree,
+                    "preview.fixture",
+                    &snapshot_digest,
+                )
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
