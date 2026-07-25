@@ -131,6 +131,7 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
             tracedecay_tool_catalog::BindingSurface::Cli,
             tracedecay_tool_catalog::BindingSurface::Mcp,
             tracedecay_tool_catalog::BindingSurface::Http,
+            tracedecay_tool_catalog::BindingSurface::Dashboard,
         ] {
             assert!(
                 crate::daemon_client::BindingResolver::resolve_binding(

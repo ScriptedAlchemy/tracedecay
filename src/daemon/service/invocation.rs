@@ -3252,40 +3252,56 @@ async fn apply_configuration_or_semantic_transition(
     now: UtcMicros,
 ) -> Result<crate::application::configuration::ConfigurationMutationReceipt, ConfigurationError> {
     let semantic_profile = semantic_profile_transition(&mutation)?;
-    let Some(semantic_profile) = semantic_profile else {
-        return registered
+    let receipt = if let Some(semantic_profile) = semantic_profile {
+        let operation = registered
+            .semantic_operation
+            .get()
+            .cloned()
+            .ok_or(ConfigurationError::Unavailable)?;
+        match semantic_profile {
+            Some(selected_profile) => operation
+                .activate(SemanticProtectedActivationOperationV1 {
+                    authority,
+                    selected_profile,
+                    central_mutation: mutation,
+                    now,
+                })
+                .await
+                .map(|applied| applied.configuration_receipt)
+                .map_err(map_semantic_configuration_error)?,
+            None => operation
+                .rollback(SemanticProtectedRollbackOperationV1 {
+                    authority,
+                    central_mutation: mutation,
+                    trigger: "configuration_semantic_profile_disabled".to_owned(),
+                    now,
+                })
+                .await
+                .map(|applied| applied.configuration_receipt)
+                .map_err(map_semantic_configuration_error)?,
+        }
+    } else {
+        registered
             .runtime
             .client()
             .mutate_direct(authority, mutation, expected_revision)
-            .await;
+            .await?
     };
-    let operation = registered
-        .semantic_operation
-        .get()
-        .cloned()
-        .ok_or(ConfigurationError::Unavailable)?;
-    match semantic_profile {
-        Some(selected_profile) => operation
-            .activate(SemanticProtectedActivationOperationV1 {
-                authority,
-                selected_profile,
-                central_mutation: mutation,
-                now,
-            })
-            .await
-            .map(|applied| applied.configuration_receipt)
-            .map_err(map_semantic_configuration_error),
-        None => operation
-            .rollback(SemanticProtectedRollbackOperationV1 {
-                authority,
-                central_mutation: mutation,
-                trigger: "configuration_semantic_profile_disabled".to_owned(),
-                now,
-            })
-            .await
-            .map(|applied| applied.configuration_receipt)
-            .map_err(map_semantic_configuration_error),
+    match registered.runtime.client().current().await {
+        Ok(current) => {
+            if let Err(error) = crate::config::install_pinned_runtime_configuration(current) {
+                tracing::warn!(
+                    "committed configuration could not refresh the runtime cache: {error}"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                "committed configuration could not reload the retained snapshot: {error}"
+            );
+        }
     }
+    Ok(receipt)
 }
 
 fn semantic_profile_transition(
