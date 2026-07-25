@@ -77,9 +77,9 @@ pub enum HostBundleRegistryError {
     Incompatible,
 }
 
-/// Canonical default install set. Operator MCP remains explicitly selected;
-/// Kimi's plugin manifest already owns its MCP registration, so its Core
-/// component is the complete default and is not duplicated.
+/// Canonical default install set. Each native MCP registration has one
+/// component owner. Kimi's plugin manifest carries its MCP route inside Core;
+/// hosts with a separable route use Context MCP.
 pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
     match host {
         HostKindV1::ClaudeCode | HostKindV1::Codex => vec![
@@ -438,31 +438,15 @@ fn component_assets(
             .collect());
     }
 
-    // The managed Kimi plugin directory is rewritten by the legacy installer
-    // that the compatibility registration adapter re-runs during apply, and the
-    // component-set transaction verifies installed digests afterwards. Deploy
-    // the installer's own rendered inventory (same bin resolution as
-    // `InstallContext::tracedecay_bin`) so both writers produce identical
-    // bytes; the raw template still carries its unstamped version and
-    // unresolved command placeholders.
-    if host == HostKindV1::KimiCode
-        && matches!(
-            component,
-            HostBundleComponentV1::Core
-                | HostBundleComponentV1::ContextMcp
-                | HostBundleComponentV1::OperatorMcp
-        )
-    {
+    // Kimi's Core bundle owns its manifest-declared hooks and MCP route as one
+    // native plugin. Render the complete managed inventory with the installed
+    // binary path; companion MCP components would duplicate that ownership.
+    if (host, component) == (HostKindV1::KimiCode, HostBundleComponentV1::Core) {
         let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let files = super::kimi::rendered_plugin_files(&bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        // Kimi's plugin manifest declares its own MCP server, so the MCP
-        // companion components address that manifest alone while Core keeps the
-        // full deploy set.
-        let manifest_only = component != HostBundleComponentV1::Core;
         return Ok(files
             .into_iter()
-            .filter(|(relative, _)| !manifest_only || *relative == ".kimi-plugin/plugin.json")
             .map(|(relative, body)| {
                 (
                     format!(".kimi-code/plugins/managed/tracedecay/{relative}"),
@@ -472,18 +456,10 @@ fn component_assets(
             .collect());
     }
 
-    // The managed OpenCode plugin file is also written by the legacy installer
-    // that the compatibility registration adapter re-runs during apply, and the
-    // component-set transaction verifies installed digests afterwards. Deploy
-    // the installer's own rendered inventory (same bin resolution as
-    // `InstallContext::tracedecay_bin`) so both writers produce identical
-    // bytes. `render_compiled_asset` below resolves the binary from
-    // `std::env::current_exe()` instead, which disagrees with
-    // `which_tracedecay()` whenever the running binary lives outside the
-    // installed path (for example `./target/release/tracedecay reinstall`) and
-    // corrupted every OpenCode transaction. The MCP companion and Agent
-    // components keep the compiled-asset path: the legacy installer never
-    // writes those files.
+    // Render OpenCode Core with the installed binary path. The generic renderer
+    // uses `std::env::current_exe()`, which can differ from the installed path
+    // during an in-tree reinstall. Context MCP and Agent remain disjoint
+    // compiled assets.
     if (host, component) == (HostKindV1::OpenCode, HostBundleComponentV1::Core) {
         let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let files = super::opencode::rendered_plugin_files(&bin)
@@ -531,10 +507,7 @@ fn component_assets(
             ".config/opencode",
             super::plugin_bundle::opencode_agent_files(),
         ),
-        (
-            HostKindV1::OpenCode,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
-        ) => (
+        (HostKindV1::OpenCode, HostBundleComponentV1::ContextMcp) => (
             ".config/opencode",
             vec![
                 (
@@ -623,11 +596,6 @@ mod tests {
                 HostKindV1::Hermes,
                 HostBundleComponentV1::Core,
                 ".hermes/plugins/tracedecay/plugin.yaml",
-            ),
-            (
-                HostKindV1::KimiCode,
-                HostBundleComponentV1::ContextMcp,
-                ".kimi-plugin/plugin.json",
             ),
             (
                 HostKindV1::OpenCode,
@@ -942,6 +910,20 @@ mod tests {
             single.component_set.components[0].manifest.component,
             HostBundleComponentV1::ContextMcp
         );
+    }
+
+    #[test]
+    fn shared_mcp_manifests_have_one_canonical_component_owner() {
+        for (host, unsupported) in [
+            (HostKindV1::OpenCode, HostBundleComponentV1::OperatorMcp),
+            (HostKindV1::KimiCode, HostBundleComponentV1::ContextMcp),
+            (HostKindV1::KimiCode, HostBundleComponentV1::OperatorMcp),
+        ] {
+            assert_eq!(
+                verified_embedded_host_bundle(host, unsupported, 0),
+                Err(HostBundleRegistryError::Incompatible)
+            );
+        }
     }
 
     #[test]

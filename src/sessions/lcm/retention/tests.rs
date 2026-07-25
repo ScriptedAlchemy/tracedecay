@@ -187,6 +187,7 @@ fn drop_config(days: u32) -> LcmRetentionConfig {
     LcmRetentionConfig {
         enabled: true,
         drop_after_days: Some(days),
+        dedupe_projected_after_days: None,
         ..LcmRetentionConfig::default()
     }
 }
@@ -451,6 +452,39 @@ async fn dedupe_drops_projected_duplicate_and_keeps_raw() -> Result<(), String> 
     // The projected FTS shadow obeys the same window (trigger cleaned it).
     let fts_after = count(conn, "session_messages_fts").await?;
     assert!(fts_after < fts_before, "projected FTS shadow shrank");
+    Ok(())
+}
+
+#[tokio::test]
+async fn dedupe_retains_projected_copy_until_summary_lineage_is_durable() -> Result<(), String> {
+    let store = test_store().await?;
+    let conn = &store.conn;
+    insert_message(conn, 1, 90, "not durable yet").await?;
+
+    let config = LcmRetentionConfig::default();
+    let backlog = read_session_retention_backlog(
+        conn,
+        tracedecay_application::storage::StoreKeyV1::new("sessions.db")
+            .map_err(|error| error.to_string())?,
+        &config,
+        NOW,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let projected = backlog
+        .iter()
+        .find(|record| record.table.as_str() == "session_messages")
+        .ok_or_else(|| "missing projected retention backlog".to_string())?;
+    assert_eq!(projected.past_window_bytes.get(), 0);
+
+    let report = run_apply(conn, &store.storage_root, &config).await?;
+    assert_eq!(report.projected_deduped.eligible, 0);
+    assert_eq!(report.projected_deduped.acted, 0);
+    assert_eq!(
+        count(conn, "session_messages").await?,
+        1,
+        "non-durable projection remains the only immediately queryable copy"
+    );
     Ok(())
 }
 
