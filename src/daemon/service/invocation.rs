@@ -5169,6 +5169,11 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .lock()
             .await
             .remove(project_root);
+        self.service
+            .advisory_cycle_invokers
+            .lock()
+            .await
+            .remove(project_root);
     }
 
     async fn retain_registration(
@@ -7815,6 +7820,13 @@ mod tests {
             .retain_registration(root.clone(), identity.clone(), first_runtime)
             .await
             .unwrap();
+        registrar
+            .register_cycle_invoker(
+                root.clone(),
+                Arc::new(MintedAdvisoryCycleHandle("rh.registration")),
+            )
+            .await
+            .unwrap();
 
         assert!(matches!(
             registrar
@@ -7825,6 +7837,13 @@ mod tests {
         assert!(first_weak.upgrade().is_some());
         assert!(registrar.unmount_project(&root).await);
         assert!(first_weak.upgrade().is_none());
+        assert!(
+            !service
+                .advisory_cycle_invokers
+                .lock()
+                .await
+                .contains_key(&root)
+        );
         assert!(!registrar.unmount_project(&root).await);
     }
 
