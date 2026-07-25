@@ -136,13 +136,19 @@ mod tests {
     use std::collections::BTreeSet;
 
     use tracedecay_domain::{
-        ComponentVersion, LocatorDigest, ManifestDigest, PrivacyDomainId, ProjectId, ProviderId,
-        SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
-        SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
-        SourceCoverageV1, SourceDefinitionV1, SourceDeletionSemanticsV1, SourceInstanceId,
-        SourceNativeObjectIdV1, SourceObjectObservationV1, SourceObjectRevisionV1,
-        SourcePartitionFrontierV1, SourcePartitionIdV1, SourceRefetchStrategyV1,
-        SourceSnapshotCompletionV1, SourceSnapshotIdV1,
+        AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest, ManifestDigest,
+        PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
+        ResolutionAuthorizationV1, RetrievalAnchorId, SanitizationReceiptId,
+        SanitizationReceiptRefV1, ScopeResolutionId, SourceAcquisitionCapabilitiesV1,
+        SourceAcquisitionContractV1, SourceAggregateFrontierV1, SourceBindingOwnerV1,
+        SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1, SourceCoverageV1,
+        SourceDefinitionV1, SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1,
+        SourceObjectObservationV1, SourceObjectRevisionV1, SourcePartitionFrontierV1,
+        SourcePartitionIdV1, SourceRefetchStrategyV1, SourceSnapshotCompletionV1,
+        SourceSnapshotIdV1,
+    };
+    use tracedecay_store::{
+        SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
     };
 
     use super::*;
@@ -210,6 +216,38 @@ mod tests {
             BTreeSet::from([observation.native_object().clone()]),
         )
         .unwrap();
+        let evidence = SourceObservationEvidenceV1::new(
+            identity.clone(),
+            partition.clone(),
+            &observation,
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.external-source.runtime-fixture").unwrap(),
+                ComponentVersion::new("sanitizer.external-source.v1").unwrap(),
+            )
+            .unwrap(),
+            RetrievalAnchorId::new("retrieval.external-source.runtime-fixture").unwrap(),
+            ResolutionAuthorizationV1 {
+                resolved_scope_id: ScopeResolutionId::new("scope.external-source.runtime-fixture")
+                    .unwrap(),
+                privacy_domain_id: identity.privacy_domain.clone(),
+                access_policy_digest: AccessPolicyDigest::new(digest('4').as_str()).unwrap(),
+                capability_id: CapabilityId::new("capability.external-source.runtime-fixture")
+                    .unwrap(),
+                canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(
+                    digest('5').as_str(),
+                )
+                .unwrap(),
+            },
+            digest('6'),
+        )
+        .unwrap();
+        let mutation = SourceObjectMutationV1::new(
+            observation,
+            None,
+            SourceObjectTransitionV1::Initial,
+            evidence,
+        )
+        .unwrap();
         let commit = SourceCommitV1::new(
             definition,
             binding,
@@ -219,7 +257,7 @@ mod tests {
             digest('3'),
             None,
             aggregate,
-            vec![observation],
+            vec![mutation],
             Some(completion),
         )
         .unwrap();
@@ -228,10 +266,37 @@ mod tests {
 
     #[test]
     fn commit_replay_and_restart_read_share_one_durable_state() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let database_path = temporary.path().join("external-source.sqlite");
         let (commit, binding) = fixture();
-        for _ in 0..2 {
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+            let mut interrupted = connection.transaction().unwrap();
+            let savepoint = interrupted.savepoint().unwrap();
+            ExternalSourceExecutor
+                .execute_write(&savepoint, &commit)
+                .unwrap();
+            savepoint.commit().unwrap();
+            drop(interrupted);
+        }
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+            let transaction = connection.transaction().unwrap();
+            assert!(matches!(
+                ExternalSourceExecutor
+                    .execute_read(
+                        &transaction,
+                        &ExternalSourceReadOperationV1::State {
+                            binding: binding.clone(),
+                        },
+                    )
+                    .unwrap(),
+                ExternalSourceReadResultV1::State(None)
+            ));
+        }
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
             let mut transaction = connection.transaction().unwrap();
             let savepoint = transaction.savepoint().unwrap();
             ExternalSourceExecutor
@@ -240,6 +305,14 @@ mod tests {
             savepoint.commit().unwrap();
             transaction.commit().unwrap();
         }
+        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut replay = connection.transaction().unwrap();
+        let savepoint = replay.savepoint().unwrap();
+        ExternalSourceExecutor
+            .execute_write(&savepoint, &commit)
+            .unwrap();
+        savepoint.commit().unwrap();
+        replay.commit().unwrap();
         let transaction = connection.transaction().unwrap();
         let state = match ExternalSourceExecutor
             .execute_read(
@@ -253,5 +326,14 @@ mod tests {
         };
         assert_eq!(state.receipt().idempotency_key(), commit.idempotency_key());
         assert_eq!(state.projected_objects().len(), 1);
+        let state_json: String = transaction
+            .query_row(
+                "SELECT state_json FROM external_source_states_v1 WHERE binding_id = ?1",
+                [binding.binding_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!state_json.contains("secret"));
+        assert!(!state_json.contains("https://"));
     }
 }
