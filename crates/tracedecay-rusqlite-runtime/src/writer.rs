@@ -578,6 +578,7 @@ impl PersistentWriter {
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
         let worker = Worker {
             path: worker_open_path,
+            #[cfg(unix)]
             canonical_path: path.clone(),
             expected_file_identity,
             _opened_database: opened_database,
