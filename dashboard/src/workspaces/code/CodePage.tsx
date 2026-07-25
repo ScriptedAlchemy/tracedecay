@@ -12,6 +12,7 @@ import { Meter, Readout } from '../../ui/instrument.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { elideStart, splitCount } from '../../ui/format.ts';
+import { ambiguityNote, annotateHubs, describeSubgraph } from './hubs.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
@@ -179,20 +180,38 @@ export function CodePage() {
           />
         ) : (
         <div className="flex h-full flex-col">
-          <div className="border-b border-edge-subtle p-3">
+          <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
             {subgraph.isPending ? (
               <p className="p-6 text-center text-sm text-text-muted">
                 composing graph neighborhood…
               </p>
             ) : (
-              <GraphCanvas
-                nodes={canvasNodes}
-                edges={canvasEdges}
-                selectedId={selected?.id ?? null}
-                onSelect={selectFromCanvas}
-                height={300}
-                activation={activationRef.current}
-              />
+              <>
+                <GraphCanvas
+                  nodes={canvasNodes}
+                  edges={canvasEdges}
+                  selectedId={selected?.id ?? null}
+                  onSelect={selectFromCanvas}
+                  height={300}
+                  activation={activationRef.current}
+                />
+                {/* Eighty nodes out of a hundred and eighteen thousand is not a
+                  * reading until the rule that picked them is stated: "the
+                  * busiest connected region" and "one symbol's neighbours" are
+                  * different claims about identically-shaped pictures. Both
+                  * branches are read off the endpoint's own `mode`. */}
+                <SubgraphCaption
+                  payload={
+                    subgraph.data?.outcome === 'ok' ? subgraph.data.data : undefined
+                  }
+                  totalNodes={
+                    overview.data?.outcome === 'ok'
+                      ? overview.data.data.totals.nodes
+                      : null
+                  }
+                  seedLabel={selected ? displayName(selected) : null}
+                />
+              </>
             )}
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
@@ -361,6 +380,58 @@ function TopConnectedList({
   );
 }
 
+/** The canvas's selection rule, printed under it. See `hubs.ts` for where each
+ * sentence comes from in `subgraph_payload`. */
+function SubgraphCaption({
+  payload,
+  totalNodes,
+  seedLabel,
+}: {
+  payload:
+    | {
+        mode?: string;
+        seed_id?: string | null;
+        nodes: readonly unknown[];
+        edges: readonly unknown[];
+        capped?: { nodes: boolean; edges: boolean };
+        limits?: Record<string, unknown>;
+      }
+    | undefined;
+  totalNodes: number | null;
+  seedLabel: string | null;
+}) {
+  const caption = describeSubgraph(
+    payload
+      ? {
+          mode: payload.mode,
+          seed_id: payload.seed_id,
+          nodes: payload.nodes,
+          edges: payload.edges,
+          capped: payload.capped,
+          limits: {
+            nodes: Number(payload.limits?.['nodes'] ?? Number.NaN),
+            edges: Number(payload.limits?.['edges'] ?? Number.NaN),
+          },
+        }
+      : undefined,
+    totalNodes,
+    seedLabel,
+  );
+  if (!caption) return null;
+  return (
+    <figcaption className="flex flex-col gap-0.5">
+      <span className="flex items-baseline gap-2">
+        <span className="td-legend shrink-0">{caption.scale}</span>
+        <span aria-hidden className="td-rule" />
+        {caption.capped ? (
+          <span className="td-legend shrink-0 text-text-muted">capped at the limit</span>
+        ) : null}
+      </span>
+      <span className="text-3xs leading-relaxed text-text-muted">{caption.rule}</span>
+    </figcaption>
+  );
+}
+
 /** How a hub's degree is drawn on the spine, and how big its name is set in
  * the field below. Both derive from the same rank/degree pair, so the two
  * instruments cannot disagree about which symbol matters most. */
@@ -412,6 +483,12 @@ function HubField({
   const floor = ranked[ranked.length - 1]?.degree ?? 0;
   const leadName = displayName(ranked[0]);
   const tailName = displayName(ranked[ranked.length - 1]);
+  // Eight of the twelve hubs on a real Rust graph are language primitives or
+  // one-word generics — `path`, `json`, `u64`, `Value`, `trim`, `kind` — and
+  // two of them are literally the same word. `qualified_name` is not served on
+  // this route, so the file is the only thing that can tell them apart.
+  const annotated = annotateHubs(ranked);
+  const ambiguity = ambiguityNote(annotated);
 
   return (
     <div className="flex flex-col">
@@ -522,8 +599,14 @@ function HubField({
        * implicit cells of a part-filled last row, which paints a solid block
        * of rule colour where the grid simply has no data — a fabricated
        * region, and the one thing this console must never draw. */}
+      {ambiguity ? (
+        <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-text-muted">
+          {ambiguity}
+        </p>
+      ) : null}
+
       <ol className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
-        {ranked.map((node, rank) => (
+        {annotated.map(({ hub: node, module, file, ambiguous }, rank) => (
           <li
             key={node.id ?? rank}
             className={cn(
@@ -539,6 +622,9 @@ function HubField({
             <HubCard
               node={node}
               rank={rank}
+              module={module}
+              file={file}
+              ambiguous={ambiguous}
               selected={selected?.id === node.id}
               onSelect={() => onSelect(node)}
             />
@@ -559,11 +645,20 @@ function displayName(node: GraphNode | undefined): string {
 function HubCard({
   node,
   rank,
+  module,
+  file,
+  ambiguous,
   selected,
   onSelect,
 }: {
   node: GraphNode;
   rank: number;
+  /** Directory the symbol lives in, trailing slash included. */
+  module: string;
+  /** File name alone — the part that actually disambiguates. */
+  file: string;
+  /** Another card in this set carries the same name. */
+  ambiguous: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -621,13 +716,35 @@ function HubCard({
           <span className="td-unit ml-1">deg</span>
         </span>
       </span>
+      {/* The context line, which used to be a 3xs grey path elided from its
+        * front and pushed to the far right of the card, where it read as
+        * decoration rather than as the thing that identifies the symbol. The
+        * FILE now carries the line at the same size as the kind beside it, and
+        * the directory trails it quietly — because between two cards both
+        * called `path`, "graph_api.rs" is the answer and
+        * "…/dashboard/graph_api.rs" is the same answer with the middle of a
+        * path in front of it. When the name is genuinely ambiguous inside this
+        * set the file steps up to the primary text colour: it is then not
+        * context, it is the identifier. */}
       <span className="flex min-w-0 items-baseline gap-2 pl-6 leading-tight">
-        <span className="td-legend shrink-0 max-w-24 truncate">{node.kind}</span>
+        <span className="td-legend max-w-20 shrink-0 truncate">{node.kind}</span>
+        {/* The file is capped at three fifths of the line and truncates inside
+          * that cap rather than running past the card's own border, which is
+          * what an unshrinkable span did at 768px. */}
         <span
-          className="td-value min-w-0 flex-1 truncate text-right text-3xs text-text-muted"
+          className={cn(
+            'td-value max-w-[60%] shrink-0 truncate text-2xs',
+            ambiguous ? 'text-text-primary' : 'text-text-secondary',
+          )}
           title={node.file_path ?? undefined}
         >
-          {elideStart(node.file_path, 30)}
+          {file || '—'}
+        </span>
+        <span
+          className="td-value min-w-0 flex-1 truncate text-right text-3xs text-text-muted max-lg:hidden"
+          title={node.file_path ?? undefined}
+        >
+          {elideStart(module.replace(/\/$/, ''), 24)}
         </span>
       </span>
     </button>

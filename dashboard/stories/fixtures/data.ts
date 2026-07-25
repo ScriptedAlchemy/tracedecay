@@ -890,6 +890,10 @@ function neighborsPayload(nodeId: string, limit: number): Record<string, unknown
 /** GET /api/plugins/graph/subgraph[?node_id=]. Unseeded returns the full hub
  * overview (mode "default"); a node_id returns that node’s neighborhood
  * (mode "seeded"), matching graph_service.rs subgraph_payload. */
+// `coerce_limit(params.limit_nodes, 80, 250)` / `(params.limit_edges, 120,
+// 500)` in graph_api.rs: the defaults are 80 and 120, not 40. The Code
+// workspace now prints these limits in the canvas caption, so a wrong number
+// here would be a wrong number on screen.
 function subgraphPayload(nodeId: string | null): Record<string, unknown> {
   if (!nodeId) {
     return {
@@ -898,7 +902,7 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
       nodes: BASE_GRAPH.nodes,
       edges: BASE_GRAPH.edges,
       capped: { nodes: false, edges: false },
-      limits: { nodes: 40, edges: 120 },
+      limits: { nodes: 80, edges: 120 },
     };
   }
   const neighbors = BASE_GRAPH.adjacency.get(nodeId);
@@ -909,7 +913,7 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
       nodes: [],
       edges: [],
       capped: { nodes: false, edges: false },
-      limits: { nodes: 40, edges: 120 },
+      limits: { nodes: 80, edges: 120 },
     };
   }
   const keep = new Set<string>([nodeId, ...neighbors]);
