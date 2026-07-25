@@ -1,5 +1,5 @@
 use crate::config::PinnedUserDataDir;
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -31,6 +31,13 @@ fn head_oid(dir: &Path) -> String {
 
 async fn init_repo_with_commit() -> (TraceDecay, TempDir, PinnedUserDataDir) {
     let pin = PinnedUserDataDir::new();
+    let profile_root = crate::storage::default_profile_root().expect("test profile root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+            .expect("secure test profile root");
+    }
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -39,7 +46,27 @@ async fn init_repo_with_commit() -> (TraceDecay, TempDir, PinnedUserDataDir) {
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "initial"]);
 
-    let cg = TraceDecay::init(root).await.expect("init");
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "indexing freshness fixture initialization",
+    )
+    .expect("acquire fixture lifecycle authority");
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "indexing freshness fixture initialization",
+    )
+    .expect("enter fixture maintenance database scope");
+    let cg = TraceDecay::init_with_exclusive_maintenance(
+        root,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: None,
+        },
+        &lifecycle,
+    )
+    .await
+    .expect("init");
     cg.index_all().await.expect("index");
     (cg, dir, pin)
 }
