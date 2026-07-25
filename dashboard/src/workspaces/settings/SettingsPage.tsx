@@ -194,7 +194,7 @@ function SettingsSurface({
         </p>
       </div>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <SectionIndex entries={filtered} total={model.sections.length} onJump={jumpTo} />
         <div
           ref={scrollRef}
@@ -297,9 +297,10 @@ function SettingsEditorPanel({
   if (!editor || !project || !user) {
     return (
       <section className="border-b border-edge-subtle p-3" aria-label="Supported settings changes">
-        <p className="text-xs text-state-unsupported-schema">
-          Editable settings are unavailable because the response omitted a supported value or
-          configuration revision.
+        <p className="text-xs text-state-error">
+          Settings editing requires project configuration values and configuration_revision_id
+          from GET /api/settings, plus user settings and user_settings_revision_id from the same
+          authority. The response omitted at least one required field.
         </p>
       </section>
     );
@@ -707,7 +708,7 @@ function SectionIndex({
     <nav
       aria-label="Configuration groups"
       tabIndex={0}
-      className="hidden w-48 shrink-0 flex-col overflow-auto border-r border-edge-subtle bg-surface-1 md:flex"
+      className="flex max-h-28 w-full shrink-0 flex-col overflow-auto border-b border-edge-subtle bg-surface-1 md:max-h-none md:w-48 md:border-b-0 md:border-r"
     >
       <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
         <span className="td-title">
@@ -715,7 +716,7 @@ function SectionIndex({
         </span>
         <span aria-hidden className="td-rule" />
       </div>
-      <div className="flex flex-col p-1.5">
+      <div className="grid grid-cols-2 p-1.5 sm:grid-cols-3 md:flex md:flex-col">
         {entries.map(({ section, rows }) => (
           <button
             key={section.id}
