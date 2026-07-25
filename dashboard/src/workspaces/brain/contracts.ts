@@ -111,8 +111,8 @@ export const ProjectStoreSchema = z
         last_verified_at: z.number().nullable().optional(),
       })
       .passthrough(),
-    graph_scopes: z.array(ProjectGraphScopeSchema).default([]),
-    artifacts: z.array(ProjectStoreArtifactSchema).default([]),
+    graph_scopes: z.array(ProjectGraphScopeSchema).optional(),
+    artifacts: z.array(ProjectStoreArtifactSchema).optional(),
   })
   .passthrough();
 export type ProjectStore = z.infer<typeof ProjectStoreSchema>;
@@ -128,8 +128,8 @@ export const ProjectContextPayloadSchema = z
     status: z.string(),
     is_active: z.boolean().optional(),
     project: ProjectRegistryEntrySchema.nullable().optional(),
-    aliases: z.array(ProjectAliasSchema).default([]),
-    stores: z.array(ProjectStoreSchema).default([]),
+    aliases: z.array(ProjectAliasSchema).optional(),
+    stores: z.array(ProjectStoreSchema).optional(),
   })
   .passthrough();
 export type ProjectContextPayload = z.infer<typeof ProjectContextPayloadSchema>;
@@ -151,14 +151,14 @@ export type ScopedSubgraphNode = z.infer<typeof ScopedSubgraphNodeSchema>;
 
 export const ScopedSubgraphPayloadSchema = z
   .object({
-    nodes: z.array(ScopedSubgraphNodeSchema).default([]),
+    nodes: z.array(ScopedSubgraphNodeSchema).optional(),
     edges: z
       .array(
         z
           .object({ source: z.string(), target: z.string(), kind: z.string().optional() })
           .passthrough(),
       )
-      .default([]),
+      .optional(),
     capped: z
       .object({ nodes: z.boolean().optional(), edges: z.boolean().optional() })
       .passthrough()
@@ -175,10 +175,10 @@ export const ScopedGraphOverviewSchema = z
       .passthrough(),
     nodes_by_kind: z
       .array(z.object({ kind: z.string(), count: z.number() }).passthrough())
-      .default([]),
+      .optional(),
     files_by_language: z
       .array(z.object({ language: z.string(), count: z.number() }).passthrough())
-      .default([]),
+      .optional(),
   })
   .passthrough();
 export type ScopedGraphOverview = z.infer<typeof ScopedGraphOverviewSchema>;
@@ -214,7 +214,7 @@ export const ScopedAnalyticsOverviewSchema = z
               .object({ category: z.string(), events: z.number(), kind: z.string().optional() })
               .passthrough(),
           )
-          .default([]),
+          .optional(),
       })
       .passthrough()
       .optional(),
