@@ -360,6 +360,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     PrimitiveTestResults {
+        page: PageRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -670,8 +671,9 @@ impl DaemonInvocationRequest {
             },
             (
                 crate::application_surface::ApplicationSurfaceOperation::TestResults,
-                Pr12PrimitiveRequest::RecentTestResults,
+                Pr12PrimitiveRequest::RecentTestResults(page),
             ) => DaemonInvocationPayload::PrimitiveTestResults {
+                page,
                 observed_at,
                 deadline,
                 cancellation,
@@ -1117,6 +1119,7 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             }
             | DaemonInvocationPayload::PrimitiveRead {
                 observed_at,
@@ -6382,6 +6385,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::PrimitiveTestResults {
+                page,
                 observed_at,
                 deadline,
                 cancellation,
@@ -6391,7 +6395,7 @@ impl DaemonInvocationService {
                     project_root,
                     request_id,
                     crate::application_surface::ApplicationSurfaceOperation::TestResults,
-                    Pr12PrimitiveRequest::RecentTestResults,
+                    Pr12PrimitiveRequest::RecentTestResults(page),
                     observed_at,
                     deadline,
                     cancellation,
@@ -7914,6 +7918,30 @@ mod tests {
             parse_daemon_invocation_request(&encoded),
             Some(Ok(_))
         ));
+    }
+
+    #[test]
+    fn test_results_invocation_retains_the_transport_page() {
+        let page = PageRequest::first(17).expect("page");
+        let request = DaemonInvocationRequest::primitive(
+            "request.test-results.page",
+            crate::application_surface::ApplicationSurfaceOperation::TestResults,
+            Pr12PrimitiveRequest::RecentTestResults(page.clone()),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.test-results.page").expect("cancellation"),
+        );
+        let encoded = serde_json::to_string(&request).expect("encode request");
+        let decoded = parse_daemon_invocation_request(&encoded)
+            .expect("daemon protocol")
+            .expect("valid request");
+        let DaemonInvocationPayload::PrimitiveTestResults {
+            page: decoded_page, ..
+        } = decoded.payload
+        else {
+            panic!("test-results request must retain its typed payload");
+        };
+        assert_eq!(decoded_page, page);
     }
 
     #[tokio::test]
