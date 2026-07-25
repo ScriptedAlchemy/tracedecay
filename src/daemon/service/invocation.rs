@@ -39,8 +39,8 @@ use tracedecay_application::{
     callable_code_operations,
 };
 use tracedecay_domain::configuration::{
-    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
-    ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+    CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
+    ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
@@ -4054,7 +4054,14 @@ fn mounted_configuration_layers(
             .values()
             .flatten()
             .filter_map(|candidate| match &candidate.layer {
-                ConfigurationLayerIdV1::Collection { .. } => Some(candidate.layer.clone()),
+                ConfigurationLayerIdV1::Collection { .. }
+                    if matches!(
+                        candidate.disposition,
+                        CandidateDispositionV1::Winning | CandidateDispositionV1::Defaulted
+                    ) =>
+                {
+                    Some(candidate.layer.clone())
+                }
                 _ => None,
             }),
     );
@@ -6634,6 +6641,64 @@ mod tests {
                 Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
             ));
         }
+    }
+
+    #[test]
+    fn mounted_configuration_layers_exclude_stale_collection_provenance() {
+        use tracedecay_domain::configuration::{
+            CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationSnapshotV1,
+            ConfigurationValueV1,
+        };
+
+        let project_id = ProjectId::new("project.configuration.mounted").expect("project");
+        let profile_id =
+            tracedecay_domain::UserProfileId::new("profile.configuration.mounted").expect("profile");
+        let winning = tracedecay_domain::QueryCollectionId::new("collection.configuration.winning")
+            .expect("collection");
+        let overridden =
+            tracedecay_domain::QueryCollectionId::new("collection.configuration.overridden")
+                .expect("collection");
+        let rejected =
+            tracedecay_domain::QueryCollectionId::new("collection.configuration.rejected")
+                .expect("collection");
+        let key = tracedecay_domain::configuration::SettingKey::new("sync.auto_watch")
+            .expect("setting");
+        let revision =
+            ConfigurationRevisionId::new("configuration.revision.mounted").expect("revision");
+        let candidate = |collection_id, disposition| ConfigurationCandidateV1 {
+            layer: ConfigurationLayerIdV1::Collection { collection_id },
+            revision_id: revision.clone(),
+            disposition,
+            safe_reason: None,
+        };
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::from([(key.clone(), ConfigurationValueV1::Boolean(true))]),
+            BTreeMap::from([(
+                key,
+                vec![
+                    candidate(winning.clone(), CandidateDispositionV1::Winning),
+                    candidate(overridden.clone(), CandidateDispositionV1::Overridden),
+                    candidate(rejected.clone(), CandidateDispositionV1::Rejected),
+                ],
+            )]),
+        )
+        .expect("snapshot");
+
+        let mounted =
+            mounted_configuration_layers(&project_id, &profile_id, &snapshot).expect("layers");
+        let contains = |layer: ConfigurationLayerIdV1| {
+            let digest = configuration_layer_scope_digest(&layer).expect("digest");
+            mounted.get(&digest) == Some(&layer)
+        };
+        assert!(contains(ConfigurationLayerIdV1::Collection {
+            collection_id: winning,
+        }));
+        assert!(!contains(ConfigurationLayerIdV1::Collection {
+            collection_id: overridden,
+        }));
+        assert!(!contains(ConfigurationLayerIdV1::Collection {
+            collection_id: rejected,
+        }));
     }
 
     #[derive(Default)]
