@@ -12,6 +12,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
@@ -25,7 +26,7 @@ use super::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1, TableNameV
 /// `freelist_pages * page_size`. Both are recorded so the free-page ratio and
 /// the reclaimable-bytes estimate (Plan 38 §6 compaction) can be computed
 /// without re-reading the store.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StoreSizeSampleV1 {
     pub store: StoreKeyV1,
@@ -170,7 +171,7 @@ impl StoreSizeBudgetV1 {
 }
 
 /// The outcome of evaluating a store size against its soft budget.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum StoreBudgetEvaluationV1 {
     WithinBudget {
@@ -197,7 +198,7 @@ impl StoreBudgetEvaluationV1 {
 /// A platform that cannot query `dbstat`/pragmas reports [`Self::Unsupported`];
 /// a denied read reports [`Self::Denied`]; an undetermined read reports
 /// [`Self::Unknown`]. Each maps to a distinct, honest Doctor evidence state.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum StorageTelemetryReadV1 {
     /// A size sample was observed.

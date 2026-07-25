@@ -9,6 +9,7 @@
 //! explicit coverage entry, so the report's coverage statement always enumerates
 //! which families were consulted versus unavailable.
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::RequestContext;
@@ -55,7 +56,7 @@ const fn family_slug(family: DoctorFindingFamilyV1) -> &'static str {
 }
 
 /// Why a finding family could not be consulted from an observed source.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorFamilyUnavailableReasonV1 {
     /// No source port is wired for this family in this composition.
@@ -95,7 +96,7 @@ impl DoctorFamilyUnavailableReasonV1 {
 }
 
 /// Whether a family was consulted from an observed source or is unavailable.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum DoctorFamilyConsultationV1 {
     /// A source produced observed evidence for this family.
@@ -114,7 +115,7 @@ impl DoctorFamilyConsultationV1 {
 }
 
 /// The consultation status of one finding family within a report.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorFamilyCoverageV1 {
     family: DoctorFindingFamilyV1,
     consultation: DoctorFamilyConsultationV1,
@@ -136,7 +137,7 @@ impl DoctorFamilyCoverageV1 {
 
 /// The report-wide coverage statement: which families were consulted versus
 /// unavailable, plus an overall completeness and a bounded human statement.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorReportCoverageV1 {
     families: Vec<DoctorFamilyCoverageV1>,
     completeness: DoctorCoverageCompletenessV1,
@@ -167,7 +168,7 @@ impl DoctorReportCoverageV1 {
 /// One entry in a Doctor report: a canonical finding plus, for the storage
 /// family, its typed subclass. The subclass is present only for storage findings
 /// (a non-storage entry never carries one).
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorReportEntryV1 {
     finding: DoctorFindingV1,
     storage_kind: Option<DoctorStorageFindingKindV1>,

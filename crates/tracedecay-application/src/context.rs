@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
@@ -16,7 +17,7 @@ const RESOLVED_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.application.scope.v1";
 
 macro_rules! application_id {
     ($($name:ident => $field:literal),+ $(,)?) => {$(
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -77,7 +78,7 @@ fn validate_identifier(value: &str, field: &'static str) -> Result<(), Applicati
 /// The resolved PR11 scope is one exact project/repository/worktree root.
 ///
 /// Paths, CWDs, labels, and mutable branch spellings are deliberately absent.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedScope {
     pub project_id: ProjectId,
@@ -222,7 +223,7 @@ impl CapabilityGrantSnapshot {
 }
 
 /// One immutable deadline supplied by the caller or upstream admission layer.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Deadline {
     pub expires_at: UtcMicros,

@@ -8,6 +8,7 @@
 //! clean result. Remediation is always a *reference* to an owning application
 //! operation; Doctor never carries an inline action.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ApplicationContractError;
@@ -21,7 +22,9 @@ use crate::error::ApplicationContractError;
 /// Each family maps to one audited typed input surface. The set is kept small
 /// and honest; new families are added through a future versioned enum rather
 /// than by widening the meaning of an existing variant.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorFindingFamilyV1 {
     /// PR13 advisory/scout findings (GitHub review, CI localization,
@@ -56,7 +59,9 @@ pub enum DoctorFindingFamilyV1 {
 /// observable retention/size condition Doctor surfaces over the Plan 26 size
 /// observability read models. The set is closed and grows only through a future
 /// versioned enum, never by widening an existing subclass.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorStorageFindingKindV1 {
     /// A store exceeds its owner-configured soft size budget.
@@ -81,7 +86,9 @@ pub enum DoctorStorageFindingKindV1 {
 /// [`DoctorEvidenceStateV1::HealthyCompleteCoverage`] asserts a healthy result,
 /// and only when its finding carries complete coverage (see
 /// [`DoctorFindingV1::new`]).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorEvidenceStateV1 {
     /// The owning authority does not support this evidence on this platform.
@@ -111,7 +118,9 @@ impl DoctorEvidenceStateV1 {
 }
 
 /// Whether Doctor observed all of a family's evidence sources.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorCoverageCompletenessV1 {
     /// Every relevant evidence source for the family was observed.
@@ -135,7 +144,9 @@ impl DoctorCoverageCompletenessV1 {
 /// preview pins expected state without mutating; an action is the owning
 /// operation's admitted effect. Both are invoked through the owning operation,
 /// never inline.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorRemediationKindV1 {
     /// A non-mutating preview owned by the responsible operation.
@@ -147,7 +158,7 @@ pub enum DoctorRemediationKindV1 {
 macro_rules! doctor_identifier {
     ($($(#[$meta:meta])* $name:ident => ($field:literal, $maximum_bytes:expr)),+ $(,)?) => {$(
         $(#[$meta])*
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -200,7 +211,7 @@ doctor_identifier!(
 /// The `family` records which audited input surface produced the evidence, so
 /// a finding may cross-cite evidence from more than one family without losing
 /// provenance.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DoctorEvidenceRefV1 {
     family: DoctorFindingFamilyV1,
     reference: DoctorEvidenceReferenceV1,
@@ -226,7 +237,7 @@ impl DoctorEvidenceRefV1 {
 }
 
 /// A bounded, human-readable coverage statement plus its completeness.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorCoverageStatementV1 {
     completeness: DoctorCoverageCompletenessV1,
     statement: String,
@@ -276,7 +287,7 @@ impl DoctorCoverageStatementV1 {
 /// Doctor never repairs directly; it names the owning application operation
 /// and whether a preview or action is offered. The caller invokes that owning
 /// operation through its normal admitted path.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorRemediationRefV1 {
     owning_operation: DoctorOwningOperationRefV1,
     kind: DoctorRemediationKindV1,
@@ -314,7 +325,7 @@ impl DoctorRemediationRefV1 {
 /// owner-supplied remediation. Construction enforces the Plan 09 §PR14
 /// invariants that keep unknown/partial evidence from collapsing into a healthy
 /// or clean result.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorFindingV1 {
     family: DoctorFindingFamilyV1,
     state: DoctorEvidenceStateV1,

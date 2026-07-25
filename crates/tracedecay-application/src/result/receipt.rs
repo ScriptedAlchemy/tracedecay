@@ -1,5 +1,6 @@
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{ActorId, ManifestDigest, RetrievalAnchorId, UtcMicros};
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
@@ -11,7 +12,7 @@ use super::AuthorityReceipt;
 
 macro_rules! receipt_id {
     ($($name:ident => $field:literal),+ $(,)?) => {$(
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -65,7 +66,9 @@ receipt_id!(
 );
 
 /// Exact stage at which cancellation or deadline state was observed.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CancellationStage {
     BeforeAdmission,
@@ -77,7 +80,7 @@ pub enum CancellationStage {
     AfterCommit,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CancellationObservation {
     pub stage: CancellationStage,
@@ -85,7 +88,7 @@ pub struct CancellationObservation {
 }
 
 /// Bounded work accounting supplied by an owning port or transaction.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OperationBudgetUsage {
     pub units_consumed: u64,
@@ -94,7 +97,9 @@ pub struct OperationBudgetUsage {
 }
 
 /// Terminal state after an operation has been admitted.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationTermination {
     Completed,
@@ -107,7 +112,7 @@ pub enum OperationTermination {
 
 /// Canonical operation evidence. An admitted failure remains represented here
 /// rather than being replaced by a transport exception.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OperationReceipt {
     pub started_at: UtcMicros,
@@ -155,7 +160,9 @@ impl OperationReceipt {
 }
 
 /// Durable effect receipt terminal state.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectTermination {
     Completed,
@@ -234,7 +241,7 @@ impl<T> PreviewResult<T> {
 
 /// Durable effect proof. It records identities and receipts, never credentials
 /// or arbitrary command text.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EffectReceipt {
     pub operation: UseCaseId,

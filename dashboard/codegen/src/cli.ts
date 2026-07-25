@@ -1,36 +1,62 @@
-/**
- * Contracts codegen CLI (transitional preview harness).
- *
- *   tsx codegen/src/cli.ts generate   # write the preview under codegen/.preview/
- *   tsx codegen/src/cli.ts --check    # fail (exit 1) if the preview is stale
- *
- * The live wire boundary (`src/contracts/generated.ts`) is hand-maintained
- * against `src/dashboard/read_model.rs` today; this CLI emits a preview so the
- * generated shape can be diffed without overwriting the hand-maintained file.
- * `--check` regenerates in memory and compares byte-for-byte against the
- * preview, so a schema change that was not regenerated is caught. When the real
- * schemars export lands, repoint `OUTPUT_FILES` back at `src/contracts/*`.
- */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+/** Generate/check the live frontend contract from fresh Rust schemars output. */
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { generateContracts, type JsonSchema } from "./generate.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = resolve(HERE, "..", "..");
-const SCHEMA_DIR = resolve(HERE, "..", "schemas");
+const REPOSITORY_ROOT = resolve(DASHBOARD_ROOT, "..");
+const SCHEMA_OUTPUT_ENV = "TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT";
 
-function loadBundles(): JsonSchema[] {
-  const files = readdirSync(SCHEMA_DIR)
-    .filter((f) => f.endsWith(".schema.json"))
-    .sort();
-  return files.map((f) => JSON.parse(readFileSync(join(SCHEMA_DIR, f), "utf8")) as JsonSchema);
+function exportRustBundle(): JsonSchema {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "tracedecay-dashboard-contracts-"));
+  const output = join(temporaryDirectory, "dashboard.schema.json");
+  try {
+    const result = spawnSync(
+      "cargo",
+      [
+        "test",
+        "--quiet",
+        "--test",
+        "dashboard_contract_schema_export",
+        "--",
+        "--ignored",
+        "--exact",
+        "writes_dashboard_contract_schema",
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        env: {
+          ...process.env,
+          TRACEDECAY_SKIP_DASHBOARD_BUILD: "1",
+          [SCHEMA_OUTPUT_ENV]: output,
+        },
+        stdio: "inherit",
+      },
+    );
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(`Rust contract schema export failed with status ${result.status ?? "unknown"}`);
+    }
+    return JSON.parse(readFileSync(output, "utf8")) as JsonSchema;
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 }
 
 function run(): number {
   const mode = process.argv.includes("--check") ? "check" : "generate";
-  const bundles = loadBundles();
-  const { files } = generateContracts(bundles);
+  const { files } = generateContracts([exportRustBundle()]);
 
   if (mode === "check") {
     let stale = false;
