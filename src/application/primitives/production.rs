@@ -20,8 +20,8 @@ use tracedecay_application::retrieval::{
 };
 use tracedecay_application::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceCoverage,
-    EvidenceDomain, FreshnessState, Omission, OmissionReason, OperationBudgetUsage, PageState,
-    RequestContext, ResolvedScope, RetrievalEvidence, TemporalState,
+    EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage,
+    PageState, RequestAdmission, RequestContext, ResolvedScope, RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
@@ -66,9 +66,12 @@ use crate::mcp::tools::handlers::git::{
     affected_test_proximity, collect_affected_test_files, rank_affected_tests,
 };
 use crate::mcp::tools::handlers::grep::{ScanResult, build_matcher, scan_tree};
+use crate::query::temporal::cursor::{
+    CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
+};
 use crate::query::temporal::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
-    TemporalWatermarks,
+    BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
+    TemporalSnapshotRequest, TemporalWatermarks,
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::tracedecay::TraceDecay;
@@ -183,23 +186,35 @@ fn diagnostics_result(
     generation_id: CodeGenerationId,
     watermark_digest: ManifestDigest,
     diagnostics: Vec<DiagnosticPrimitiveRecord>,
-    complete: bool,
-    next_cursor: Option<String>,
+    total: u64,
+    next_cursor: Option<OpaqueCursor>,
     finished_at: UtcMicros,
 ) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
     let returned = diagnostics.len() as u64;
-    let completeness = if complete {
-        CoverageCompleteness::Complete
-    } else {
-        CoverageCompleteness::Partial
-    };
+    let next_cursor_text = next_cursor
+        .as_ref()
+        .map(|cursor| cursor.as_str().to_owned());
+    let mut page = PageState::first_page(
+        SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
+        1,
+        Some(total),
+        returned,
+    )
+    .unwrap_or_else(|_| panic!("diagnostic result page"));
+    page.cursor = next_cursor;
+    page.expires_at = page.cursor.as_ref().and_then(|_| {
+        finished_at
+            .0
+            .checked_add(CURSOR_LIFETIME_MICROS)
+            .map(UtcMicros)
+    });
     let evidence = RetrievalEvidence {
         payload: Some(DiagnosticsPrimitiveResult {
             generation_id: generation_id.clone(),
             clean_generation: true,
-            findings_cleared: complete && returned == 0,
+            findings_cleared: total == 0,
             diagnostics,
-            next_cursor,
+            next_cursor: next_cursor_text,
         }),
         temporal: TemporalState {
             source_generation: Some(generation_id),
@@ -209,40 +224,127 @@ fn diagnostics_result(
         evidence_authorities: Vec::new(),
         coverage: EvidenceCoverage {
             requested_domains: vec![EvidenceDomain::Diagnostic],
-            visited: complete.then_some(returned),
-            eligible: complete.then_some(returned),
+            visited: Some(total),
+            eligible: Some(total),
             returned,
-            completeness,
+            completeness: CoverageCompleteness::Complete,
             domains: vec![CoverageDomainState {
                 domain: EvidenceDomain::Diagnostic,
-                completeness,
+                completeness: CoverageCompleteness::Complete,
             }],
         },
-        omissions: (!complete)
-            .then_some(Omission {
-                domain: EvidenceDomain::Diagnostic,
-                count: 0,
-                reason: OmissionReason::Budget,
-            })
-            .into_iter()
-            .collect(),
+        omissions: Vec::new(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(
-            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
-            1,
-            complete.then_some(returned),
-            returned,
-        )
-        .unwrap_or_else(|_| panic!("diagnostic result page")),
+        page,
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
     };
-    if complete {
-        RetrievalPortOutcome::Completed(evidence)
-    } else {
-        RetrievalPortOutcome::Partial(evidence)
+    RetrievalPortOutcome::Completed(evidence)
+}
+
+const DIAGNOSTIC_CURSOR_LANE_WORKSPACE: &str = "workspace";
+
+struct AuthenticatedDiagnosticCursorAuthorityV1 {
+    key: SignedCursorKeyRefV1,
+    configuration_digest: ManifestDigest,
+    authenticator: Arc<dyn SessionCursorAuthenticator>,
+}
+
+impl AuthenticatedDiagnosticCursorAuthorityV1 {
+    fn snapshot(
+        &self,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+    ) -> Result<TemporalExecutionSnapshot, ()> {
+        if context.validate().is_err()
+            || context.admission_at(now_observed()) != RequestAdmission::Admitted
+        {
+            return Err(());
+        }
+        let request_digest = canonical_sha256(&(
+            "tracedecay.diagnostics.cursor.v1",
+            context.actor(),
+            context.grant().revision,
+            &context.grant().digest,
+            &context.grant().issuer,
+            &context.grant().allowed_capabilities,
+            &context.grant().allowed_use_cases,
+            context.grant().disclosure,
+            generation.as_str(),
+            lane,
+        ))
+        .map_err(|_| ())?;
+        let request = TemporalSnapshotRequest::new(
+            SessionId::new("session.daemon.diagnostics").map_err(|_| ())?,
+            context.scope().scope_digest.as_str(),
+            request_digest.as_str(),
+            context.grant().digest.as_str(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::Occurrence,
+        )
+        .map_err(|_| ())?;
+        TemporalExecutionSnapshot::new_authorized(
+            request,
+            TemporalWatermarks {
+                generation: 1,
+                source: 1,
+                projection: 1,
+                index: 1,
+                summary: 1,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest: BindingDigest::new(
+                    "configuration_digest",
+                    self.configuration_digest.as_str(),
+                )
+                .map_err(|_| ())?,
+            },
+            Some(self.key.clone()),
+            ValidatedAuthorization::Authorized,
+        )
+        .map_err(|_| ())
+    }
+
+    fn decode(
+        &self,
+        encoded: &str,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+    ) -> Result<DiagnosticQueryCursor, ()> {
+        let snapshot = self.snapshot(context, generation, lane)?;
+        let sort_key =
+            verify_cursor(encoded, &snapshot, self.authenticator.as_ref()).map_err(|_| ())?;
+        if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
+            return Err(());
+        }
+        DiagnosticQueryCursor::decode(&format!("dq1:{}", sort_key.stable_id)).map_err(|_| ())
+    }
+
+    fn encode(
+        &self,
+        cursor: &DiagnosticQueryCursor,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+    ) -> Result<OpaqueCursor, ()> {
+        let snapshot = self.snapshot(context, generation, lane)?;
+        let encoded = encode_cursor(
+            &snapshot,
+            &StableSortKey {
+                normalized_score_micros: 0,
+                knowledge_at_micros: 0,
+                stable_id: cursor.anchor().to_owned(),
+            },
+            self.authenticator.as_ref(),
+        )
+        .map_err(|_| ())?;
+        OpaqueCursor::new(encoded).map_err(|_| ())
     }
 }
 
@@ -779,20 +881,23 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
     database: Database,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
-    pub fn new(
+    pub(crate) fn new(
         graph: Arc<TraceDecay>,
         database: Database,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+        diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
     ) -> Self {
         Self {
             graph,
             database,
             code_index,
             diagnostic_identity,
+            diagnostic_cursors,
         }
     }
 }
@@ -1098,8 +1203,16 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
             let selected_file = document_path
                 .as_deref()
                 .and_then(|path| identity.file(path).map(|(file, _)| file));
+            let cursor_lane = selected_file
+                .map(|file| file.as_str())
+                .unwrap_or(DIAGNOSTIC_CURSOR_LANE_WORKSPACE);
             let cursor = match request.cursor.as_deref() {
-                Some(cursor) => match DiagnosticQueryCursor::decode(cursor) {
+                Some(cursor) => match self.diagnostic_cursors.decode(
+                    cursor,
+                    context.request,
+                    &current_generation,
+                    cursor_lane,
+                ) {
                     Ok(cursor) => Some(cursor),
                     Err(_) => {
                         return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
@@ -1124,17 +1237,27 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
             let Ok(page) = page else {
                 return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
             };
-            let complete = match page.coverage {
-                DiagnosticQueryCoverage::Complete => true,
-                DiagnosticQueryCoverage::Truncated => false,
+            match page.coverage {
+                DiagnosticQueryCoverage::Complete | DiagnosticQueryCoverage::Truncated => {}
                 DiagnosticQueryCoverage::StoreUnavailable { .. } => {
                     return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
                 }
-            };
+            }
             let next_cursor = page
                 .next_cursor
                 .as_ref()
-                .map(|cursor| cursor.encode().to_owned());
+                .map(|cursor| {
+                    self.diagnostic_cursors.encode(
+                        cursor,
+                        context.request,
+                        &current_generation,
+                        cursor_lane,
+                    )
+                })
+                .transpose();
+            let Ok(next_cursor) = next_cursor else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
             let mut diagnostics = Vec::new();
             for diagnostic in page.records {
                 if diagnostic.repository != *identity.repository()
@@ -1162,18 +1285,11 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     });
                 }
             }
-            diagnostics.sort_by(|left, right| {
-                left.logical_path.cmp(&right.logical_path).then(
-                    left.diagnostic
-                        .diagnostic_anchor
-                        .cmp(&right.diagnostic.diagnostic_anchor),
-                )
-            });
             diagnostics_result(
                 identity.generation_id().clone(),
                 current_index.snapshot_digest,
                 diagnostics,
-                complete,
+                page.total as u64,
                 next_cursor,
                 finished_at,
             )
@@ -1748,12 +1864,12 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
         .map_or(1, |stats| stats.node_count)
         .max(1);
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
-        key,
-        configuration_digest,
+        key: key.clone(),
+        configuration_digest: configuration_digest.clone(),
         watermark,
     });
     let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
-        AuthenticatedSymbolGraphCursorAdapter::new(snapshots, authenticator),
+        AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
     );
     let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
         Arc::new(ProductionManagedTestRunCurrentScope {
@@ -1765,6 +1881,11 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
         database.clone(),
         code_index,
         diagnostic_identity,
+        AuthenticatedDiagnosticCursorAuthorityV1 {
+            key,
+            configuration_digest,
+            authenticator,
+        },
     ));
     open_pr12_primitive_project_runtime(
         database,
@@ -1880,7 +2001,8 @@ mod affected_tests_tests {
     use tracedecay_domain::{
         ActorId, CodeGenerationId, ComponentVersion, ContentDigest, FileOccurrenceId,
         GenerationTestAttributionV1, ProjectId, ProviderEvaluationStateV1, RefId, RepositoryId,
-        SymbolOccurrenceId, TestAttributionEvidenceClassV1,
+        SessionCursorKeyIdV1, SessionCursorVersionV1, SymbolOccurrenceId,
+        TestAttributionEvidenceClassV1,
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -1895,6 +2017,7 @@ mod affected_tests_tests {
         TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
         TestAttributionWatermarkV1,
     };
+    use crate::query::temporal::ports::InMemoryCursorAuthenticator;
 
     struct AttributionFixture {
         calls: AtomicUsize,
@@ -1963,6 +2086,134 @@ mod affected_tests_tests {
             true,
         );
         (request, operation, scope)
+    }
+
+    fn cursor_context(project: &str) -> RequestContext {
+        let scope = ResolvedScope::new(
+            ProjectId::new(project).expect("project"),
+            RepositoryId::new("repository.diagnostics").expect("repository"),
+            WorktreeId::new("worktree.diagnostics").expect("worktree"),
+            Some(RefId::new("refs/heads/diagnostics").expect("reference")),
+        )
+        .expect("scope");
+        let capability = CapabilityId::new("capability.diagnostics").expect("capability");
+        let use_case = UseCaseId::new("use-case.diagnostics").expect("use case");
+        let expires_at = UtcMicros(i64::MAX / 2);
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.diagnostics").expect("grant"),
+            1,
+            digest('a'),
+            ActorId::new("actor.diagnostics.issuer").expect("issuer"),
+            UtcMicros(1),
+            expires_at,
+            scope.clone(),
+            BTreeSet::from([capability]),
+            BTreeSet::from([use_case]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        RequestContext::new(
+            ActorId::new("actor.diagnostics.requester").expect("actor"),
+            scope,
+            grant,
+            RequestId::new("request.diagnostics").expect("request"),
+            Deadline::new(expires_at).expect("deadline"),
+            CancellationContext::active("cancel.diagnostics").expect("cancellation"),
+        )
+        .expect("context")
+    }
+
+    #[test]
+    fn diagnostic_cursor_binds_scope_generation_and_lane() {
+        let key = SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new("cursor.diagnostics").expect("key"),
+            version: SessionCursorVersionV1::new(1).expect("version"),
+        };
+        let authenticator =
+            InMemoryCursorAuthenticator::new(key.clone(), vec![7_u8; 32]).expect("authenticator");
+        let authority = AuthenticatedDiagnosticCursorAuthorityV1 {
+            key,
+            configuration_digest: digest('c'),
+            authenticator: Arc::new(authenticator),
+        };
+        let context = cursor_context("project.diagnostics");
+        let current_generation = generation("generation.diagnostics.1");
+        let query_cursor =
+            DiagnosticQueryCursor::decode("dq1:anchor.diagnostic.1").expect("query cursor");
+        let encoded = authority
+            .encode(
+                &query_cursor,
+                &context,
+                &current_generation,
+                DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+            )
+            .expect("encode");
+
+        assert_eq!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &context,
+                    &current_generation,
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                )
+                .expect("decode"),
+            query_cursor
+        );
+        assert!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &cursor_context("project.diagnostics.other"),
+                    &current_generation,
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                )
+                .is_err()
+        );
+        assert!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &context,
+                    &generation("generation.diagnostics.2"),
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                )
+                .is_err()
+        );
+        assert!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &context,
+                    &current_generation,
+                    "file.diagnostics",
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn diagnostic_continuation_is_complete_coverage_not_partial_evidence() {
+        let cursor = OpaqueCursor::new("opaque.diagnostics.next").expect("cursor");
+        let outcome = diagnostics_result(
+            generation("generation.diagnostics.1"),
+            digest('b'),
+            Vec::new(),
+            2,
+            Some(cursor.clone()),
+            UtcMicros(100),
+        );
+        let RetrievalPortOutcome::Completed(evidence) = outcome else {
+            panic!("bounded pagination must complete");
+        };
+        assert_eq!(
+            evidence.coverage.completeness,
+            CoverageCompleteness::Complete
+        );
+        assert_eq!(evidence.coverage.eligible, Some(2));
+        assert_eq!(evidence.page.cursor, Some(cursor));
+        assert!(evidence.page.expires_at.is_some());
+        assert!(!evidence.payload.expect("payload").findings_cleared);
     }
 
     fn request(generation: CodeGenerationId) -> AffectedTestsRequest {

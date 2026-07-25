@@ -8,8 +8,8 @@ use tower::ServiceExt;
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CancellationSignal,
     CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    OperationBudgetUsage, OperationReceipt, PageRequest, RequestContext, RequestId, ResolvedScope,
-    ResultContractRef, SafeDiagnostic, StreamEvent,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest, RequestContext, RequestId,
+    ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
@@ -1252,8 +1252,35 @@ fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
         .unwrap(),
         json!({"scope": {"file": "src/lib.rs"}, "maximum_diagnostics": 1000, "cursor": null})
     );
+    assert_eq!(
+        normalize_application_tool_args(
+            "tracedecay_diagnostics",
+            json!({"maximum_diagnostics": 25, "cursor": "opaque"}),
+        )
+        .unwrap(),
+        json!({"scope": "workspace", "maximum_diagnostics": 25, "cursor": "opaque"})
+    );
     assert!(
         normalize_application_tool_args("tracedecay_diagnostics", json!({"scope": "package"}),)
             .is_err()
+    );
+
+    let page = PageRequest::new(25, Some(OpaqueCursor::new("opaque-http").expect("cursor")))
+        .expect("page");
+    assert_eq!(
+        super::apply_http_page_to_surface_body(
+            ApplicationSurfaceOperation::DiagnosticsRead,
+            json!({
+                "scope": "workspace",
+                "maximum_diagnostics": 999,
+                "cursor": "body-cursor"
+            }),
+            &page,
+        ),
+        json!({
+            "scope": "workspace",
+            "maximum_diagnostics": 25,
+            "cursor": "opaque-http"
+        })
     );
 }
