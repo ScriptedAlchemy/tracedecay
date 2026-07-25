@@ -49,7 +49,12 @@ fn dashboard_memory_status_does_not_wait_for_the_writer_lane() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
-        let cg = TraceDecay::open(&fixture.project_root)
+        let cg = fixture
+            .host_runtime
+            .open_project_graph_for_test(
+                &fixture.project_root,
+                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+            )
             .await
             .unwrap_or_else(|error| panic!("reopen dashboard fixture project: {error}"));
         let writer = cg
@@ -112,7 +117,12 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             .await
             .unwrap();
 
-        let cg = TraceDecay::open(&fixture.project_root)
+        let cg = fixture
+            .host_runtime
+            .open_project_graph_for_test(
+                &fixture.project_root,
+                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+            )
             .await
             .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));
         let applied_record = apply_dashboard_automation_fact(
@@ -724,8 +734,7 @@ fn lcm_serves_project_session_store_without_global_override() {
         let _env_guard = EnvVarGuard::unset(GLOBAL_DB_ENV);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
-        let session_store = open_project_session_store(&project_root).await;
+        let (cg, session_store) = setup_project(&project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
 
         let port = pick_free_port();
@@ -803,9 +812,8 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let cg = setup_project(&project_root).await;
+        let (cg, session_store) = setup_project(&project_root).await;
         // The project store has rows; the overridden global accounting store has none.
-        let session_store = open_project_session_store(&project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
 
         let port = pick_free_port();

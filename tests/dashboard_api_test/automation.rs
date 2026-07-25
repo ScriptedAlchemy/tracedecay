@@ -18,12 +18,17 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_lightweight(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
@@ -333,12 +338,17 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_lightweight(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, config) = patch_json_body(
@@ -468,7 +478,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let fixture = seed_memory_fixture(&cg).await;
         let fake_codex = FakeCodexAppServer::new_memory_curator(fixture.near_duplicate_fact_id);
         let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex.bin);
@@ -476,7 +486,12 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_lightweight(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, config) = patch_json_body(
@@ -708,7 +723,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let run_id = "artifact_api_run";
         let created_at = "2026-06-24T00:00:00Z";
@@ -769,7 +784,12 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_lightweight(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let artifact_url = format!("{base_url}/api/automation/runs/{run_id}/artifacts");
@@ -846,7 +866,7 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let alive_record = apply_dashboard_automation_fact(
             &cg,
             "run_outcomes_alive",
@@ -864,7 +884,12 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_lightweight(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, outcomes) = get_json(&agent, &format!("{base_url}/api/automation/outcomes"));

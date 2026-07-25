@@ -170,15 +170,43 @@ pub(crate) fn write_file(path: &Path, content: &str) {
     }
 }
 
-pub(crate) async fn setup_project(project_root: &Path) -> TraceDecay {
+pub(crate) async fn setup_project(
+    project_root: &Path,
+) -> (TraceDecay, Arc<HostAdmissionTestRuntimeV1>) {
     write_file(
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
     );
-    match TraceDecay::init(project_root).await {
-        Ok(cg) => cg,
-        Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
-    }
+    let project_id = tracedecay::storage::read_repository_identity_marker(project_root)
+        .unwrap_or_else(|error| panic!("read dashboard fixture identity: {error}"))
+        .and_then(|marker| ProjectId::new(marker.project_id).ok())
+        .unwrap_or_else(|| {
+            let suffix = project_root
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("project")
+                .replace(|character: char| !character.is_ascii_alphanumeric(), "_");
+            ProjectId::new(format!("dashboard_fixture_{suffix}"))
+                .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
+        });
+    let runtime = Arc::new(
+        HostAdmissionTestRuntimeV1::project(
+            tracedecay::storage::default_profile_root()
+                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
+            project_root,
+            project_id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
+    );
+    let graph = runtime
+        .initialize_project_graph_for_test(
+            project_root,
+            tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("initialize dashboard fixture graph: {error}"));
+    (graph, runtime)
 }
 
 pub(crate) async fn open_dashboard_host_runtime(
@@ -708,12 +736,11 @@ async fn start_dashboard_fixture_with_options(
     // and the dashboard server's startup LCM resolve + catch-up ingest all
     // open existing DBs instead of each paying a full schema creation (slow
     // on Windows).
-    let cg = setup_project(&project_root).await;
+    let (cg, host_runtime) = setup_project(&project_root).await;
     if seed_memory {
         seed_memory_fixture(&cg).await;
     }
 
-    let host_runtime = open_dashboard_host_runtime(&cg).await;
     let project_graphs = dashboard::DashboardTestProjectGraphsV1::default();
     if seed_lcm {
         seed_lcm_fixture(&host_runtime, &project_root).await;

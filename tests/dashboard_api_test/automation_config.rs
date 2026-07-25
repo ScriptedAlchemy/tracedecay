@@ -28,7 +28,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             .save()
             .expect("global user config should save");
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let sidecar = cg
             .store_layout()
             .dashboard_root
@@ -36,7 +36,12 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            Arc::clone(&host_runtime),
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
@@ -256,12 +261,21 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
         );
         server.stop();
 
-        let cg = TraceDecay::open(&project_root)
+        let cg = host_runtime
+            .open_project_graph_for_test(
+                &project_root,
+                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+            )
             .await
             .unwrap_or_else(|err| panic!("failed to reopen fixture project: {err}"));
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
         let (status, restored) = get_json(
             &agent,
@@ -318,7 +332,7 @@ fn automation_config_patch_does_not_rewrite_invalid_project_sidecar() {
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let sidecar = cg
             .store_layout()
             .dashboard_root
@@ -330,7 +344,12 @@ fn automation_config_patch_does_not_rewrite_invalid_project_sidecar() {
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, rejected) = patch_json_body(

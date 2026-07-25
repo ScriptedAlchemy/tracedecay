@@ -282,11 +282,16 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         let _home_guard = EnvVarGuard::set("HOME", &home);
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let skills_url = format!("{base_url}/api/automation/skills");
@@ -438,11 +443,16 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
         let _home_guard = EnvVarGuard::set("HOME", &home);
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let draft = serde_json::json!({
@@ -535,11 +545,16 @@ fn managed_skill_dashboard_api_controls_staged_updates() {
         let _home_guard = EnvVarGuard::set("HOME", &home);
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let draft = serde_json::json!({

@@ -7,13 +7,17 @@ use crate::common::{
 use crate::dashboard_api_support::write_file;
 use serde_json::Value;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
+use tracedecay_domain::ProjectId;
 
 struct DashboardFixture {
     _tmp: TempDir,
     _env_guard: EnvVarGuard,
+    _data_dir_guard: EnvVarGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
 }
@@ -52,15 +56,34 @@ fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: 
     }
 }
 
-async fn setup_project(project_root: &Path) -> TraceDecay {
+async fn setup_project(
+    project_root: &Path,
+    profile_root: &Path,
+) -> (TraceDecay, std::sync::Arc<HostAdmissionTestRuntimeV1>) {
     write_file(
         &project_root.join("src/dashboard/mod.rs"),
         "pub fn dashboard() {}\npub fn route_graph() {}\npub fn render_graph() {}\n",
     );
-    match TraceDecay::init(project_root).await {
-        Ok(cg) => cg,
-        Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
-    }
+    let runtime = std::sync::Arc::new(
+        HostAdmissionTestRuntimeV1::project(
+            profile_root,
+            project_root,
+            ProjectId::new("dashboard_graph_fixture").expect("project identity"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("open dashboard graph authority: {error}")),
+    );
+    let graph = runtime
+        .initialize_project_graph_for_test(
+            project_root,
+            tracedecay::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root.to_path_buf()),
+                global_db_path: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("initialize dashboard graph fixture: {error}"));
+    (graph, runtime)
 }
 
 /// Extra node with no edges, for exercising the default-mode prune/fill rules.
@@ -169,13 +192,15 @@ async fn start_dashboard_fixture_with(with_orphan: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
+    let profile_root = tmp.path().join("profile").join(".tracedecay");
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
     // Pre-create the global store from the cached empty template so init and
     // dashboard startup open an existing DB instead of paying a full schema
     // creation (slow on Windows).
     write_empty_global_db_schema(&global_db_path).await;
 
-    let cg = setup_project(&project_root).await;
+    let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
     seed_graph_fixture(&cg).await;
     if with_orphan {
         seed_orphan_node(&cg).await;
@@ -183,10 +208,17 @@ async fn start_dashboard_fixture_with(with_orphan: bool) -> DashboardFixture {
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
+    let server_graph = std::sync::Arc::new(cg);
     let server = tokio::spawn(async move {
-        let _ =
-            dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, std::future::pending())
-                .await;
+        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+            server_graph,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            "127.0.0.1",
+            port,
+            std::future::pending(),
+        )
+        .await;
     });
 
     let agent = http_agent();
@@ -195,6 +227,7 @@ async fn start_dashboard_fixture_with(with_orphan: bool) -> DashboardFixture {
     DashboardFixture {
         _tmp: tmp,
         _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
         base_url,
         server,
     }

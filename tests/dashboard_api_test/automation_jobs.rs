@@ -20,12 +20,17 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
         let missing_codex_bin = tmp_root.join("missing-codex");
         let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &missing_codex_bin);
 
-        let cg = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server(cg, port);
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
         wait_for_dashboard(&agent, &base_url).await;
 
         let jobs_url = format!("{base_url}/api/automation/jobs");
