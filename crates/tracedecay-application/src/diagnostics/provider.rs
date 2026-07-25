@@ -15,7 +15,7 @@ use tracedecay_tool_catalog::CapabilityId;
 
 use crate::ResolvedScope;
 use crate::error::ApplicationContractError;
-use crate::policy::{PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1};
+use crate::policy::{PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1};
 use crate::result::{CoverageCompleteness, FreshnessState, PolicyDecisionRef};
 
 const PROVIDER_IDENTITY_DIGEST_DOMAIN: &str = "tracedecay.application.provider-identity.v1";
@@ -318,11 +318,7 @@ impl AnalyzerAdmittedDiagnosticProviderV1 {
                 field: "analyzer policy application scope",
             });
         }
-        let evaluation = composition.admit_analyzer(
-            PolicyConsumerV1::AnalyzerAdmission,
-            context,
-            &admission_input,
-        )?;
+        let evaluation = composition.admit_analyzer(context, &admission_input)?;
         Self::from_plan20_plan35_snapshot(identity, admission_input, evaluation.decision)
     }
 

@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay_application::feedback::feedback_surface_operation;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
-    PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1, RequestContext,
-    RequestId, ResolvedScope, git_index_handler_descriptors,
+    PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1, PolicyEvidenceAgreementV1,
+    PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1, RequestContext, RequestId, ResolvedScope,
+    git_index_handler_descriptors,
 };
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
 use tracedecay_domain::{
@@ -87,6 +87,20 @@ fn watermark(shard: &str, sequence: u64) -> VectorWatermark {
     }
 }
 
+fn matching_horizon(state: TruthSourceStateV1) -> PolicyEvidenceHorizonV1 {
+    PolicyEvidenceHorizonV1 {
+        local_session: PolicyEvidenceFrontierV1 {
+            watermark: watermark("local-session", 11),
+            state,
+        },
+        live_git: PolicyEvidenceFrontierV1 {
+            watermark: watermark("live-git", 7),
+            state,
+        },
+        agreement: PolicyEvidenceAgreementV1::Agree,
+    }
+}
+
 #[test]
 fn production_composition_preserves_static_unavailability_for_policy() {
     let composition = PolicyEvaluatorCompositionV1::from_application_catalog().unwrap();
@@ -129,16 +143,15 @@ fn production_composition_preserves_static_unavailability_for_policy() {
         operation.use_case_id().clone(),
     );
     let evaluation = operation
-        .evaluate_policy_route(
+        .evaluate_local_live_policy(
             &composition,
-            PolicyConsumerV1::CapabilityRouting,
             &context,
             CapabilityAvailabilityV1::Available,
             ScopeMatchV1::Match,
             TruthSourceStateV1::Fresh,
             CapabilityEffectClassV1::GitIndexStage,
             TruthFreshnessRequirementV1::Fresh,
-            None,
+            matching_horizon(TruthSourceStateV1::Fresh),
             UtcMicros(10),
         )
         .unwrap();
@@ -175,16 +188,15 @@ fn callable_route_preserves_runtime_unavailability_and_snapshot_digests() {
         ),
     ] {
         let evaluation = operation
-            .evaluate_policy_route(
+            .evaluate_local_live_policy(
                 &composition,
-                PolicyConsumerV1::RetrievalRouting,
                 &context,
                 availability,
                 ScopeMatchV1::Match,
                 TruthSourceStateV1::Fresh,
                 CapabilityEffectClassV1::Read,
                 TruthFreshnessRequirementV1::Fresh,
-                None,
+                matching_horizon(TruthSourceStateV1::Fresh),
                 UtcMicros(10),
             )
             .unwrap();
@@ -217,16 +229,15 @@ fn callable_route_returns_typed_denial_for_a_missing_operation_grant() {
     );
 
     let evaluation = operation
-        .evaluate_policy_route(
+        .evaluate_local_live_policy(
             &composition,
-            PolicyConsumerV1::RetrievalRouting,
             &context,
             CapabilityAvailabilityV1::Available,
             ScopeMatchV1::Match,
             TruthSourceStateV1::Fresh,
             CapabilityEffectClassV1::Read,
             TruthFreshnessRequirementV1::Fresh,
-            None,
+            matching_horizon(TruthSourceStateV1::Fresh),
             UtcMicros(10),
         )
         .unwrap();
@@ -286,12 +297,7 @@ fn local_live_disagreement_preserves_both_independent_watermarks() {
     };
 
     let evaluation = composition
-        .route(
-            PolicyConsumerV1::LocalLiveCorrelation,
-            &context,
-            &request,
-            Some(horizon.clone()),
-        )
+        .route_local_live(&context, &request, horizon.clone())
         .unwrap();
 
     assert_eq!(
@@ -330,7 +336,11 @@ fn routing_rejects_a_substituted_plan20_configuration_snapshot() {
 
     assert!(
         composition
-            .route(PolicyConsumerV1::RetrievalRouting, &context, &request, None,)
+            .route_local_live(
+                &context,
+                &request,
+                matching_horizon(TruthSourceStateV1::Fresh),
+            )
             .is_err()
     );
 }
@@ -370,7 +380,11 @@ fn routing_returns_typed_cancellation_from_the_bound_request_authority() {
         .unwrap();
 
     let evaluation = composition
-        .route(PolicyConsumerV1::RetrievalRouting, &context, &request, None)
+        .route_local_live(
+            &context,
+            &request,
+            matching_horizon(TruthSourceStateV1::Fresh),
+        )
         .unwrap();
     assert_eq!(
         evaluation.decision.ordered_reason_codes,
