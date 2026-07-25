@@ -711,6 +711,7 @@ pub trait LspTestRunProjectionPort: Send + Sync {
         &self,
         root: AdmittedRoot,
         document_uri: Option<String>,
+        document_content_digest: Option<ContentDigest>,
     ) -> LspRuntimeFuture<ContextProjectionOutcome>;
 
     fn poll_changes(
@@ -751,10 +752,11 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
         &self,
         root: AdmittedRoot,
         document_uri: Option<String>,
+        document_content_digest: Option<ContentDigest>,
     ) -> LspRuntimeFuture<ContextProjectionOutcome> {
         let projection = self.clone();
         Box::pin(async move {
-            let scope = match projection
+            let mut scope = match projection
                 .project
                 .resolve(root.clone(), document_uri.clone())
                 .await
@@ -766,6 +768,9 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                     };
                 }
             };
+            if document_content_digest.is_some() {
+                scope.document_content_digest = document_content_digest;
+            }
             let current = ManagedTestRunCurrentScope {
                 root_uri: root.uri().to_owned(),
                 head_commit_id: Some(scope.head_commit_id.clone()),
@@ -875,8 +880,12 @@ impl ConcretePr12FeedbackLspSource {
         &self,
         root: AdmittedRoot,
         document_uri: Option<String>,
+        document_content_digest: Option<ContentDigest>,
     ) -> Result<CurrentFeedbackCycle, LspRuntimeFailure> {
-        let scope = self.scope.resolve(root, document_uri).await?;
+        let mut scope = self.scope.resolve(root, document_uri).await?;
+        if document_content_digest.is_some() {
+            scope.document_content_digest = document_content_digest;
+        }
         let observed_at = now_micros();
         let expires_at = self
             .runtime
@@ -1163,7 +1172,11 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 })
                 .await?;
             let current = source
-                .current_cycle(request.root.clone(), Some(request.document_uri.clone()))
+                .current_cycle(
+                    request.root.clone(),
+                    Some(request.document_uri.clone()),
+                    None,
+                )
                 .await?;
             let scope = current.scope;
             let cycle = current.result.cycle;
@@ -1219,12 +1232,20 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
         request: ContextProjectionRequest,
     ) -> LspRuntimeFuture<ContextProjectionOutcome> {
         if request.kind == ContextProjectionKind::test_run_results() {
-            return self.test_runs.snapshot(root, request.document_uri);
+            return self.test_runs.snapshot(
+                root,
+                request.document_uri,
+                request.document_content_digest,
+            );
         }
         let source = self.clone();
         Box::pin(async move {
             let current = match source
-                .current_cycle(root.clone(), request.document_uri.clone())
+                .current_cycle(
+                    root.clone(),
+                    request.document_uri.clone(),
+                    request.document_content_digest.clone(),
+                )
                 .await
             {
                 Ok(result) => result,
