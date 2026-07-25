@@ -13,7 +13,7 @@ fn debris_retention_enables_maintenance_without_orphan_gc() {
     retention.incident_debris_retention_days = Some(30);
     retention.compaction = None;
 
-    assert!(retention_maintenance_enabled(&retention, false));
+    assert!(retention_maintenance_enabled(&retention));
 }
 
 #[test]
