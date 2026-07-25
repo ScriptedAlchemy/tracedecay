@@ -181,46 +181,46 @@ export function CodePage() {
         ) : (
         <div className="flex h-full flex-col">
           <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
-            {subgraph.isPending ? (
-              <p className="p-6 text-center text-sm text-text-muted">
-                composing graph neighborhood…
-              </p>
-            ) : (
-              <>
-                <GraphCanvas
-                  nodes={canvasNodes}
-                  edges={canvasEdges}
-                  selectedId={selected?.id ?? null}
-                  onSelect={selectFromCanvas}
-                  height={300}
-                  canvasClassName="md:min-h-[400px]"
-                  activation={activationRef.current}
-                  encoding={{
-                    body: 'symbol',
-                    size: 'connectedness',
-                    hue: 'symbol kind',
-                    signal: 'search or click activation',
-                    relation: 'relation; activation thickens',
-                  }}
-                />
-                {/* Eighty nodes out of a hundred and eighteen thousand is not a
-                  * reading until the rule that picked them is stated: "the
-                  * busiest connected region" and "one symbol's neighbours" are
-                  * different claims about identically-shaped pictures. Both
-                  * branches are read off the endpoint's own `mode`. */}
-                <SubgraphCaption
-                  payload={
-                    subgraph.data?.outcome === 'ok' ? subgraph.data.data : undefined
-                  }
-                  totalNodes={
-                    overview.data?.outcome === 'ok'
-                      ? overview.data.data.totals.nodes
-                      : null
-                  }
-                  seedLabel={selected ? displayName(selected) : null}
-                />
-              </>
-            )}
+            <LegacyBoundary
+              title="Code graph"
+              pending={subgraph.isPending}
+              result={subgraph.data}
+            >
+              {(payload) => (
+                <>
+                  <GraphCanvas
+                    nodes={canvasNodes}
+                    edges={canvasEdges}
+                    selectedId={selected?.id ?? null}
+                    onSelect={selectFromCanvas}
+                    height={300}
+                    canvasClassName="md:min-h-[400px]"
+                    activation={activationRef.current}
+                    encoding={{
+                      body: 'symbol',
+                      size: 'connectedness',
+                      hue: 'symbol kind',
+                      signal: 'search or click activation',
+                      relation: 'relation; activation thickens',
+                    }}
+                  />
+                  {/* Eighty nodes out of a hundred and eighteen thousand is not a
+                    * reading until the rule that picked them is stated: "the
+                    * busiest connected region" and "one symbol's neighbours" are
+                    * different claims about identically-shaped pictures. Both
+                    * branches are read off the endpoint's own `mode`. */}
+                  <SubgraphCaption
+                    payload={payload}
+                    totalNodes={
+                      overview.data?.outcome === 'ok'
+                        ? overview.data.data.totals.nodes
+                        : null
+                    }
+                    seedLabel={selected ? displayName(selected) : null}
+                  />
+                </>
+              )}
+            </LegacyBoundary>
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
         {submitted === '' ? (
