@@ -279,7 +279,7 @@ where
                 Err(_) => return SessionRefreshOutcome::Unavailable,
             }],
             self.configuration.projector_version(),
-            format!("sha256:{}", hex::encode(digests.join.as_bytes())),
+            format!("sha256:{}", hex::encode(digests.projection.as_bytes())),
         ) else {
             return SessionRefreshOutcome::Unavailable;
         };
@@ -351,7 +351,16 @@ where
             Ok(Ok(progress)) => progress,
             Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
             Err(outcome) => return outcome,
-        };
+        }
+        .map(|progress| {
+            let source_coverage = progress.source_coverage().and_then(|coverage| {
+                source_coverage_for_target(Some(coverage), &handle.target, progress.frontier())
+            });
+            match source_coverage {
+                Some(coverage) => progress.with_source_coverage(coverage),
+                None => progress,
+            }
+        });
         match self.read_receipt(context, handle).await {
             Ok(Some(receipt)) => return terminal_outcome(receipt),
             Ok(None) => {}
@@ -404,7 +413,7 @@ where
             .as_ref()
             .and_then(SessionRefreshProgressV1::source_coverage)
             .cloned()
-            .or_else(|| source_coverage_for_target(&handle.target, frontier))
+            .or_else(|| source_coverage_for_target(None, &handle.target, frontier))
         {
             Some(source_coverage) => request.with_source_coverage(source_coverage),
             None => request,
@@ -457,7 +466,15 @@ where
         )
         .await
         {
-            Ok(Ok(receipt)) => Ok(receipt),
+            Ok(Ok(receipt)) => Ok(receipt.map(|receipt| {
+                let source_coverage = receipt.source_coverage().and_then(|coverage| {
+                    source_coverage_for_target(Some(coverage), &handle.target, receipt.frontier())
+                });
+                match source_coverage {
+                    Some(coverage) => receipt.with_source_coverage(coverage),
+                    None => receipt,
+                }
+            })),
             Ok(Err(_)) => Err(SessionRefreshOutcome::Unavailable),
             Err(outcome) => Err(outcome),
         }
@@ -468,6 +485,7 @@ where
 struct RefreshDigests {
     caller: SessionRefreshDigest,
     join: SessionRefreshDigest,
+    projection: SessionRefreshDigest,
 }
 
 // The outcome enum carries receipts/handles by value; boxing its variants
@@ -560,10 +578,32 @@ const fn empty_coverage() -> TemporalCoverageCountsV1 {
 }
 
 fn source_coverage_for_target(
+    existing: Option<&SessionSourceCoverageReceiptV1>,
     target: &SessionRefreshTarget,
     frontier: SessionRefreshFrontierV1,
 ) -> Option<SessionSourceCoverageReceiptV1> {
     let request = SessionTemporalCoverageRequestV1::new(target.temporal_mode());
+    if let Some(existing) = existing {
+        let sources = existing
+            .sources()
+            .iter()
+            .map(|source| {
+                SessionSourceCoverageV1::new(
+                    source.source_id().clone(),
+                    source.observed_frontier(),
+                    source.committed_frontier(),
+                    source.target_watermark(),
+                    request.clone(),
+                    source.covered_intervals().to_vec(),
+                    source.missing_intervals().to_vec(),
+                    source.state(),
+                    source.reason().clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        return SessionSourceCoverageReceiptV1::new(request, sources).ok();
+    }
     let source = SessionSourceCoverageV1::from_frontiers(
         SessionSourceIdV1::new(format!(
             "{}:{}",
@@ -586,6 +626,25 @@ fn refresh_digests(
     grant: &SessionAuthorizationGrant,
     configuration: &SessionRefreshConfiguration,
 ) -> RefreshDigests {
+    let mut projection = CanonicalDigest::new("session-refresh-projection.v1");
+    digest_identity(&mut projection, context.identity());
+    projection.string("session", target.session_id.as_str());
+    projection.optional_string("source", target.source_scope.as_deref());
+    projection.u64(
+        "source_frontier",
+        target.frozen_frontier.committed_through(),
+    );
+    projection.u64("target_frontier", target.frozen_frontier.observed_through());
+    projection.string("projector_version", configuration.projector_version());
+    projection.string("config_version", configuration.config_version());
+    projection.bytes("capability_digest", grant.capability_digest().as_bytes());
+    projection.bytes("policy_digest", grant.policy_digest().as_bytes());
+    projection.bytes(
+        "configuration_digest",
+        grant.configuration_digest().as_bytes(),
+    );
+    let projection = projection.finish();
+
     let mut join = CanonicalDigest::new("session-refresh-join.v1");
     digest_identity(&mut join, context.identity());
     join.string("session", target.session_id.as_str());
@@ -617,6 +676,7 @@ fn refresh_digests(
     RefreshDigests {
         caller: caller.finish(),
         join,
+        projection,
     }
 }
 

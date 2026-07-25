@@ -179,11 +179,25 @@ fn target_with_mode(
     observed: u64,
     temporal_mode: TemporalModeV1,
 ) -> SessionRefreshTarget {
+    target_with_mode_and_grain(
+        session,
+        observed,
+        temporal_mode,
+        RetrievalGrainV1::LogicalMessage,
+    )
+}
+
+fn target_with_mode_and_grain(
+    session: &str,
+    observed: u64,
+    temporal_mode: TemporalModeV1,
+    grain: RetrievalGrainV1,
+) -> SessionRefreshTarget {
     SessionRefreshTarget::new(
         SessionId::new(session).unwrap(),
         Some("cursor".to_owned()),
         temporal_mode,
-        RetrievalGrainV1::LogicalMessage,
+        grain,
         frontier(observed, 0),
     )
     .unwrap()
@@ -308,6 +322,88 @@ async fn equivalent_requests_join_with_stable_digests_excluding_request_id() {
         joined.caller_idempotency_digest()
     );
     assert_eq!(wake.calls(), 2);
+}
+
+#[tokio::test]
+async fn query_only_mode_and_grain_share_one_projection_refresh() {
+    let temp = TempDir::new().unwrap();
+    let db = open_lcm_db(&temp).await;
+    let wake = RecordingWake::default();
+    let service = SessionRefreshService::new(
+        AllowAuthorizer,
+        session_temporal_store(&db),
+        wake.clone(),
+        configuration(),
+    );
+    let context = project_context(
+        "actor.cursor",
+        "request.refresh.query-only",
+        "profile.primary",
+        "project.tracedecay",
+        "root.project",
+    );
+    let session = "session.refresh.query-only";
+    let first = started(
+        service
+            .begin_or_join(
+                &context,
+                target_with_mode_and_grain(
+                    session,
+                    4,
+                    TemporalModeV1::Current,
+                    RetrievalGrainV1::LogicalMessage,
+                ),
+            )
+            .await,
+    );
+    let joined = handle(
+        service
+            .begin_or_join(
+                &context,
+                target_with_mode_and_grain(
+                    session,
+                    4,
+                    TemporalModeV1::Forensic,
+                    RetrievalGrainV1::EvidenceSpan,
+                ),
+            )
+            .await,
+    );
+
+    assert_eq!(joined.operation_id(), first.operation_id());
+    assert_ne!(joined.join_digest(), first.join_digest());
+    assert_eq!(wake.calls(), 2);
+
+    assert!(matches!(
+        service.cancel(&context, &joined).await,
+        SessionRefreshOutcome::Cancelled(receipt)
+            if receipt
+                .source_coverage()
+                .expect("forensic source coverage")
+                .request()
+                .mode()
+                == TemporalModeV1::Forensic
+    ));
+    assert!(matches!(
+        service.status(&context, &first).await,
+        SessionRefreshOutcome::Cancelled(receipt)
+            if receipt
+                .source_coverage()
+                .expect("current source coverage")
+                .request()
+                .mode()
+                == TemporalModeV1::Current
+    ));
+    assert!(matches!(
+        service.status(&context, &joined).await,
+        SessionRefreshOutcome::Cancelled(receipt)
+            if receipt
+                .source_coverage()
+                .expect("forensic source coverage")
+                .request()
+                .mode()
+                == TemporalModeV1::Forensic
+    ));
 }
 
 #[tokio::test]
