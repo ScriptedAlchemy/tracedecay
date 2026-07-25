@@ -22,9 +22,9 @@ import { AnyObject } from '../data/query/legacy.ts';
 import {
   EnvelopeSchema,
   StorageTelemetryPayloadSchema,
-  StorageFindingsPayloadSchema,
   DoctorFindingsPayloadSchema,
 } from '../contracts/wire.ts';
+import { ObservatoryStorageFindingsPayloadSchema } from './observatory/contracts.ts';
 import {
   ProjectContextPayloadSchema,
   ProjectsPayloadSchema,
@@ -564,9 +564,25 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(env.payload.stores.length).toBeGreaterThan(0);
   });
 
+  // Validated against Observatory's route contract, not the generated
+  // `StorageFindingsPayloadSchema`. That generated shape describes a
+  // `{ kinds, note }` payload, but `storage_findings_api.rs` serves a Doctor
+  // findings envelope with `payload.kind_statuses` — so the old assertion held
+  // the fixture to a shape no real response has, and NavRail's health dot,
+  // which parses this route, could never resolve anything but `unknown`.
+  // The replacement is strictly stronger: the full Doctor payload plus exactly
+  // five named producers, each with a real source state and a reason.
   it('GET /api/storage/findings — observatory envelope', () => {
-    const env = parse(EnvelopeSchema(StorageFindingsPayloadSchema), '/api/storage/findings');
-    expect(env.payload.kinds.length).toBeGreaterThan(0);
+    const env = parse(
+      EnvelopeSchema(ObservatoryStorageFindingsPayloadSchema),
+      '/api/storage/findings',
+    );
+    expect(env.payload.kind_statuses.length).toBe(5);
+    // Every producer names its source state and why, so an omitted read can
+    // never be presented as a clean one.
+    for (const status of env.payload.kind_statuses) {
+      expect(status.reason.length).toBeGreaterThan(0);
+    }
   });
 
   it('GET /api/doctor/findings — observatory doctor envelope (wire-true unsupported)', () => {
