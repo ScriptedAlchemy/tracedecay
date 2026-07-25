@@ -11,14 +11,14 @@ cargo build
 cargo nextest run --workspace --all-features --no-fail-fast
 ```
 
-Requires **Rust 1.70+** (edition 2021).
+Requires **Rust 1.85+** (edition 2024).
 
 ## Project Structure
 
 ```
 src/
   extraction/    Language-specific extractors (tree-sitter based)
-  db/            Database layer (libSQL)
+  db/            Database abstraction over the rusqlite runtime
   graph/         Knowledge graph queries and traversal
   mcp/           MCP server (tools + handlers)
   context/       Context builder for AI-ready output
@@ -33,13 +33,14 @@ docs/            Design docs and guides
 
 ## Feature Flags
 
-tracedecay supports 31 languages via feature flags:
+tracedecay supports more than 50 languages. `Cargo.toml` is the source of truth
+for the exact feature membership:
 
-| Feature | Languages |
-|---------|-----------|
-| `lite` (default subset) | Rust, Go, Java, Scala, TypeScript/JS, Python, C, C++, Kotlin, C#, Swift |
-| `medium` | +Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET |
-| `full` (default) | +Lua, Zig, Obj-C, Perl, Batch, Fortran, COBOL, MSBasic2, GW-BASIC, QBasic |
+| Feature | Coverage |
+|---------|----------|
+| `lite` | Core extractors such as Rust, Go, Java, TypeScript/JS, Python, C/C++, Kotlin, C#, and Swift |
+| `medium` | `lite` plus Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, and VB.NET |
+| `full` (default) | `medium` plus all remaining `lang-*` features listed in `Cargo.toml` |
 
 Build with fewer languages for faster compile times during development:
 
