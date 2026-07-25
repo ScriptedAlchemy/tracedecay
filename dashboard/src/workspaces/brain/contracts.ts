@@ -60,3 +60,164 @@ export const ProjectsPayloadSchema = z
   })
   .passthrough();
 export type ProjectsPayload = z.infer<typeof ProjectsPayloadSchema>;
+
+/* ------------------------------------------------------------------------ *
+ * Scoped Brain. When a project is selected the Brain becomes THAT project's
+ * brain, and these are the surfaces it is composed from. Two tiers, because
+ * the daemon genuinely has two:
+ *
+ *  - `GET /api/projects/{id}` (src/dashboard/projects.rs `context`) answers for
+ *    every REGISTERED project — its stores, the graph scopes (branches) inside
+ *    them, the artifacts on disk with their sizes, and every alias path the
+ *    project has been seen at. This always resolves, so it is the backbone.
+ *
+ *  - The project-scoped gateway (`/api/projects/{id}/…` → `/api/…` against that
+ *    project's state) answers only while that project's graph is MOUNTED, which
+ *    in practice means the active one; every other project returns 404
+ *    "registered project graph is not mounted". So the code-graph field, the
+ *    memory bank and the session analytics are composed when they are there and
+ *    the registry backbone carries the surface when they are not. Nothing is
+ *    substituted for a missing read.
+ * ------------------------------------------------------------------------ */
+
+export const ProjectStoreArtifactSchema = z
+  .object({
+    artifact_kind: z.string(),
+    relpath: z.string(),
+    size_bytes: z.number().nullable().optional(),
+    updated_at: z.number().nullable().optional(),
+  })
+  .passthrough();
+
+export const ProjectGraphScopeSchema = z
+  .object({
+    graph_scope_id: z.string(),
+    branch_name: z.string(),
+    db_relpath: z.string().optional(),
+    last_synced_at: z.number().nullable().optional(),
+    writable: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const ProjectStoreSchema = z
+  .object({
+    store: z
+      .object({
+        store_id: z.string(),
+        store_kind: z.string().optional(),
+        storage_mode: z.string().optional(),
+        store_relpath: z.string().optional(),
+        last_write_at: z.number().nullable().optional(),
+        last_verified_at: z.number().nullable().optional(),
+      })
+      .passthrough(),
+    graph_scopes: z.array(ProjectGraphScopeSchema).default([]),
+    artifacts: z.array(ProjectStoreArtifactSchema).default([]),
+  })
+  .passthrough();
+export type ProjectStore = z.infer<typeof ProjectStoreSchema>;
+
+export const ProjectAliasSchema = z
+  .object({ alias_path: z.string(), last_seen_at: z.number() })
+  .passthrough();
+export type ProjectAlias = z.infer<typeof ProjectAliasSchema>;
+
+/** GET /api/projects/{project_id} (src/dashboard/projects.rs `context`). */
+export const ProjectContextPayloadSchema = z
+  .object({
+    status: z.string(),
+    is_active: z.boolean().optional(),
+    project: ProjectRegistryEntrySchema.nullable().optional(),
+    aliases: z.array(ProjectAliasSchema).default([]),
+    stores: z.array(ProjectStoreSchema).default([]),
+  })
+  .passthrough();
+export type ProjectContextPayload = z.infer<typeof ProjectContextPayloadSchema>;
+
+/** GET /api/plugins/graph/subgraph (src/dashboard/graph_api.rs `subgraph`),
+ * read through the scoped gateway. The unseeded call returns the project's
+ * most-connected neighborhood, already capped by the daemon. */
+export const ScopedSubgraphNodeSchema = z
+  .object({
+    id: z.string(),
+    kind: z.string(),
+    name: z.string().nullable().optional(),
+    qualified_name: z.string().nullable().optional(),
+    file_path: z.string().nullable().optional(),
+    degree: z.number().nullable().optional(),
+  })
+  .passthrough();
+export type ScopedSubgraphNode = z.infer<typeof ScopedSubgraphNodeSchema>;
+
+export const ScopedSubgraphPayloadSchema = z
+  .object({
+    nodes: z.array(ScopedSubgraphNodeSchema).default([]),
+    edges: z
+      .array(
+        z
+          .object({ source: z.string(), target: z.string(), kind: z.string().optional() })
+          .passthrough(),
+      )
+      .default([]),
+    capped: z
+      .object({ nodes: z.boolean().optional(), edges: z.boolean().optional() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type ScopedSubgraphPayload = z.infer<typeof ScopedSubgraphPayloadSchema>;
+
+/** GET /api/plugins/graph/overview (src/dashboard/graph_api.rs `overview`). */
+export const ScopedGraphOverviewSchema = z
+  .object({
+    totals: z
+      .object({ nodes: z.number(), edges: z.number(), files: z.number() })
+      .passthrough(),
+    nodes_by_kind: z
+      .array(z.object({ kind: z.string(), count: z.number() }).passthrough())
+      .default([]),
+    files_by_language: z
+      .array(z.object({ language: z.string(), count: z.number() }).passthrough())
+      .default([]),
+  })
+  .passthrough();
+export type ScopedGraphOverview = z.infer<typeof ScopedGraphOverviewSchema>;
+
+/** GET /api/plugins/holographic/status (src/dashboard/memory_api.rs `status`). */
+export const ScopedMemoryStatusSchema = z
+  .object({
+    exists: z.boolean().optional(),
+    memory: z
+      .object({
+        fact_count: z.number().optional(),
+        entity_count: z.number().optional(),
+        bank_count: z.number().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type ScopedMemoryStatus = z.infer<typeof ScopedMemoryStatusSchema>;
+
+/** GET /api/plugins/analytics/overview (src/dashboard/analytics_api.rs). */
+export const ScopedAnalyticsOverviewSchema = z
+  .object({
+    available: z.boolean().optional(),
+    usage: z
+      .object({
+        available: z.boolean().optional(),
+        event_count: z.number().optional(),
+        message_count: z.number().optional(),
+        by_category: z
+          .array(
+            z
+              .object({ category: z.string(), events: z.number(), kind: z.string().optional() })
+              .passthrough(),
+          )
+          .default([]),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type ScopedAnalyticsOverview = z.infer<typeof ScopedAnalyticsOverviewSchema>;
