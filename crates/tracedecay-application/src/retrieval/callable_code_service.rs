@@ -17,9 +17,10 @@ use crate::result::{
 };
 
 use super::callable_code::{
-    CallableCodeOperationKind, CallableCodeOperations, CodeHierarchyRequest, CodeImpactRequest,
-    CodeImplementationsRequest, CodeQueryPage, CodeRelationRequest, CodeSignatureRequest,
-    CodeSymbolSearchRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
+    CallableCodeOperationKind, CallableCodeOperations, CodeFacetRecord, CodeFacetRequest,
+    CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest, CodeNavigationRequest,
+    CodeQueryPage, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
+    CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
     LexicalOccurrenceRecord, ModuleApiRequest, PhraseSearchRequest, QualifiedNameRequest,
     SourceMetadataRecord, SourceMetadataRequest, ValidatedCodeQueryRequest,
 };
@@ -111,6 +112,42 @@ pub trait CallableCodeQueryPort: Send + Sync {
         context: RetrievalPortContext<'a>,
         request: &'a SourceMetadataRequest,
     ) -> CallableCodeQueryFuture<'a, SourceMetadataRecord>;
+
+    fn facets<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeFacetRequest,
+    ) -> CallableCodeQueryFuture<'a, CodeFacetRecord>;
+
+    fn timeline<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeTimelineRequest,
+    ) -> CallableCodeQueryFuture<'a, CodeTimelineRecord>;
+
+    fn declaration<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeNavigationRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn definition<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeNavigationRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn type_definition<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeNavigationRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
+
+    fn references<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a CodeNavigationRequest,
+    ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord>;
 }
 
 /// Opaque authorization admission retained across one callable-code read.
@@ -357,6 +394,42 @@ where
         SourceMetadataRequest,
         SourceMetadataRecord,
         source_metadata
+    );
+    callable_code_service_method!(facets, Facets, CodeFacetRequest, CodeFacetRecord, facets);
+    callable_code_service_method!(
+        timeline,
+        Timeline,
+        CodeTimelineRequest,
+        CodeTimelineRecord,
+        timeline
+    );
+    callable_code_service_method!(
+        declaration,
+        Declaration,
+        CodeNavigationRequest,
+        SymbolPrimitiveRecord,
+        declaration
+    );
+    callable_code_service_method!(
+        definition,
+        Definition,
+        CodeNavigationRequest,
+        SymbolPrimitiveRecord,
+        definition
+    );
+    callable_code_service_method!(
+        type_definition,
+        TypeDefinition,
+        CodeNavigationRequest,
+        SymbolPrimitiveRecord,
+        type_definition
+    );
+    callable_code_service_method!(
+        references,
+        References,
+        CodeNavigationRequest,
+        SymbolRelationRecord,
+        references
     );
 }
 

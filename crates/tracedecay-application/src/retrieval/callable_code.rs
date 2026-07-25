@@ -12,10 +12,11 @@ use crate::result::OpaqueCursor;
 
 use super::{ImplementationSelector, RetrievalRequestMeta};
 
-pub const CALLABLE_CODE_OPERATION_COUNT: usize = 12;
+pub const CALLABLE_CODE_OPERATION_COUNT: usize = 18;
 pub const MAX_CALLABLE_CODE_QUERY_BYTES: usize = 4_096;
 pub const MAX_CALLABLE_CODE_FILTERS: usize = 32;
 pub const MAX_CALLABLE_CODE_DEPTH: u32 = 10;
+pub const MAX_CALLABLE_CODE_FUZZY_EXPANSIONS: u32 = 64;
 pub const MAX_SOURCE_METADATA_FILES: usize = 256;
 
 /// One immutable code-index generation inside the authorized single root.
@@ -144,6 +145,31 @@ pub struct SourceMetadataRecord {
     pub byte_size: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeFacetDimension {
+    Kind,
+    Language,
+    Path,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeFacetRecord {
+    pub dimension: CodeFacetDimension,
+    pub value: String,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeTimelineRecord {
+    pub generation: CodeGenerationId,
+    pub indexed_at: UtcMicros,
+    pub file_count: u64,
+    pub symbol_count: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactOccurrenceRequest {
@@ -175,6 +201,8 @@ impl ExactOccurrenceRequest {
 pub struct PhraseSearchRequest {
     pub query: EphemeralSanitizedQueryViewV1,
     pub phrases: Vec<String>,
+    pub field_filters: Vec<CodeLexicalFieldFilter>,
+    pub fuzzy_budget: u32,
     pub scope: CodeQueryScope,
     pub meta: RetrievalRequestMeta,
 }
@@ -183,18 +211,42 @@ impl PhraseSearchRequest {
     pub fn new(
         query: EphemeralSanitizedQueryViewV1,
         phrases: Vec<String>,
+        field_filters: Vec<CodeLexicalFieldFilter>,
+        fuzzy_budget: u32,
         scope: CodeQueryScope,
         meta: RetrievalRequestMeta,
     ) -> Result<Self, ApplicationContractError> {
         let request = Self {
             query,
             phrases,
+            field_filters,
+            fuzzy_budget,
             scope,
             meta,
         };
         request.validate()?;
         Ok(request)
     }
+}
+
+/// Typed code fields accepted by the generation-owned lexical authority.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeLexicalField {
+    SymbolName,
+    QualifiedName,
+    Path,
+    BodyText,
+    PreambleText,
+    ExactTerm,
+    Subtoken,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeLexicalFieldFilter {
+    pub field: CodeLexicalField,
+    pub include: bool,
 }
 
 #[derive(Debug)]
@@ -274,6 +326,29 @@ pub struct SourceMetadataRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeFacetRequest {
+    pub dimension: CodeFacetDimension,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeTimelineRequest {
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeNavigationRequest {
+    pub node_id: String,
+    pub scope: CodeQueryScope,
+    pub meta: RetrievalRequestMeta,
+}
+
 impl SourceMetadataRequest {
     pub fn new(
         files: Vec<FileOccurrenceId>,
@@ -301,6 +376,26 @@ impl ValidatedCodeQueryRequest for PhraseSearchRequest {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         validate_query(self.query.as_str(), "phrase search query")?;
         validate_filters(&self.phrases, "phrase search phrases")?;
+        if self.field_filters.len() > MAX_CALLABLE_CODE_FILTERS {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "phrase search field filters",
+            });
+        }
+        let mut fields = std::collections::BTreeSet::new();
+        if self
+            .field_filters
+            .iter()
+            .any(|filter| !fields.insert(filter.field))
+        {
+            return Err(ApplicationContractError::Duplicate {
+                field: "phrase search field filter",
+            });
+        }
+        if self.fuzzy_budget > MAX_CALLABLE_CODE_FUZZY_EXPANSIONS {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "phrase search fuzzy budget",
+            });
+        }
         validate_scope_meta(&self.scope, &self.meta)
     }
 }
@@ -397,6 +492,25 @@ impl ValidatedCodeQueryRequest for SourceMetadataRequest {
     }
 }
 
+impl ValidatedCodeQueryRequest for CodeFacetRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeTimelineRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
+impl ValidatedCodeQueryRequest for CodeNavigationRequest {
+    fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_query(&self.node_id, "code navigation node id")?;
+        validate_scope_meta(&self.scope, &self.meta)
+    }
+}
+
 fn validate_scope_meta(
     scope: &CodeQueryScope,
     meta: &RetrievalRequestMeta,
@@ -462,6 +576,12 @@ pub enum CallableCodeOperationKind {
     Impact,
     ModuleApi,
     SourceMetadata,
+    Facets,
+    Timeline,
+    Declaration,
+    Definition,
+    TypeDefinition,
+    References,
 }
 
 impl CallableCodeOperationKind {
@@ -478,6 +598,12 @@ impl CallableCodeOperationKind {
         Self::Impact,
         Self::ModuleApi,
         Self::SourceMetadata,
+        Self::Facets,
+        Self::Timeline,
+        Self::Declaration,
+        Self::Definition,
+        Self::TypeDefinition,
+        Self::References,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -494,6 +620,12 @@ impl CallableCodeOperationKind {
             Self::Impact => "impact",
             Self::ModuleApi => "module_api",
             Self::SourceMetadata => "source_metadata",
+            Self::Facets => "facets",
+            Self::Timeline => "timeline",
+            Self::Declaration => "declaration",
+            Self::Definition => "definition",
+            Self::TypeDefinition => "type_definition",
+            Self::References => "references",
         }
     }
 }
