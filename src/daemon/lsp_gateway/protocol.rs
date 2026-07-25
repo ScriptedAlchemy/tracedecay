@@ -205,6 +205,7 @@ impl NativeDiagnosticsNotification {
         let diagnostics = self
             .diagnostics
             .into_iter()
+            .filter(|diagnostic| !native_source_is_tracedecay(&diagnostic.source))
             .map(|diagnostic| diagnostic.into_gateway_diagnostic(&uri))
             .collect::<Option<Vec<_>>>()?;
         Some((
@@ -215,6 +216,12 @@ impl NativeDiagnosticsNotification {
             },
         ))
     }
+}
+
+fn native_source_is_tracedecay(source: &str) -> bool {
+    source
+        .get(.."tracedecay".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tracedecay"))
 }
 
 impl NativeDiagnostic {
@@ -3647,7 +3654,7 @@ mod tests {
         );
         session.drain_outbound();
         session.handle_payload(
-            br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"typescript","message":"native diagnostic","data":{"ruleId":"typescript"}}]}}"#,
+            br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"tracedecay","message":"projected diagnostic"},{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"TraceDecay-CI","message":"projected CI diagnostic"},{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"tracedecay-proximity","message":"projected proximity diagnostic"},{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"typescript","message":"native diagnostic","data":{"ruleId":"typescript"}}]}}"#,
             11,
         );
         assert_eq!(
@@ -3658,6 +3665,11 @@ mod tests {
                 .diagnostics
                 .len(),
             1
+        );
+        assert_eq!(
+            session.native_upstream["file:///root/a.rs"].diagnostics[0].message,
+            "native diagnostic",
+            "TraceDecay-projected sources must never be inverted into native upstream evidence"
         );
         session.detach().unwrap();
         session.reconnect().unwrap();
