@@ -205,3 +205,26 @@ transcribed, honest aggregation statements throughout).
 Synthesis: ONE navigable space. Far = CORTEX. Touch a symbol = TRACE floods.
 Enter a file = CORE SAMPLE. LENS is the theory of motion between them. The
 sensory contract rides on top: channel = spring, mass = weight, churn = warmth.
+
+## Visual artifact index (reference images)
+
+All design-round artifacts are committed on mockup branches (kept off trunk —
+heavy PNGs). View any file without switching branches:
+`git show <branch>:<path>` (binary shots: `git show <branch>:<path> > /tmp/x.png`).
+
+| Artifact | Branch | Path |
+| --- | --- | --- |
+| Symbol Anatomy sheet (dark/light) | `worktree-agent-ac56015e63cbf0f86` | `mockups/structure-viz/shots/symbol-anatomy-{dark,light}.png` |
+| Call-chain transit sheet | same | `mockups/structure-viz/shots/call-chain-transit-{dark,light}.png` |
+| Disagreement field sheet | same | `mockups/structure-viz/shots/disagreement-field-{dark,light}.png` |
+| CORTEX relief sheet | `worktree-agent-a3433e6e6f36a4201` | `mockups/code-topography/shots/cortex-{dark,light}.png` |
+| TRACE watershed sheet (hero) | same | `mockups/code-topography/shots/trace-{dark,light}.png` |
+| CORE SAMPLE strat sheet | same | `mockups/code-topography/shots/core-sample-{dark,light}.png` |
+| LENS zoom-as-position sheet | same | `mockups/code-topography/shots/lens-{dark,light}.png` |
+| Live physics prototype + QA keyframes | `worktree-agent-af882d6565fbab159` | `mockups/code-topography/prototype/` (`shots/{hub,leaf}-{1..4}*.png`, `README.md` tuning table) |
+| PR-421 reasoning weave (real data) | same branch, uncommitted copy also served in-session | `mockups/code-topography/prototype/pr421-weave.html` |
+| Shipped-state pixel baselines (all 12 workspaces × themes × widths) | trunk | `dashboard/audit-baselines/` |
+
+Design notes accompany each sheet in the same directory (`notes/` or
+sibling `.md`), stating per-channel encodings, backing data, and open
+questions — read the note before reusing a sheet as a spec.
