@@ -140,6 +140,8 @@ pub use retrieval::{
     CodeSymbolSearchRequest, CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord,
     ExactOccurrenceRequest, GraphCallersRequest, GraphCallersService, GraphImpactRequest,
     GraphImpactResult, GraphImpactRetrievalPort, GraphRetrievalPort, HealthReadRequest,
+    HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaRequest,
+    HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
     LexicalOccurrenceRecord, MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_FUZZY_EXPANSIONS,
     ModuleApiRequest, OperationalRetrievalPort, PageRequest, PhraseSearchRequest,
     QualifiedNameRequest, ResultProjection, RetrievalOrder, RetrievalPortContext,

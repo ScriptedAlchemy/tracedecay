@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 165;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 166;
 
 mod admin;
 mod analysis;
@@ -409,6 +409,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_module_api_read(),
         def_file_metadata_read(),
         def_health_read(),
+        def_health_delta(),
         def_storage_status_read(),
         def_diagnostics_read(),
         def_affected(),
@@ -639,6 +640,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_module_api",
     "tracedecay_file_metadata",
     "tracedecay_health_read",
+    "tracedecay_health_delta",
     "tracedecay_storage_status",
     "tracedecay_diagnostics_read",
     "tracedecay_configuration_list",
