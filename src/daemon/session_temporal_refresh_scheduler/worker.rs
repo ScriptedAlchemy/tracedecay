@@ -202,11 +202,7 @@ async fn complete_ready_refresh(
         progress.frontier(),
         *progress.coverage(),
     ) {
-        match progress.source_coverage().cloned().or_else(|| {
-            recovery
-                .source_coverage(progress.frontier().committed_through())
-                .ok()
-        }) {
+        match progress.source_coverage().cloned() {
             Some(source_coverage) => request.with_source_coverage(source_coverage),
             None => request,
         }

@@ -545,7 +545,7 @@ async fn restart_finalizes_ready_progress_without_replaying_projection() {
             SessionTemporalRefreshPolicy::default(),
         )
         .await;
-    assert_eq!(report.completed, 1);
+    assert_eq!(report.completed, 1, "{report:?}");
     assert_eq!(report.projected_batches, 0);
 
     let store = crate::store::GlobalDbSessionTemporalStore::new(db);
@@ -608,7 +608,7 @@ async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
             SessionTemporalRefreshPolicy::default(),
         )
         .await;
-    assert_eq!(second.completed, 1);
+    assert_eq!(second.completed, 1, "{second:?}");
     assert_eq!(second.projected_batches, 0);
     assert!(
         crate::store::GlobalDbSessionTemporalStore::new(db)
