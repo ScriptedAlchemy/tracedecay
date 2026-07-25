@@ -1356,17 +1356,38 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
  * Observatory storage telemetry / findings (already wired; kept intact).
  * ========================================================================== */
 
-/** GET /api/storage/telemetry — observatory (StorageTelemetryPayloadSchema). */
+/** The owner setting a soft store budget comes from, and the wording the daemon
+ * emits for the unset/baseline/coverage cases — copied verbatim from
+ * `src/dashboard/storage_telemetry_api.rs` so these fixtures stay wire-true. */
+const BUDGET_SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
+const BUDGET_UNSET_REASON =
+  'no soft size budget is configured by the owner for this store (set sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)';
+const GROWTH_COVERAGE =
+  'since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not a persisted historical series';
+const GROWTH_BASELINE_REASON =
+  'first watermark recorded in this daemon lifetime; a growth delta needs a second sample';
+
+/** GET /api/storage/telemetry — observatory (StorageTelemetryPayloadSchema).
+ *
+ * One entry per distinct store *file*: the graph and project-memory roles share
+ * a database in project storage mode and are therefore one card carrying both
+ * roles, not two cards with byte-identical sizes. The five entries below model
+ * every state the endpoint can emit: an evaluated budget within and over its
+ * soft limit, an unset budget, an unknown budget, and the baseline / observed /
+ * unknown growth states. */
 const storageTelemetry = envelope({
   stores: [
     {
-      store: 'graph',
-      role: 'project-graph',
+      // Shared store file: graph + project memory, budget within its soft
+      // limit, growth observed across the daemon-lifetime watermark ring.
+      store: 'graph.db',
+      role: 'graph',
+      roles: ['graph', 'memory'],
       path: '/fast/projects/tracedecay/.tracedecay/graph.db',
       read: {
         kind: 'observed',
         sample: {
-          store: 'graph',
+          store: 'graph.db',
           page_size_bytes: 4096,
           page_count: 52_400,
           freelist_pages: 1_280,
@@ -1376,42 +1397,193 @@ const storageTelemetry = envelope({
       total_bytes: 214_630_400,
       free_bytes: 5_242_880,
       free_page_ratio: 0.024,
-      budget: { state: 'unsupported', reason: 'no budget configured for project graph' },
+      budget: {
+        state: 'evaluated',
+        evaluation: {
+          state: 'within_budget',
+          observed: 214_630_400,
+          soft_limit: 536_870_912,
+        },
+        setting_key: BUDGET_SETTING_KEY,
+        reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
+      },
       growth: {
         state: 'observed',
+        coverage: GROWTH_COVERAGE,
+        first_measured_at: nowMicros - 3_600_000_000,
+        last_measured_at: nowMicros,
+        sample_count: 12,
+        first_total_bytes: 208_207_872,
+        current_total_bytes: 214_630_400,
+        growth_bytes: 6_422_528,
         samples: [
-          {
-            store: 'graph',
-            table: 'nodes',
-            previous_bytes: 96_000_000,
-            current_bytes: 102_400_000,
-            previous_observed_at: nowMicros - 3_600_000_000,
-            current_observed_at: nowMicros,
-          },
+          { measured_at: nowMicros - 3_600_000_000, total_bytes: 208_207_872, free_bytes: 4_112_384 },
+          { measured_at: nowMicros - 1_800_000_000, total_bytes: 211_419_136, free_bytes: 4_820_992 },
+          { measured_at: nowMicros, total_bytes: 214_630_400, free_bytes: 5_242_880 },
         ],
       },
     },
     {
-      store: 'global',
-      role: 'global-index',
-      path: '/home/zack/.tracedecay/global.db',
-      read: { kind: 'observed', sample: {
-        store: 'global',
-        page_size_bytes: 4096,
-        page_count: 18_200,
-        freelist_pages: 420,
-        observed_at: nowMicros,
-      } },
+      // Over its owner-configured soft limit, with a real overage.
+      store: 'lcm.db',
+      role: 'lcm',
+      roles: ['lcm'],
+      path: '/home/zack/.tracedecay/lcm.db',
+      read: {
+        kind: 'observed',
+        sample: {
+          store: 'lcm.db',
+          page_size_bytes: 4096,
+          page_count: 180_224,
+          freelist_pages: 2_048,
+          observed_at: nowMicros,
+        },
+      },
+      total_bytes: 738_197_504,
+      free_bytes: 8_388_608,
+      free_page_ratio: 0.011,
+      budget: {
+        state: 'evaluated',
+        evaluation: {
+          state: 'over_budget',
+          observed: 738_197_504,
+          soft_limit: 536_870_912,
+          overage: 201_326_592,
+        },
+        setting_key: BUDGET_SETTING_KEY,
+        reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
+      },
+      growth: {
+        state: 'observed',
+        coverage: GROWTH_COVERAGE,
+        first_measured_at: nowMicros - 7_200_000_000,
+        last_measured_at: nowMicros,
+        sample_count: 24,
+        first_total_bytes: 742_391_808,
+        current_total_bytes: 738_197_504,
+        // A shrinking store reports a negative delta rather than zero growth.
+        growth_bytes: -4_194_304,
+        samples: [
+          { measured_at: nowMicros - 7_200_000_000, total_bytes: 742_391_808, free_bytes: 12_582_912 },
+          { measured_at: nowMicros, total_bytes: 738_197_504, free_bytes: 8_388_608 },
+        ],
+      },
+    },
+    {
+      // No owner entry: a missing *setting*, never a fabricated pass. First
+      // watermark of this daemon lifetime, so growth is baseline, not zero.
+      store: 'savings.db',
+      role: 'savings',
+      roles: ['savings'],
+      path: '/home/zack/.tracedecay/savings.db',
+      read: {
+        kind: 'observed',
+        sample: {
+          store: 'savings.db',
+          page_size_bytes: 4096,
+          page_count: 18_200,
+          freelist_pages: 420,
+          observed_at: nowMicros,
+        },
+      },
       total_bytes: 74_547_200,
       free_bytes: 1_720_320,
       free_page_ratio: 0.023,
-      budget: { state: 'unsupported', reason: 'global index budget not enforced' },
-      growth: { state: 'absent', reason: 'insufficient history for a growth sample' },
+      budget: {
+        state: 'unset',
+        reason: BUDGET_UNSET_REASON,
+        setting_key: BUDGET_SETTING_KEY,
+      },
+      growth: {
+        state: 'baseline',
+        coverage: GROWTH_COVERAGE,
+        measured_at: nowMicros,
+        total_bytes: 74_547_200,
+        reason: GROWTH_BASELINE_REASON,
+      },
+    },
+    {
+      // The configured budget is unreadable, so the budget is unknown — the
+      // dashboard never renders that as "within budget".
+      store: 'sessions.db',
+      role: 'sessions',
+      roles: ['sessions'],
+      path: '/home/zack/.tracedecay/sessions.db',
+      read: {
+        kind: 'observed',
+        sample: {
+          store: 'sessions.db',
+          page_size_bytes: 4096,
+          page_count: 9_600,
+          freelist_pages: 96,
+          observed_at: nowMicros,
+        },
+      },
+      total_bytes: 39_321_600,
+      free_bytes: 393_216,
+      free_page_ratio: 0.01,
+      budget: {
+        state: 'unknown',
+        reason:
+          'the resolved runtime configuration could not be read, so a configured budget could not be determined',
+      },
+      growth: {
+        state: 'baseline',
+        coverage: GROWTH_COVERAGE,
+        measured_at: nowMicros,
+        total_bytes: 39_321_600,
+        reason: GROWTH_BASELINE_REASON,
+      },
+    },
+    {
+      // The pragma read failed: sizes stay null and both dimensions are typed
+      // unknown rather than collapsing to zero.
+      store: 'incident.db',
+      role: 'incident',
+      roles: ['incident'],
+      path: '/home/zack/.tracedecay/incident.db',
+      read: { kind: 'unknown', store: 'incident.db' },
+      total_bytes: null,
+      free_bytes: null,
+      free_page_ratio: null,
+      budget: {
+        state: 'unknown',
+        reason: 'no observed size sample, so a configured budget could not be evaluated',
+      },
+      growth: {
+        state: 'unknown',
+        reason:
+          'no watermark could be recorded because the store size read did not produce a sample',
+      },
     },
   ],
-  budget_note: 'Budgets are advisory; no store is over an enforced ceiling.',
-  growth_note: 'Growth compares the two most recent telemetry samples per table.',
+  budget_note:
+    'budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store key; a store with no entry reports unset (no budget configured), never a fabricated pass',
+  growth_note:
+    'growth is measured over the store-size watermarks this daemon has recorded since it started; no persisted historical watermark series exists, so the window is not historical',
 });
+
+/** One of the five stores failed its pragma read, so the endpoint's coverage is
+ * partial over the enumerated store set — wire-true to
+ * `DashboardCoverageV1::partial` and the endpoint's own refresh legal action. */
+const storageTelemetryEnvelope = {
+  ...storageTelemetry,
+  coverage: {
+    completeness: 'partial',
+    eligible: 5,
+    examined: 4,
+    matched: null,
+    excluded: null,
+    omitted: 1,
+    unknown: null,
+    denominator: 5,
+    unit: 'stores',
+    omission_reasons: ['store telemetry read failed (pragma unavailable)'],
+  },
+  legal_actions: [
+    { kind: 'refresh', operation: 'use-case.dashboard.storage.telemetry.refresh' },
+  ],
+};
 
 /** GET /api/storage/findings — observatory doctor (StorageFindingsPayloadSchema). */
 const storageFindings = envelope({
@@ -1732,7 +1904,7 @@ function loomChainPayload(): Record<string, unknown> {
  */
 export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/projects': projects,
-  '/api/storage/telemetry': storageTelemetry,
+  '/api/storage/telemetry': storageTelemetryEnvelope,
   '/api/storage/findings': storageFindings,
   '/api/doctor/findings': doctorFindingsEnvelope(),
   '/api/settings': settings,

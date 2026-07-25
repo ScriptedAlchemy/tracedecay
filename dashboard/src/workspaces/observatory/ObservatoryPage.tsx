@@ -18,9 +18,15 @@ import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import {
+  budgetPresentation,
+  dimensionDotClass,
   doctorEvidencePresentation,
+  formatBytes,
+  growthPresentation,
   refreshOperation,
   storageFindingLabel,
+  storeRolesLabel,
+  type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
 
@@ -127,8 +133,10 @@ function TelemetryReadModel({
         <ReadModelState kind="unknown" detail="telemetry payload contained no stores" />
       ) : (
         <OverviewGrid>
+          {/* One card per distinct store *file*: roles that share a database
+              are merged server-side, so the path is the stable identity. */}
           {envelope.payload.stores.map((store) => (
-            <StoreCard key={`${store.role}:${store.store}`} entry={store} />
+            <StoreCard key={store.path} entry={store} />
           ))}
         </OverviewGrid>
       )}
@@ -226,9 +234,11 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
   return (
     <OverviewCard title={entry.store}>
       <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <StateChip kind={readKindToState(entry.read.kind)} />
-          <span className="text-2xs text-text-muted">{entry.role}</span>
+          <span className="text-2xs text-text-muted" data-store-roles={entry.roles.join(',')}>
+            {storeRolesLabel(entry.roles, entry.role)}
+          </span>
         </div>
         {observed ? (
           <>
@@ -251,16 +261,8 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
             {readUnavailableMessage(entry.read)}
           </p>
         )}
-        <DimensionRow label="Budget" state={entry.budget.state} detail={entry.budget.reason} />
-        <DimensionRow
-          label="Growth"
-          state={entry.growth.state}
-          detail={
-            entry.growth.state === 'absent'
-              ? entry.growth.reason
-              : `${entry.growth.samples.length} table samples`
-          }
-        />
+        <DimensionRow label="Budget" presentation={budgetPresentation(entry.budget)} />
+        <DimensionRow label="Growth" presentation={growthPresentation(entry.growth)} />
         <p className="truncate font-mono text-2xs text-text-muted" title={entry.path}>
           {entry.path}
         </p>
@@ -294,22 +296,56 @@ function StorageKindCard({ status }: { status: StorageFindingKindStatus }) {
   );
 }
 
+/** One telemetry dimension. The state is carried by words (the summary names
+ * it outright) with the tone dot as a redundant, never sole, signal. `unset`
+ * additionally renders its owner setting as a mono token, so a missing setting
+ * is structurally — not just chromatically — distinct from an undetermined
+ * read. */
 function DimensionRow({
   label,
-  state,
-  detail,
+  presentation,
 }: {
   label: string;
-  state: string;
-  detail: string;
+  presentation: DimensionPresentation;
 }) {
   return (
-    <div className="rounded-[var(--radius-chip)] bg-surface-2 px-2.5 py-2 text-2xs">
+    <div
+      className="rounded-[var(--radius-chip)] bg-surface-2 px-2.5 py-2 text-2xs"
+      data-dimension={label.toLowerCase()}
+      data-dimension-state={presentation.state}
+      data-dimension-tone={presentation.tone}
+    >
       <p className="font-medium text-text-secondary">
-        {label} · <span className="capitalize">{state}</span>
+        <span
+          aria-hidden
+          className={`mr-1.5 inline-block size-1.5 rounded-full align-middle ${dimensionDotClass(presentation.tone)}`}
+        />
+        {label} · <DimensionSummary presentation={presentation} />
       </p>
-      <p className="mt-0.5 text-text-muted">{detail}</p>
+      {presentation.notes.map((note) => (
+        <p key={note} className="mt-0.5 text-text-muted">
+          {note}
+        </p>
+      ))}
     </div>
+  );
+}
+
+/** The summary sentence, with a named owner setting rendered as a mono token.
+ * The rendered text is unchanged — the mono run only makes "you have not set
+ * this" structurally distinct from "the server could not tell". */
+function DimensionSummary({ presentation }: { presentation: DimensionPresentation }) {
+  const { settingKey, summary } = presentation;
+  if (presentation.state !== 'unset' || !settingKey || !summary.endsWith(settingKey)) {
+    return <span>{summary}</span>;
+  }
+  return (
+    <span>
+      {summary.slice(0, summary.length - settingKey.length)}
+      <span className="font-mono" data-setting-key={settingKey}>
+        {settingKey}
+      </span>
+    </span>
   );
 }
 
@@ -353,16 +389,6 @@ function readUnavailableMessage(read: StorageTelemetryRead): string {
     case 'unknown':
       return 'telemetry could not be determined for this store';
   }
-}
-
-function formatBytes(bytes: number | null): string {
-  if (bytes == null) return '—';
-  if (bytes >= 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
-  }
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${bytes} B`;
 }
 
 function toStripCoverage(coverage: WireCoverage) {

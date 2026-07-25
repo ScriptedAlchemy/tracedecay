@@ -195,36 +195,95 @@ export const StorageTelemetryReadSchema = z.discriminatedUnion('kind', [
 ]);
 export type StorageTelemetryRead = z.infer<typeof StorageTelemetryReadSchema>;
 
-const StoreBudgetDimensionSchema = z.discriminatedUnion('state', [
+/** The outcome of evaluating a live store size against an owner-configured
+ * soft limit (`StoreBudgetEvaluationV1`). `observed`/`soft_limit`/`overage` are
+ * `StorageByteSizeV1`, a `#[serde(transparent)]` newtype over `u64`. */
+export const StoreBudgetEvaluationSchema = z.discriminatedUnion('state', [
   z.object({
-    state: z.literal('unsupported'),
+    state: z.literal('within_budget'),
+    observed: z.number(),
+    soft_limit: z.number(),
+  }),
+  z.object({
+    state: z.literal('over_budget'),
+    observed: z.number(),
+    soft_limit: z.number(),
+    overage: z.number(),
+  }),
+]);
+export type StoreBudgetEvaluation = z.infer<typeof StoreBudgetEvaluationSchema>;
+
+/** The budget dimension (`StoreBudgetDimensionV1`). There is no `unsupported`
+ * variant: budgets are owner *configuration*, so a store with no configured
+ * entry is `unset` (a missing setting), and only an unreadable configuration or
+ * a missing size sample is `unknown`. A fabricated "within budget" is never
+ * emitted. */
+export const StoreBudgetDimensionSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('evaluated'),
+    evaluation: StoreBudgetEvaluationSchema,
+    setting_key: z.string(),
+    reason: z.string(),
+  }),
+  z.object({
+    state: z.literal('unset'),
+    reason: z.string(),
+    setting_key: z.string(),
+  }),
+  z.object({
+    state: z.literal('unknown'),
     reason: z.string(),
   }),
 ]);
+export type StoreBudgetDimension = z.infer<typeof StoreBudgetDimensionSchema>;
 
-const TableGrowthSampleSchema = z.object({
-  store: z.string(),
-  table: z.string(),
-  previous_bytes: z.number(),
-  current_bytes: z.number(),
-  previous_observed_at: z.number(),
-  current_observed_at: z.number(),
+/** One recorded store-size watermark (`StoreSizeWatermarkV1`). These are whole
+ * *store* measurements from the daemon-lifetime ring, not per-table samples. */
+export const StoreSizeWatermarkSchema = z.object({
+  measured_at: z.number(),
+  total_bytes: z.number(),
+  free_bytes: z.number(),
 });
+export type StoreSizeWatermark = z.infer<typeof StoreSizeWatermarkSchema>;
 
-const StoreGrowthDimensionSchema = z.discriminatedUnion('state', [
+/** The growth dimension (`StoreGrowthDimensionV1`). Growth is only reported
+ * over the window the server actually observed, and every real state names that
+ * window in `coverage`. `baseline` is a real first measurement, not zero
+ * growth; `growth_bytes` is signed so a shrinking store reports a negative
+ * delta. */
+export const StoreGrowthDimensionSchema = z.discriminatedUnion('state', [
   z.object({
-    state: z.literal('absent'),
+    state: z.literal('baseline'),
+    coverage: z.string(),
+    measured_at: z.number(),
+    total_bytes: z.number(),
     reason: z.string(),
   }),
   z.object({
     state: z.literal('observed'),
-    samples: z.array(TableGrowthSampleSchema),
+    coverage: z.string(),
+    first_measured_at: z.number(),
+    last_measured_at: z.number(),
+    sample_count: z.number(),
+    first_total_bytes: z.number(),
+    current_total_bytes: z.number(),
+    growth_bytes: z.number(),
+    samples: z.array(StoreSizeWatermarkSchema),
+  }),
+  z.object({
+    state: z.literal('unknown'),
+    reason: z.string(),
   }),
 ]);
+export type StoreGrowthDimension = z.infer<typeof StoreGrowthDimensionSchema>;
 
 export const StoreTelemetryEntrySchema = z.object({
   store: z.string(),
+  /** The primary role label, retained for compatibility. */
   role: z.string(),
+  /** Every dashboard role served by this one store file. More than one entry
+   * here means roles share a database, not that a store was duplicated. */
+  roles: z.array(z.string()),
   path: z.string(),
   read: StorageTelemetryReadSchema,
   total_bytes: z.number().nullable(),

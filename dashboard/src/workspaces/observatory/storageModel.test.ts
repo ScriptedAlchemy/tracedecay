@@ -6,10 +6,19 @@ import {
   StorageTelemetryPayloadSchema,
 } from '../../contracts/wire.ts';
 import {
+  budgetPresentation,
+  dimensionDotClass,
   doctorEvidencePresentation,
+  formatSignedBytes,
+  growthPresentation,
   refreshOperation,
   storageFindingLabel,
+  storeRolesLabel,
 } from './storageModel.ts';
+
+const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
+const COVERAGE =
+  'since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not a persisted historical series';
 
 describe('Observatory storage read models', () => {
   it('renders refresh only from a server-supplied legal action reference', () => {
@@ -101,12 +110,13 @@ describe('Observatory storage read models', () => {
     });
   });
 
-  it('preserves typed absent dimensions and observed samples', () => {
+  it('preserves the typed budget/growth dimensions and the roles a store serves', () => {
     const payload = StorageTelemetryPayloadSchema.parse({
       stores: [
         {
           store: 'graph.db',
           role: 'graph',
+          roles: ['graph', 'memory'],
           path: '/profile/graph.db',
           read: {
             kind: 'observed',
@@ -121,13 +131,13 @@ describe('Observatory storage read models', () => {
           total_bytes: 32768,
           free_bytes: 8192,
           free_page_ratio: 0.25,
-          budget: {
-            state: 'unsupported',
-            reason: 'no configured budget',
-          },
+          budget: { state: 'unset', reason: 'no configured budget', setting_key: SETTING_KEY },
           growth: {
-            state: 'absent',
-            reason: 'no growth watermark',
+            state: 'baseline',
+            coverage: COVERAGE,
+            measured_at: 123,
+            total_bytes: 32768,
+            reason: 'first watermark recorded in this daemon lifetime',
           },
         },
       ],
@@ -135,12 +145,132 @@ describe('Observatory storage read models', () => {
       growth_note: 'growth note',
     });
 
-    expect(payload.stores[0]?.budget.reason).toBe('no configured budget');
-    const growth = payload.stores[0]?.growth;
-    expect(growth?.state).toBe('absent');
-    if (growth?.state === 'absent') {
-      expect(growth.reason).toBe('no growth watermark');
-    }
-    expect(payload.stores[0]?.read.kind).toBe('observed');
+    const store = payload.stores[0]!;
+    expect(store.budget.reason).toBe('no configured budget');
+    expect(store.budget.state === 'unset' && store.budget.setting_key).toBe(SETTING_KEY);
+    expect(store.growth.state).toBe('baseline');
+    expect(store.roles).toEqual(['graph', 'memory']);
+    expect(store.read.kind).toBe('observed');
+  });
+});
+
+describe('store budget dimension presentation', () => {
+  it('reports an evaluated budget within its owner-configured soft limit', () => {
+    const view = budgetPresentation({
+      state: 'evaluated',
+      evaluation: { state: 'within_budget', observed: 32768, soft_limit: 65536 },
+      setting_key: SETTING_KEY,
+      reason: 'evaluated against the owner-configured soft limit of 65536 bytes',
+    });
+    expect(view.state).toBe('within_budget');
+    expect(view.tone).toBe('ready');
+    expect(view.summary).toBe('within budget · 32.0 KiB of 64.0 KiB soft limit');
+    expect(view.notes).toContain('evaluated against the owner-configured soft limit of 65536 bytes');
+  });
+
+  it('reports an evaluated over-budget store with its real overage', () => {
+    const view = budgetPresentation({
+      state: 'evaluated',
+      evaluation: { state: 'over_budget', observed: 98304, soft_limit: 65536, overage: 32768 },
+      setting_key: SETTING_KEY,
+      reason: 'evaluated against the owner-configured soft limit of 65536 bytes',
+    });
+    expect(view.state).toBe('over_budget');
+    expect(view.tone).toBe('over');
+    expect(view.summary).toBe('over budget · 96.0 KiB of 64.0 KiB soft limit · over by 32.0 KiB');
+  });
+
+  it('renders an unset budget as a missing owner setting, never as unsupported or a pass', () => {
+    const view = budgetPresentation({
+      state: 'unset',
+      reason: 'no soft size budget is configured by the owner for this store',
+      setting_key: SETTING_KEY,
+    });
+    expect(view.state).toBe('unset');
+    expect(view.summary).toBe(`no budget configured · set ${SETTING_KEY}`);
+    expect(view.settingKey).toBe(SETTING_KEY);
+    expect(view.summary).not.toMatch(/unsupported|within budget/);
+    // An unset budget must be visually distinct from an undetermined one.
+    expect(dimensionDotClass(view.tone)).not.toBe(
+      dimensionDotClass(budgetPresentation({ state: 'unknown', reason: 'r' }).tone),
+    );
+  });
+
+  it('renders an undetermined budget as unknown with the server reason, not a pass', () => {
+    const view = budgetPresentation({
+      state: 'unknown',
+      reason: 'the resolved runtime configuration could not be read',
+    });
+    expect(view.tone).toBe('unknown');
+    expect(view.summary).toBe('budget could not be determined');
+    expect(view.notes).toEqual(['the resolved runtime configuration could not be read']);
+    expect(view.settingKey).toBeUndefined();
+  });
+});
+
+describe('store growth dimension presentation', () => {
+  it('states a baseline as a real first sample, not zero growth', () => {
+    const view = growthPresentation({
+      state: 'baseline',
+      coverage: COVERAGE,
+      measured_at: 1,
+      total_bytes: 32768,
+      reason: 'first watermark recorded in this daemon lifetime',
+    });
+    expect(view.state).toBe('baseline');
+    expect(view.summary).toContain('first sample this daemon lifetime — not zero growth');
+    expect(view.summary).toContain('32.0 KiB measured');
+    // The coverage sentence is surfaced verbatim, never paraphrased.
+    expect(view.notes).toContain(COVERAGE);
+  });
+
+  it('shows a signed delta and the verbatim since-daemon-start coverage', () => {
+    const grew = growthPresentation({
+      state: 'observed',
+      coverage: COVERAGE,
+      first_measured_at: 1,
+      last_measured_at: 2,
+      sample_count: 12,
+      first_total_bytes: 32768,
+      current_total_bytes: 65536,
+      growth_bytes: 32768,
+      samples: [
+        { measured_at: 1, total_bytes: 32768, free_bytes: 0 },
+        { measured_at: 2, total_bytes: 65536, free_bytes: 0 },
+      ],
+    });
+    expect(grew.summary).toBe(
+      '+32.0 KiB over 12 store-size watermarks · 32.0 KiB → 64.0 KiB',
+    );
+    expect(grew.notes).toEqual([COVERAGE]);
+    // The retired per-table wording must be gone: these are store watermarks.
+    expect(grew.summary).not.toMatch(/table samples/);
+  });
+
+  it('renders a shrinking store as a negative delta and an unchanged store honestly', () => {
+    expect(formatSignedBytes(-2048)).toBe('−2.0 KiB');
+    expect(formatSignedBytes(0)).toBe('no size change');
+    expect(formatSignedBytes(1536)).toBe('+1.5 KiB');
+  });
+
+  it('renders an unrecordable growth read as unknown', () => {
+    const view = growthPresentation({
+      state: 'unknown',
+      reason: 'no watermark could be recorded because the store size read did not produce a sample',
+    });
+    expect(view.tone).toBe('unknown');
+    expect(view.summary).toBe('growth could not be determined');
+    expect(view.notes[0]).toContain('no watermark could be recorded');
+  });
+});
+
+describe('store role labelling', () => {
+  it('names every role a shared store file serves', () => {
+    expect(storeRolesLabel(['graph', 'memory'], 'graph')).toBe(
+      'graph · memory (shared store file)',
+    );
+    expect(storeRolesLabel(['lcm'], 'lcm')).toBe('lcm');
+    // A payload that somehow omits roles still names the primary role.
+    expect(storeRolesLabel([], 'savings')).toBe('savings');
   });
 });

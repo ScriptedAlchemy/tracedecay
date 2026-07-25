@@ -133,6 +133,7 @@ describe("wire storage payload decoders", () => {
         {
           store: "s",
           role: "graph",
+          roles: ["graph", "memory"],
           path: "/p",
           read: {
             kind: "observed",
@@ -147,14 +148,73 @@ describe("wire storage payload decoders", () => {
           total_bytes: 100,
           free_bytes: 0,
           free_page_ratio: 0,
-          budget: { state: "unsupported", reason: "not wired" },
-          growth: { state: "absent", reason: "no prior sample" },
+          budget: {
+            state: "evaluated",
+            evaluation: { state: "over_budget", observed: 100, soft_limit: 50, overage: 50 },
+            setting_key: "sync.retention.v1 store_soft_budgets_bytes",
+            reason: "evaluated against the owner-configured soft limit of 50 bytes",
+          },
+          growth: {
+            state: "observed",
+            coverage: "since-daemon-start: bounded in-process watermark ring",
+            first_measured_at: 1,
+            last_measured_at: 2,
+            sample_count: 2,
+            first_total_bytes: 140,
+            current_total_bytes: 100,
+            growth_bytes: -40,
+            samples: [
+              { measured_at: 1, total_bytes: 140, free_bytes: 0 },
+              { measured_at: 2, total_bytes: 100, free_bytes: 0 },
+            ],
+          },
         },
       ],
       budget_note: "n",
       growth_note: "m",
     });
     expect(parsed.stores[0]!.read.kind).toBe("observed");
+    expect(parsed.stores[0]!.roles).toEqual(["graph", "memory"]);
+    // Growth is signed: a shrinking store must not saturate to zero.
+    const growth = parsed.stores[0]!.growth;
+    expect(growth.state === "observed" && growth.growth_bytes).toBe(-40);
+  });
+
+  it("rejects the retired unsupported budget and absent growth variants", () => {
+    const entry = {
+      store: "s",
+      role: "graph",
+      roles: ["graph"],
+      path: "/p",
+      read: { kind: "unknown", store: "s" },
+      total_bytes: null,
+      free_bytes: null,
+      free_page_ratio: null,
+      budget: { state: "unknown", reason: "r" },
+      growth: { state: "unknown", reason: "r" },
+    };
+    expect(
+      StorageTelemetryPayloadSchema.safeParse({
+        stores: [entry],
+        budget_note: "n",
+        growth_note: "m",
+      }).success,
+    ).toBe(true);
+    // `unsupported` budgets and `absent` growth no longer exist on the wire.
+    for (const drift of [
+      { ...entry, budget: { state: "unsupported", reason: "not wired" } },
+      { ...entry, growth: { state: "absent", reason: "no prior sample" } },
+      // `roles` is required: a store must always name every role it serves.
+      { ...entry, roles: undefined },
+    ]) {
+      expect(
+        StorageTelemetryPayloadSchema.safeParse({
+          stores: [drift],
+          budget_note: "n",
+          growth_note: "m",
+        }).success,
+      ).toBe(false);
+    }
   });
 
   it("decodes a storage findings payload", () => {
