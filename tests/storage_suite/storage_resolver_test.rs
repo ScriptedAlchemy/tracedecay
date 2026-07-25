@@ -115,6 +115,108 @@ fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
     );
 }
 
+fn maintenance_profile_root() -> PathBuf {
+    tracedecay::config::user_data_dir().expect("test profile root")
+}
+
+fn prepare_maintenance_profile(profile_root: &Path) {
+    fs::create_dir_all(profile_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(profile_root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+fn acquire_fixture_maintenance() -> tracedecay::lifecycle_lease::LifecycleLease {
+    let profile_root = maintenance_profile_root();
+    prepare_maintenance_profile(&profile_root);
+    tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "storage resolver fixture mutation",
+    )
+    .unwrap()
+}
+
+async fn init_with_maintenance(project_root: &Path) -> tracedecay::errors::Result<TraceDecay> {
+    let profile_root = maintenance_profile_root();
+    prepare_maintenance_profile(&profile_root);
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "storage resolver fixture initialization",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "storage resolver fixture initialization",
+    )
+    .unwrap();
+    TraceDecay::init_with_exclusive_maintenance(
+        project_root,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+        &lifecycle,
+    )
+    .await
+}
+
+async fn open_with_maintenance(project_root: &Path) -> tracedecay::errors::Result<TraceDecay> {
+    let profile_root = maintenance_profile_root();
+    prepare_maintenance_profile(&profile_root);
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "storage resolver fixture open",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "storage resolver fixture open",
+    )
+    .unwrap();
+    TraceDecay::open_with_exclusive_maintenance(
+        project_root,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+        &lifecycle,
+    )
+    .await
+}
+
+async fn open_branch_with_maintenance(
+    project_root: &Path,
+    branch_name: &str,
+) -> tracedecay::errors::Result<TraceDecay> {
+    let profile_root = maintenance_profile_root();
+    prepare_maintenance_profile(&profile_root);
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "storage resolver fixture branch open",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "storage resolver fixture branch open",
+    )
+    .unwrap();
+    TraceDecay::open_branch_with_exclusive_maintenance(
+        project_root,
+        branch_name,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+        &lifecycle,
+    )
+    .await
+}
+
 fn test_home(dir: &TempDir) -> PathBuf {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
@@ -190,7 +292,7 @@ async fn init_enrolled_legacy_shard(project: &Path, legacy_project_id: &str) -> 
         },
     )
     .unwrap();
-    let store = TraceDecay::init(project).await.unwrap();
+    let store = init_with_maintenance(project).await.unwrap();
     assert_eq!(
         store.store_layout().identity.project_id.as_deref(),
         Some(legacy_project_id),

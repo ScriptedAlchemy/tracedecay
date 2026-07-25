@@ -10,16 +10,26 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
     let project = dir.path().join("repo");
     let worktree = dir.path().join("repo-wt");
     let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
 
     init_repo_with_commit(&project);
 
-    let main = TraceDecay::init(&project).await.unwrap();
+    let main = init_with_maintenance(&project).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed linked worktree store",
+    )
+    .unwrap();
     main.index_all().await.unwrap();
     let main_store = main.store_layout().data_root.clone();
-    drop(main);
+    main.close();
+    drop(database_scope);
+    drop(lifecycle);
 
     git(
         &project,
@@ -47,7 +57,7 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
         "linked worktree should resolve the already-initialized shared git store"
     );
 
-    let worktree_cg = TraceDecay::open(&worktree).await.unwrap();
+    let worktree_cg = open_with_maintenance(&worktree).await.unwrap();
     assert_eq!(worktree_cg.project_root(), worktree.as_path());
     assert_eq!(worktree_cg.store_layout().data_root, main_store);
     assert_path_eq(
@@ -161,10 +171,19 @@ async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store(
         init_repo_with_commit(root);
     }
 
-    let main = TraceDecay::init(&project).await.unwrap();
+    let main = init_with_maintenance(&project).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed shared worktree store",
+    )
+    .unwrap();
     main.index_all().await.unwrap();
     let main_project_id = main.store_layout().identity.project_id.clone().unwrap();
     main.close();
+    drop(database_scope);
+    drop(lifecycle);
 
     git(
         &project,
@@ -177,10 +196,19 @@ async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store(
         ],
     );
 
-    let candidate = TraceDecay::init(&candidate_source).await.unwrap();
+    let candidate = init_with_maintenance(&candidate_source).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed exact worktree store",
+    )
+    .unwrap();
     candidate.index_all().await.unwrap();
     let candidate_root = candidate.store_layout().data_root.clone();
     candidate.close();
+    drop(database_scope);
+    drop(lifecycle);
 
     let exact_project_id = "proj_linked_exact_over_shared";
     let exact_root = profile_root.join(format!("projects/{exact_project_id}"));
@@ -229,11 +257,20 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     let _home_guard = HomeGuard::set(&home);
     init_repo_with_commit(&project);
 
-    let main = TraceDecay::init(&project).await.unwrap();
+    let main = init_with_maintenance(&project).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed registered worktree store",
+    )
+    .unwrap();
     main.index_all().await.unwrap();
     let main_project_id = main.store_layout().identity.project_id.clone().unwrap();
     let main_data_root = main.store_layout().data_root.clone();
     main.close();
+    drop(database_scope);
+    drop(lifecycle);
 
     for (branch, worktree) in [
         ("feature/registered-sibling-one", first_worktree.as_path()),
@@ -328,7 +365,7 @@ async fn same_remote_clone_is_not_considered_initialized_without_local_identity(
         &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
     );
 
-    let registered_session_db = TraceDecay::init(&project)
+    let registered_session_db = init_with_maintenance(&project)
         .await
         .unwrap()
         .store_layout()
@@ -352,7 +389,7 @@ async fn same_remote_clone_is_not_considered_initialized_without_local_identity(
         .unwrap()
         .join("tracedecay-project.json");
     fs::copy(original_identity, copied_identity).unwrap();
-    let error = match TraceDecay::open(&clone).await {
+    let error = match open_with_maintenance(&clone).await {
         Ok(_) => panic!("a copied repository marker must not bind a second live clone"),
         Err(error) => error,
     };
@@ -389,7 +426,7 @@ async fn renamed_checkout_session_db_follows_registered_store() {
     git(&original, &["commit", "-m", "initial"]);
     git(&original, &["push", "origin", "HEAD:master"]);
 
-    let cg = TraceDecay::init(&original).await.unwrap();
+    let cg = init_with_maintenance(&original).await.unwrap();
     let registered_session_db = cg.store_layout().sessions_db_path.clone();
     drop(cg);
 
@@ -398,24 +435,23 @@ async fn renamed_checkout_session_db_follows_registered_store() {
     fs::rename(&original, &renamed).unwrap();
     git(&renamed, &["remote", "remove", "origin"]);
 
-    let resolved = TraceDecay::open(&renamed)
+    let resolved = open_with_maintenance(&renamed)
         .await
         .expect("renamed checkout should resolve a registered store")
         .store_layout()
         .sessions_db_path
         .clone();
     assert_path_eq(&resolved, &registered_session_db);
-    assert_ne!(
-        normalize_test_path(&resolved),
-        normalize_test_path(&resolve_project_session_db_path(&renamed).unwrap()),
-        "renamed checkout must not fork a fresh default-path session DB",
+    assert_path_eq(
+        resolve_project_session_db_path(&renamed).unwrap(),
+        &registered_session_db,
     );
 
     #[cfg(unix)]
     {
         let alias = dir.path().join("repo-alias");
         symlink(&renamed, &alias).unwrap();
-        let via_alias = TraceDecay::open(&alias)
+        let via_alias = open_with_maintenance(&alias)
             .await
             .expect("symlink alias should retain repository identity")
             .store_layout()
@@ -432,6 +468,7 @@ async fn parent_index_excludes_nested_linked_worktree_sources() {
     let project = dir.path().join("repo");
     let nested_worktree = project.join(".worktrees/feature");
     let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn parent_only() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
@@ -453,7 +490,14 @@ async fn parent_index_excludes_nested_linked_worktree_sources() {
     )
     .unwrap();
 
-    let mut parent = TraceDecay::init(&project).await.unwrap();
+    let mut parent = init_with_maintenance(&project).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "index parent worktree fixture",
+    )
+    .unwrap();
     parent.add_include_folders(&[".worktrees".to_string()]);
     parent.index_all().await.unwrap();
 
@@ -498,7 +542,7 @@ async fn same_remote_clone_session_db_does_not_borrow_registered_store() {
         &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
     );
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let cg = init_with_maintenance(&project).await.unwrap();
     let registered_session_db = cg.store_layout().sessions_db_path.clone();
     drop(cg);
 
@@ -542,27 +586,26 @@ async fn same_remote_repositories_keep_distinct_persistent_identities() {
         &["clone", remote.to_str().unwrap(), two.to_str().unwrap()],
     );
 
-    let one_session_db = TraceDecay::init(&one)
+    let one_session_db = init_with_maintenance(&one)
         .await
         .unwrap()
         .store_layout()
         .sessions_db_path
         .clone();
-    TraceDecay::init(&two).await.unwrap();
+    init_with_maintenance(&two).await.unwrap();
 
     fs::rename(&one, &renamed_one).unwrap();
 
-    let resolved = TraceDecay::open(&renamed_one)
+    let resolved = open_with_maintenance(&renamed_one)
         .await
         .expect("moved checkout should resolve its persistent repository identity")
         .store_layout()
         .sessions_db_path
         .clone();
-    assert_path_eq(&resolved, one_session_db);
-    assert_ne!(
-        normalize_test_path(&resolved),
-        normalize_test_path(&resolve_project_session_db_path(&renamed_one).unwrap()),
-        "remote ambiguity must not fork the moved repository into a new path-hash store"
+    assert_path_eq(&resolved, &one_session_db);
+    assert_path_eq(
+        resolve_project_session_db_path(&renamed_one).unwrap(),
+        one_session_db,
     );
 }
 
@@ -578,7 +621,7 @@ async fn nested_linked_worktree_does_not_discover_parent_checkout_marker() {
     let _home_guard = HomeGuard::set(&home);
 
     init_repo_with_commit(&project);
-    TraceDecay::init(&project).await.unwrap();
+    init_with_maintenance(&project).await.unwrap();
 
     git(
         &project,

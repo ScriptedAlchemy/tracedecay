@@ -391,6 +391,62 @@ impl TraceDecay {
         .await
     }
 
+    async fn registered_enrollment_roots(
+        project_root: &Path,
+        store_layout: &StoreLayout,
+        project_id: &ProjectId,
+        registry_database: &RegisteredGlobalDb,
+    ) -> Result<Vec<PathBuf>> {
+        let mut candidates = vec![
+            project_root.to_path_buf(),
+            store_layout.project_root.clone(),
+        ];
+        if let Some(context) = registry_database
+            .project_registry_context_by_id(project_id.as_str())
+            .await?
+        {
+            candidates.push(PathBuf::from(context.project.canonical_root));
+        }
+
+        let mut roots = Vec::new();
+        for candidate in candidates {
+            let Ok(canonical) = candidate.canonicalize() else {
+                continue;
+            };
+            if roots.contains(&canonical) {
+                continue;
+            }
+            let Some(marker) = storage::read_enrollment_marker(&canonical)? else {
+                continue;
+            };
+            if marker.storage_mode == storage::StorageMode::ProfileSharded
+                && marker.project_id == project_id.as_str()
+            {
+                roots.push(canonical);
+            }
+        }
+        if roots.is_empty() {
+            let canonical =
+                project_root
+                    .canonicalize()
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "could not canonicalize project enrollment root '{}': {error}",
+                            project_root.display()
+                        ),
+                    })?;
+            storage::write_enrollment_marker(
+                &canonical,
+                &storage::EnrollmentMarker {
+                    project_id: project_id.as_str().to_owned(),
+                    storage_mode: storage::StorageMode::ProfileSharded,
+                },
+            )?;
+            roots.push(canonical);
+        }
+        Ok(roots)
+    }
+
     async fn resolve_store_layout_with_identity_migration(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -605,8 +661,15 @@ impl TraceDecay {
         )
         .await?;
         let project_id = Self::registered_project_id(&store_layout)?;
+        let enrollment_roots = Self::registered_enrollment_roots(
+            project_root,
+            &store_layout,
+            &project_id,
+            profile_database.as_ref(),
+        )
+        .await?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, [project_root.to_path_buf()])
+            .project_sessions(project_id, enrollment_roots)
             .await?;
         Self::open_with_registered_configuration(
             project_root,
@@ -1369,6 +1432,54 @@ impl TraceDecay {
         Err(configuration_runtime_unavailable())
     }
 
+    /// Opens a tracked branch through the canonical registered runtime while
+    /// the caller holds the exact profile's exclusive maintenance lease.
+    pub async fn open_branch_with_exclusive_maintenance(
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
+        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+    ) -> Result<Self> {
+        let profile_root = open_options.resolved_profile_root()?;
+        if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
+            return Err(TraceDecayError::Config {
+                message: "branch open requires the exact profile's exclusive lifecycle lease"
+                    .to_owned(),
+            });
+        }
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let profile_database = runtime_registry.profile_database().await?;
+        let store_layout = Self::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        let project_id = Self::registered_project_id(&store_layout)?;
+        let enrollment_roots = Self::registered_enrollment_roots(
+            project_root,
+            &store_layout,
+            &project_id,
+            profile_database.as_ref(),
+        )
+        .await?;
+        let configuration_database = runtime_registry
+            .project_sessions(project_id, enrollment_roots)
+            .await?;
+        Self::open_branch_with_registered_configuration(
+            project_root,
+            branch_name,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+        )
+        .await
+    }
+
     pub(crate) async fn open_branch_with_registered_configuration(
         project_root: &Path,
         branch_name: &str,
@@ -1842,8 +1953,10 @@ impl std::fmt::Display for StoreIdentityInventory {
 
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
     let scratch_root = layout.data_root.join("scratch").join("sqlite-read");
-    let open_result =
-        crate::sqlite_read_snapshot::open_in(&layout.graph_db_path, &scratch_root).await;
+    let open_result = match storage::PrivateStoreIo::create_dir_all(&scratch_root) {
+        Ok(()) => crate::sqlite_read_snapshot::open_in(&layout.graph_db_path, &scratch_root).await,
+        Err(error) => Err(error),
+    };
     let (graph_health, nodes, files, facts) = match open_result {
         Ok(snapshot) => {
             let connection = snapshot.connection();
@@ -1864,19 +1977,26 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
     };
 
     let (sessions, messages, lcm_rows) =
-        match crate::sqlite_read_snapshot::open_in(&layout.sessions_db_path, &scratch_root).await {
-            Ok(snapshot) => {
-                let connection = snapshot.connection();
-                let counts = (
-                    count_rows(connection, "sessions").await,
-                    count_rows(connection, "session_messages").await,
-                    count_rows(connection, "lcm_raw_messages").await
-                        + count_rows(connection, "lcm_summary_nodes").await,
-                );
-                if snapshot.validate_source().is_ok() {
-                    counts
-                } else {
-                    (0, 0, 0)
+        match storage::PrivateStoreIo::create_dir_all(&scratch_root) {
+            Ok(()) => {
+                match crate::sqlite_read_snapshot::open_in(&layout.sessions_db_path, &scratch_root)
+                    .await
+                {
+                    Ok(snapshot) => {
+                        let connection = snapshot.connection();
+                        let counts = (
+                            count_rows(connection, "sessions").await,
+                            count_rows(connection, "session_messages").await,
+                            count_rows(connection, "lcm_raw_messages").await
+                                + count_rows(connection, "lcm_summary_nodes").await,
+                        );
+                        if snapshot.validate_source().is_ok() {
+                            counts
+                        } else {
+                            (0, 0, 0)
+                        }
+                    }
+                    Err(_) => (0, 0, 0),
                 }
             }
             Err(_) => (0, 0, 0),
