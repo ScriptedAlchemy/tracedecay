@@ -771,6 +771,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kimi_and_opencode_replay_preserve_native_session_and_provider_order() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        for (host, session, sequence) in [
+            (HookHostV1::KimiCode, "session.kimi.replay", 41),
+            (HookHostV1::OpenCode, "session.opencode.replay", 42),
+        ] {
+            let mut host_binding = binding(7);
+            host_binding.host = host;
+            host_binding.capabilities = [
+                HookEventFamily::SessionBoundary,
+                HookEventFamily::PromptBoundary,
+                HookEventFamily::ToolLifecycle,
+                HookEventFamily::SavedEdit,
+                HookEventFamily::TestLifecycle,
+            ]
+            .into_iter()
+            .map(|family| HookCapabilityV1 {
+                family,
+                support: stock_event_support(host, family),
+            })
+            .collect();
+            let mut replayed = envelope(sequence as u8, &host_binding);
+            replayed.producer = host;
+            replayed.protected_session_id =
+                crate::hooks::hook_v2_protected_session_id_for_native(session);
+            replayed.ordering = HookOrderingV1::ProviderSequence(sequence);
+            replayed.event = HookEventV2::SavedEdit {
+                file_id: [sequence as u8; 16],
+                changed_range_count: 1,
+            };
+            let captured = Arc::clone(&seen);
+
+            let outcome = admit_replayed_envelope_with_authoritative_session(
+                replayed,
+                move |project_id, worktree_id, protected_session_id| async move {
+                    assert_eq!(project_id, [1; 16]);
+                    assert_eq!(worktree_id, [3; 16]);
+                    assert_eq!(
+                        protected_session_id,
+                        crate::hooks::hook_v2_protected_session_id_for_native(session)
+                    );
+                    Some(SessionId::new(session.to_owned()).unwrap())
+                },
+                move |envelope, native_session_id| async move {
+                    captured.lock().unwrap().push((
+                        envelope.producer,
+                        envelope.ordering,
+                        native_session_id.unwrap(),
+                    ));
+                    admitted()
+                },
+            )
+            .await;
+            assert!(matches!(outcome, HookV2AdmissionOutcomeV1::Admitted { .. }));
+        }
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0, HookHostV1::KimiCode);
+        assert_eq!(seen[0].1, HookOrderingV1::ProviderSequence(41));
+        assert_eq!(seen[0].2.as_str(), "session.kimi.replay");
+        assert_eq!(seen[1].0, HookHostV1::OpenCode);
+        assert_eq!(seen[1].1, HookOrderingV1::ProviderSequence(42));
+        assert_eq!(seen[1].2.as_str(), "session.opencode.replay");
+    }
+
+    #[tokio::test]
     async fn an_expired_record_is_tombstoned_rather_than_replayed() {
         let root = TestRoot::new("expired");
         let queued_at = UtcMicros(1_000);

@@ -22,7 +22,7 @@
 #![allow(dead_code)] // model artifact store; Plan 31
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -1404,6 +1404,26 @@ impl ModelArtifactStore {
                     expires_at_unix: u64::MAX,
                 });
         }
+        let retained_rollback_digests = inventory
+            .leases
+            .iter()
+            .filter_map(|(leased_digest, leases)| {
+                leases
+                    .iter()
+                    .any(|lease| {
+                        lease.kind == ArtifactLeaseKindV1::Rollback
+                            && lease.expires_at_unix > now_unix
+                    })
+                    .then_some(leased_digest.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        for (record_digest, record) in &mut inventory.records {
+            if record.state == ArtifactInventoryStateV1::RetainedForRollback
+                && !retained_rollback_digests.contains(record_digest)
+            {
+                record.state = ArtifactInventoryStateV1::Installed;
+            }
+        }
         self.save_inventory_locked(&inventory)
     }
 
@@ -1594,7 +1614,11 @@ impl ModelArtifactStore {
                     r.state,
                     ArtifactInventoryStateV1::Verified | ArtifactInventoryStateV1::Quarantined
                 ) || (include_unleased_installed
-                    && r.state == ArtifactInventoryStateV1::Installed);
+                    && matches!(
+                        r.state,
+                        ArtifactInventoryStateV1::Installed
+                            | ArtifactInventoryStateV1::RetainedForRollback
+                    ));
                 let has_live_reference = inventory
                     .leases
                     .get(&r.artifact_digest.to_string())
@@ -2699,6 +2723,61 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn daemon_gc_collects_only_the_superseded_rollback_after_rotation() {
+        let (_root, store) = store();
+        let (_first_manifest, first) = import_ok(&store, b"first verified model");
+        store
+            .activate_artifact_with_rollback(&first, "active", "rollback", NOW)
+            .unwrap();
+        let (_second_manifest, second) = import_ok(&store, b"second verified model");
+        store
+            .activate_artifact_with_rollback(&second, "active", "rollback", NOW + 1)
+            .unwrap();
+        let (_third_manifest, third) = import_ok(&store, b"third verified model");
+        store
+            .activate_artifact_with_rollback(&third, "active", "rollback", NOW + 2)
+            .unwrap();
+
+        let before_gc = store.inventory().unwrap();
+        assert_eq!(
+            before_gc.records.get(&first.to_string()).unwrap().state,
+            ArtifactInventoryStateV1::Installed
+        );
+        assert_eq!(
+            before_gc.records.get(&second.to_string()).unwrap().state,
+            ArtifactInventoryStateV1::RetainedForRollback
+        );
+        assert_eq!(
+            store
+                .artifact_digest_for_lease("active", ArtifactLeaseKindV1::Active, NOW + 2)
+                .unwrap(),
+            Some(third.clone())
+        );
+        assert_eq!(
+            store
+                .artifact_digest_for_lease("rollback", ArtifactLeaseKindV1::Rollback, NOW + 2)
+                .unwrap(),
+            Some(second.clone())
+        );
+
+        let collected_at = NOW + 102;
+        let daemon = store
+            .acquire_daemon_gc_lease("daemon", collected_at + 1_000, collected_at)
+            .unwrap();
+        let receipts = store.gc_with_daemon_lease(&daemon, collected_at).unwrap();
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| receipt.artifact_digest.clone())
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+        let after_gc = store.inventory().unwrap();
+        assert!(after_gc.records.contains_key(&second.to_string()));
+        assert!(after_gc.records.contains_key(&third.to_string()));
     }
 
     #[test]
