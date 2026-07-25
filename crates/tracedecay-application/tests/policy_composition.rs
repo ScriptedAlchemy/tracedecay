@@ -16,6 +16,11 @@ use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRoutingDispositionV1,
     CapabilityRoutingReasonV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
+use tracedecay_policy::{
+    PolicyEvidenceAgreementV1 as RetainedEvidenceAgreementV1, PolicyEvidenceCoverageV1,
+    PolicyEvidenceSnapshotV1, PolicyEvidenceStateV1, RetainedPolicyInputV1,
+    RetainedPolicySnapshotStateV1,
+};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 fn id<T>(value: &str) -> T
@@ -85,6 +90,70 @@ fn watermark(shard: &str, sequence: u64) -> VectorWatermark {
     VectorWatermark {
         components: BTreeMap::from([(ShardId::new(shard).unwrap(), sequence)]),
     }
+}
+
+fn retained_input(context: &PolicyEvaluationContextV1) -> RetainedPolicyInputV1 {
+    RetainedPolicyInputV1 {
+        requested_route: tracedecay_policy::PolicyIdentifierV1::new("route.primary").unwrap(),
+        deterministic_fallback: Some(
+            tracedecay_policy::PolicyIdentifierV1::new("route.baseline").unwrap(),
+        ),
+        enabled: true,
+        authorized: true,
+        primary_evidence: PolicyEvidenceSnapshotV1 {
+            watermark: digest('c'),
+            state: PolicyEvidenceStateV1::Fresh,
+            coverage: PolicyEvidenceCoverageV1::Complete,
+        },
+        secondary_evidence: None,
+        evidence_agreement: RetainedEvidenceAgreementV1::NotApplicable,
+        snapshot_state: RetainedPolicySnapshotStateV1::Complete,
+        policy_revision: context.policy_revision(),
+        policy_digest: context.policy_digest().clone(),
+        configuration_digest: context.configuration().effective_behavior_digest.clone(),
+        evaluated_at: UtcMicros(10),
+    }
+}
+
+#[test]
+fn application_composition_calls_each_retained_policy_family_directly() {
+    let composition = PolicyEvaluatorCompositionV1::from_application_catalog().unwrap();
+    let context = evaluation_context();
+    let input = retained_input(&context);
+
+    let hint = composition.evaluate_hint(&context, &input).unwrap();
+    let diagnostics = composition.curate_diagnostics(&context, &input).unwrap();
+    let memory = composition.propose_memory(&context, &input).unwrap();
+    let conflict = composition.arbitrate_conflict(&context, &input).unwrap();
+    let experiment = composition.route_experiment(&context, &input).unwrap();
+    let mut correlation_input = input.clone();
+    correlation_input.secondary_evidence = Some(PolicyEvidenceSnapshotV1 {
+        watermark: digest('d'),
+        state: PolicyEvidenceStateV1::Fresh,
+        coverage: PolicyEvidenceCoverageV1::Complete,
+    });
+    correlation_input.evidence_agreement = RetainedEvidenceAgreementV1::Agree;
+    let correlation = composition
+        .correlate_local_live(&context, &correlation_input)
+        .unwrap();
+
+    assert_eq!(hint.consumer, PolicyConsumerV1::HintRouting);
+    assert_eq!(diagnostics.consumer, PolicyConsumerV1::DiagnosticsCuration);
+    assert_eq!(memory.consumer, PolicyConsumerV1::MemoryRouting);
+    assert_eq!(conflict.consumer, PolicyConsumerV1::ConflictRouting);
+    assert_eq!(experiment.consumer, PolicyConsumerV1::ExperimentRouting);
+    assert_eq!(correlation.consumer, PolicyConsumerV1::LocalLiveCorrelation);
+    let evaluator_ids = [
+        hint.decision.evaluator_id,
+        diagnostics.decision.evaluator_id,
+        memory.decision.evaluator_id,
+        conflict.decision.evaluator_id,
+        experiment.decision.evaluator_id,
+        correlation.decision.evaluator_id,
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(evaluator_ids.len(), 6);
 }
 
 #[test]
@@ -250,7 +319,7 @@ fn callable_route_returns_typed_denial_for_a_missing_operation_grant() {
 }
 
 #[test]
-fn local_live_disagreement_preserves_both_independent_watermarks() {
+fn local_live_correlation_cannot_fall_back_to_generic_capability_routing() {
     let composition = PolicyEvaluatorCompositionV1::from_application_catalog().unwrap();
     let context = evaluation_context();
     let candidate = composition
@@ -285,21 +354,16 @@ fn local_live_disagreement_preserves_both_independent_watermarks() {
         agreement: PolicyEvidenceAgreementV1::Disagree,
     };
 
-    let evaluation = composition
-        .route(
-            PolicyConsumerV1::LocalLiveCorrelation,
-            &context,
-            &request,
-            Some(horizon.clone()),
-        )
-        .unwrap();
-
-    assert_eq!(
-        evaluation.decision.disposition,
-        CapabilityRoutingDispositionV1::Allow
+    assert!(
+        composition
+            .route(
+                PolicyConsumerV1::LocalLiveCorrelation,
+                &context,
+                &request,
+                Some(horizon),
+            )
+            .is_err()
     );
-    assert_eq!(evaluation.evidence_horizon, Some(horizon));
-    assert_eq!(evaluation.context.scope(), context.scope());
 }
 
 #[test]
