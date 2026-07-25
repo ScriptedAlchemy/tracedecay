@@ -294,6 +294,11 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     ];
     let project = init_project(&tmp);
     let project_id = mark_test_project(&project);
+    let enrollment =
+        HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+            .await
+            .unwrap();
+    drop(enrollment);
 
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
@@ -1513,7 +1518,7 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
 // Intentional: this test pins process-wide profile storage while the Cursor
 // sweep resolves its project session DB.
 #[allow(clippy::await_holding_lock)]
-async fn cursor_sweep_ingests_profile_stored_project_without_local_marker() {
+async fn cursor_sweep_ingests_profile_stored_project_without_legacy_local_database() {
     let tmp = TempDir::new().unwrap();
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -1540,7 +1545,11 @@ async fn cursor_sweep_ingests_profile_stored_project_without_local_marker() {
         .unwrap();
     assert_eq!(indexed.sessions_upserted, 2);
     assert_eq!(indexed.messages_upserted, 2);
-    assert!(!project.join(".tracedecay").exists());
+    assert!(!project.join(".tracedecay/tracedecay.db").exists());
+    let enrollment = tracedecay::storage::read_enrollment_marker(&project)
+        .unwrap()
+        .expect("profile-backed project should retain its enrollment marker");
+    assert_eq!(enrollment.project_id, fixture_project_id().as_str());
 }
 
 #[tokio::test]

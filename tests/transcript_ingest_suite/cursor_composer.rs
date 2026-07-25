@@ -39,7 +39,7 @@ async fn composer_observation_json_blobs(runtime: &ProjectSessionTestRuntime) ->
         .runtime()
         .replay_observations(
             HostAdmissionScope::Project,
-            ObservationReplayRequest::new(0, 10_000).unwrap(),
+            ObservationReplayRequest::new(0, 1_000).unwrap(),
         )
         .await
         .unwrap()
