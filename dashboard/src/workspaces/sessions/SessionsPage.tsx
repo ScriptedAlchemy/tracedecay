@@ -18,10 +18,10 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 const BASE = '/api/plugins/hermes-lcm';
 
 const OverviewPayload = z
-  .object({ latest_sessions: z.array(AnyObject).optional() })
+  .object({ exists: z.boolean().optional(), latest_sessions: z.array(AnyObject).optional() })
   .passthrough();
 const TimelinePayload = z
-  .object({ buckets: z.array(AnyObject).optional() })
+  .object({ exists: z.boolean().optional(), buckets: z.array(AnyObject).optional() })
   .passthrough();
 /** Wire-true transcript search (lcm_api.rs search): hits nest under
  * matches.messages / matches.summary_nodes. */
@@ -82,6 +82,13 @@ export function SessionsPage() {
           </form>
         <LegacyBoundary title="LCM" pending={timeline.isPending} result={timeline.data}>
           {(data) => {
+            if (data.exists === false) {
+              return (
+                <p className="text-2xs leading-relaxed text-text-muted">
+                  LCM session store is unavailable; message volume is unknown.
+                </p>
+              );
+            }
             const buckets = (data.buckets ?? []).map((b) => ({
               label: String(b['bucket'] ?? ''),
               value: Number(b['count'] ?? 0),
@@ -166,6 +173,13 @@ export function SessionsPage() {
         ) : (
         <LegacyBoundary title="Sessions" pending={overview.isPending} result={overview.data}>
           {(data) => {
+            if (data.exists === false) {
+              return (
+                <p className="p-6 text-center text-sm text-text-muted">
+                  LCM session store is unavailable; session count is unknown.
+                </p>
+              );
+            }
             const rows = data.latest_sessions ?? [];
             if (rows.length === 0)
               return (
