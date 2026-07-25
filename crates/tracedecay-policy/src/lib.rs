@@ -10,6 +10,7 @@
 pub mod analyzer;
 pub mod authorization;
 pub mod configuration;
+pub mod diagnostic_curation;
 pub mod git;
 pub mod hint_delivery;
 pub mod replay;
@@ -20,6 +21,7 @@ pub mod routing;
 pub use analyzer::*;
 pub use authorization::*;
 pub use configuration::*;
+pub use diagnostic_curation::*;
 pub use git::*;
 pub use hint_delivery::*;
 pub use replay::*;
