@@ -87,6 +87,10 @@ impl PhysicalRuntimeAttachment for FakeAttachment {
         *self.snapshot.lock().unwrap()
     }
 
+    fn opened_file_identity(&self) -> Result<u64, String> {
+        Ok(1)
+    }
+
     fn drain(&self) -> Result<(), String> {
         self.drain_calls.fetch_add(1, Ordering::SeqCst);
         self.drain_gate.wait();
@@ -212,15 +216,11 @@ async fn publication_and_aliases_share_and_retain_one_physical_attachment() {
 async fn eviction_drains_verifies_closes_once_and_drops_database_proxy() {
     let (registry, publisher) = attachment_registry();
     let pin = profile_pin(&registry).await;
-    let first = open_published(&registry, project_request("project.attachment-first", &pin)).await;
+    let first = open_published(&registry, code_request("worktree.attachment-first", &pin)).await;
     let attachment = publisher.attachment(1);
     drop(first);
 
-    open_published(
-        &registry,
-        project_request("project.attachment-second", &pin),
-    )
-    .await;
+    open_published(&registry, code_request("worktree.attachment-second", &pin)).await;
 
     assert_eq!(attachment.drain_calls.load(Ordering::SeqCst), 1);
     assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 1);
@@ -232,14 +232,14 @@ async fn eviction_drains_verifies_closes_once_and_drops_database_proxy() {
 async fn drain_failure_is_terminal_and_retains_evicting_attachment() {
     let (registry, publisher) = attachment_registry();
     let pin = profile_pin(&registry).await;
-    let first = open_published(&registry, project_request("project.attachment-fault", &pin)).await;
+    let first = open_published(&registry, code_request("worktree.attachment-fault", &pin)).await;
     let binding = first.binding().clone();
     let attachment = publisher.attachment(1);
     attachment.fail_drain.store(true, Ordering::SeqCst);
     drop(first);
 
     assert!(matches!(
-        registry.begin_or_join_open(&project_request("project.after-fault", &pin)),
+        registry.begin_or_join_open(&code_request("worktree.after-fault", &pin)),
         StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
             operation: "drain",
             ..
@@ -258,7 +258,7 @@ async fn incomplete_drain_is_verified_before_physical_close() {
     let pin = profile_pin(&registry).await;
     let first = open_published(
         &registry,
-        project_request("project.attachment-incomplete-drain", &pin),
+        code_request("worktree.attachment-incomplete-drain", &pin),
     )
     .await;
     let binding = first.binding().clone();
@@ -269,7 +269,7 @@ async fn incomplete_drain_is_verified_before_physical_close() {
     drop(first);
 
     assert!(matches!(
-        registry.begin_or_join_open(&project_request("project.after-incomplete-drain", &pin)),
+        registry.begin_or_join_open(&code_request("worktree.after-incomplete-drain", &pin)),
         StoreRuntimeOpenBegin::Rejected(
             StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { .. }
         )
@@ -290,8 +290,8 @@ async fn incomplete_drain_is_verified_before_physical_close() {
 async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_keys() {
     let (registry, publisher) = attachment_registry();
     let pin = profile_pin(&registry).await;
-    let evicted_request = project_request("project.blocking-join-first", &pin);
-    let opening_request = project_request("project.blocking-join-second", &pin);
+    let evicted_request = code_request("worktree.blocking-join-first", &pin);
+    let opening_request = code_request("worktree.blocking-join-second", &pin);
     let first = open_published(&registry, evicted_request.clone()).await;
     let binding = first.binding().clone();
     let attachment = publisher.attachment(1);
@@ -370,8 +370,8 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
 async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() {
     let (registry, publisher) = attachment_registry();
     let pin = profile_pin(&registry).await;
-    let evicted_request = project_request("project.blocking-drain-first", &pin);
-    let opening_request = project_request("project.blocking-drain-second", &pin);
+    let evicted_request = code_request("worktree.blocking-drain-first", &pin);
+    let opening_request = code_request("worktree.blocking-drain-second", &pin);
     let first = open_published(&registry, evicted_request.clone()).await;
     let binding = first.binding().clone();
     let attachment = publisher.attachment(1);
