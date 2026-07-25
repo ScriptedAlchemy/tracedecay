@@ -202,6 +202,9 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
             body_digest: digest(SHA_B),
             body_anchor: github_anchor.clone(),
             safe_url_anchor: Some(anchor("anchor.pr13.github-url")),
+            safe_url: Some(
+                "https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1".to_owned(),
+            ),
             lifecycle: GitHubReviewLifecycleV1::Current,
             provider_outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
             remap: GitHubReviewCurrentBranchRemapV1 {
@@ -215,6 +218,10 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
         fetched_at: UtcMicros(2),
     };
     github.validate().unwrap();
+    let mut unsafe_github = github.clone();
+    unsafe_github.items[0].safe_url =
+        Some("https://user:secret@github.com/ScriptedAlchemy/tracedecay/pull/13".to_owned());
+    assert!(unsafe_github.validate().is_err());
     let github_request = GitHubReviewReadRequestV1 {
         operation: github.operation,
         scope: scope.clone(),
@@ -328,6 +335,13 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
             .as_ref()
             .map(|projection| projection.producer),
         Some(FeedbackDiagnosticProducerV1::GitHubReview)
+    );
+    assert_eq!(
+        github_finding
+            .diagnostic_projection
+            .as_ref()
+            .and_then(|projection| projection.code_description_uri.as_deref()),
+        Some("https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1")
     );
     let ci_finding = ci
         .advisory_findings(validity)
