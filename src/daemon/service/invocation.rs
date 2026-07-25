@@ -5890,9 +5890,24 @@ impl DaemonInvocationService {
         self.callable_code_runtimes.lock().await.clear();
         self.lsp_sessions.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
-        self.feedback_runtimes.lock().await.clear();
+        let feedback_runtimes = std::mem::take(&mut *self.feedback_runtimes.lock().await);
+        let feedback_cycle_inputs = std::mem::take(&mut *self.feedback_cycle_inputs.lock().await);
+        // The production advisory input retains its LSP factory, whose
+        // feedback adapter retains this switchable router. Reset the router
+        // before dropping the registries so shutdown cannot leave that cycle
+        // retaining the project graph and database runtimes.
+        for (project_root, router) in &feedback_cycle_inputs {
+            if let Some(registered) = feedback_runtimes.get(project_root) {
+                let unavailable = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+                    registered.project_id.clone(),
+                    registered.runtime.source_observation_port(),
+                ));
+                let _ = router.replace(unavailable);
+            }
+        }
+        drop(feedback_cycle_inputs);
+        drop(feedback_runtimes);
         self.feedback_cycles.lock().await.clear();
-        self.feedback_cycle_inputs.lock().await.clear();
         self.primitive_runtimes.lock().await.clear();
         self.configuration_runtimes.lock().await.clear();
         let semantic_runtimes = std::mem::take(&mut *self.semantic_runtimes.lock().await);
