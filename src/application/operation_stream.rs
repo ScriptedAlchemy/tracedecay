@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -36,10 +37,21 @@ use crate::query::temporal::ports::{
     BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
     TemporalSnapshotRequest, TemporalWatermarks,
 };
+
 use crate::query::temporal::resolution::ValidatedAuthorization;
 
 const RESUME_KEY_RANDOM_BYTES: usize = 16;
 const RESUME_KEY_MATERIAL_BYTES: usize = 32;
+
+fn current_micros_for_cancellation() -> UtcMicros {
+    UtcMicros(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_micros()).ok())
+            .unwrap_or(i64::MAX),
+    )
+}
 
 /// Stable operation identity. The originating authorized request owns the
 /// identity; paths, labels, and client-selected payloads never participate.
@@ -465,7 +477,7 @@ struct OperationRecord {
     terminal: Option<OperationEvent>,
     live: broadcast::Sender<OperationEvent>,
     frontier: watch::Sender<StreamFrontier>,
-    cancellation: watch::Sender<bool>,
+    cancellation: watch::Sender<Option<UtcMicros>>,
     subscribers: Arc<AtomicUsize>,
 }
 
@@ -685,7 +697,7 @@ impl OperationEventAuthority {
             resume_token: Some(resume_token.clone()),
         };
         let (frontier, _) = watch::channel(initial_frontier);
-        let (cancellation, cancellation_receiver) = watch::channel(false);
+        let (cancellation, cancellation_receiver) = watch::channel(None);
         let accepted = StreamEvent {
             sequence: 0,
             kind: StreamEventKind::Item(OperationEventItem::Accepted {
@@ -770,7 +782,7 @@ impl OperationEventAuthority {
             retained_from_sequence: 0,
             resume_token: Some(resume_token.clone()),
         });
-        let (cancellation, cancellation_receiver) = watch::channel(false);
+        let (cancellation, cancellation_receiver) = watch::channel(None);
         let accepted = StreamEvent {
             sequence: 0,
             kind: StreamEventKind::Item(OperationEventItem::Accepted {
@@ -844,7 +856,12 @@ impl OperationEventAuthority {
         if record.terminal.is_some() {
             return Ok(OperationCancelOutcome::AlreadyTerminal);
         }
-        let already_requested = record.cancellation.send_replace(true);
+        let already_requested = record.cancellation.borrow().is_some();
+        if !already_requested {
+            record
+                .cancellation
+                .send_replace(Some(current_micros_for_cancellation()));
+        }
         Ok(if already_requested {
             OperationCancelOutcome::AlreadyRequested
         } else {
@@ -949,7 +966,10 @@ impl OperationEventAuthority {
         if record.terminal.is_some() {
             return Ok(OperationCancelOutcome::AlreadyTerminal);
         }
-        let already_requested = record.cancellation.send_replace(true);
+        let already_requested = record.cancellation.borrow().is_some();
+        if !already_requested {
+            record.cancellation.send_replace(Some(observed_at));
+        }
         Ok(if already_requested {
             OperationCancelOutcome::AlreadyRequested
         } else {
@@ -1176,7 +1196,7 @@ fn managed_test_run_snapshot(
 pub struct OperationEmitter {
     authority: OperationEventAuthority,
     binding: OperationBinding,
-    cancellation: watch::Receiver<bool>,
+    cancellation: watch::Receiver<Option<UtcMicros>>,
 }
 
 impl OperationEmitter {
@@ -1185,11 +1205,15 @@ impl OperationEmitter {
     }
 
     pub fn is_cancelled(&self) -> bool {
+        self.cancellation.borrow().is_some()
+    }
+
+    pub fn cancellation_requested_at(&self) -> Option<UtcMicros> {
         *self.cancellation.borrow()
     }
 
     pub async fn cancelled(&mut self) {
-        while !*self.cancellation.borrow_and_update() {
+        while self.cancellation.borrow_and_update().is_none() {
             if self.cancellation.changed().await.is_err() {
                 return;
             }

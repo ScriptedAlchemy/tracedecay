@@ -5047,28 +5047,37 @@ impl LspSessionAdmissionPort for AdmittedRootSessionAdmission {
 }
 
 #[derive(Clone)]
-struct SharedGitTransactionPort(Arc<DaemonProjectGitIndexTransactionService>);
+struct SharedGitTransactionPort {
+    service: Arc<DaemonProjectGitIndexTransactionService>,
+    cancellation: Option<OperationEmitter>,
+}
 
 impl GitIndexTransactionPort for SharedGitTransactionPort {
     fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
     ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        self.0.preview(request)
+        self.service.preview(request)
     }
 
     fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.0.apply(request)
+        self.cancellation.as_ref().map_or_else(
+            || self.service.apply(request),
+            |emitter| {
+                self.service
+                    .apply_cancellable(request, || emitter.cancellation_requested_at())
+            },
+        )
     }
 
     fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
-        self.0.recover(request)
+        self.service.recover(request)
     }
 }
 
@@ -5453,7 +5462,11 @@ async fn execute_git_preview(
     let started_at = request.observed_at;
     let effective_deadline = request.context.deadline().clone();
     let result = tokio::task::spawn_blocking(move || {
-        GitIndexTransactionService::new(SharedGitTransactionPort(service)).preview(request)
+        GitIndexTransactionService::new(SharedGitTransactionPort {
+            service,
+            cancellation: None,
+        })
+        .preview(request)
     })
     .await;
     let response = match result {
@@ -5533,8 +5546,13 @@ async fn execute_git_apply(
     let _ = emitter.progress(0, Some(1)).await;
     let started_at = request.observed_at;
     let effective_deadline = request.context.deadline().clone();
+    let cancellation = emitter.clone();
     let result = tokio::task::spawn_blocking(move || {
-        GitIndexTransactionService::new(SharedGitTransactionPort(service)).apply(request)
+        GitIndexTransactionService::new(SharedGitTransactionPort {
+            service,
+            cancellation: Some(cancellation),
+        })
+        .apply(request)
     })
     .await;
     let response = match result {
