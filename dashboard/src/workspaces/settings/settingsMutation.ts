@@ -63,7 +63,10 @@ export async function applySettingsMutation(
   const patched = await fetchJson(request.patchUrl, {
     method: 'PATCH',
     headers: JSON_HEADERS,
-    body: JSON.stringify(request.patch),
+    body: JSON.stringify({
+      ...request.patch,
+      expected_revision_id: request.expectedRevisionId,
+    }),
   });
   if (patched.outcome !== 'response') return patched;
   if (patched.response.status === 409) {
