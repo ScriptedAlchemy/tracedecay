@@ -76,6 +76,32 @@ async fn test_open_read_only(path: &Path) -> (Database, bool) {
     .unwrap()
 }
 
+async fn open_historical_project_runtime(
+    profile: &Path,
+    project: &Path,
+    project_id: &str,
+) -> HostAdmissionTestRuntimeV1 {
+    let previous_enrollment = storage::read_enrollment_marker(project).unwrap();
+    let requested_enrollment = EnrollmentMarker {
+        project_id: project_id.to_string(),
+        storage_mode: StorageMode::ProfileSharded,
+    };
+    storage::write_enrollment_marker(project, &requested_enrollment).unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        profile,
+        project,
+        ProjectId::new(project_id.to_string()).unwrap(),
+    )
+    .await;
+    match previous_enrollment {
+        Some(marker) => storage::write_enrollment_marker(project, &marker).unwrap(),
+        None => {
+            storage::remove_enrollment_marker(project, project_id).unwrap();
+        }
+    }
+    runtime.unwrap()
+}
+
 struct Fixture {
     _temp: TempDir,
     project: PathBuf,
