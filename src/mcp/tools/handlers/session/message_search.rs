@@ -149,6 +149,8 @@ pub(crate) struct SessionRetrievalProjectSelector {
 pub(crate) struct SessionRetrievalFilters {
     pub(crate) project_key: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) include_summaries: bool,
     pub(crate) scope: SessionSearchScope,
     pub(crate) message_type: SessionMessageType,
     pub(crate) roles: Vec<String>,
@@ -218,6 +220,8 @@ fn temporal_candidate_filter(
     TemporalCandidateFilterV1 {
         project_key: filters.project_key.clone(),
         parent_session_id: filters.parent_session_id.clone(),
+        source: filters.source.clone(),
+        include_summaries: filters.include_summaries,
         session_scope: match filters.scope {
             SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
             SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
@@ -251,9 +255,11 @@ fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -
     roles.sort();
     roles.dedup();
     let encoded = json!({
-        "version": 1,
+        "version": 2,
         "project_key": filters.project_key,
         "parent_session_id": filters.parent_session_id,
+        "source": filters.source,
+        "include_summaries": filters.include_summaries,
         "scope": filters.scope.as_str(),
         "message_type": filters.message_type.as_str(),
         "roles": roles,
@@ -1002,6 +1008,8 @@ fn retrieval_command(
     let filters = SessionRetrievalFilters {
         project_key: request.project_key.map(str::to_string),
         parent_session_id: request.parent_session_id.map(str::to_string),
+        source: None,
+        include_summaries: false,
         scope: request.scope,
         message_type: request.message_type,
         roles: Vec::new(),

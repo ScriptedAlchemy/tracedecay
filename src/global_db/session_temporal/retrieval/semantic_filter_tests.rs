@@ -186,3 +186,38 @@ fn tool_results_do_not_leak_into_direct_user_filter() {
     assert!(!observation_matches_filter(&encoded, "user", &direct).unwrap());
     assert!(observation_matches_filter(&encoded, "user", &tool).unwrap());
 }
+
+#[test]
+fn canonical_source_filter_matches_provider_or_source_identity_before_ranking() {
+    let encoded = encoded_observation(vec![CanonicalObservationFactV1::Message {
+        role: CanonicalMessageRoleV1::User,
+        content: json!({"text": "source-bound evidence"}),
+        model: None,
+        timestamp: Some(42),
+    }]);
+
+    for source in ["codex", "session-semantic-filter"] {
+        assert!(
+            observation_matches_filter(
+                &encoded,
+                "user",
+                &TemporalCandidateFilterV1 {
+                    source: Some(source.to_string()),
+                    ..TemporalCandidateFilterV1::default()
+                },
+            )
+            .unwrap()
+        );
+    }
+    assert!(
+        !observation_matches_filter(
+            &encoded,
+            "user",
+            &TemporalCandidateFilterV1 {
+                source: Some("claude".to_string()),
+                ..TemporalCandidateFilterV1::default()
+            },
+        )
+        .unwrap()
+    );
+}

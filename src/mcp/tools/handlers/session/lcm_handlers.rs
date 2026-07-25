@@ -184,6 +184,8 @@ fn lcm_retrieval_command(
     message_type: SessionMessageType,
     roles: Vec<String>,
     time_range: SessionSearchTimeRange,
+    source: Option<String>,
+    include_summaries: bool,
 ) -> Result<SessionRetrievalCommand> {
     let session_id =
         SessionId::new(session_id).map_err(|error| argument_error(error.to_string()))?;
@@ -205,6 +207,8 @@ fn lcm_retrieval_command(
         SessionRetrievalFilters {
             project_key: None,
             parent_session_id: None,
+            source,
+            include_summaries,
             scope: relationship_scope,
             message_type,
             roles,
@@ -455,6 +459,8 @@ pub(in super::super) async fn handle_lcm_load_session(
             start_time: non_negative_i64_arg_alias(&args, "start_time", "time_from")?,
             end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
         },
+        None,
+        false,
     )?;
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
@@ -533,14 +539,7 @@ pub(in super::super) async fn handle_lcm_grep(
     let message_type = parse_session_message_type(&args)?;
     let provider = lcm_grep_provider_arg(&args)?;
     let git_filter = parse_git_scope_filter(&args)?;
-    if bool_arg(&args, "include_summaries")?.unwrap_or(false) {
-        return Ok(unsupported_lcm_filter(
-            context.project_root,
-            &args,
-            "hits",
-            "summary",
-        ));
-    }
+    let include_summaries = bool_arg(&args, "include_summaries")?.unwrap_or(false);
     if !git_filter.is_empty() {
         return Ok(unsupported_lcm_filter(
             context.project_root,
@@ -549,17 +548,17 @@ pub(in super::super) async fn handle_lcm_grep(
             "git",
         ));
     }
-    if let Some(source) = args.get("source") {
-        if source.as_str().is_none() {
-            return Err(argument_error("source must be a string"));
-        }
-        return Ok(unsupported_lcm_filter(
-            context.project_root,
-            &args,
-            "hits",
-            "source",
-        ));
-    }
+    let source = args
+        .get("source")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| argument_error("source must be a non-empty string"))
+        })
+        .transpose()?;
     if !matches!(parse_lcm_grep_sort(&args)?, LcmGrepSort::Relevance) {
         return Ok(unsupported_lcm_filter(
             context.project_root,
@@ -592,6 +591,8 @@ pub(in super::super) async fn handle_lcm_grep(
         message_type,
         lcm_roles_arg(&args)?,
         message_search_time_range(&args)?,
+        source,
+        include_summaries,
     )?;
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
@@ -632,14 +633,28 @@ pub(in super::super) async fn handle_lcm_grep(
         .into_iter()
         .map(|result| {
             let (snippet, _) = truncate_chars(&result.message.text, DEFAULT_LCM_CONTENT_LIMIT);
+            let is_summary = result.message.kind.as_deref() == Some("summary");
+            let message_id = result.message.message_id;
             json!({
-                "kind": "raw_message",
+                "kind": if is_summary { "summary_node" } else { "raw_message" },
                 "provider": result.message.provider,
                 "session_id": result.message.session_id,
-                "message_id": result.message.message_id,
-                "node_id": Value::Null,
+                "message_id": if is_summary {
+                    Value::Null
+                } else {
+                    json!(&message_id)
+                },
+                "node_id": if is_summary {
+                    json!(&message_id)
+                } else {
+                    Value::Null
+                },
                 "store_id": Value::Null,
-                "role": result.message.role,
+                "role": if is_summary {
+                    Value::Null
+                } else {
+                    json!(result.message.role)
+                },
                 "snippet": snippet,
                 "score": result.score,
             })
@@ -1195,6 +1210,8 @@ pub(in super::super) async fn handle_lcm_expand_query(
                 SessionMessageType::All,
                 Vec::new(),
                 SessionSearchTimeRange::default(),
+                None,
+                false,
             )?;
             service.execute(command).await
         }
@@ -1432,7 +1449,7 @@ mod compatibility_tests {
     use tracedecay_domain::{
         HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
         SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
-        TemporalCoverageCountsV1, TemporalModeV1,
+        TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
     };
 
     use super::super::message_search::{
@@ -1596,6 +1613,13 @@ mod compatibility_tests {
         }
     }
 
+    fn summary_result(text: &str, node_id: &str) -> SessionMessageSearchResult {
+        let mut result = result(text, "summary");
+        result.message.message_id = node_id.to_string();
+        result.message.kind = Some("summary".to_string());
+        result
+    }
+
     fn complete(text: &str, role: &str, cursor: Option<&str>) -> SessionRetrievalServiceOutcome {
         SessionRetrievalServiceOutcome::Complete {
             page: SessionRetrievalPageView {
@@ -1747,11 +1771,65 @@ mod compatibility_tests {
     }
 
     #[tokio::test]
+    async fn grep_binds_summary_source_as_of_and_renders_stable_summary_hits() {
+        let service = RecordingService::new(SessionRetrievalServiceOutcome::Complete {
+            page: SessionRetrievalPageView {
+                results: vec![summary_result(
+                    "current canonical summary",
+                    "summary-successor",
+                )],
+                temporal: temporal(Some("summary-next")),
+            },
+            freshness: SessionDataFreshness::Fresh,
+        });
+        let response = payload(
+            handle_lcm_grep(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "query": "canonical summary",
+                    "provider": "claude",
+                    "scope": "session",
+                    "session_id": "session-exact",
+                    "include_summaries": true,
+                    "source": "claude",
+                    "temporal_mode": "as_of",
+                    "as_of_micros": 1234,
+                    "cursor": "summary-current",
+                    "format": "json"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        let command = service.command();
+        assert_eq!(
+            command.query().temporal_mode(),
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(1234)
+            }
+        );
+        assert_eq!(command.query().cursor(), Some("summary-current"));
+        assert_eq!(command.filters().source.as_deref(), Some("claude"));
+        assert!(command.filters().include_summaries);
+        assert_eq!(
+            command.query().semantic_filter().source.as_deref(),
+            Some("claude")
+        );
+        assert!(command.query().semantic_filter().include_summaries);
+
+        assert_eq!(response["hits"][0]["kind"], "summary_node");
+        assert_eq!(response["hits"][0]["node_id"], "summary-successor");
+        assert!(response["hits"][0]["message_id"].is_null());
+        assert!(response["hits"][0]["role"].is_null());
+        assert_eq!(response["next_cursor"], "summary-next");
+        assert_eq!(response["anchors"][0], "anchor.compatibility.1");
+    }
+
+    #[tokio::test]
     async fn unsupported_filters_are_typed_and_never_call_the_service() {
         for args in [
-            json!({"query": "x", "include_summaries": true, "format": "json"}),
             json!({"query": "x", "branch": "main", "include_summaries": false, "format": "json"}),
-            json!({"query": "x", "source": "cursor", "include_summaries": false, "format": "json"}),
             json!({"query": "x", "sort": "recency", "include_summaries": false, "format": "json"}),
         ] {
             let service = RecordingService::new(complete("unused", "user", None));
