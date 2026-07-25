@@ -1,10 +1,12 @@
 use crate::dashboard_api_support::*;
 
-fn quoted_attribute(html: &str, prefix: &str) -> String {
-    html.split_once(prefix)
-        .and_then(|(_, tail)| tail.split_once('"'))
-        .map(|(value, _)| value.to_string())
-        .unwrap_or_else(|| panic!("dashboard index omitted {prefix:?}: {html}"))
+fn entry_script(html: &str) -> String {
+    html.split("src=\"")
+        .skip(1)
+        .filter_map(|tail| tail.split_once('"').map(|(value, _)| value))
+        .find(|value| value.starts_with("/static/js/index."))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("dashboard index omitted its Rsbuild entry script: {html}"))
 }
 
 #[test]
@@ -39,11 +41,7 @@ fn dashboard_root_serves_the_embedded_single_app_bundle() {
             "production root served the legacy placeholder"
         );
 
-        let script = quoted_attribute(&index, "src=\"");
-        assert!(
-            script.starts_with("/static/js/"),
-            "production index must load the Rsbuild single-app entry: {script}"
-        );
+        let script = entry_script(&index);
         let mut script_response = agent
             .get(&format!("{}{}", fixture.base_url, script))
             .call()
