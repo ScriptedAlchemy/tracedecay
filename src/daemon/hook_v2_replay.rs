@@ -13,10 +13,10 @@
 //! per-session batch limits, and the spool's writer lease is held only for the
 //! duration of a pass so a live hook can still append.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -354,37 +354,92 @@ fn hook_replay_now() -> UtcMicros {
     )
 }
 
-fn registered_replay_roots() -> &'static StdMutex<BTreeSet<PathBuf>> {
-    static ROOTS: OnceLock<StdMutex<BTreeSet<PathBuf>>> = OnceLock::new();
-    ROOTS.get_or_init(|| StdMutex::new(BTreeSet::new()))
+struct RegisteredReplayConsumer {
+    graph: Weak<crate::tracedecay::TraceDecay>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+fn registered_replay_roots() -> &'static StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>> {
+    static ROOTS: OnceLock<StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>>> = OnceLock::new();
+    ROOTS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
 #[cfg(test)]
 pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
-    registered_replay_roots()
-        .lock()
-        .is_ok_and(|roots| roots.contains(data_root))
+    registered_replay_roots().lock().is_ok_and(|roots| {
+        roots
+            .get(data_root)
+            .and_then(|consumer| consumer.graph.upgrade())
+            .is_some()
+    })
 }
 
 /// Start the per-project replay consumer exactly once per hook data root.
 /// Returns `false` when one is already running for this root.
 pub(crate) fn register_hook_v2_replay_consumer(graph: Arc<crate::tracedecay::TraceDecay>) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
+    let graph = Arc::downgrade(&graph);
     match registered_replay_roots().lock() {
         Ok(mut roots) => {
-            if !roots.insert(data_root.clone()) {
+            if roots
+                .get(&data_root)
+                .and_then(|consumer| consumer.graph.upgrade())
+                .is_some()
+            {
                 return false;
             }
+            roots.insert(
+                data_root.clone(),
+                RegisteredReplayConsumer {
+                    graph: graph.clone(),
+                    task: None,
+                },
+            );
         }
         Err(_) => return false,
     }
-    tokio::spawn(async move {
+    let task_data_root = data_root.clone();
+    let task_graph = graph.clone();
+    let task = tokio::spawn(async move {
         loop {
-            drain_all_hosts(&graph, &data_root).await;
+            let Some(graph_owner) = task_graph.upgrade() else {
+                break;
+            };
+            drain_all_hosts(&graph_owner, &task_data_root).await;
+            drop(graph_owner);
             tokio::time::sleep(REPLAY_INTERVAL).await;
         }
+        if let Ok(mut roots) = registered_replay_roots().lock()
+            && roots
+                .get(&task_data_root)
+                .is_some_and(|registered| Weak::ptr_eq(&registered.graph, &task_graph))
+        {
+            roots.remove(&task_data_root);
+        }
     });
+    match registered_replay_roots().lock() {
+        Ok(mut roots) => match roots.get_mut(&data_root) {
+            Some(registered) if Weak::ptr_eq(&registered.graph, &graph) => {
+                registered.task = Some(task);
+            }
+            _ => task.abort(),
+        },
+        Err(_) => task.abort(),
+    }
     true
+}
+
+/// Stop and join the exact project replay consumer before releasing its graph.
+pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
+    let task = registered_replay_roots()
+        .lock()
+        .ok()
+        .and_then(|mut roots| roots.remove(data_root))
+        .and_then(|consumer| consumer.task);
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 #[cfg(test)]

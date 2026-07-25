@@ -87,7 +87,14 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(&replay_root),
         "fresh project open must start Hook V2 replay"
     );
+    let graph_weak = Arc::downgrade(&graph);
+    drop(graph);
+    drop(server);
     engine.shutdown_all().await;
+    assert!(
+        graph_weak.upgrade().is_none(),
+        "daemon shutdown must release the project graph retained by Hook V2 replay"
+    );
 }
 
 #[cfg(unix)]
