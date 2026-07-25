@@ -425,19 +425,31 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             .validate()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
         let runner = self.runner()?;
+        if let Some(reason) = unsupported_native_preflight(&runner)? {
+            return unsupported_materialized(request, runner, reason);
+        }
         let lock = runner.acquire_index_lock().map_err(map_native_error)?;
         let current = self.capture_snapshot(&request.repository_snapshot, &runner, &lock)?;
         if current != request.repository_snapshot {
             return Err(GitIndexTransactionPortError::StalePreview);
         }
+        if let Some(reason) = unsupported_commit_preflight(request, &runner)? {
+            drop(lock);
+            return unsupported_materialized(request, runner, reason);
+        }
         let snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let disposition = unsupported_hunk_selection(&request.selected_hunks)
-            .or_else(|| unsupported_state(&current, &runner))
-            .map_or(
-                GitIndexPreviewDispositionV1::Applicable,
-                GitIndexPreviewDispositionV1::Unsupported,
-            );
+        let disposition = unsupported_hunk_selection(
+            &request.selected_hunks,
+            &runner,
+            &self.read_authority(),
+            request.binding.operation,
+        )
+        .or_else(|| unsupported_state(&current, &runner))
+        .map_or(
+            GitIndexPreviewDispositionV1::Applicable,
+            GitIndexPreviewDispositionV1::Unsupported,
+        );
         let (selected_hunks, patches, candidate_index_tree) = if disposition.is_applicable() {
             let patches = self.materialize_patches(request, &snapshot_digest)?;
             let selected_hunks = patches
@@ -639,6 +651,15 @@ fn unsupported_state(
     snapshot: &RepositoryStateSnapshotV1,
     _runner: &FixedGitIndexRunner,
 ) -> Option<GitIndexUnsupportedStateV1> {
+    if snapshot
+        .coverage
+        .records(GitDegradationV1::UnsupportedObjectFormat)
+    {
+        return Some(GitIndexUnsupportedStateV1::UnsupportedObjectFormat);
+    }
+    if snapshot.coverage.records(GitDegradationV1::SubmoduleState) {
+        return Some(GitIndexUnsupportedStateV1::Submodule);
+    }
     match snapshot.head {
         GitHeadStateV1::Detached { .. } => {
             return Some(GitIndexUnsupportedStateV1::DetachedHead);
@@ -679,13 +700,204 @@ fn unsupported_state(
     }
 }
 
+fn unsupported_native_preflight(
+    runner: &FixedGitIndexRunner,
+) -> Result<Option<GitIndexUnsupportedStateV1>, GitIndexTransactionPortError> {
+    if runner.is_bare_repository().map_err(map_native_error)? {
+        return Ok(Some(GitIndexUnsupportedStateV1::BareRepository));
+    }
+    match runner.ensure_index_unlocked() {
+        Ok(()) => {}
+        Err(NativeGitIndexError::IndexLocked) => {
+            return Ok(Some(GitIndexUnsupportedStateV1::IndexLockPresent));
+        }
+        Err(error) => return Err(map_native_error(error)),
+    }
+    if !runner
+        .object_format()
+        .is_ok_and(|format| supported_object_format(&format))
+    {
+        return Ok(Some(GitIndexUnsupportedStateV1::UnsupportedObjectFormat));
+    }
+    Ok(None)
+}
+
+fn unsupported_commit_preflight(
+    request: &GitIndexPreviewRequestV1,
+    runner: &FixedGitIndexRunner,
+) -> Result<Option<GitIndexUnsupportedStateV1>, GitIndexTransactionPortError> {
+    if request.binding.operation != GitIndexTransactionOperationV1::CommitIndex {
+        return Ok(None);
+    }
+    if runner
+        .has_applicable_commit_hooks()
+        .map_err(map_native_error)?
+    {
+        return Ok(Some(GitIndexUnsupportedStateV1::ApplicableCommitHooks));
+    }
+    if let Some(GitIndexSigningPolicyV1::SignatureRequired { key_reference }) = request
+        .commit_intent
+        .as_ref()
+        .map(|intent| &intent.signing_policy)
+        && !runner
+            .signing_key_available(key_reference)
+            .map_err(map_native_error)?
+    {
+        return Ok(Some(GitIndexUnsupportedStateV1::SigningKeyUnavailable));
+    }
+    Ok(None)
+}
+
+fn supported_object_format(format: &str) -> bool {
+    matches!(format, "sha1" | "sha256")
+}
+
+fn unsupported_materialized(
+    request: &GitIndexPreviewRequestV1,
+    runner: FixedGitIndexRunner,
+    reason: GitIndexUnsupportedStateV1,
+) -> Result<MaterializedGitIndexPreview, GitIndexTransactionPortError> {
+    let snapshot_digest =
+        GitIndexPreviewV1::repository_snapshot_digest(&request.repository_snapshot)
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+    let preview = GitIndexPreviewV1::new_with_commit_intent(
+        request.preview_id.clone(),
+        request.binding.operation,
+        request.repository_snapshot.clone(),
+        snapshot_digest,
+        Vec::new(),
+        None,
+        request.commit_intent.as_ref(),
+        GitIndexPreviewDispositionV1::Unsupported(reason),
+        request.observed_at,
+        UtcMicros(request.observed_at.0.saturating_add(30_000_000)),
+    )
+    .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+    Ok(MaterializedGitIndexPreview {
+        preview,
+        execution: completed_execution(request),
+        commit_intent: request.commit_intent.clone(),
+        runner,
+        patches: Vec::new(),
+    })
+}
+
 fn unsupported_hunk_selection(
     selected_hunks: &[tracedecay_domain::HunkRefV1],
+    runner: &FixedGitIndexRunner,
+    intelligence: &NativeGitIntelligence,
+    operation: GitIndexTransactionOperationV1,
 ) -> Option<GitIndexUnsupportedStateV1> {
-    selected_hunks
-        .iter()
-        .any(|hunk| hunk.original_path.is_some())
-        .then_some(GitIndexUnsupportedStateV1::RenameOrCopy)
+    for hunk in selected_hunks {
+        if hunk.original_path.is_some() {
+            return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
+        }
+        let line_count = normalize_hunk_header(&hunk.hunk_header)
+            .and_then(|header| {
+                let mut fields = header.split_whitespace();
+                fields.next()?;
+                let old = parse_hunk_range(fields.next()?.strip_prefix('-')?)?;
+                let new = parse_hunk_range(fields.next()?.strip_prefix('+')?)?;
+                Some(old.1.max(new.1))
+            })
+            .unwrap_or_default();
+        if hunk.selected_line_bitmap != tracedecay_domain::full_hunk_selection_bitmap(line_count) {
+            return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
+        }
+        let modes = [
+            hunk.expected_index_entry.mode.as_ref(),
+            hunk.expected_worktree_mode.as_ref(),
+        ];
+        if modes.iter().flatten().any(|mode| mode.is_submodule()) {
+            return Some(GitIndexUnsupportedStateV1::Submodule);
+        }
+        if modes.iter().flatten().any(|mode| mode.is_symlink()) {
+            return Some(GitIndexUnsupportedStateV1::Symlink);
+        }
+        if let Some(reason) = unsupported_path_state(runner, intelligence, operation, &hunk.path) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn unsupported_path_state(
+    runner: &FixedGitIndexRunner,
+    intelligence: &NativeGitIntelligence,
+    operation: GitIndexTransactionOperationV1,
+    path: &str,
+) -> Option<GitIndexUnsupportedStateV1> {
+    let scope = match operation {
+        GitIndexTransactionOperationV1::StageHunks => GitDiffScopeV1::WorkingTree,
+        GitIndexTransactionOperationV1::UnstageHunks => GitDiffScopeV1::Staged,
+        GitIndexTransactionOperationV1::CommitIndex => {
+            return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
+        }
+    };
+    let Ok(diff) = intelligence.diff(&scope) else {
+        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+    };
+    let Some(file) = diff.files.iter().find(|file| file.path == path) else {
+        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+    };
+    if file.original_path.is_some() {
+        return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
+    }
+    if file.binary {
+        return Some(GitIndexUnsupportedStateV1::BinaryHunk);
+    }
+    if file.submodule {
+        return Some(GitIndexUnsupportedStateV1::Submodule);
+    }
+    if [file.old_mode.as_ref(), file.new_mode.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(tracedecay_domain::GitFileModeV1::is_symlink)
+    {
+        return Some(GitIndexUnsupportedStateV1::Symlink);
+    }
+    if file.old_mode != file.new_mode && file.hunks.is_empty() {
+        return Some(GitIndexUnsupportedStateV1::FileModeOnly);
+    }
+    if !diff.coverage.is_complete() {
+        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+    }
+    let mut command = read_git_command(runner.repository_root());
+    let Ok(output) = command
+        .args([
+            "check-attr",
+            "-z",
+            "filter",
+            "text",
+            "eol",
+            "working-tree-encoding",
+            "--",
+            path,
+        ])
+        .output()
+    else {
+        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+    };
+    if !output.status.success() {
+        return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine);
+    }
+    let fields = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    let mut records = fields.chunks_exact(3);
+    let has_filter = records.any(|record| {
+        let value = record[2];
+        value != b"unspecified" && value != b"unset" && value != b"false"
+    });
+    if !records.remainder().is_empty() {
+        return Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree);
+    }
+    if has_filter {
+        return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine);
+    }
+    None
 }
 
 #[derive(Serialize)]
@@ -1588,15 +1800,20 @@ mod tests {
             .expect("one hunk");
         let mut rename_hunk = hunk.clone();
         rename_hunk.original_path = Some("packet-old.txt".to_owned());
+        let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
         assert_eq!(
-            unsupported_hunk_selection(&[rename_hunk]),
+            unsupported_hunk_selection(
+                &[rename_hunk],
+                &runner,
+                &intelligence,
+                GitIndexTransactionOperationV1::StageHunks,
+            ),
             Some(GitIndexUnsupportedStateV1::RenameOrCopy),
             "rename/copy hunks remain explicit read-only previews"
         );
         let patch = extract_patch(directory.path(), &GitDiffScopeV1::WorkingTree, &hunk)
             .expect("extract exact packet");
         let patch = ValidatedIndexPatch::new(hunk, patch).expect("validate exact packet");
-        let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
         let old_tree = runner.write_tree().expect("old index tree");
         let candidate = runner
             .preview_candidate_tree(&[patch], false)
@@ -1606,6 +1823,155 @@ mod tests {
         assert_eq!(
             runner.write_tree().expect("real index remains unchanged"),
             old_tree
+        );
+    }
+
+    #[test]
+    fn preview_preflight_classifies_repository_and_commit_blockers_without_mutation() {
+        let bare = tempfile::tempdir().expect("bare repository");
+        git(bare.path(), &["init", "--bare", "--quiet"]);
+        let bare_runner = FixedGitIndexRunner::new(bare.path()).expect("bare runner");
+        assert!(bare_runner.is_bare_repository().expect("bare probe"));
+        assert!(supported_object_format("sha1"));
+        assert!(supported_object_format("sha256"));
+        assert!(!supported_object_format("sha512"));
+
+        let (directory, _assembler, runner) = repository_fixture();
+        let before = runner.index_bytes().expect("index before probes");
+        fs::write(runner.index_lock_path(), b"external owner").expect("external lock");
+        assert!(matches!(
+            runner.ensure_index_unlocked(),
+            Err(NativeGitIndexError::IndexLocked)
+        ));
+        fs::remove_file(runner.index_lock_path()).expect("remove fixture lock");
+
+        let hook = directory.path().join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&hook, permissions).expect("executable hook");
+            assert!(
+                runner
+                    .has_applicable_commit_hooks()
+                    .expect("hook classification")
+            );
+        }
+        assert!(
+            !runner
+                .signing_key_available("tracedecay-missing-signing-key")
+                .expect("missing signing key classification")
+        );
+        assert_eq!(runner.index_bytes().expect("index after probes"), before);
+    }
+
+    #[test]
+    fn preview_classifies_partial_binary_filter_and_special_mode_hunks() {
+        let (directory, assembler, runner) = repository_fixture();
+        fs::write(directory.path().join("packet.txt"), "after\nsecond\n")
+            .expect("change text file");
+        let snapshot = exact_snapshot(&assembler, &runner);
+        let snapshot_digest =
+            GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
+        let mut hunk = assembler
+            .read_authority()
+            .hunk_refs(
+                &GitDiffScopeV1::WorkingTree,
+                "git-index-preview.partial",
+                &snapshot_digest,
+            )
+            .expect("text hunk")
+            .remove(0);
+        let full_hunk = hunk.clone();
+        hunk.selected_line_bitmap = vec![1];
+        assert_eq!(
+            unsupported_hunk_selection(
+                &[hunk],
+                &runner,
+                &assembler.read_authority(),
+                GitIndexTransactionOperationV1::StageHunks
+            ),
+            Some(GitIndexUnsupportedStateV1::PartialHunkSelection)
+        );
+
+        fs::write(directory.path().join("packet.txt"), [0_u8, 1, 2, 3]).expect("binary change");
+        assert_eq!(
+            unsupported_path_state(
+                &runner,
+                &assembler.read_authority(),
+                GitIndexTransactionOperationV1::StageHunks,
+                "packet.txt"
+            ),
+            Some(GitIndexUnsupportedStateV1::BinaryHunk)
+        );
+
+        fs::write(
+            directory.path().join(".gitattributes"),
+            "*.txt text eol=lf\n",
+        )
+        .expect("attributes");
+        fs::write(directory.path().join("packet.txt"), "filtered\n").expect("filtered change");
+        assert_eq!(
+            unsupported_path_state(
+                &runner,
+                &assembler.read_authority(),
+                GitIndexTransactionOperationV1::StageHunks,
+                "packet.txt"
+            ),
+            Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine)
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            fs::remove_file(directory.path().join(".gitattributes")).expect("remove attributes");
+            fs::write(directory.path().join("mode.txt"), "mode\n").expect("mode file");
+            git(directory.path(), &["add", "mode.txt"]);
+            git(directory.path(), &["commit", "--quiet", "-m", "mode base"]);
+            let mut permissions = fs::metadata(directory.path().join("mode.txt"))
+                .expect("mode metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(directory.path().join("mode.txt"), permissions)
+                .expect("mode change");
+            assert_eq!(
+                unsupported_path_state(
+                    &runner,
+                    &assembler.read_authority(),
+                    GitIndexTransactionOperationV1::StageHunks,
+                    "mode.txt"
+                ),
+                Some(GitIndexUnsupportedStateV1::FileModeOnly)
+            );
+
+            symlink("packet.txt", directory.path().join("link.txt")).expect("symlink");
+            git(directory.path(), &["add", "link.txt"]);
+            assert_eq!(
+                unsupported_path_state(
+                    &runner,
+                    &assembler.read_authority(),
+                    GitIndexTransactionOperationV1::UnstageHunks,
+                    "link.txt"
+                ),
+                Some(GitIndexUnsupportedStateV1::Symlink)
+            );
+        }
+
+        let mut submodule_hunk = full_hunk;
+        submodule_hunk.expected_index_entry.mode = Some(
+            tracedecay_domain::GitFileModeV1::new(tracedecay_domain::GitFileModeV1::GITLINK)
+                .expect("gitlink mode"),
+        );
+        assert_eq!(
+            unsupported_hunk_selection(
+                &[submodule_hunk],
+                &runner,
+                &assembler.read_authority(),
+                GitIndexTransactionOperationV1::StageHunks,
+            ),
+            Some(GitIndexUnsupportedStateV1::Submodule)
         );
     }
 
