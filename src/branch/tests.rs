@@ -227,7 +227,7 @@ fn add_tracked_branch(
 }
 
 #[tokio::test]
-async fn read_only_sqlite_snapshot_includes_committed_data() {
+async fn writer_owned_sqlite_snapshot_includes_committed_wal_data_and_readers_stay_read_only() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.db");
     let dst = dir.path().join("dst.db");
@@ -248,6 +248,7 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
         )
         .await
         .unwrap();
+    writer.snapshot_to(&dst).await.unwrap();
     writer.close();
 
     let (source, _) = crate::db::Database::publish_test_runtime(
@@ -257,7 +258,6 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
     )
     .await
     .unwrap();
-    source.snapshot_to(&dst).await.unwrap();
     assert!(
         source
             .conn()
